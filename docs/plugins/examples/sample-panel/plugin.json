@@ -1,0 +1,16 @@
+{
+  "id": "com.window-hub.sample-panel",
+  "name": "示例面板",
+  "version": "1.1.0",
+  "description": "灵动岛下拉插件面板骨架。Host 固定加载同目录 panel.css / panel.js。",
+  "entry": {
+    "panel": "panel.html"
+  },
+  "slots": {
+    "island.panel": {
+      "defaultSize": { "w": 380, "h": 180 },
+      "maxSize": { "w": 380, "h": 220 }
+    }
+  },
+  "capabilities": ["island.panel", "storage"]
+}

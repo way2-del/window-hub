@@ -1,0 +1,408 @@
+mod commands;
+mod companion_scripts;
+mod db;
+mod ecs;
+mod plugin_hub;
+mod plugin_install;
+mod staging;
+mod win32;
+mod windows_service;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
+
+use crate::commands::initial_material_state;
+use crate::ecs::{spawn_ecs_thread, EcsHandle};
+use crate::plugin_hub::ShortcutsPinStore;
+use crate::win32::appbar;
+use crate::win32::topmost::force_topmost;
+use crate::windows_service::WindowsService;
+
+/// 因全屏游戏隐藏顶栏时为 true；watchdog 期间勿强制置顶/重挂 AppBar。
+static HIDDEN_FOR_FULLSCREEN: AtomicBool = AtomicBool::new(false);
+
+fn hwnd_of(window: &tauri::WebviewWindow) -> Option<isize> {
+    window.hwnd().ok().map(|h| h.0 as isize)
+}
+
+/// 顶栏贴齐当前显示器顶部，并强制铺满整屏宽度（左右留给系统材质）。
+fn pin_top_bar(window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+
+    let screen = monitor.size();
+    let origin = monitor.position();
+    let x = origin.x;
+    let y = origin.y;
+
+    if size.width != screen.width {
+        let _ = window.set_size(PhysicalSize::new(screen.width, size.height));
+    }
+    if pos.x != x || pos.y != y {
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
+}
+
+fn reassert_window(window: &tauri::WebviewWindow) {
+    if HIDDEN_FOR_FULLSCREEN.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Some(hwnd) = hwnd_of(window) {
+        // 持续排除 Alt+Tab / Win+Tab，防止样式被重置后又出现在窗口切换里
+        crate::win32::switcher::exclude_from_switcher(hwnd);
+    }
+    if crate::win32::topmost::is_yielding() {
+        // Keep geometry pinned, but don't steal Z-order over tray menus.
+        pin_top_bar(window);
+        return;
+    }
+    let _ = window.set_always_on_top(true);
+    if let Some(hwnd) = hwnd_of(window) {
+        force_topmost(hwnd);
+    }
+    pin_top_bar(window);
+}
+
+fn spawn_watchdog(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        if let Some(window) = app.get_webview_window("main") {
+            if let Some(hwnd) = hwnd_of(&window) {
+                appbar::register(hwnd);
+            }
+            // 跟随顶色：始终无模糊材质
+            let _ = crate::win32::material::clear(&window);
+            reassert_window(&window);
+        }
+
+        let mut ticks: u32 = 0;
+        loop {
+            std::thread::sleep(Duration::from_millis(2000));
+            if HIDDEN_FOR_FULLSCREEN.load(Ordering::SeqCst) {
+                continue;
+            }
+            let Some(window) = app.get_webview_window("main") else {
+                break;
+            };
+            reassert_window(&window);
+            ticks = ticks.wrapping_add(1);
+            if ticks % 5 == 0 {
+                if let Some(hwnd) = hwnd_of(&window) {
+                    appbar::sync(hwnd);
+                }
+            }
+        }
+    });
+}
+
+/// 前台为独占/无边框全屏（游戏）时隐藏岛并释放工作区；退出全屏后再显示。
+fn spawn_fullscreen_watcher(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        let mut hidden = false;
+
+        loop {
+            std::thread::sleep(Duration::from_millis(350));
+            let Some(window) = app.get_webview_window("main") else {
+                break;
+            };
+            let self_hwnd = hwnd_of(&window);
+            let should_hide = crate::win32::fullscreen::should_hide_strip(self_hwnd);
+
+            if should_hide && !hidden {
+                HIDDEN_FOR_FULLSCREEN.store(true, Ordering::SeqCst);
+                appbar::suspend();
+                let _ = window.hide();
+                // 设置窗若开着一并藏起，避免盖在游戏上
+                if let Some(settings) = app.get_webview_window("settings") {
+                    let _ = settings.hide();
+                }
+                hidden = true;
+            } else if !should_hide && hidden {
+                let _ = window.show();
+                if let Some(hwnd) = self_hwnd {
+                    appbar::register(hwnd);
+                }
+                HIDDEN_FOR_FULLSCREEN.store(false, Ordering::SeqCst);
+                reassert_window(&window);
+                hidden = false;
+            }
+        }
+    });
+}
+
+/// 最大化窗口顶 1–2px 取色；切窗后采 ~3s 再锁定，锁定后只侦测窗口切换。
+fn spawn_ambient_watcher(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(700));
+        let mut cleared = false;
+
+        // 启动时采一次
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = crate::win32::material::clear(&window);
+            cleared = true;
+            if let Some(strip) = crate::win32::ambient::poll_changed(hwnd_of(&window)) {
+                let _ = app.emit("ambient-color", strip);
+            } else {
+                let strip = crate::win32::ambient::sample(hwnd_of(&window));
+                let _ = app.emit("ambient-color", strip);
+            }
+        }
+
+        loop {
+            // 稳定期密采；锁定后只低频侦测「当前最大化窗口是否切换」
+            let ms = if crate::win32::ambient::is_settling() {
+                180
+            } else {
+                700
+            };
+            std::thread::sleep(Duration::from_millis(ms));
+            let Some(window) = app.get_webview_window("main") else {
+                break;
+            };
+
+            if !cleared {
+                let _ = crate::win32::material::clear(&window);
+                cleared = true;
+            }
+
+            if let Some(strip) = crate::win32::ambient::poll_changed(hwnd_of(&window)) {
+                let _ = app.emit("ambient-color", strip);
+            }
+        }
+    });
+}
+
+/// 用 explorer 托盘钩子（失败则 spy fallback）监听系统托盘；变化时推送前端。
+fn spawn_tray_watcher(app: tauri::AppHandle) {
+    let app_icons = app.clone();
+    let app_attn = app.clone();
+    crate::win32::tray::start(
+        move |icons| {
+            let _ = app_icons.emit("tray-icons", &icons);
+        },
+        move |attn| {
+            let _ = app_attn.emit("tray-attention", &attn);
+        },
+    );
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let db = crate::db::init().map_err(|e| {
+                eprintln!("[db] init failed: {e}");
+                e
+            })?;
+            app.manage(db);
+            let handle = spawn_ecs_thread(app.handle().clone());
+            app.manage(handle);
+            app.manage(initial_material_state());
+            app.manage(WindowsService::start(app.handle().clone()));
+            let pins = ShortcutsPinStore::new();
+            pins.load_all_from_db();
+            app.manage(pins);
+            let _ = crate::plugin_install::list_installed_plugins_sync();
+            crate::win32::ambient::set_mode(commands::load_ambient_mode());
+            crate::win32::tray::set_prefs(commands::load_tray_prefs());
+
+            if let Some(window) = app.get_webview_window("main") {
+                if let Some(hwnd) = hwnd_of(&window) {
+                    crate::win32::topmost::set_main_hwnd(hwnd);
+                }
+                reassert_window(&window);
+                // 顶色跟随时不用 Mica/Acrylic
+                let _ = crate::win32::material::clear(&window);
+            }
+
+            spawn_watchdog(app.handle().clone());
+            spawn_ambient_watcher(app.handle().clone());
+            spawn_fullscreen_watcher(app.handle().clone());
+            spawn_tray_watcher(app.handle().clone());
+            crate::companion_scripts::start_hub_associated_launchers();
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            match event {
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    if window.label() == "main"
+                        && !HIDDEN_FOR_FULLSCREEN.load(Ordering::SeqCst)
+                    {
+                        if let Some(w) = window.app_handle().get_webview_window("main") {
+                            pin_top_bar(&w);
+                        }
+                    }
+                }
+                tauri::WindowEvent::Focused(focused) => {
+                    // 托盘 / 插件 / 状态菜单弹窗失焦即关（WebView 侧 focus 事件不总是可靠）
+                    if (window.label() == "tray-popup"
+                        || window.label() == "plugin-popup"
+                        || window.label() == "status-menu-popup")
+                        && !*focused
+                    {
+                        let label = window.label().to_string();
+                        let app = window.app_handle().clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(60));
+                            if let Some(w) = app.get_webview_window(&label) {
+                                if w.is_focused().unwrap_or(false) {
+                                    return;
+                                }
+                                let _ = w.close();
+                            }
+                            match label.as_str() {
+                                "tray-popup" => {
+                                    let _ = app.emit("tray-popup-closed", ());
+                                }
+                                "plugin-popup" => {
+                                    let _ = app.emit("plugin-popup-closed", ());
+                                }
+                                "status-menu-popup" => {
+                                    let _ = app.emit("status-menu-popup-closed", ());
+                                }
+                                _ => {}
+                            }
+                        });
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    if window.label() == "tray-popup" {
+                        let _ = window.app_handle().emit("tray-popup-closed", ());
+                    }
+                    if window.label() == "plugin-popup" {
+                        let _ = window.app_handle().emit("plugin-popup-closed", ());
+                    }
+                    if window.label() == "status-menu-popup" {
+                        let _ = window.app_handle().emit("status-menu-popup-closed", ());
+                    }
+                    if window.label() == "main" {
+                        appbar::restore();
+                        if let Some(ecs) = window.app_handle().try_state::<EcsHandle>() {
+                            ecs.send(crate::ecs::resources::HubCommand::Shutdown);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::health,
+            commands::list_open_windows,
+            commands::get_open_window,
+            commands::focus_open_window,
+            commands::attach_window,
+            commands::detach_window,
+            commands::set_roi,
+            commands::swap_slots,
+            commands::forward_pointer,
+            commands::forward_key,
+            commands::self_hwnd,
+            commands::dock_set_visual_height,
+            commands::float_overlay,
+            commands::open_settings_window,
+            commands::close_settings_window,
+            commands::open_tray_popup,
+            commands::close_tray_popup,
+            commands::is_tray_popup_open,
+            commands::open_status_menu_popup,
+            commands::close_status_menu_popup,
+            commands::is_status_menu_popup_open,
+            commands::open_plugin_popup,
+            commands::close_plugin_popup,
+            commands::is_plugin_popup_open,
+            plugin_hub::hub_windows_list,
+            plugin_hub::hub_windows_get,
+            plugin_hub::hub_windows_focus,
+            plugin_hub::hub_storage_get,
+            plugin_hub::hub_storage_set,
+            plugin_hub::hub_storage_remove,
+            plugin_hub::hub_storage_list_keys,
+            plugin_hub::hub_settings_get_all,
+            plugin_hub::hub_settings_get,
+            plugin_hub::hub_settings_set,
+            plugin_hub::hub_shortcuts_set_pins,
+            plugin_hub::hub_shortcuts_clear_pins,
+            plugin_hub::hub_shortcuts_list_pins,
+            plugin_hub::hub_shortcuts_set_badge,
+            plugin_hub::hub_plugin_read_text,
+            plugin_install::list_installed_plugins,
+            plugin_install::pick_whpx_file,
+            plugin_install::pick_plugin_directory,
+            plugin_install::install_plugin_from_path,
+            plugin_install::uninstall_plugin,
+            plugin_install::set_plugin_enabled,
+            plugin_install::pack_plugin_directory,
+            plugin_install::install_example_plugin,
+            companion_scripts::list_script_launchers,
+            companion_scripts::upsert_script_launcher,
+            companion_scripts::delete_script_launcher,
+            companion_scripts::pick_script_file,
+            companion_scripts::start_script_launcher,
+            companion_scripts::stop_script_launcher,
+            commands::apply_window_effect,
+            commands::get_material_prefs,
+            commands::system_apps_dark,
+            commands::set_material_prefs,
+            commands::sample_ambient_color,
+            commands::get_ambient_mode,
+            commands::set_ambient_mode,
+            commands::get_window_material,
+            commands::set_window_material,
+            commands::list_tray_icons,
+            commands::get_tray_prefs,
+            commands::set_tray_prefs,
+            commands::get_island_prefs,
+            commands::set_island_prefs,
+            commands::get_shortcuts_prefs,
+            commands::set_shortcuts_prefs,
+            commands::get_weather_credentials,
+            commands::set_weather_credentials,
+            commands::get_weather_cache,
+            commands::set_weather_cache,
+            db::admin::db_dev_info,
+            db::admin::db_dev_list_rows,
+            db::admin::db_dev_upsert_row,
+            db::admin::db_dev_delete_row,
+            db::admin::db_dev_clear_table,
+            db::admin::db_dev_backup,
+            db::admin::db_dev_pick_restore_file,
+            db::admin::db_dev_restore,
+            commands::invoke_tray_icon,
+            commands::clear_tray_attention,
+            commands::open_notification_center,
+            commands::get_foreground_app,
+            commands::set_system_taskbar_visible,
+            commands::show_desktop,
+            commands::restart_app,
+            commands::exit_app,
+            commands::hub_staging_list,
+            commands::hub_staging_summary,
+            commands::hub_staging_add_text,
+            commands::hub_staging_add_paths,
+            commands::hub_staging_add_image_bytes,
+            commands::hub_staging_remove,
+            commands::hub_staging_clear,
+            commands::hub_staging_copy,
+            commands::hub_staging_copy_all_paths,
+            commands::hub_staging_thumb,
+            commands::hub_staging_reveal,
+            commands::hub_staging_start_drag,
+            commands::hub_island_set_bar,
+            commands::hub_island_clear_bar,
+            commands::hub_panel_open_session,
+            commands::hub_panel_close_session,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Window Hub");
+}

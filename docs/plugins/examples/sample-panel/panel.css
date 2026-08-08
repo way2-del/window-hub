@@ -1,0 +1,25 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  color: #f4f4f5;
+  font: 600 13px/1.4 "Segoe UI", "PingFang SC", sans-serif;
+}
+.wrap {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+}
+.title {
+  font-size: 16px;
+}
+.sub {
+  opacity: 0.65;
+  font-weight: 500;
+  font-size: 12px;
+}

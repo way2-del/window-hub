@@ -1,0 +1,220 @@
+import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { normalizeGlassKind, subscribeSystemDark, syncGlassCss, type GlassPrefs } from "../glassPrefs";
+import "./PluginPopupHost.css";
+
+declare global {
+  interface Window {
+    __WH_PLUGIN_ID__?: string;
+    hub?: {
+      pluginId: string;
+      windows: {
+        list: () => Promise<unknown>;
+        get: (id: string) => Promise<unknown>;
+        focus: (id: string) => Promise<unknown>;
+        subscribe: (cb: (windows: unknown) => void) => () => void;
+      };
+      storage: {
+        get: (key: string) => Promise<unknown>;
+        set: (key: string, value: unknown) => Promise<unknown>;
+      };
+      shortcuts: {
+        setBadge: (badge: unknown) => Promise<unknown>;
+      };
+      popup: { close: () => Promise<unknown> };
+      applyEffect: (material?: string) => Promise<unknown>;
+    };
+  }
+}
+
+function resolvePluginId(): string {
+  return (
+    new URLSearchParams(window.location.search).get("plugin") ??
+    window.__WH_PLUGIN_ID__ ??
+    ""
+  );
+}
+
+function ensureHub(pluginId: string) {
+  if (window.hub?.pluginId === pluginId) return;
+  window.__WH_PLUGIN_ID__ = pluginId;
+
+  const withPlugin = (args?: Record<string, unknown>) => ({
+    pluginId,
+    ...(args ?? {}),
+  });
+
+  window.hub = {
+    pluginId,
+    windows: {
+      list: () => invoke("hub_windows_list", withPlugin()),
+      get: (id) => invoke("hub_windows_get", withPlugin({ id })),
+      focus: (id) => invoke("hub_windows_focus", withPlugin({ id })),
+      subscribe: (cb) => {
+        let un = () => {};
+        void listen<{ windows: unknown }>("hub-windows-changed", (ev) => {
+          if (ev.payload?.windows) cb(ev.payload.windows);
+        }).then((fn) => {
+          un = fn;
+        });
+        void invoke("hub_windows_list", withPlugin())
+          .then((wins) => cb(wins))
+          .catch(() => undefined);
+        return () => un();
+      },
+    },
+    storage: {
+      get: (key) => invoke("hub_storage_get", withPlugin({ key })),
+      set: (key, value) => invoke("hub_storage_set", withPlugin({ key, value })),
+    },
+    shortcuts: {
+      setBadge: (badge) => invoke("hub_shortcuts_set_badge", withPlugin({ badge })),
+    },
+    popup: {
+      close: () => invoke("close_plugin_popup"),
+    },
+    applyEffect: (material?: string) =>
+      material
+        ? invoke("apply_window_effect", { material })
+        : invoke("apply_window_effect", {}),
+  };
+}
+
+type Boot = { css: string; js: string };
+
+/**
+ * Host shell: Tauri IPC + inject plugin CSS/JS from disk (independent package).
+ */
+export default function PluginPopupHost() {
+  const pluginId = resolvePluginId();
+  const [boot, setBoot] = useState<Boot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const injectedRef = useRef(false);
+
+  useEffect(() => {
+    if (!pluginId) {
+      setError("缺少插件 ID");
+      return;
+    }
+    ensureHub(pluginId);
+    void (async () => {
+      try {
+        const prefs = await invoke<GlassPrefs>("get_material_prefs");
+        await syncGlassCss({ ...prefs, kind: normalizeGlassKind(prefs.kind) });
+      } catch {
+        await syncGlassCss({ kind: "mica-alt", dark: true });
+      }
+      await invoke("apply_window_effect", {}).catch(() => undefined);
+    })();
+
+    let cancelled = false;
+    let unGlass: (() => void) | undefined;
+    void listen<GlassPrefs>("material-prefs", (ev) => {
+      void syncGlassCss({ ...ev.payload, kind: normalizeGlassKind(ev.payload.kind) });
+      void invoke("apply_window_effect", {}).catch(() => undefined);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unGlass = fn;
+    });
+
+    const unSystem = subscribeSystemDark(() => {
+      void (async () => {
+        try {
+          const prefs = await invoke<GlassPrefs>("get_material_prefs");
+          if (prefs.dark != null) return;
+          await syncGlassCss({ ...prefs, kind: normalizeGlassKind(prefs.kind) });
+          await invoke("apply_window_effect", {}).catch(() => undefined);
+        } catch {
+          /* noop */
+        }
+      })();
+    });
+
+    void (async () => {
+      try {
+        const list = await invoke<
+          Array<{ id: string; manifest?: { entry?: { popup?: string } } }>
+        >("list_installed_plugins");
+        const rec = list.find((p) => p.id === pluginId);
+        const entry = rec?.manifest?.entry?.popup ?? "popup.html";
+        const dir = entry.includes("/")
+          ? entry.slice(0, entry.lastIndexOf("/") + 1)
+          : entry.includes("\\")
+            ? entry.slice(0, entry.lastIndexOf("\\") + 1)
+            : "";
+
+        const [css, js] = await Promise.all([
+          invoke<string>("hub_plugin_read_text", {
+            pluginId,
+            relativePath: `${dir}popup.css`,
+          }).catch(() => ""),
+          invoke<string>("hub_plugin_read_text", {
+            pluginId,
+            relativePath: `${dir}popup.js`,
+          }),
+        ]);
+        if (cancelled) return;
+        setBoot({ css, js });
+      } catch (err) {
+        if (!cancelled) setError(String(err));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unGlass?.();
+      unSystem();
+    };
+  }, [pluginId]);
+
+  useEffect(() => {
+    if (!boot || injectedRef.current) return;
+    ensureHub(pluginId);
+    injectedRef.current = true;
+
+    if (boot.css) {
+      const style = document.createElement("style");
+      style.textContent = boot.css;
+      document.head.appendChild(style);
+    }
+
+    // Defer so #app from this render is in the DOM
+    const t = window.setTimeout(() => {
+      if (!document.getElementById("app")) {
+        setError("插件挂载点 #app 缺失");
+        return;
+      }
+      const script = document.createElement("script");
+      script.textContent = boot.js;
+      document.body.appendChild(script);
+    }, 0);
+
+    return () => window.clearTimeout(t);
+  }, [boot, pluginId]);
+
+  if (error) {
+    return (
+      <div className="plugin-popup-frame">
+        <div className="plugin-popup-empty">{error}</div>
+        <button
+          type="button"
+          className="plugin-popup-close"
+          onClick={() => void invoke("close_plugin_popup")}
+        >
+          关闭
+        </button>
+      </div>
+    );
+  }
+
+  if (!boot) {
+    return (
+      <div className="plugin-popup-frame">
+        <div className="plugin-popup-empty">加载插件…</div>
+      </div>
+    );
+  }
+
+  return <main id="app" className="wg-shell" />;
+}

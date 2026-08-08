@@ -1,0 +1,60 @@
+{
+  "id": "com.window-hub.transfer-station",
+  "name": "中转站",
+  "version": "1.5.0",
+  "official": true,
+  "description": "拖入文件后展开横向预览；弹出宽高在本插件设置中配置。",
+  "entry": {
+    "panel": "panel.html"
+  },
+  "slots": {
+    "island.bar": {
+      "order": 10
+    },
+    "island.drop": {
+      "order": 10
+    },
+    "island.panel": {
+      "defaultSize": { "w": 560, "h": 152 },
+      "minSize": { "w": 440, "h": 120 },
+      "maxSize": { "w": 720, "h": 184 },
+      "excludeFromPullContent": true
+    }
+  },
+  "settings": [
+    {
+      "key": "panelWidth",
+      "type": "select",
+      "label": "弹出宽度",
+      "description": "越大可横排更多缩略图",
+      "default": 560,
+      "options": [
+        { "value": 440, "label": "440px" },
+        { "value": 520, "label": "520px" },
+        { "value": 560, "label": "560px" },
+        { "value": 640, "label": "640px" },
+        { "value": 720, "label": "720px" }
+      ]
+    },
+    {
+      "key": "panelHeight",
+      "type": "select",
+      "label": "弹出高度",
+      "description": "含岛顶栏；默认与原先中转站面板一致",
+      "default": 152,
+      "options": [
+        { "value": 120, "label": "120px" },
+        { "value": 136, "label": "136px" },
+        { "value": 152, "label": "152px" },
+        { "value": 168, "label": "168px" },
+        { "value": 184, "label": "184px" }
+      ]
+    }
+  ],
+  "capabilities": [
+    "island.panel",
+    "island.drop",
+    "staging",
+    "storage"
+  ]
+}

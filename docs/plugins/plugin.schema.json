@@ -1,0 +1,207 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://window-hub.local/schemas/plugin.schema.json",
+  "title": "Window Hub plugin.json",
+  "type": "object",
+  "required": ["id", "name", "version"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$",
+      "description": "Reverse-domain plugin id, e.g. com.example.todo"
+    },
+    "name": { "type": "string", "minLength": 1 },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z]+)*$"
+    },
+    "logo": { "type": "string" },
+    "description": { "type": "string" },
+    "official": {
+      "type": "boolean",
+      "description": "Official catalog plugin (seed / reinstall row)"
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri"
+    },
+    "minHostVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z]+)*$",
+      "description": "Minimum window-hub host semver"
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "panel": { "type": "string" },
+        "popup": { "type": "string" },
+        "shortcuts": {
+          "type": "string",
+          "description": "Shortcuts strip HTML; Host loads in a short iframe"
+        },
+        "development": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "panel": { "type": "string", "format": "uri" },
+            "popup": { "type": "string", "format": "uri" },
+            "shortcuts": { "type": "string", "format": "uri" }
+          }
+        }
+      }
+    },
+    "slots": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shortcuts": {
+          "type": "object",
+          "required": ["icon"],
+          "additionalProperties": false,
+          "properties": {
+            "icon": { "type": "string" },
+            "label": { "type": "string", "maxLength": 8 },
+            "order": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "action": {
+              "type": "string",
+              "enum": ["expand", "popup.open", "panel.open", "command"]
+            }
+          }
+        },
+        "island.notify": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "priority": {
+              "type": "string",
+              "enum": ["passive", "active", "critical"]
+            },
+            "maxPerMinute": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60
+            }
+          }
+        },
+        "island.bar": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Collapsed island bar summary slot",
+          "properties": {
+            "order": { "type": "integer", "minimum": 0, "maximum": 1000 }
+          }
+        },
+        "island.drop": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Receive drag-drop on the island chrome",
+          "properties": {
+            "order": { "type": "integer", "minimum": 0, "maximum": 1000 }
+          }
+        },
+        "island.panel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "defaultSize": { "$ref": "#/definitions/size" },
+            "minSize": { "$ref": "#/definitions/size" },
+            "maxSize": { "$ref": "#/definitions/size" },
+            "excludeFromPullContent": {
+              "type": "boolean",
+              "description": "If true, omit from Settings pull-content list; open via session/drop/bar only"
+            }
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "storage",
+          "shortcuts",
+          "notify",
+          "popup",
+          "island.panel",
+          "island.drop",
+          "windows.read",
+          "windows.focus",
+          "clipboard.read",
+          "clipboard.write",
+          "network",
+          "staging"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "network": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Allowed origin patterns for hub.fetch"
+        }
+      }
+    },
+    "settings": {
+      "type": "array",
+      "description": "Plugin settings shown in Host Settings; values in plugin_kv __settings",
+      "items": { "$ref": "#/definitions/settingField" }
+    }
+  },
+  "definitions": {
+    "size": {
+      "type": "object",
+      "required": ["w", "h"],
+      "additionalProperties": false,
+      "properties": {
+        "w": { "type": "number", "minimum": 1, "maximum": 720 },
+        "h": { "type": "number", "minimum": 1, "maximum": 220 }
+      }
+    },
+    "settingOption": {
+      "type": "object",
+      "required": ["value", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": ["string", "number", "boolean"]
+        },
+        "label": { "type": "string", "minLength": 1 }
+      }
+    },
+    "settingField": {
+      "type": "object",
+      "required": ["key", "type", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$",
+          "description": "Runtime key for hub.settings.get"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["boolean", "string", "number", "select", "radio", "multiSelect"]
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "default": {},
+        "options": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/settingOption" },
+          "minItems": 1
+        },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number" },
+        "maxLength": { "type": "integer", "minimum": 1, "maximum": 4096 }
+      }
+    }
+  }
+}

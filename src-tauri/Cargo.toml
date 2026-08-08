@@ -1,0 +1,52 @@
+[package]
+name = "window-hub"
+version = "0.1.0"
+description = "Windows window mosaic hub with ECS capture and input forwarding"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "window_hub_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bevy_ecs = "0.15"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp", "ico"] }
+parking_lot = "0.12"
+window-vibrancy = "0.6"
+zip = "2.2"
+rfd = "0.15"
+percent-encoding = "2"
+drag = { version = "2.1", features = ["serde"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+# Vendored: blank NIF_ICON frames (WeChat flash) must not be dropped.
+systray-util = { path = "vendor/systray-util" }
+winreg = "0.52"
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
+  "Win32_Storage_Xps",
+  "Win32_UI_Accessibility",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_HiDpi",
+  "Win32_System_Com",
+  "Win32_System_SystemServices",
+  "Win32_System_Memory",
+  "Win32_System_DataExchange",
+  "Win32_System_Threading",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_LibraryLoader",
+] }

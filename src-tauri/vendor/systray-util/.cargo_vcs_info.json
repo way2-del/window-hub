@@ -1,0 +1,7 @@
+{
+  "git": {
+    "sha1": "50bee67551af104b4ff9b444db8aef911778245b",
+    "dirty": true
+  },
+  "path_in_vcs": "crates/systray-util"
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.window-groups",
+  "name": "窗口组",
+  "version": "1.2.4",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "命名窗口组，从快捷区下拉弹窗切换与管理。",
+  "entry": {
+    "popup": "popup.html",
+    "shortcuts": "shortcuts.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "windows",
+      "label": "窗口组",
+      "order": 20,
+      "action": "popup.open"
+    }
+  },
+  "capabilities": [
+    "shortcuts",
+    "storage",
+    "popup",
+    "windows.read",
+    "windows.focus"
+  ]
+}
