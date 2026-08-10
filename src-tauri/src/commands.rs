@@ -614,15 +614,26 @@ fn read_material_prefs(state: &MaterialState) -> crate::win32::material::Materia
         .clone()
 }
 
-/// Apply saved material to settings / tray / plugin windows (unified).
+/// Apply saved material to settings / tray / plugin / dock windows (unified).
 fn apply_saved_material(window: &tauri::WebviewWindow, state: &MaterialState) {
     let prefs = read_material_prefs(state);
     crate::win32::material::apply_prefs_deferred(window, &prefs);
 }
 
+pub fn apply_saved_material_pub(window: &tauri::WebviewWindow, state: &MaterialState) {
+    apply_saved_material(window, state);
+}
+
 /// Re-apply materials to every open popup after prefs change.
 fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::MaterialPrefs) {
-    for label in ["settings", "tray-popup", "plugin-popup", "status-menu-popup"] {
+    for label in [
+        "settings",
+        "tray-popup",
+        "plugin-popup",
+        "status-menu-popup",
+        "dock",
+        "dock-glass",
+    ] {
         if let Some(w) = app.get_webview_window(label) {
             let _ = crate::win32::material::apply_prefs(&w, prefs);
         }
@@ -668,7 +679,7 @@ pub fn set_material_prefs(
     Ok(prefs)
 }
 
-/// Apply material to the calling window (settings / tray / plugin — shared prefs).
+/// Apply material to the calling window (settings / tray / plugin / dock — shared prefs).
 #[tauri::command]
 pub fn apply_window_effect(
     window: WebviewWindow,
@@ -695,9 +706,19 @@ pub fn get_window_material(state: State<'_, MaterialState>) -> String {
 #[tauri::command]
 pub fn set_window_material(
     app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, MaterialState>,
     material: String,
 ) -> Result<String, String> {
+    // Island / main: clear this HWND only — never rewrite shared popup prefs.
+    if matches!(
+        material.trim().to_ascii_lowercase().as_str(),
+        "none" | "clear"
+    ) {
+        crate::win32::material::clear(&window)?;
+        return Ok("none".into());
+    }
+
     let mut prefs = read_material_prefs(&state);
     prefs.kind = crate::win32::material::WindowMaterial::parse(&material);
     prefs = prefs.normalize();
@@ -1003,12 +1024,11 @@ pub fn hub_island_set_bar(
     text: String,
     title: Option<String>,
 ) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
     crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.bar")?;
     let text = text.trim().to_string();
-    if text.is_empty() {
-        let _ = app.emit("island-bar-changed", Option::<IslandBarDto>::None);
-        return Ok(());
-    }
+    // Always include plugin_id so Host can clear only that plugin's layer
+    // (resident vs temporary overlay) without wiping the other.
     let _ = app.emit(
         "island-bar-changed",
         IslandBarDto {
@@ -1022,8 +1042,16 @@ pub fn hub_island_set_bar(
 
 #[tauri::command]
 pub fn hub_island_clear_bar(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
     crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.bar")?;
-    let _ = app.emit("island-bar-changed", Option::<IslandBarDto>::None);
+    let _ = app.emit(
+        "island-bar-changed",
+        IslandBarDto {
+            plugin_id,
+            text: String::new(),
+            title: None,
+        },
+    );
     Ok(())
 }
 
@@ -1046,7 +1074,175 @@ pub fn hub_panel_close_session(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-// ── Island prefs / weather (host business tables) ────────────
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubNotifyArgs {
+    pub title: String,
+    pub body: Option<String>,
+    pub icon_png: Option<String>,
+    pub urgency: Option<String>,
+    pub ttl_ms: Option<u64>,
+    pub actions: Option<Vec<serde_json::Value>>,
+    pub data: Option<serde_json::Value>,
+}
+
+#[tauri::command]
+pub fn hub_notify(
+    app: AppHandle,
+    plugin_id: String,
+    opts: HubNotifyArgs,
+) -> Result<serde_json::Value, String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "notify")?;
+    crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.notify")?;
+    let title = opts.title.trim().to_string();
+    if title.is_empty() {
+        return Err("notify title required".into());
+    }
+    let max_per_minute = crate::plugin_install::find_installed_plugin(&plugin_id)
+        .and_then(|p| {
+            p.manifest
+                .get("slots")
+                .and_then(|s| s.get("island.notify"))
+                .and_then(|n| n.get("maxPerMinute"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(6)
+        .clamp(1, 60);
+    let id = format!("n-{}-{}", plugin_id, chrono_like_notify_id());
+    let urgency = match opts.urgency.as_deref() {
+        Some("passive") | Some("critical") | Some("active") => {
+            opts.urgency.clone().unwrap_or_else(|| "active".into())
+        }
+        _ => "active".into(),
+    };
+    let _ = app.emit(
+        "island-notify",
+        serde_json::json!({
+            "id": id,
+            "pluginId": plugin_id,
+            "maxPerMinute": max_per_minute,
+            "title": title,
+            "body": opts.body,
+            "iconPng": opts.icon_png,
+            "urgency": urgency,
+            "ttlMs": opts.ttl_ms,
+            "actions": opts.actions.unwrap_or_default(),
+            "data": opts.data,
+        }),
+    );
+    Ok(serde_json::json!({ "id": id }))
+}
+
+fn chrono_like_notify_id() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubFetchOpts {
+    pub method: Option<String>,
+    pub headers: Option<serde_json::Map<String, serde_json::Value>>,
+    pub body: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubFetchResponse {
+    pub status: u16,
+    pub ok: bool,
+    pub headers: serde_json::Map<String, serde_json::Value>,
+    pub body: String,
+}
+
+#[tauri::command]
+pub fn hub_fetch(
+    plugin_id: String,
+    url: String,
+    opts: Option<HubFetchOpts>,
+) -> Result<HubFetchResponse, String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "network")?;
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("url required".into());
+    }
+    let allow = crate::plugin_hub::network_allowlist(&plugin_id)?;
+    if allow.is_empty() {
+        return Err("permissions.network is empty — declare allowed hosts".into());
+    }
+    if !crate::plugin_hub::url_allowed_by_network_list(&url, &allow) {
+        return Err(format!("url not allowed by permissions.network: {url}"));
+    }
+    let opts = opts.unwrap_or(HubFetchOpts {
+        method: None,
+        headers: None,
+        body: None,
+        timeout_ms: None,
+    });
+    let method = opts
+        .method
+        .as_deref()
+        .unwrap_or("GET")
+        .trim()
+        .to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+    ) {
+        return Err(format!("unsupported method: {method}"));
+    }
+    let timeout = std::time::Duration::from_millis(opts.timeout_ms.unwrap_or(15_000).clamp(1_000, 60_000));
+    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+    let mut req = match method.as_str() {
+        "GET" => agent.get(&url),
+        "POST" => agent.post(&url),
+        "PUT" => agent.put(&url),
+        "PATCH" => agent.request("PATCH", &url),
+        "DELETE" => agent.delete(&url),
+        "HEAD" => agent.request("HEAD", &url),
+        _ => unreachable!(),
+    };
+    if let Some(headers) = &opts.headers {
+        for (k, v) in headers {
+            if let Some(s) = v.as_str() {
+                req = req.set(k, s);
+            }
+        }
+    }
+    let resp = if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
+        let body = opts.body.unwrap_or_default();
+        req.send_string(&body)
+    } else {
+        req.call()
+    }
+    .map_err(|e| format!("fetch failed: {e}"))?;
+
+    let status = resp.status();
+    let mut headers = serde_json::Map::new();
+    for name in resp.headers_names() {
+        if let Some(val) = resp.header(&name) {
+            headers.insert(name, serde_json::Value::String(val.to_string()));
+        }
+    }
+    let body = if method == "HEAD" {
+        String::new()
+    } else {
+        resp.into_string()
+            .map_err(|e| format!("read body: {e}"))?
+    };
+    Ok(HubFetchResponse {
+        status,
+        ok: (200..300).contains(&status),
+        headers,
+        body,
+    })
+}
+
+// ── Island prefs (host business tables) ────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1054,9 +1250,15 @@ pub struct IslandPrefsDto {
     pub auto_immerse: bool,
     pub immerse_idle_sec: u32,
     pub pull_content: String,
+    #[serde(default = "default_bar_resident_pref")]
+    pub bar_resident: String,
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
+}
+
+fn default_bar_resident_pref() -> String {
+    "com.window-hub.weather".into()
 }
 
 impl Default for IslandPrefsDto {
@@ -1064,7 +1266,8 @@ impl Default for IslandPrefsDto {
         Self {
             auto_immerse: true,
             immerse_idle_sec: 8,
-            pull_content: "weather".into(),
+            pull_content: "plugin:com.window-hub.weather".into(),
+            bar_resident: default_bar_resident_pref(),
             msg_notify: true,
             msg_notify_text: "收到一条消息".into(),
             msg_notify_sec: 4,
@@ -1078,6 +1281,7 @@ impl From<crate::db::IslandPrefsRow> for IslandPrefsDto {
             auto_immerse: p.auto_immerse,
             immerse_idle_sec: p.immerse_idle_sec,
             pull_content: p.pull_content,
+            bar_resident: p.bar_resident,
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text,
             msg_notify_sec: p.msg_notify_sec,
@@ -1091,6 +1295,7 @@ impl From<&IslandPrefsDto> for crate::db::IslandPrefsRow {
             auto_immerse: p.auto_immerse,
             immerse_idle_sec: p.immerse_idle_sec,
             pull_content: p.pull_content.clone(),
+            bar_resident: p.bar_resident.clone(),
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text.clone(),
             msg_notify_sec: p.msg_notify_sec,
@@ -1098,9 +1303,31 @@ impl From<&IslandPrefsDto> for crate::db::IslandPrefsRow {
     }
 }
 
+fn normalize_pull_content(raw: &str) -> String {
+    match raw.trim() {
+        "weather" => "plugin:com.window-hub.weather".into(),
+        "mirror" => "plugin:com.window-hub.mirror".into(),
+        s if s.starts_with("plugin:") && s.len() > "plugin:".len() => s.to_string(),
+        _ => "plugin:com.window-hub.weather".into(),
+    }
+}
+
+fn normalize_bar_resident(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty() || t == "none" || t == "off" {
+        return String::new();
+    }
+    if let Some(rest) = t.strip_prefix("plugin:") {
+        return rest.to_string();
+    }
+    t.to_string()
+}
+
 fn normalize_island_prefs(mut p: IslandPrefsDto) -> IslandPrefsDto {
     p.immerse_idle_sec = p.immerse_idle_sec.clamp(2, 300);
     p.msg_notify_sec = p.msg_notify_sec.clamp(2, 30);
+    p.pull_content = normalize_pull_content(&p.pull_content);
+    p.bar_resident = normalize_bar_resident(&p.bar_resident);
     p.msg_notify_text = {
         let t = p.msg_notify_text.trim().to_string();
         if t.is_empty() {
@@ -1115,7 +1342,14 @@ fn normalize_island_prefs(mut p: IslandPrefsDto) -> IslandPrefsDto {
 #[tauri::command]
 pub fn get_island_prefs() -> IslandPrefsDto {
     if let Ok(Some(p)) = crate::db::with_conn(|c| crate::db::island_get(c)) {
-        return normalize_island_prefs(IslandPrefsDto::from(p));
+        let raw = IslandPrefsDto::from(p);
+        let next = normalize_island_prefs(raw.clone());
+        // Persist legacy weather|mirror → plugin:* once
+        if next.pull_content != raw.pull_content {
+            let row = crate::db::IslandPrefsRow::from(&next);
+            let _ = crate::db::with_conn(|c| crate::db::island_set(c, &row));
+        }
+        return next;
     }
     IslandPrefsDto::default()
 }
@@ -1179,54 +1413,3 @@ pub fn set_shortcuts_prefs(
     Ok(next)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WeatherCredentials {
-    pub id: String,
-    pub key: String,
-}
-
-#[tauri::command]
-pub fn get_weather_credentials() -> WeatherCredentials {
-    if let Ok(Some(r)) = crate::db::with_conn(|c| crate::db::weather_api_get(c)) {
-        let id = r.id.trim().to_string();
-        let key = r.key.trim().to_string();
-        return WeatherCredentials {
-            id: if id.is_empty() {
-                "88888888".into()
-            } else {
-                id
-            },
-            key: if key.is_empty() {
-                "88888888".into()
-            } else {
-                key
-            },
-        };
-    }
-    WeatherCredentials {
-        id: "88888888".into(),
-        key: "88888888".into(),
-    }
-}
-
-#[tauri::command]
-pub fn set_weather_credentials(creds: WeatherCredentials) -> Result<(), String> {
-    let row = crate::db::WeatherApiRow {
-        id: creds.id.trim().to_string(),
-        key: creds.key.trim().to_string(),
-    };
-    crate::db::with_conn(|c| crate::db::weather_api_set(c, &row))
-}
-
-#[tauri::command]
-pub fn get_weather_cache() -> Option<serde_json::Value> {
-    crate::db::with_conn(|c| crate::db::weather_cache_get(c))
-        .ok()
-        .flatten()
-}
-
-#[tauri::command]
-pub fn set_weather_cache(cache: serde_json::Value) -> Result<(), String> {
-    crate::db::with_conn(|c| crate::db::weather_cache_set(c, &cache))
-}

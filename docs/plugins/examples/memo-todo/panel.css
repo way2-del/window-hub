@@ -1,0 +1,177 @@
+/* 备忘岛面板：对齐中转站 — 黑底浅字，禁止浅色大面 */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  color: #f4f4f5;
+  font: 500 12px/1.3 "Segoe UI", "Segoe UI Emoji", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color-scheme: dark;
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.memo-root {
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 2px 2px;
+  color: #f4f4f5;
+}
+
+.memo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  height: 18px;
+  padding: 0 4px;
+}
+
+.memo-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(250, 250, 250, 0.78);
+}
+
+.memo-sub {
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(250, 250, 250, 0.42);
+}
+
+.memo-rail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1.5px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.memo-rail::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.memo-hint {
+  margin: auto;
+  color: rgba(250, 250, 250, 0.45);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.memo-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.memo-card.is-done {
+  opacity: 0.42;
+}
+
+.memo-card.is-done .memo-card-title {
+  text-decoration: line-through;
+}
+
+.memo-card.is-overdue {
+  border-color: rgba(255, 107, 107, 0.28);
+  background: rgba(255, 80, 80, 0.08);
+}
+
+.memo-card-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memo-card-title {
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: rgba(250, 250, 250, 0.94);
+  word-break: break-word;
+}
+
+.memo-card-note {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(250, 250, 250, 0.52);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memo-card-due {
+  font-size: 10px;
+  font-weight: 600;
+  color: #e8b86d;
+  letter-spacing: 0.01em;
+}
+
+.memo-card-due.is-overdue {
+  color: #ff8a8a;
+}
+
+.memo-card-act {
+  flex-shrink: 0;
+  height: 26px;
+  min-width: 44px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  background: rgba(232, 184, 109, 0.18);
+  color: #f0d9a8;
+  border: 1px solid rgba(232, 184, 109, 0.28);
+}
+
+.memo-card-act:hover {
+  background: rgba(232, 184, 109, 0.28);
+  color: #fff4dc;
+}
+
+.memo-card.is-done .memo-card-act {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgba(250, 250, 250, 0.65);
+}

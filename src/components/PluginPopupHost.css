@@ -7,9 +7,11 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: var(--glass-panel-bg, rgba(32, 32, 34, 0.55));
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
   color: var(--glass-fg, #f4f4f5);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* Full-window shell: no CSS radius (DWM rounds the HWND). */
+  border-radius: 0;
 }
 
 .plugin-popup-empty {
@@ -31,9 +33,26 @@
   font-size: 12px;
 }
 
+/* Default plugin popup shell inset — plugins may override via injected popup.css.
+   Tokens documented in .cursor/skills/window-hub-plugin-popup/SKILL.md */
+:root {
+  --wh-popup-pad-x: 12px;
+  --wh-popup-pad-top: 12px;
+  --wh-popup-pad-bottom: 14px;
+  --wh-popup-gap: 10px;
+}
+
 .wg-shell {
+  box-sizing: border-box;
   width: 100%;
   height: 100vh;
-  background: var(--glass-panel-bg, rgba(32, 32, 34, 0.55));
+  padding: var(--wh-popup-pad-top) var(--wh-popup-pad-x) var(--wh-popup-pad-bottom);
+  display: flex;
+  flex-direction: column;
+  gap: var(--wh-popup-gap);
+  overflow: hidden;
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
   color: var(--glass-fg, #f4f4f5);
+  /* Full-window shell: no CSS radius (DWM rounds the HWND). */
+  border-radius: 0;
 }

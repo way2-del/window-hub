@@ -306,6 +306,26 @@ export default function ShortcutsPluginStrip({
             },
           ),
         );
+        unsubs.push(
+          await listen<{
+            pluginId?: string;
+            notifyId: string;
+            actionId: string;
+            data?: unknown;
+          }>("island-notify-action", (ev) => {
+            if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+            frame()?.postMessage(
+              {
+                channel: WH_SHORTCUTS_EVT,
+                type: "notify-action",
+                notifyId: ev.payload.notifyId,
+                actionId: ev.payload.actionId,
+                data: ev.payload.data,
+              },
+              "*",
+            );
+          }),
+        );
       } catch {
         /* noop */
       }

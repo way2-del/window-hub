@@ -1,0 +1,187 @@
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent !important;
+}
+
+body.is-dock {
+  color: var(--glass-fg, #f4f4f5);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+/* Full window is transparent; glass lives on the fixed-height chrome strip. */
+.dock-shell {
+  box-sizing: border-box;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+/* Shrink-wraps the icon row; chrome matches this width only. */
+.dock-stack {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  height: 60px;
+  max-width: 100%;
+  overflow: visible;
+}
+
+/* Visible dock height — never grows with magnification.
+   Real acrylic comes from sibling `dock-glass` under this strip.
+   Keep CSS wash soft — a hard fill creates a black top edge. */
+.dock-chrome {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 60px;
+  pointer-events: none;
+  border: none;
+  outline: none;
+  border-radius: 12px;
+  background: color-mix(
+    in srgb,
+    var(--glass-panel-bg, rgba(28, 28, 30, 0.42)) 42%,
+    transparent
+  );
+  box-shadow: none;
+}
+
+.dock-bar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 6px;
+  /* Same as chrome — icons scale upward into transparent headroom above. */
+  height: 60px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.dock-loading {
+  opacity: 0;
+}
+
+.dock-sep {
+  width: 1px;
+  height: 28px;
+  margin-bottom: 10px;
+  background: rgba(255, 255, 255, 0.18);
+  flex-shrink: 0;
+  align-self: flex-end;
+}
+
+.dock-item {
+  position: relative;
+  width: 40px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 1px;
+  cursor: pointer;
+  color: inherit;
+  flex-shrink: 0;
+  /* Fan width grows; icon uses uniform scale only (no skew). */
+  transition: width 80ms linear;
+  margin-bottom: 0;
+  padding-bottom: 6px;
+  overflow: visible;
+  will-change: width;
+}
+
+/* Hover only on the icon tile — not the running dot below. */
+.dock-hit {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: transparent;
+  transform: scale(var(--dock-scale, 1));
+  transform-origin: bottom center;
+  transition: transform 80ms linear;
+  will-change: transform;
+}
+
+.dock-item:hover .dock-hit,
+.dock-item.is-magnified .dock-hit {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.dock-icon {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  border-radius: 6px;
+  /* Source is 128–256px; let the browser downscale (sharper than upscaling 32px). */
+  image-rendering: auto;
+  -webkit-user-drag: none;
+}
+
+.dock-icon-fallback {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dock-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transform: scale(0);
+  background: rgba(255, 255, 255, 0.92);
+  opacity: 0;
+  transition:
+    transform 140ms ease,
+    opacity 140ms ease;
+}
+
+.dock-dot.is-on {
+  transform: scale(1);
+  opacity: 1;
+}
+
+html[data-theme="light"] .dock-sep {
+  background: rgba(0, 0, 0, 0.16);
+}
+
+html[data-theme="light"] .dock-dot.is-on {
+  background: rgba(20, 20, 22, 0.85);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dock-item,
+  .dock-hit {
+    transition: none;
+  }
+}

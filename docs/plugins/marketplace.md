@@ -11,15 +11,15 @@
 ## 本地安装（当前）
 
 1. 设置 → **插件** →「安装 .whpx」或「添加开发目录」或「导入示例」
-2. 校验 `plugin.json`（id/name/version + slots|entry）
-3. 解压到 `%APPDATA%/window-hub/plugins/{id}/`，写 `registry.json`
-4. `plugins-changed` → 前端热加载
-5. 开发目录安装：id 自动加 `__dev`
+2. **安装前预览**（`preview_plugin_from_path` / `preview_example_plugin`）：展示所用界面表面（快捷区是否弹窗、岛通知、岛下拉、岛栏/拖放等）、capabilities、`permissions.network` 主机列表；用户确认后才安装
+3. 校验 `plugin.json`（id/name/version + slots|entry）
+4. 解压到 `%APPDATA%/window-hub/plugins/{id}/`，写 `registry.json`
+5. `plugins-changed` → 前端热加载
+6. 开发目录安装：id 自动加 `__dev`
 
 首次启动**不会**自动安装示例。导入：
 
-- `install_example_plugin("window-groups")`
-- `install_example_plugin("transfer-station")`
+- `preview_example_plugin` → 确认 → `install_example_plugin("window-groups"|"transfer-station")`
 
 源：`docs/plugins/examples/{name}` 或打包资源 `src-tauri/resources/plugins/{name}`。  
 `manifest.official` 仅 UI 徽章。
@@ -45,7 +45,7 @@
 }
 ```
 
-安装后 UI 列出 capabilities；敏感项高亮。
+安装确认弹层与已安装列表均展示 capabilities；敏感项高亮。
 
 ## `.whpx`
 

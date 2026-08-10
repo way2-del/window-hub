@@ -1,6 +1,6 @@
-:root {
+﻿:root {
   color-scheme: dark;
-  --glass-panel-bg: rgba(32, 32, 34, 0.55);
+  --glass-panel-bg: rgba(28, 28, 30, 0.48);
   --glass-fg: #f4f4f5;
   --glass-fg-muted: #9ca3af;
   --glass-side: rgba(255, 255, 255, 0.04);
@@ -70,8 +70,10 @@ a {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  background: var(--glass-panel-bg, rgba(32, 32, 34, 0.55));
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
   color: var(--glass-fg, #f4f4f5);
+  /* Window chrome / DWM owns outer radius — do not round the shell again. */
+  border-radius: 0;
 }
 
 .settings-side {
@@ -850,6 +852,125 @@ a {
 
 .plugin-caps {
   color: #fbbf24 !important;
+}
+
+.plugin-install-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+}
+
+.plugin-install-dialog {
+  width: min(440px, 100%);
+  max-height: min(80vh, 640px);
+  overflow: auto;
+  padding: 18px 18px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(28, 28, 30, 0.96);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.plugin-install-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.plugin-install-lead {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #d1d5db;
+}
+
+.plugin-install-lead span {
+  color: #9ca3af;
+  font-weight: 400;
+}
+
+.plugin-install-desc {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #9ca3af;
+}
+
+.plugin-install-section {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.plugin-install-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+.plugin-install-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.plugin-install-list li strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.plugin-install-list li span {
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.35;
+}
+
+.plugin-install-list li.is-sensitive {
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.22);
+}
+
+.plugin-install-list li.is-sensitive strong {
+  color: #fbbf24;
+}
+
+.plugin-install-empty {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.plugin-install-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+html[data-theme="light"] .plugin-install-dialog {
+  background: rgba(250, 250, 252, 0.98);
+  border-color: rgba(0, 0, 0, 0.08);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme="light"] .plugin-install-list li {
+  background: rgba(0, 0, 0, 0.03);
 }
 
 .plugin-row-actions {

@@ -1,5 +1,7 @@
 /** Island notification bus — host-owned banner queue for tray + plugins. */
 
+import type { NotifyAction } from "./notifyActions";
+
 export type NotifyUrgency = "passive" | "active" | "critical";
 
 export type IslandNotifyRequest = {
@@ -22,7 +24,10 @@ export type IslandNotifyRequest = {
     callbackMsg: number;
     version: number;
   };
-  actions?: { id: string; label: string }[];
+  /** Host-normalized actions (start/end only). */
+  actions?: NotifyAction[];
+  /** Opaque payload echoed with action clicks. */
+  data?: unknown;
 };
 
 export type IslandNotifyBanner = IslandNotifyRequest & {

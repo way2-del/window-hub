@@ -27,13 +27,16 @@ button {
   cursor: pointer;
 }
 
+/* Shell inset tokens — see .cursor/skills/window-hub-plugin-popup/SKILL.md */
 .wg-shell {
   position: relative;
+  box-sizing: border-box;
   height: 100vh;
-  padding: 12px 12px 14px;
+  padding: var(--wh-popup-pad-top, 12px) var(--wh-popup-pad-x, 12px)
+    var(--wh-popup-pad-bottom, 14px);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--wh-popup-gap, 10px);
   overflow: hidden;
 }
 

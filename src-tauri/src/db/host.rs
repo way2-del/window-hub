@@ -84,6 +84,14 @@ pub fn shortcuts_set(conn: &Connection, value: &Value) -> Result<(), String> {
     singleton_set_json(conn, "prefs_shortcuts", value)
 }
 
+pub fn dock_get(conn: &Connection) -> Result<Option<Value>, String> {
+    singleton_get_json(conn, "prefs_dock")
+}
+
+pub fn dock_set(conn: &Connection, value: &Value) -> Result<(), String> {
+    singleton_set_json(conn, "prefs_dock", value)
+}
+
 // ── prefs_ambient ────────────────────────────────────────────────────
 
 pub fn ambient_get(conn: &Connection) -> Result<Option<String>, String> {
@@ -114,14 +122,21 @@ pub struct IslandPrefsRow {
     pub auto_immerse: bool,
     pub immerse_idle_sec: u32,
     pub pull_content: String,
+    #[serde(default = "default_bar_resident")]
+    pub bar_resident: String,
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
 }
 
+fn default_bar_resident() -> String {
+    "com.window-hub.weather".into()
+}
+
 pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
     conn.query_row(
-        "SELECT auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec
+        "SELECT auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
+                COALESCE(bar_resident, 'com.window-hub.weather')
          FROM prefs_island WHERE id = 1",
         [],
         |r| {
@@ -132,6 +147,7 @@ pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
                 msg_notify: r.get::<_, i64>(3)? != 0,
                 msg_notify_text: r.get(4)?,
                 msg_notify_sec: r.get::<_, i64>(5)? as u32,
+                bar_resident: r.get(6)?,
             })
         },
     )
@@ -142,8 +158,8 @@ pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
 pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
     conn.execute(
         "INSERT INTO prefs_island(
-            id, auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec, updated_at
-         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7)
+            id, auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec, bar_resident, updated_at
+         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)
          ON CONFLICT(id) DO UPDATE SET
            auto_immerse=excluded.auto_immerse,
            immerse_idle_sec=excluded.immerse_idle_sec,
@@ -151,6 +167,7 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
            msg_notify=excluded.msg_notify,
            msg_notify_text=excluded.msg_notify_text,
            msg_notify_sec=excluded.msg_notify_sec,
+           bar_resident=excluded.bar_resident,
            updated_at=excluded.updated_at",
         params![
             p.auto_immerse as i64,
@@ -159,53 +176,12 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
             p.msg_notify as i64,
             p.msg_notify_text,
             p.msg_notify_sec as i64,
+            p.bar_resident,
             now_ms(),
         ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-// ── weather ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WeatherApiRow {
-    pub id: String,
-    pub key: String,
-}
-
-pub fn weather_api_get(conn: &Connection) -> Result<Option<WeatherApiRow>, String> {
-    conn.query_row(
-        "SELECT api_id, api_key FROM weather_api WHERE id = 1",
-        [],
-        |r| {
-            Ok(WeatherApiRow {
-                id: r.get(0)?,
-                key: r.get(1)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(|e| e.to_string())
-}
-
-pub fn weather_api_set(conn: &Connection, row: &WeatherApiRow) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO weather_api(id, api_id, api_key, updated_at) VALUES(1, ?1, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET api_id=excluded.api_id, api_key=excluded.api_key, updated_at=excluded.updated_at",
-        params![row.id, row.key, now_ms()],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-pub fn weather_cache_get(conn: &Connection) -> Result<Option<Value>, String> {
-    singleton_get_json(conn, "weather_cache")
-}
-
-pub fn weather_cache_set(conn: &Connection, value: &Value) -> Result<(), String> {
-    singleton_set_json(conn, "weather_cache", value)
 }
 
 // ── script_launchers ─────────────────────────────────────────────────
@@ -321,6 +297,11 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS prefs_dock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS prefs_ambient (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           mode TEXT NOT NULL,
@@ -334,17 +315,7 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           msg_notify INTEGER NOT NULL,
           msg_notify_text TEXT NOT NULL,
           msg_notify_sec INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS weather_api (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          api_id TEXT NOT NULL,
-          api_key TEXT NOT NULL,
-          updated_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS weather_cache (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          data_json TEXT NOT NULL,
+          bar_resident TEXT NOT NULL DEFAULT 'com.window-hub.weather',
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS script_launchers (
@@ -440,20 +411,48 @@ pub fn migrate_from_host_kv(conn: &Connection) -> Result<(), String> {
                 let _ = launchers_replace_all(conn, &rows);
             }
             ("secrets", "weather_api") => {
+                // Legacy host_kv → weather plugin settings in plugin_kv
                 let id = v
                     .get("id")
                     .and_then(|x| x.as_str())
                     .unwrap_or("88888888")
+                    .trim()
                     .to_string();
                 let key = v
                     .get("key")
                     .and_then(|x| x.as_str())
                     .unwrap_or("88888888")
+                    .trim()
                     .to_string();
-                let _ = weather_api_set(conn, &WeatherApiRow { id, key });
+                if !id.is_empty() && !key.is_empty() {
+                    let existing = super::plugin_get_system(
+                        conn,
+                        super::WEATHER_PLUGIN_ID,
+                        super::KEY_SETTINGS,
+                    )
+                    .ok()
+                    .flatten();
+                    let mut map = match existing {
+                        Some(Value::Object(m)) => m,
+                        _ => serde_json::Map::new(),
+                    };
+                    map.insert("apiId".into(), Value::String(id));
+                    map.insert("apiKey".into(), Value::String(key));
+                    let _ = super::plugin_set_system(
+                        conn,
+                        super::WEATHER_PLUGIN_ID,
+                        super::KEY_SETTINGS,
+                        &Value::Object(map),
+                    );
+                }
             }
             ("cache", "weather") => {
-                let _ = weather_cache_set(conn, &v);
+                let payload = if v.get("info").is_some() {
+                    v.clone()
+                } else {
+                    serde_json::json!({ "info": v, "savedAt": now_ms() })
+                };
+                let _ = super::plugin_set(conn, super::WEATHER_PLUGIN_ID, "cache", &payload);
             }
             _ => {}
         }

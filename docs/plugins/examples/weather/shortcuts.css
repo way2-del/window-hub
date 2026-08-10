@@ -1,0 +1,8 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1px;
+  height: var(--wh-bar-h, 28px);
+  overflow: hidden;
+  background: transparent !important;
+}
+.wx-bar { width: 1px; height: 100%; }

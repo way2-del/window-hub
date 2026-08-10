@@ -16,9 +16,9 @@
 | `staging` | `hub.staging.*` 按插件隔离暂存 | ✅ |
 | `windows.read` | list / get / subscribe | ✅ |
 | `windows.focus` | focus（敏感，安装须明示） | ✅ |
-| `notify` | 灵动岛通知 | ⚠️ 仅 Host 侧 `hubNotify`；**插件 iframe 未注入** |
+| `notify` | `hub.notify`（需 slot `island.notify`） | ✅ Popup / Panel / Shortcuts |
 | `clipboard.read` / `clipboard.write` | 剪贴板 | ❌ schema 占位，无 API |
-| `network` | 经 `hub.fetch` + 域名白名单 | ❌ schema 占位，无 API |
+| `network` | `hub.fetch` + `permissions.network` 白名单 | ✅ |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。
 
@@ -69,7 +69,50 @@ DnD → `island.drop` 赢家。`excludeFromPullContent: true` → 不进下拉�
 
 ## `hub.popup.*`
 
-`open_plugin_popup` / `close_plugin_popup`；注入后读 `popup.css` / `popup.js`。
+`open_plugin_popup` / `close_plugin_popup`；注入后读 `popup.css` / `popup.js`。快捷区可开弹窗；岛面板 **故意** 不注入 `popup.open`。
+
+## `hub.notify`
+
+```ts
+hub.notify({
+  title: string;
+  body?: string;
+  iconPng?: string;
+  urgency?: "passive" | "active" | "critical";
+  ttlMs?: number;
+  data?: unknown;
+  actions?: {
+    id: string;
+    slot: "start" | "end";       // 仅开头/结尾，每槽最多 1
+    label?: string;              // 恰好 2 字；与 iconPng 互斥
+    iconPng?: string;
+    background: string;          // 安全 CSS 色
+    data?: unknown;
+  }[];
+}): Promise<{ id: string }>
+
+hub.notify.onAction((ev: {
+  notifyId: string;
+  actionId: string;
+  data?: unknown;
+}) => void): () => void
+```
+
+需 `notify` + `slots["island.notify"]`。按钮由 Host 固定布局（垂直居中、大圆角、字号=岛栏 12px）。  
+**点横幅中部**（所有插件统一）：dismiss 后若声明 `island.panel` 则下拉打开该插件面板；**不是**托盘应用跳转。左右按钮走 `onAction`。细则：`.cursor/skills/window-hub-island-notify/SKILL.md`。
+
+## `hub.fetch`
+
+```ts
+hub.fetch(url: string, opts?: {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeoutMs?: number;
+}): Promise<{ status: number; ok: boolean; headers: Record<string, string>; body: string }>
+```
+
+需 `network`；URL 必须匹配 `permissions.network`（主机/模式白名单）。空白名单 → 拒绝。
 
 ## Companion
 

@@ -1,0 +1,69 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.weather",
+  "name": "天气",
+  "version": "1.0.2",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "岛栏常驻天气摘要；下拉查看详细天气。开发者 ID / KEY 在本插件设置中配置。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "panel": "panel.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "天气",
+      "order": 5,
+      "action": "command"
+    },
+    "island.bar": {
+      "order": 20
+    },
+    "island.panel": {
+      "defaultSize": { "w": 380, "h": 220 },
+      "excludeFromPullContent": false
+    }
+  },
+  "settings": [
+    {
+      "key": "apiId",
+      "type": "string",
+      "label": "开发者 ID",
+      "description": "接口盒子天气 API 的 id（默认公共演示号）",
+      "default": "88888888",
+      "maxLength": 64
+    },
+    {
+      "key": "apiKey",
+      "type": "string",
+      "label": "通讯 KEY",
+      "description": "接口盒子天气 API 的 key",
+      "default": "88888888",
+      "maxLength": 128
+    },
+    {
+      "key": "cityOrIp",
+      "type": "string",
+      "label": "城市 / IP（可选）",
+      "description": "留空则按出口 IP 自动定位",
+      "default": "",
+      "maxLength": 64
+    },
+    {
+      "key": "refreshMinutes",
+      "type": "select",
+      "label": "刷新间隔",
+      "default": 30,
+      "options": [
+        { "value": 15, "label": "15 分钟" },
+        { "value": 30, "label": "30 分钟" },
+        { "value": 60, "label": "60 分钟" }
+      ]
+    }
+  ],
+  "capabilities": ["storage", "network", "island.panel", "island.bar", "shortcuts"],
+  "permissions": {
+    "network": ["cn.apihz.cn", "https://cn.apihz.cn"]
+  }
+}

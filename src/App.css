@@ -58,6 +58,13 @@ body.is-plugin-popup #root {
   height: 100%;
 }
 
+body.is-dock,
+body.is-dock #root {
+  background: transparent !important;
+  color: var(--glass-fg, #f4f4f5);
+  overflow: hidden;
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -401,11 +408,11 @@ button {
 .bar-notify {
   position: absolute;
   inset: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 18px;
+  gap: 6px;
+  padding: 0 8px;
   color: #fff;
   font-size: 12px;
   font-weight: 600;
@@ -418,6 +425,64 @@ button {
 
 .bar-notify.is-swiping {
   animation: none;
+}
+
+.bar-notify-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.bar-notify-slot:has(.bar-notify-action) {
+  pointer-events: auto;
+}
+
+.bar-notify-main {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  pointer-events: none;
+}
+
+/* 通知按钮：仅 start/end 槽；垂直居中；大圆角矩形；字号=岛栏 12px；内容 2 字或 icon */
+.bar-notify-action {
+  height: 22px;
+  min-width: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+  font-family: inherit;
+}
+
+.bar-notify-action:hover {
+  filter: brightness(1.06);
+}
+
+.bar-notify-action:active {
+  filter: brightness(0.96);
+}
+
+.bar-notify-action-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  display: block;
 }
 
 .bar-notify-icon {
@@ -443,7 +508,7 @@ button {
 .bar-notify-text {
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 220px;
+  max-width: 200px;
 }
 
 @keyframes notify-drop-in {
@@ -948,9 +1013,10 @@ button {
   height: 100%;
   overflow: auto;
   padding: 12px 10px;
-  background: var(--glass-panel-bg, rgba(32, 32, 34, 0.42));
-  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.12));
-  border-radius: 12px;
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+  /* Match plugin popup: no CSS border/radius — DWM owns the single outer edge. */
+  border: none;
+  border-radius: 0;
   color: var(--glass-fg, #f4f4f5);
   user-select: none;
   scrollbar-width: none;
@@ -1021,10 +1087,6 @@ html[data-theme="light"] body.is-tray-popup,
 html[data-theme="light"] body.is-tray-popup #root,
 html[data-theme="light"] .tray-popup-shell {
   color: #1c1c1e;
-}
-
-html[data-theme="light"] .tray-popup-shell {
-  border-color: rgba(0, 0, 0, 0.14);
 }
 
 html[data-theme="light"] .tray-drop-label,

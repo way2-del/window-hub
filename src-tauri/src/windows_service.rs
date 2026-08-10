@@ -43,7 +43,14 @@ impl WindowsService {
                     }
                 }
                 let exclude = *poller.inner.exclude.lock();
-                let next = list_windows(exclude);
+                let mut next = list_windows(exclude);
+                // Never treat dock chrome as a running app for indicator dots
+                if let Some(dock) = app.get_webview_window("dock") {
+                    if let Ok(hwnd) = dock.hwnd() {
+                        let dh = hwnd.0 as isize;
+                        next.retain(|w| w.hwnd != dh);
+                    }
+                }
                 let changed = {
                     let mut snap = poller.inner.snapshot.lock();
                     let key = |w: &WindowInfo| format!("{}:{}", w.id, w.title);

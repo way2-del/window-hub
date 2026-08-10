@@ -1,0 +1,67 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  color: #f4f4f5;
+  font: 500 12px/1.3 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color-scheme: dark;
+  overflow: hidden;
+}
+
+.mirror-root,
+.mirror-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.mirror-frame {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mirror-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+  opacity: 0;
+  transition: opacity 220ms ease;
+  border-radius: inherit;
+}
+
+.mirror-root.is-ready .mirror-video {
+  opacity: 1;
+}
+
+.mirror-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: rgba(250, 250, 250, 0.7);
+  background: rgba(0, 0, 0, 0.35);
+  text-align: center;
+  padding: 12px;
+}
+
+.mirror-root.is-ready .mirror-status:not(.is-error) {
+  display: none;
+}
+
+.mirror-status.is-error {
+  color: #ff8a8a;
+}
+
+.mirror-status span {
+  font-size: 11px;
+  opacity: 0.75;
+  word-break: break-word;
+}

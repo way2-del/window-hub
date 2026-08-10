@@ -149,6 +149,79 @@ pub fn assert_plugin_slot(plugin_id: &str, slot: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `permissions.network` allowlist from installed plugin manifest.
+pub fn network_allowlist(plugin_id: &str) -> Result<Vec<String>, String> {
+    let p = find_installed_plugin(plugin_id).ok_or_else(|| "plugin not installed".to_string())?;
+    let list = p
+        .manifest
+        .get("permissions")
+        .and_then(|x| x.get("network"))
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(list)
+}
+
+/// Match URL against allowlist entries (full URL prefix, host, or `*.domain.tld`).
+pub fn url_allowed_by_network_list(url: &str, allow: &[String]) -> bool {
+    let Some((scheme, host)) = parse_http_url_host(url) else {
+        return false;
+    };
+    let origin = format!("{scheme}://{host}");
+    let host_l = host.to_ascii_lowercase();
+    for entry in allow {
+        let e = entry.trim();
+        if e.is_empty() {
+            continue;
+        }
+        if e == "*" {
+            return true;
+        }
+        if url.starts_with(e) || origin.eq_ignore_ascii_case(e) {
+            return true;
+        }
+        if let Some(rest) = e.strip_prefix("*.") {
+            let rest_l = rest.to_ascii_lowercase();
+            if host_l == rest_l || host_l.ends_with(&format!(".{rest_l}")) {
+                return true;
+            }
+            continue;
+        }
+        if let Some((ps, ph)) = parse_http_url_host(e) {
+            if scheme.eq_ignore_ascii_case(ps) && host_l == ph.to_ascii_lowercase() {
+                return true;
+            }
+            continue;
+        }
+        if host_l == e.to_ascii_lowercase() {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_http_url_host(url: &str) -> Option<(&str, &str)> {
+    let url = url.trim();
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
+        ("https", r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        ("http", r)
+    } else {
+        return None;
+    };
+    let host_port = rest.split('/').next().unwrap_or("");
+    let host = host_port.split('@').next_back()?.split(':').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((scheme, host))
+}
+
 #[tauri::command]
 pub fn hub_windows_list(
     app: AppHandle,
@@ -586,6 +659,14 @@ pub fn hub_init_script(plugin_id: &str) -> String {
         ),
       clearBar: () => invoke("hub_island_clear_bar", withPlugin()),
     }},
+    fetch: (url, opts) =>
+      invoke(
+        "hub_fetch",
+        withPlugin({{
+          url: url,
+          opts: opts || null,
+        }}),
+      ),
     panel: {{
       close: () => invoke("close_plugin_popup"),
       openSession: () => invoke("hub_panel_open_session", withPlugin()),
@@ -599,6 +680,40 @@ pub fn hub_init_script(plugin_id: &str) -> String {
         ? invoke("apply_window_effect", {{ material }})
         : invoke("apply_window_effect", {{}}),
   }};
+
+  const notifyFn = (opts) =>
+    invoke(
+      "hub_notify",
+      withPlugin({{
+        opts: {{
+          title: (opts && opts.title) || "",
+          body: opts && opts.body,
+          iconPng: opts && opts.iconPng,
+          urgency: opts && opts.urgency,
+          ttlMs: opts && opts.ttlMs,
+          actions: opts && opts.actions,
+          data: opts && opts.data,
+        }},
+      }}),
+    );
+  notifyFn.onAction = (cb) => {{
+    const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+    if (!listen) return () => {{}};
+    let un = () => {{}};
+    listen("island-notify-action", (ev) => {{
+      const p = ev && ev.payload;
+      if (!p || p.pluginId !== PLUGIN_ID) return;
+      try {{
+        cb({{
+          notifyId: p.notifyId,
+          actionId: p.actionId,
+          data: p.data,
+        }});
+      }} catch (_) {{}}
+    }}).then((fn) => {{ un = fn; }});
+    return () => un();
+  }};
+  window.hub.notify = notifyFn;
 
   document.addEventListener("keydown", function (e) {{
     if (e.key === "Escape") {{

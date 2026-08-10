@@ -1,6 +1,7 @@
 mod commands;
 mod companion_scripts;
 mod db;
+mod dock;
 mod ecs;
 mod plugin_hub;
 mod plugin_install;
@@ -209,10 +210,12 @@ pub fn run() {
             app.manage(handle);
             app.manage(initial_material_state());
             app.manage(WindowsService::start(app.handle().clone()));
+            app.manage(crate::dock::DockVisibility::new());
             let pins = ShortcutsPinStore::new();
             pins.load_all_from_db();
             app.manage(pins);
             let _ = crate::plugin_install::list_installed_plugins_sync();
+            crate::plugin_install::ensure_official_plugins(app.handle());
             crate::win32::ambient::set_mode(commands::load_ambient_mode());
             crate::win32::tray::set_prefs(commands::load_tray_prefs());
 
@@ -230,6 +233,7 @@ pub fn run() {
             spawn_fullscreen_watcher(app.handle().clone());
             spawn_tray_watcher(app.handle().clone());
             crate::companion_scripts::start_hub_associated_launchers();
+            crate::dock::bootstrap_dock(app.handle());
 
             Ok(())
         })
@@ -366,10 +370,6 @@ pub fn run() {
             commands::set_island_prefs,
             commands::get_shortcuts_prefs,
             commands::set_shortcuts_prefs,
-            commands::get_weather_credentials,
-            commands::set_weather_credentials,
-            commands::get_weather_cache,
-            commands::set_weather_cache,
             db::admin::db_dev_info,
             db::admin::db_dev_list_rows,
             db::admin::db_dev_upsert_row,
@@ -383,6 +383,14 @@ pub fn run() {
             commands::open_notification_center,
             commands::get_foreground_app,
             commands::set_system_taskbar_visible,
+            dock::get_dock_prefs,
+            dock::set_dock_prefs,
+            dock::import_dockico_ini,
+            dock::pick_dockico_file,
+            dock::dock_launch_item,
+            dock::dock_set_mouse_near_bottom,
+            dock::get_dock_visibility,
+            dock::ensure_dock_window,
             commands::show_desktop,
             commands::restart_app,
             commands::exit_app,
@@ -402,6 +410,10 @@ pub fn run() {
             commands::hub_island_clear_bar,
             commands::hub_panel_open_session,
             commands::hub_panel_close_session,
+            commands::hub_notify,
+            commands::hub_fetch,
+            plugin_install::preview_plugin_from_path,
+            plugin_install::preview_example_plugin,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Window Hub");

@@ -53,7 +53,9 @@
     "resources": [
       "resources/window_hub_trayhook.dll",
       "resources/plugins/window-groups",
-      "resources/plugins/transfer-station"
+      "resources/plugins/transfer-station",
+      "resources/plugins/weather",
+      "resources/plugins/mirror"
     ]
   }
 }

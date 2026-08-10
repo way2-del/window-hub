@@ -1,7 +1,7 @@
 {
   "id": "com.window-hub.transfer-station",
   "name": "中转站",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "official": true,
   "description": "拖入文件后展开横向预览；弹出宽高在本插件设置中配置。",
   "entry": {
@@ -9,7 +9,8 @@
   },
   "slots": {
     "island.bar": {
-      "order": 10
+      "order": 10,
+      "excludeFromBarResident": true
     },
     "island.drop": {
       "order": 10
@@ -53,6 +54,7 @@
   ],
   "capabilities": [
     "island.panel",
+    "island.bar",
     "island.drop",
     "staging",
     "storage"

@@ -34,9 +34,9 @@ description: >-
 |------|------|----------|----------|
 | 快捷区（状态菜单左侧） | `shortcuts` | `entry.shortcuts` → iframe 自画 | `shortcuts` + 常用 `storage`/`popup`/`windows.*` |
 | 灵动岛下拉面板 | `island.panel` | `entry.panel` | `island.panel` |
-| 岛栏摘要 | `island.bar` | （无独立入口；API / Host 同步） | 需声明槽位；常配 `staging` |
+| 岛栏摘要 | `island.bar` | （无独立入口；API / Host 同步） | **capability + slot** `island.bar`；全局设置「岛栏常驻」竞选；`excludeFromBarResident` 仅临时条 |
 | 岛上拖放 | `island.drop` | （Host DnD） | **必须** `island.drop` + `staging` |
-| 岛通知横幅 | `island.notify` | （无 iframe；见 notify skill） | `notify`（**当前插件 iframe 未注入 hub.notify**） |
+| 岛通知横幅 | `island.notify` | （无独立 iframe；`hub.notify`） | `notify` |
 | 托管弹窗 | — | `entry.popup` | `popup` |
 
 **命名：** 顶栏左区叫**快捷区**，勿称 Dock。Dock / Widget 为后续表面，**schema 尚无对应 slot**。
@@ -49,8 +49,10 @@ description: >-
 |------|--------|------|
 | 快捷区常驻条 + 弹窗管理 | **窗口组** | `docs/plugins/examples/window-groups/` |
 | 拖放暂存 + 岛栏 + 矮面板 | **中转站** | `docs/plugins/examples/transfer-station/` |
+| 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/` |
+| 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
-打包资源镜像：`src-tauri/resources/plugins/{window-groups|transfer-station}/`（与 docs 示例保持同步）。
+打包资源镜像：`src-tauri/resources/plugins/{window-groups|transfer-station|weather|mirror}/`（与 docs 示例保持同步）。
 
 ### 1. 建目录与 `plugin.json`
 
@@ -67,7 +69,7 @@ my-plugin/
 **硬约定（否则空白）：**
 
 - Panel：Host **只**注入 `panel.css` / `panel.js`（与 `entry.panel` 旁路同目录），**不要**只写 `index.html` 指望自动找脚本。
-- Popup：注入 `popup.css` / `popup.js`。
+- Popup：注入 `popup.css` / `popup.js`（Host 挂 `#app.wg-shell`，**不**用 popup.html 外壳）。边距见 `window-hub-plugin-popup`。
 - Shortcuts：按 entry 文件名 stem 找 `{stem}.css` / `{stem}.js`。
 
 `id`：小写 + `.` / `-`，须含 `.`（如 `com.example.foo`）。
@@ -112,8 +114,9 @@ my-plugin/
 | `staging` | `hub.staging.*` | 是 |
 | `windows.read` | `hub.windows.list/get/subscribe` | 否 |
 | `windows.focus` | `hub.windows.focus` | **是** |
-| `notify` | **声明可用**；iframe **尚未**注入 `hub.notify` | 是 |
-| `clipboard.*` / `network` | **仅 schema 占位，无实现** — 勿调用 | 是（若声明） |
+| `notify` | `hub.notify`（需 slot `island.notify`） | 是 |
+| `network` | `hub.fetch(url, opts?)` + `permissions.network` 白名单 | 是 |
+| `clipboard.*` | **仅 schema 占位，无实现** — 勿调用 | 是（若声明） |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。
 
@@ -126,13 +129,14 @@ my-plugin/
 | `storage` / `settings` | ✅ | ✅ | ✅ |
 | `windows.*` | ✅ | ✅ | ✅ |
 | `staging.*` | ✅ | ✅ | ❌ |
-| `island.setBar/clearBar` | ✅ | ✅ | ❌ |
+| `island.setBar/clearBar` | ✅ | ✅ | ✅（需 `island.bar`；备忘类勿常驻写栏） |
 | `panel.openSession/closeSession/close` | ✅ | ✅ | ❌ |
 | `popup.open/close` | close ✅ | ❌ | ✅ open/close |
 | `shortcuts.getBounds/requestSize` | ❌ | ❌ | ✅ |
 | `shortcuts.setBadge` | ✅ | ❌ | ❌ |
 | `foreground.subscribe` | ❌ | ❌ | ✅ |
-| `notify` | ❌ | ❌ | ❌ |
+| `notify` | ✅ | ✅ | ✅ |
+| `fetch` | ✅ | ✅ | ✅ |
 
 - 快捷区细则 → `window-hub-shortcuts`（高度 `getBounds().height` / `--wh-bar-h`，禁止写死 28）
 - 岛面板尺寸 → `settings.panelWidth`/`panelHeight` → 否则 `defaultSize` → 否则 380×220；`excludeFromPullContent` 不进下拉列表
@@ -158,10 +162,12 @@ Host 设置页自动渲染；中转站示例：`panelWidth` / `panelHeight`。
 
 ### 6. 安装与验证
 
-1. **开发目录**：设置 → 插件 →「添加开发目录」→ id 变为 `{id}__dev`
-2. **示例导入**：`install_example_plugin("window-groups"|"transfer-station")`
-3. **打包**：`pack_plugin_directory` → `.whpx` →「安装 .whpx」
+1. **开发目录**：设置 → 插件 →「添加开发目录」→ 安装前确认表面/能力 → id 变为 `{id}__dev`
+2. **示例导入**：预览 `preview_example_plugin` → 确认 → `install_example_plugin`
+3. **打包**：`pack_plugin_directory` → `.whpx` → 预览后安装
 4. 启用后看：`plugins-changed`、快捷区条、岛下拉、拖放、设置项
+
+安装确认弹层展示：快捷区（是否弹窗）、岛通知、岛下拉、岛栏/拖放等 **surfaces** + **capabilities** + `permissions.network` 主机列表。
 
 **无**启动刷盘 / `include_str` 内嵌业务插件。
 
@@ -170,7 +176,7 @@ Host 设置页自动渲染；中转站示例：`panelWidth` / `panelHeight`。
 - [ ] `plugin.json` id / slots / capabilities / entry 与真实文件一致
 - [ ] panel 旁有 `panel.css`+`panel.js`（若有 panel）；popup / shortcuts 同理
 - [ ] 未使用 `setPins`、`alert`/`confirm`/`prompt`
-- [ ] 未调用未实现的 `hub.clipboard` / `hub.fetch` / iframe 内 `hub.notify`
+- [ ] 未调用未实现的 `hub.clipboard.*`；`hub.fetch` 已声明 `network` + `permissions.network`；`hub.notify` 已声明 `notify` + `island.notify`
 - [ ] 快捷区高度来自 `getBounds` / `--wh-bar-h`
 - [ ] 无硬编码官方插件 id 的 Host 后门依赖
 - [ ] 敏感 capability 在 README / 安装说明中写明
@@ -230,18 +236,19 @@ API：`docs/plugins/host-api.md` · SDK：`docs/plugins/sdk.md`
 
 写插件时 **不要**假设已有：
 
-- `hub.notify` / `onNotifyAction`（iframe 注入）
-- `hub.clipboard.*`、`hub.fetch` / `permissions.network` 强制校验
+- `hub.clipboard.*`
 - `entry.development` 热链到 `localhost` Vite（仅 `__dev` 目录安装）
 - Dock / Widget slot
 - 远程市场 / 签名 `.whpx` / CLI publish
-- 统一三表面完全相同的 `hub` 全集
+- 统一三表面完全相同的 `hub` 全集（快捷区可 popup；岛/面板不能开弹窗 — **有意不同**）
+- 通知按钮自定义坐标（仅允许 `slot: start|end`，见 island-notify skill）
 
 缺能力 → 提 CapGate 提案，或 Companion 本地脚本。
 
 ## Related skills
 
 - [window-hub-shortcuts](../window-hub-shortcuts/SKILL.md)
+- [window-hub-plugin-popup](../window-hub-plugin-popup/SKILL.md)
 - [window-hub-island-panel](../window-hub-island-panel/SKILL.md)
 - [window-hub-island-notify](../window-hub-island-notify/SKILL.md)
 - [window-hub-island-immerse](../window-hub-island-immerse/SKILL.md)

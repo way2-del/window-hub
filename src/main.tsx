@@ -6,6 +6,7 @@ import SettingsApp from "./SettingsApp";
 import TrayPopupApp from "./TrayPopupApp";
 import StatusMenuPopupApp from "./StatusMenuPopupApp";
 import PluginPopupHost from "./components/PluginPopupHost";
+import DockApp from "./DockApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
@@ -16,19 +17,32 @@ declare global {
     __WH_IS_TRAY_POPUP__?: boolean;
     __WH_IS_STATUS_MENU_POPUP__?: boolean;
     __WH_IS_PLUGIN_POPUP__?: boolean;
+    __WH_IS_DOCK__?: boolean;
+    __WH_IS_DOCK_GLASS__?: boolean;
     __WH_PLUGIN_ID__?: string;
   }
 }
 
-type WindowKind = "island" | "settings" | "tray" | "status-menu" | "plugin-popup";
+type WindowKind =
+  | "island"
+  | "settings"
+  | "tray"
+  | "status-menu"
+  | "plugin-popup"
+  | "dock"
+  | "dock-glass";
 
 function resolveWindowKind(): WindowKind {
+  if (window.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
+  if (window.__WH_IS_DOCK__ === true) return "dock";
   if (window.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
   if (window.__WH_IS_STATUS_MENU_POPUP__ === true) return "status-menu";
   if (window.__WH_IS_TRAY_POPUP__ === true) return "tray";
   if (window.__WH_IS_SETTINGS__ === true) return "settings";
   try {
     const label = getCurrentWindow().label;
+    if (label === "dock-glass") return "dock-glass";
+    if (label === "dock") return "dock";
     if (label === "plugin-popup") return "plugin-popup";
     if (label === "status-menu-popup") return "status-menu";
     if (label === "tray-popup") return "tray";
@@ -37,6 +51,8 @@ function resolveWindowKind(): WindowKind {
     /* ignore */
   }
   const q = new URLSearchParams(window.location.search).get("window");
+  if (q === "dock-glass") return "dock-glass";
+  if (q === "dock") return "dock";
   if (q === "plugin-popup") return "plugin-popup";
   if (q === "status-menu") return "status-menu";
   if (q === "tray") return "tray";
@@ -55,7 +71,9 @@ document.body.classList.add(
         ? "is-status-menu-popup"
         : kind === "plugin-popup"
           ? "is-plugin-popup"
-          : "is-island",
+          : kind === "dock" || kind === "dock-glass"
+            ? "is-dock"
+            : "is-island",
 );
 document.body.style.background = "transparent";
 document.title =
@@ -67,13 +85,20 @@ document.title =
         ? "状态菜单"
         : kind === "plugin-popup"
           ? "插件"
-          : "灵动岛";
+          : kind === "dock-glass"
+            ? "Dock Glass"
+            : kind === "dock"
+              ? "Dock"
+              : "灵动岛";
 
 const root = document.getElementById("root") as HTMLElement;
 if (kind === "settings") {
   applyGlassCss({ kind: "mica-alt", dark: true, acrylicAlpha: 125 });
   root.innerHTML =
     '<div style="padding:24px;color:var(--glass-fg,#f4f4f5);font-family:Segoe UI,sans-serif;background:var(--glass-panel-bg,rgba(32,32,34,0.55));min-height:100vh">正在加载设置…</div>';
+}
+if (kind === "dock" || kind === "dock-glass") {
+  applyGlassCss({ kind: "mica-alt", dark: true, acrylicAlpha: 125 });
 }
 
 ReactDOM.createRoot(root).render(
@@ -86,6 +111,22 @@ ReactDOM.createRoot(root).render(
       <StatusMenuPopupApp />
     ) : kind === "plugin-popup" ? (
       <PluginPopupHost />
+    ) : kind === "dock" ? (
+      <DockApp />
+    ) : kind === "dock-glass" ? (
+      // Empty — Host SWCA paints the 60px glass strip; icons live in `dock`.
+      <div
+        aria-hidden
+        style={{
+          width: "100%",
+          height: "100%",
+          margin: 0,
+          padding: 0,
+          border: "none",
+          background: "transparent",
+          pointerEvents: "none",
+        }}
+      />
     ) : (
       <App />
     )}

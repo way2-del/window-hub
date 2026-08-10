@@ -229,8 +229,13 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   }, []);
 
   const pluginsAll = pluginRegistry.listShortcuts();
+  // 独占某插件时仍挂载「岛栏 worker」：声明 island.bar + entry.shortcuts 的隐形条（如天气）
   const plugins = exclusivePluginId
-    ? pluginsAll.filter((p) => p.pluginId === exclusivePluginId)
+    ? pluginsAll.filter((p) => {
+        if (p.pluginId === exclusivePluginId) return true;
+        const m = pluginRegistry.get(p.pluginId)?.manifest;
+        return Boolean(m?.slots?.["island.bar"] && m.entry?.shortcuts);
+      })
     : pluginsAll;
 
   const webPlugins = plugins.filter((p) => hasShortcutsEntry(p));

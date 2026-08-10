@@ -30,6 +30,8 @@ const ALLOWED_CMDS = new Set([
   "hub_windows_list",
   "hub_windows_get",
   "hub_windows_focus",
+  "hub_notify",
+  "hub_fetch",
 ]);
 
 export function isAllowedPanelHubCmd(cmd: string): boolean {
@@ -126,14 +128,85 @@ export function panelHubBootstrapScript(pluginId: string): string {
       },
       clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }
     },
+    fetch: function (url, opts) {
+      return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));
+    },
     panel: {
       close: function () {
         window.parent.postMessage({ channel: "${WH_PANEL_HUB}", cmd: "panel.close", args: {} }, "*");
       },
       openSession: function () { return invoke("hub_panel_open_session", withPlugin()); },
-      closeSession: function () { return invoke("hub_panel_close_session", {}); }
+      closeSession: function () { return invoke("hub_panel_close_session", {}); },
+      /** Host 在岛完全展开后 enter；收起一开始 leave。摄像头等重资源只在 onEnter 开。 */
+      onEnter: function (cb) {
+        if (typeof cb !== "function") return function () {};
+        enterCbs.push(cb);
+        if (panelPhase === "enter") {
+          try { cb(); } catch (_) {}
+        }
+        return function () {
+          var i = enterCbs.indexOf(cb);
+          if (i >= 0) enterCbs.splice(i, 1);
+        };
+      },
+      onLeave: function (cb) {
+        if (typeof cb !== "function") return function () {};
+        leaveCbs.push(cb);
+        if (panelPhase === "leave") {
+          try { cb(); } catch (_) {}
+        }
+        return function () {
+          var i = leaveCbs.indexOf(cb);
+          if (i >= 0) leaveCbs.splice(i, 1);
+        };
+      }
     }
   };
+  var panelPhase = "leave";
+  var enterCbs = [];
+  var leaveCbs = [];
+  window.addEventListener("message", function (ev) {
+    var d = ev && ev.data;
+    if (!d || d.channel !== "island-panel-lifecycle-fwd") return;
+    if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+    var phase = d.phase === "enter" ? "enter" : "leave";
+    if (phase === panelPhase) return;
+    panelPhase = phase;
+    var list = phase === "enter" ? enterCbs : leaveCbs;
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](); } catch (_) {}
+    }
+  });
+  var notifyFn = function (opts) {
+    return invoke("hub_notify", withPlugin({
+      opts: {
+        title: (opts && opts.title) || "",
+        body: opts && opts.body,
+        iconPng: opts && opts.iconPng,
+        urgency: opts && opts.urgency,
+        ttlMs: opts && opts.ttlMs,
+        actions: opts && opts.actions,
+        data: opts && opts.data
+      }
+    }));
+  };
+  notifyFn.onAction = function (cb) {
+    function onMsg(ev) {
+      var d = ev && ev.data;
+      if (!d || d.channel !== "island-notify-action-fwd") return;
+      if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+      try {
+        cb({
+          notifyId: d.notifyId,
+          actionId: d.actionId,
+          data: d.data
+        });
+      } catch (_) {}
+    }
+    window.addEventListener("message", onMsg);
+    return function () { window.removeEventListener("message", onMsg); };
+  };
+  window.hub.notify = notifyFn;
 })();
 `;
 }

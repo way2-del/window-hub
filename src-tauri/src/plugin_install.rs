@@ -10,6 +10,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const WINDOW_GROUPS_EXAMPLE_ID: &str = "com.window-hub.window-groups";
 const TRANSFER_EXAMPLE_ID: &str = "com.window-hub.transfer-station";
+const WEATHER_EXAMPLE_ID: &str = "com.window-hub.weather";
+const MIRROR_EXAMPLE_ID: &str = "com.window-hub.mirror";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,7 +189,61 @@ fn close_plugin_popup(app: &AppHandle) {
 
 pub fn list_installed_plugins_sync() -> Vec<InstalledPluginRecord> {
     // Transfer-station / window-groups: normal plugins (no embed seed / no overwrite-on-launch).
+    // Weather / mirror: ensured separately on app setup (missing-only).
     load_registry().plugins
+}
+
+fn plugin_already_installed(reg: &RegistryFile, id: &str) -> bool {
+    let dev = format!("{id}__dev");
+    reg.plugins.iter().any(|p| p.id == id || p.id == dev)
+}
+
+/// Install or bump official weather / mirror / transfer from resources when missing or version differs.
+/// Does not touch `__dev` installs.
+pub fn ensure_official_plugins(app: &AppHandle) {
+    for (folder, id) in [
+        ("weather", WEATHER_EXAMPLE_ID),
+        ("mirror", MIRROR_EXAMPLE_ID),
+        ("transfer-station", TRANSFER_EXAMPLE_ID),
+    ] {
+        let reg = load_registry();
+        let bundled = match resolve_example_plugin_dir(app, folder) {
+            Ok(src) => src,
+            Err(e) => {
+                eprintln!("[plugins] ensure {id}: {e}");
+                continue;
+            }
+        };
+        let bundled_ver = read_manifest_file(&bundled)
+            .ok()
+            .and_then(|m| {
+                m.get("version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        let installed = reg.plugins.iter().find(|p| p.id == id);
+        let dev_present = reg.plugins.iter().any(|p| p.id == format!("{id}__dev"));
+        if let Some(rec) = installed {
+            if rec.version == bundled_ver || bundled_ver.is_empty() {
+                continue;
+            }
+            // Official release bump only (skip if user has a parallel __dev copy as source of truth)
+            if dev_present {
+                continue;
+            }
+            if let Err(e) = install_from_dir(app, &bundled, false) {
+                eprintln!("[plugins] upgrade {id} → {bundled_ver} failed: {e}");
+            }
+            continue;
+        }
+        if plugin_already_installed(&reg, id) {
+            continue;
+        }
+        if let Err(e) = install_from_dir(app, &bundled, false) {
+            eprintln!("[plugins] ensure {id} failed: {e}");
+        }
+    }
 }
 
 #[tauri::command]
@@ -376,6 +432,250 @@ fn resolve_example_plugin_dir(app: &AppHandle, folder: &str) -> Result<PathBuf, 
     ))
 }
 
+fn example_folder(example_id: &str) -> Result<&'static str, String> {
+    let id = example_id.trim();
+    if id == "window-groups" || id == WINDOW_GROUPS_EXAMPLE_ID {
+        Ok("window-groups")
+    } else if id == "transfer-station" || id == TRANSFER_EXAMPLE_ID {
+        Ok("transfer-station")
+    } else if id == "weather" || id == WEATHER_EXAMPLE_ID {
+        Ok("weather")
+    } else if id == "mirror" || id == MIRROR_EXAMPLE_ID {
+        Ok("mirror")
+    } else {
+        Err(format!("unknown example plugin: {example_id}"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSurfacePreview {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPreviewDto {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub capabilities: Vec<String>,
+    pub surfaces: Vec<PluginSurfacePreview>,
+    pub network_hosts: Vec<String>,
+    pub description: Option<String>,
+}
+
+fn surfaces_from_manifest(manifest: &Value) -> Vec<PluginSurfacePreview> {
+    let slots = manifest.get("slots");
+    let entry = manifest.get("entry");
+    let mut out = Vec::new();
+
+    if let Some(sc) = slots.and_then(|s| s.get("shortcuts")) {
+        let label = sc
+            .get("label")
+            .and_then(|x| x.as_str())
+            .unwrap_or("快捷区");
+        let action = sc.get("action").and_then(|x| x.as_str()).unwrap_or("expand");
+        let has_popup_entry = entry.and_then(|e| e.get("popup")).is_some();
+        let has_shortcuts_entry = entry.and_then(|e| e.get("shortcuts")).is_some();
+        let mut detail = format!("入口「{label}」");
+        if has_shortcuts_entry {
+            detail.push_str(" · 自画快捷条");
+        }
+        match action {
+            "popup.open" => detail.push_str(if has_popup_entry {
+                " · 点击打开弹窗"
+            } else {
+                " · 声明 popup.open（缺 entry.popup）"
+            }),
+            "panel.open" => detail.push_str(" · 点击打开岛面板"),
+            "command" => detail.push_str(" · 自定义命令"),
+            _ => detail.push_str(" · 展开/激活"),
+        }
+        out.push(PluginSurfacePreview {
+            id: "shortcuts".into(),
+            label: "快捷区".into(),
+            detail,
+        });
+    }
+
+    if entry.and_then(|e| e.get("popup")).is_some()
+        && !out.iter().any(|s| s.id == "shortcuts" && s.detail.contains("弹窗"))
+    {
+        // Standalone popup without shortcuts slot, or shortcuts without popup.open
+        if slots.and_then(|s| s.get("shortcuts")).is_none() {
+            out.push(PluginSurfacePreview {
+                id: "popup".into(),
+                label: "托管弹窗".into(),
+                detail: "有 entry.popup，可由其它入口打开".into(),
+            });
+        } else if slots
+            .and_then(|s| s.get("shortcuts"))
+            .and_then(|sc| sc.get("action"))
+            .and_then(|a| a.as_str())
+            != Some("popup.open")
+        {
+            out.push(PluginSurfacePreview {
+                id: "popup".into(),
+                label: "托管弹窗".into(),
+                detail: "有 entry.popup（快捷区 action 非 popup.open）".into(),
+            });
+        }
+    }
+
+    if slots.and_then(|s| s.get("island.notify")).is_some() {
+        out.push(PluginSurfacePreview {
+            id: "island.notify".into(),
+            label: "灵动岛通知".into(),
+            detail: "可推送岛栏通知横幅".into(),
+        });
+    }
+    if slots.and_then(|s| s.get("island.bar")).is_some() {
+        out.push(PluginSurfacePreview {
+            id: "island.bar".into(),
+            label: "灵动岛摘要栏".into(),
+            detail: "可占用折叠岛中间摘要文案".into(),
+        });
+    }
+    if slots.and_then(|s| s.get("island.drop")).is_some() {
+        out.push(PluginSurfacePreview {
+            id: "island.drop".into(),
+            label: "灵动岛拖放".into(),
+            detail: "可接收拖到岛上的文件/文字".into(),
+        });
+    }
+    if let Some(panel) = slots.and_then(|s| s.get("island.panel")) {
+        let excl = panel
+            .get("excludeFromPullContent")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let detail = if excl {
+            "岛下拉面板（不出现在「下拉内容」列表；会话/拖放打开）".into()
+        } else {
+            "岛下拉面板（可选入「下拉内容」）".into()
+        };
+        out.push(PluginSurfacePreview {
+            id: "island.panel".into(),
+            label: "灵动岛下拉".into(),
+            detail,
+        });
+    }
+
+    if out.is_empty() {
+        out.push(PluginSurfacePreview {
+            id: "none".into(),
+            label: "未声明 UI 表面".into(),
+            detail: "仅 capabilities / 后台能力".into(),
+        });
+    }
+    out
+}
+
+fn preview_from_manifest(manifest: Value) -> Result<PluginPreviewDto, String> {
+    let (id, name, version, capabilities) = validate_manifest(&manifest)?;
+    let network_hosts = manifest
+        .get("permissions")
+        .and_then(|p| p.get("network"))
+        .and_then(|n| n.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let description = manifest
+        .get("description")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let surfaces = surfaces_from_manifest(&manifest);
+    Ok(PluginPreviewDto {
+        id,
+        name,
+        version,
+        capabilities,
+        surfaces,
+        network_hosts,
+        description,
+    })
+}
+
+fn read_manifest_from_path(path: &Path) -> Result<Value, String> {
+    if !path.exists() {
+        return Err("path does not exist".into());
+    }
+    if path.is_dir() {
+        return read_manifest_file(path);
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "whpx" && ext != "zip" {
+        return Err("expected .whpx / .zip or a directory".into());
+    }
+    let staging = std::env::temp_dir().join(format!(
+        "window-hub-preview-{}-{}",
+        std::process::id(),
+        now_ms_preview()
+    ));
+    let _ = fs::remove_dir_all(&staging);
+    extract_whpx(path, &staging)?;
+    let manifest_dir = if staging.join("plugin.json").is_file() {
+        staging.clone()
+    } else {
+        let mut found = None;
+        if let Ok(entries) = fs::read_dir(&staging) {
+            for entry in entries.flatten() {
+                if entry.path().join("plugin.json").is_file() {
+                    found = Some(entry.path());
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(p) => p,
+            None => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err("plugin.json not found in archive".into());
+            }
+        }
+    };
+    let result = read_manifest_file(&manifest_dir);
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
+fn now_ms_preview() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Read plugin.json from .whpx / directory without installing.
+#[tauri::command]
+pub fn preview_plugin_from_path(path: String) -> Result<PluginPreviewDto, String> {
+    let manifest = read_manifest_from_path(Path::new(path.trim()))?;
+    preview_from_manifest(manifest)
+}
+
+/// Preview a bundled example before import.
+#[tauri::command]
+pub fn preview_example_plugin(
+    app: AppHandle,
+    example_id: String,
+) -> Result<PluginPreviewDto, String> {
+    let folder = example_folder(&example_id)?;
+    let src = resolve_example_plugin_dir(&app, folder)?;
+    let manifest = read_manifest_file(&src)?;
+    preview_from_manifest(manifest)
+}
+
 /// Import a bundled example via the same install path as any .whpx / directory.
 /// Does not overwrite on every app launch — only when the user invokes this.
 #[tauri::command]
@@ -383,14 +683,7 @@ pub fn install_example_plugin(
     app: AppHandle,
     example_id: String,
 ) -> Result<InstalledPluginRecord, String> {
-    let id = example_id.trim();
-    let folder = if id == "window-groups" || id == WINDOW_GROUPS_EXAMPLE_ID {
-        "window-groups"
-    } else if id == "transfer-station" || id == TRANSFER_EXAMPLE_ID {
-        "transfer-station"
-    } else {
-        return Err(format!("unknown example plugin: {example_id}"));
-    };
+    let folder = example_folder(&example_id)?;
     let src = resolve_example_plugin_dir(&app, folder)?;
     install_from_dir(&app, &src, false)
 }

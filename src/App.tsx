@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import {
   currentMonitor,
   getCurrentWindow,
@@ -19,29 +19,28 @@ import {
   clampStagingPanelH,
   clampStagingPanelW,
   STAGING_PANEL_H_DEFAULT,
-  STAGING_PANEL_W_DEFAULT,
   type IslandPrefs,
 } from "./islandPrefs";
-import {
-  fetchWeather,
-  hydrateWeatherStorage,
-  initialWeather,
-  type WeatherInfo,
-} from "./weather";
 import { islandNotifyBus, type IslandNotifyBanner } from "./plugins/islandNotify";
+import {
+  actionsForSlot,
+  normalizeNotifyActions,
+  type NotifyAction,
+} from "./plugins/notifyActions";
 import { bootstrapPlugins, subscribeInstalledPlugins } from "./plugins/bootstrap";
 import { normalizeStagingChanged } from "./stagingApi";
 import {
   formatStagingBarText,
+  isStagingPanelShell,
   resolveIslandDropPluginId,
-  resolvePanelDefaultSize,
+  resolvePluginPanelShellSize,
   type IslandBarState,
 } from "./plugins/islandSlots";
-import { isBuiltinPanel, parsePluginPanelId } from "./plugins/panelProviders";
+import { parsePluginPanelId } from "./plugins/panelProviders";
 import { pluginRegistry } from "./plugins/registry";
 import "./App.css";
 
-/** 默认天气/镜子展开尺寸（非中转站） */
+/** 默认插件面板展开尺寸（非中转站） */
 const VIEW_W_DEFAULT = 380;
 const VIEW_H_DEFAULT = 220;
 /** 岛贴屏顶后顶隙为 0；窗口高度 = 岛高 */
@@ -55,8 +54,6 @@ const MORPH_MS = 420;
 const PULL_OPEN = 0.52;
 const CLICK_SLOP = 6;
 const SPRING_MS = 320;
-/** 收起前先拆摄像头的等待 */
-const MIRROR_TEARDOWN_MS = 50;
 
 type IslandSize = { width: number; height: number };
 
@@ -171,10 +168,6 @@ function easeOutSmooth(t: number) {
 /** 把全局进度映射到 [start,end] 子区间，再 ease */
 function channelEase(p: number, start: number, end: number) {
   return easeOutSmooth(clamp01((p - start) / Math.max(0.001, end - start)));
-}
-
-function sleep(ms: number) {
-  return new Promise<void>((r) => window.setTimeout(r, ms));
 }
 
 type Rgb = { r: number; g: number; b: number };
@@ -304,6 +297,7 @@ type MsgBanner = {
   iconPng: string;
   title: string;
   source: "tray" | "plugin";
+  pluginId?: string;
   /** Tray icon id for invoke / clear flashing */
   trayIconId?: string;
   hwnd?: number;
@@ -311,6 +305,8 @@ type MsgBanner = {
   callbackMsg?: number;
   version?: number;
   notifyId: string;
+  actions: NotifyAction[];
+  data?: unknown;
 };
 
 function bannerFromBus(b: IslandNotifyBanner): MsgBanner {
@@ -321,12 +317,15 @@ function bannerFromBus(b: IslandNotifyBanner): MsgBanner {
     iconPng: b.iconPng ?? "",
     title: b.title,
     source: b.source,
+    pluginId: b.pluginId,
     trayIconId: b.tray?.iconId,
     hwnd: b.tray?.hwnd,
     uid: b.tray?.uid,
     callbackMsg: b.tray?.callbackMsg,
     version: b.tray?.version,
     notifyId: b.id,
+    actions: b.actions ?? [],
+    data: b.data,
   };
 }
 
@@ -350,42 +349,6 @@ async function setBarHeight(islandH: number) {
   }
 }
 
-function IconCloud({ className }: { className?: string }) {
-  return (
-    <svg className={className} width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" />
-    </svg>
-  );
-}
-
-function IconPin({ className }: { className?: string }) {
-  return (
-    <svg className={className} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
-      <circle cx="12" cy="10" r="3" />
-    </svg>
-  );
-}
-
-function IconDroplets({ className }: { className?: string }) {
-  return (
-    <svg className={className} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <path d="M7 16.3c2.2 0 4-1.83 4-4.05 0-1.16-.57-2.26-1.71-3.19S7.29 6.75 7 5.3c-.29 1.45-1.14 2.84-2.29 3.76S3 11.1 3 12.25c0 2.22 1.8 4.05 4 4.05z" />
-      <path d="M12.56 6.6A10.97 10.97 0 0 0 14 3.02c.5 2.5 2 4.9 4 6.5s3 3.5 3 5.5a6.98 6.98 0 0 1-11.91 4.97" />
-    </svg>
-  );
-}
-
-function IconWind({ className }: { className?: string }) {
-  return (
-    <svg className={className} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2" />
-      <path d="M9.6 4.6A2 2 0 1 1 11 8H2" />
-      <path d="M12.6 19.4A2 2 0 1 0 14 16H2" />
-    </svg>
-  );
-}
-
 function App() {
   const [expanded, setExpanded] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
@@ -395,7 +358,6 @@ function App() {
   const [chromeLeft, setChromeLeft] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
   const [chromeCenter, setChromeCenter] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
   const [chromeRight, setChromeRight] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
-  const [weather, setWeather] = useState<WeatherInfo>(initialWeather);
   const [size, setSize] = useState<IslandSize>(ISLAND_COLLAPSED);
   const [pulling, setPulling] = useState(false);
   const pullingRef = useRef(false);
@@ -406,11 +368,15 @@ function App() {
   const [reveal, setReveal] = useState(0);
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
   /** 插件面板尺寸：settings.panelWidth / panelHeight（缺省取 defaultSize） */
-  const [shellPanelW, setShellPanelW] = useState(STAGING_PANEL_W_DEFAULT);
+  const [shellPanelW, setShellPanelW] = useState(VIEW_W_DEFAULT);
   const shellPanelWRef = useRef(shellPanelW);
-  const [shellPanelH, setShellPanelH] = useState(STAGING_PANEL_H_DEFAULT);
+  const [shellPanelH, setShellPanelH] = useState(VIEW_H_DEFAULT);
   const shellPanelHRef = useRef(shellPanelH);
-  const [islandBar, setIslandBar] = useState<IslandBarState | null>(null);
+  /** 常驻层：仅全局设置选中的 barResident 插件可写 */
+  const [residentBar, setResidentBar] = useState<IslandBarState | null>(null);
+  /** 临时层：中转站等；有内容时盖住常驻 */
+  const [overlayBar, setOverlayBar] = useState<IslandBarState | null>(null);
+  const islandBar = overlayBar ?? residentBar;
   const [dropTarget, setDropTarget] = useState(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
   const [dropPluginId, setDropPluginId] = useState<string | null>(() =>
@@ -419,8 +385,11 @@ function App() {
   const dropPluginIdRef = useRef(dropPluginId);
   /** 沉浸：黑底变透明，字色跟随顶栏对比度 */
   const [immersed, setImmersed] = useState(false);
-  /** 镜子摄像头是否挂载（收起前先关掉） */
-  const [mirrorLive, setMirrorLive] = useState(false);
+  /**
+   * 面板生命周期：仅在展开动画结束后为 true；收起一开始为 false。
+   * 驱动 hub.panel.onEnter / onLeave（镜子等勿在折叠态开摄像头）。
+   */
+  const [panelActive, setPanelActive] = useState(false);
   /** 托盘闪动消息提示（岛内落下） */
   const [msgBanner, setMsgBanner] = useState<MsgBanner | null>(null);
   const gen = useRef(0);
@@ -431,7 +400,6 @@ function App() {
   const revealRef = useRef(0);
   const immersedRef = useRef(false);
   const islandPrefsRef = useRef(islandPrefs);
-  const mirrorLiveRef = useRef(false);
   const msgBannerRef = useRef<MsgBanner | null>(null);
   const notifyRef = useRef<HTMLDivElement>(null);
   const swipe = useRef<{
@@ -468,17 +436,28 @@ function App() {
   islandPrefsRef.current = islandPrefs;
   shellPanelWRef.current = shellPanelW;
   shellPanelHRef.current = shellPanelH;
-  mirrorLiveRef.current = mirrorLive;
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
 
   useEffect(() => {
     const sync = () => {
       setDropPluginId(resolveIslandDropPluginId());
-      setIslandBar((prev) => {
+      const barOk = (pluginId: string) => {
+        const rec = pluginRegistry.get(pluginId);
+        return Boolean(
+          rec?.enabled &&
+            rec.manifest.slots?.["island.bar"] &&
+            (rec.manifest.capabilities ?? []).includes("island.bar"),
+        );
+      };
+      setResidentBar((prev) => {
         if (!prev) return prev;
-        const rec = pluginRegistry.get(prev.pluginId);
-        if (!rec?.enabled || !rec.manifest.slots?.["island.bar"]) return null;
+        const want = islandPrefsRef.current.barResident;
+        if (!want || prev.pluginId !== want || !barOk(prev.pluginId)) return null;
         return prev;
+      });
+      setOverlayBar((prev) => {
+        if (!prev) return prev;
+        return barOk(prev.pluginId) ? prev : null;
       });
       setPanelOverride((prev) => {
         if (!prev?.startsWith("plugin:")) return prev;
@@ -490,19 +469,21 @@ function App() {
     return pluginRegistry.subscribe(sync);
   }, []);
 
-  function armMirror() {
-    if (islandPrefsRef.current.pullContent !== "mirror") return;
-    if (mirrorLiveRef.current) return;
-    mirrorLiveRef.current = true;
-    setMirrorLive(true);
-  }
-
-  async function teardownMirror() {
-    if (!mirrorLiveRef.current) return;
-    mirrorLiveRef.current = false;
-    setMirrorLive(false);
-    await sleep(MIRROR_TEARDOWN_MS);
-  }
+  useEffect(() => {
+    const want = islandPrefs.barResident;
+    setResidentBar((prev) => {
+      if (!want) return null;
+      if (prev && prev.pluginId !== want) return null;
+      return prev;
+    });
+    // 竞选常驻的插件不得留在临时层（修「无」之后改设置又刷出天气）
+    setOverlayBar((prev) => {
+      if (!prev) return prev;
+      const rec = pluginRegistry.get(prev.pluginId);
+      if (rec?.manifest.slots?.["island.bar"]?.excludeFromBarResident) return prev;
+      return null;
+    });
+  }, [islandPrefs.barResident]);
 
   function clearIdleTimer() {
     if (idleTimer.current != null) {
@@ -533,6 +514,22 @@ function App() {
     if (id) islandNotifyBus.dismiss(id);
     else islandNotifyBus.dismiss();
     scheduleImmerse();
+  }
+
+  function fireNotifyAction(action: NotifyAction) {
+    const banner = msgBannerRef.current;
+    if (!banner || banner.source !== "plugin" || !banner.pluginId) {
+      dismissMsgBanner();
+      return;
+    }
+    const payload = {
+      pluginId: banner.pluginId,
+      notifyId: banner.notifyId,
+      actionId: action.id,
+      data: action.data !== undefined ? action.data : banner.data,
+    };
+    void emit("island-notify-action", payload).catch(console.error);
+    dismissMsgBanner();
   }
 
   /** 托盘闪动 → 通知总线（常驻，ttl=0） */
@@ -744,8 +741,7 @@ function App() {
       setExpanded(true);
       await animateMorph(token, true);
       if (token !== gen.current) return;
-      // 完全展开后再开摄像头，避免动画中抢权限/卡顿
-      armMirror();
+      setPanelActive(true);
     } finally {
       if (token === gen.current) {
         busy.current = false;
@@ -766,19 +762,19 @@ function App() {
     }
   }
 
-  /** 收起：先销毁摄像头，再一条时间线交错收高度与宽度 */
+  /** 收起：一条时间线交错收高度与宽度 */
   async function collapse() {
     if (!expandedRef.current && revealRef.current <= 0.01) return;
     bumpIslandActivity();
     const token = ++gen.current;
     busy.current = true;
     try {
+      // 先 leave：立刻关摄像头，再开收起动画
+      setPanelActive(false);
       setExpanded(false);
       // 收回一开始就直角贴顶，与下拉同理
       morphingRef.current = true;
       paintDom(sizeRef.current, revealRef.current);
-      await teardownMirror();
-      if (token !== gen.current) return;
       await animateMorph(token, false);
       if (token !== gen.current) return;
       await setBarHeight(ISLAND_COLLAPSED.height);
@@ -897,8 +893,7 @@ function App() {
           setExpanded(true);
           await animateVisual({ ...liveExpanded }, 1, HEIGHT_MS, token);
           if (token !== gen.current) return;
-          // 弹窗完全打开后再加载镜子
-          armMirror();
+          setPanelActive(true);
         } finally {
           if (token === gen.current) busy.current = false;
         }
@@ -906,11 +901,11 @@ function App() {
       return;
     }
     setSpringing(true);
+    setPanelActive(false);
     void (async () => {
       const token = ++gen.current;
       morphingRef.current = true;
       paintDom(sizeRef.current, revealRef.current);
-      await teardownMirror();
       if (token !== gen.current) return;
       // 未拉满：从当前尺寸收回（不走完整倒放，避免跳变）
       await animateVisual(ISLAND_COLLAPSED, 0, SPRING_MS, token);
@@ -1091,35 +1086,6 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-
-    async function load() {
-      try {
-        const next = await fetchWeather();
-        if (!cancelled) setWeather(next);
-      } catch (e) {
-        console.error(e);
-        // 请求失败时保留缓存/当前展示，不回落到「获取中」
-      }
-    }
-
-    void hydrateWeatherStorage().then(() => {
-      if (!cancelled) setWeather(initialWeather());
-      void load();
-    });
-    const timer = window.setInterval(() => void load(), 30 * 60 * 1000);
-    function onCreds() {
-      void load();
-    }
-    window.addEventListener("wh-weather-creds", onCreds);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener("wh-weather-creds", onCreds);
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
     const fallback = { r: ambient.r, g: ambient.g, b: ambient.b };
 
     void (async () => {
@@ -1145,29 +1111,33 @@ function App() {
     };
   }, [ambient.r, ambient.g, ambient.b, ambient.png_base64, ambient.width]);
 
-  /** 当前会话 / 投放插件：同步 panelWidth + panelHeight */
+  /** 当前会话 / 投放插件：同步面板壳尺寸（defaultSize 或 staging settings） */
   const sizePluginId =
     parsePluginPanelId(panelOverride ?? islandPrefs.pullContent) ?? dropPluginId;
 
   useEffect(() => {
     if (!sizePluginId) return;
-    const defaults = resolvePanelDefaultSize(sizePluginId);
-    const fallbackW = defaults.w ?? STAGING_PANEL_W_DEFAULT;
-    const fallbackH = defaults.h ?? STAGING_PANEL_H_DEFAULT;
     let cancelled = false;
     const apply = (settings?: Record<string, unknown> | null) => {
-      const wRaw = settings?.panelWidth ?? fallbackW;
-      const hRaw = settings?.panelHeight ?? fallbackH;
-      if (!cancelled) {
-        setShellPanelW(clampStagingPanelW(Number(wRaw)));
-        setShellPanelH(clampStagingPanelH(Number(hRaw)));
-      }
+      const { w, h } = resolvePluginPanelShellSize(sizePluginId, settings, {
+        w: clampStagingPanelW,
+        h: clampStagingPanelH,
+      });
+      if (cancelled) return;
+      shellPanelWRef.current = w;
+      shellPanelHRef.current = h;
+      setShellPanelW(w);
+      setShellPanelH(h);
+      liveExpanded.width = w;
+      liveExpanded.height = h;
     };
+    // Sync from manifest first so expand never uses stale staging 560×152
+    apply(null);
     void invoke<Record<string, unknown>>("hub_settings_get_all", {
       pluginId: sizePluginId,
     })
       .then((s) => apply(s))
-      .catch(() => apply(null));
+      .catch(() => undefined);
     let unlisten: (() => void) | undefined;
     void listen<{ pluginId?: string; settings?: Record<string, unknown> }>(
       "plugin-settings-changed",
@@ -1221,13 +1191,19 @@ function App() {
       summary: { files: number; texts: number; images: number; total: number },
     ) => {
       const rec = pluginRegistry.get(pluginId);
-      if (!rec?.enabled || !rec.manifest.slots?.["island.bar"]) return;
+      if (
+        !rec?.enabled ||
+        !rec.manifest.slots?.["island.bar"] ||
+        !(rec.manifest.capabilities ?? []).includes("island.bar")
+      ) {
+        return;
+      }
       if (summary.total <= 0) {
-        setIslandBar((prev) => (prev?.pluginId === pluginId ? null : prev));
+        setOverlayBar((prev) => (prev?.pluginId === pluginId ? null : prev));
         setPanelOverride((prev) => (prev === `plugin:${pluginId}` ? null : prev));
         return;
       }
-      setIslandBar({
+      setOverlayBar({
         pluginId,
         text: formatStagingBarText(rec.manifest.name || pluginId, summary),
         title: rec.manifest.name || pluginId,
@@ -1253,7 +1229,29 @@ function App() {
       unlistenStaging = fn;
     });
     void listen<IslandBarState | null>("island-bar-changed", (ev) => {
-      setIslandBar(ev.payload ?? null);
+      const p = ev.payload;
+      if (!p?.pluginId) return;
+      const cleared = !String(p.text ?? "").trim();
+      const next = cleared
+        ? null
+        : { pluginId: p.pluginId, text: p.text, title: p.title };
+      const residentId = islandPrefsRef.current.barResident;
+      const rec = pluginRegistry.get(p.pluginId);
+      const tempOnly = Boolean(rec?.manifest.slots?.["island.bar"]?.excludeFromBarResident);
+      // 常驻层：仅当前选中的常驻插件可写
+      if (residentId && p.pluginId === residentId) {
+        setResidentBar(next);
+        return;
+      }
+      // 临时层：仅 excludeFromBarResident 插件（中转站等）
+      if (tempOnly) {
+        setOverlayBar((prev) => {
+          if (cleared) return prev?.pluginId === p.pluginId ? null : prev;
+          return next;
+        });
+        return;
+      }
+      // 未当选的常驻型插件（如天气在「无」时）→ 忽略 setBar，避免盖回岛栏
     }).then((fn) => {
       unlistenBar = fn;
     });
@@ -1283,6 +1281,8 @@ function App() {
       iconPng?: string;
       urgency?: "passive" | "active" | "critical";
       ttlMs?: number;
+      actions?: unknown;
+      data?: unknown;
     }>("island-notify", (ev) => {
       const p = ev.payload;
       const prefs = islandPrefsRef.current;
@@ -1295,6 +1295,8 @@ function App() {
           iconPng: p.iconPng,
           urgency: p.urgency ?? "active",
           ttlMs: p.ttlMs ?? prefs.msgNotifySec * 1000,
+          actions: normalizeNotifyActions(p.actions),
+          data: p.data,
         },
         p.maxPerMinute,
       );
@@ -1354,6 +1356,8 @@ function App() {
   const stagingBar = islandBar?.text ?? "";
   const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
   const viewH = activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT;
+  const pluginStagingShell =
+    !!activePanelPluginId && isStagingPanelShell(viewW, viewH);
   liveExpanded.width = viewW;
   liveExpanded.height = viewH;
 
@@ -1399,10 +1403,18 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePanelPluginId, viewW, viewH, expanded]);
 
-  /** 打开会话面板前同步 liveExpanded 为目标插件尺寸 */
+  /** 打开会话面板前同步 liveExpanded 为目标插件尺寸（同步读 defaultSize，避免直开时仍用中转站 560×152） */
   function armPluginSession(pluginId: string) {
-    liveExpanded.width = shellPanelWRef.current;
-    liveExpanded.height = shellPanelHRef.current;
+    const { w, h } = resolvePluginPanelShellSize(pluginId, null, {
+      w: clampStagingPanelW,
+      h: clampStagingPanelH,
+    });
+    shellPanelWRef.current = w;
+    shellPanelHRef.current = h;
+    setShellPanelW(w);
+    setShellPanelH(h);
+    liveExpanded.width = w;
+    liveExpanded.height = h;
     setPanelOverride(`plugin:${pluginId}`);
   }
 
@@ -1642,10 +1654,24 @@ function App() {
             if (swipe.current?.dismissed || swipe.current?.moved) return;
             const banner = msgBannerRef.current;
             if (banner) {
+              // 插件通知：点横幅 → 下拉该插件面板看详情；左右按钮走 actions（非托盘跳转）
+              if (banner.source === "plugin") {
+                const pluginId = banner.pluginId;
+                dismissMsgBanner();
+                if (pluginId) {
+                  const runtime = pluginRegistry.get(pluginId);
+                  const hasPanel =
+                    !!runtime?.enabled &&
+                    !!runtime.manifest.slots?.["island.panel"] &&
+                    (runtime.manifest.capabilities ?? []).includes("island.panel");
+                  if (hasPanel) void openPluginSession(pluginId);
+                }
+                return;
+              }
+              // 托盘闪动通知：点横幅 → 唤起对应托盘应用
               void (async () => {
                 try {
                   if (
-                    banner.source === "tray" &&
                     banner.hwnd != null &&
                     banner.callbackMsg != null &&
                     banner.uid != null
@@ -1663,16 +1689,14 @@ function App() {
                   console.error(err);
                 } finally {
                   // 点开后 flashing→0，否则会一直占着「已闪动」导致下次新消息不再提示
-                  if (banner.source === "tray") {
-                    try {
-                      await invoke("clear_tray_attention", {
-                        id: banner.trayIconId,
-                        hwnd: banner.hwnd ?? 0,
-                        uid: banner.uid ?? 0,
-                      });
-                    } catch {
-                      /* noop */
-                    }
+                  try {
+                    await invoke("clear_tray_attention", {
+                      id: banner.trayIconId,
+                      hwnd: banner.hwnd ?? 0,
+                      uid: banner.uid ?? 0,
+                    });
+                  } catch {
+                    /* noop */
                   }
                   dismissMsgBanner();
                 }
@@ -1732,55 +1756,97 @@ function App() {
                     <span className="bar-staging-dot" aria-hidden />
                     <span className="bar-staging-text">{stagingBar}</span>
                   </div>
-                ) : (
-                  <>
-                    {weather.iconUrl ? (
-                      <img className="bar-weather-icon" src={weather.iconUrl} alt="" draggable={false} />
-                    ) : (
-                      <IconCloud className="bar-cloud" />
-                    )}
-                    <span className="bar-temp">{weather.temp}°</span>
-                    <span className="bar-sep" aria-hidden />
-                    <span className="bar-city">{weather.city}</span>
-                    <span className="bar-condition">{weather.condition}</span>
-                    <span className="bar-sep" aria-hidden />
-                    <span className="bar-meta">湿度 {weather.humidity}%</span>
-                    <span className="bar-meta">{weather.wind}</span>
-                  </>
-                )}
+                ) : null}
               </div>
               {msgBanner ? (
                 <div className="bar-notify" key={msgBanner.key} ref={notifyRef}>
-                  {msgBanner.iconPng ? (
-                    <img
-                      className="bar-notify-icon"
-                      src={`data:image/png;base64,${msgBanner.iconPng}`}
-                      alt=""
-                      draggable={false}
-                    />
-                  ) : (
-                    <span className="bar-notify-fallback" aria-hidden>
-                      {(msgBanner.title || "消").charAt(0).toUpperCase()}
-                    </span>
-                  )}
-                  <span className="bar-notify-text">{msgBanner.text}</span>
+                  <div className="bar-notify-slot is-start">
+                    {(() => {
+                      const act = actionsForSlot(msgBanner.actions, "start");
+                      if (!act) return null;
+                      return (
+                        <button
+                          type="button"
+                          className="bar-notify-action"
+                          style={{ background: act.background }}
+                          title={act.label || act.id}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fireNotifyAction(act);
+                          }}
+                        >
+                          {act.iconPng ? (
+                            <img
+                              className="bar-notify-action-icon"
+                              src={`data:image/png;base64,${act.iconPng}`}
+                              alt=""
+                              draggable={false}
+                            />
+                          ) : (
+                            act.label
+                          )}
+                        </button>
+                      );
+                    })()}
+                  </div>
+                  <div className="bar-notify-main">
+                    {msgBanner.iconPng ? (
+                      <img
+                        className="bar-notify-icon"
+                        src={`data:image/png;base64,${msgBanner.iconPng}`}
+                        alt=""
+                        draggable={false}
+                      />
+                    ) : (
+                      <span className="bar-notify-fallback" aria-hidden>
+                        {(msgBanner.title || "消").charAt(0).toUpperCase()}
+                      </span>
+                    )}
+                    <span className="bar-notify-text">{msgBanner.text}</span>
+                  </div>
+                  <div className="bar-notify-slot is-end">
+                    {(() => {
+                      const act = actionsForSlot(msgBanner.actions, "end");
+                      if (!act) return null;
+                      return (
+                        <button
+                          type="button"
+                          className="bar-notify-action"
+                          style={{ background: act.background }}
+                          title={act.label || act.id}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fireNotifyAction(act);
+                          }}
+                        >
+                          {act.iconPng ? (
+                            <img
+                              className="bar-notify-action-icon"
+                              src={`data:image/png;base64,${act.iconPng}`}
+                              alt=""
+                              draggable={false}
+                            />
+                          ) : (
+                            act.label
+                          )}
+                        </button>
+                      );
+                    })()}
+                  </div>
                 </div>
               ) : null}
             </div>
 
             <div
               ref={panelRef}
-              className={`island-panel${effectivePullContent === "mirror" ? " is-mirror" : ""}${!isBuiltinPanel(effectivePullContent) ? " is-plugin" : ""}${activePanelPluginId ? " is-plugin-sized" : ""}`}
+              className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}`}
               onClick={(e) => e.stopPropagation()}
             >
               <IslandPanelHost
                 pullContent={effectivePullContent}
-                weather={weather}
-                mirrorLive={mirrorLive}
-                IconPin={() => <IconPin className="pin-icon" />}
-                IconCloud={IconCloud}
-                IconDroplets={IconDroplets}
-                IconWind={IconWind}
+                active={panelActive}
                 onPanelClose={() => {
                   if (expandedRef.current) void collapse();
                 }}

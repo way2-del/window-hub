@@ -90,7 +90,11 @@
           "additionalProperties": false,
           "description": "Collapsed island bar summary slot",
           "properties": {
-            "order": { "type": "integer", "minimum": 0, "maximum": 1000 }
+            "order": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "excludeFromBarResident": {
+              "type": "boolean",
+              "description": "If true, omit from Settings 岛栏常驻 list; may still setBar temporarily"
+            }
           }
         },
         "island.drop": {
@@ -126,6 +130,7 @@
           "notify",
           "popup",
           "island.panel",
+          "island.bar",
           "island.drop",
           "windows.read",
           "windows.focus",

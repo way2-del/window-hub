@@ -2,6 +2,7 @@ import { emit } from "@tauri-apps/api/event";
 import { assertCapability } from "./capGate";
 import type { PluginManifest } from "./types";
 import type { NotifyUrgency } from "./islandNotify";
+import type { NotifyActionInput } from "./notifyActions";
 
 export type HubNotifyArgs = {
   title: string;
@@ -9,7 +10,8 @@ export type HubNotifyArgs = {
   iconPng?: string;
   urgency?: NotifyUrgency;
   ttlMs?: number;
-  actions?: { id: string; label: string }[];
+  actions?: NotifyActionInput[];
+  data?: unknown;
 };
 
 /** Plugin-facing notify — CapGate + event into main island. */
@@ -30,6 +32,7 @@ export async function hubNotify(
     urgency: args.urgency ?? "active",
     ttlMs: args.ttlMs,
     actions: args.actions,
+    data: args.data,
   });
   return { id };
 }

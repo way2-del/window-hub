@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-/** 下拉展开内容：内置 weather|mirror，或 `plugin:{id}` */
+/** 下拉展开内容：`plugin:{id}`（legacy weather|mirror 会迁移） */
 export type PullContent = string;
 
 export type IslandPrefs = {
@@ -12,6 +12,11 @@ export type IslandPrefs = {
   immerseIdleSec: number;
   /** 下拉岛默认展示内容 */
   pullContent: PullContent;
+  /**
+   * 岛栏常驻插件 id；空字符串 = 无常驻。
+   * 仅该插件的 setBar 写入常驻层；中转站等临时摘要为覆盖层。
+   */
+  barResident: string;
   /** 托盘闪动时在岛上弹出消息提示 */
   msgNotify: boolean;
   /** 无具体内容时的默认文案 */
@@ -52,7 +57,9 @@ export const STAGING_PANEL_H = STAGING_PANEL_H_DEFAULT;
 const DEFAULTS: IslandPrefs = {
   autoImmerse: true,
   immerseIdleSec: 8,
-  pullContent: "weather",
+  /** Weather is a plugin; migrate legacy "weather"|"mirror" in parsePullContent */
+  pullContent: "plugin:com.window-hub.weather",
+  barResident: "com.window-hub.weather",
   msgNotify: true,
   msgNotifyText: "收到一条消息",
   msgNotifySec: 4,
@@ -62,8 +69,6 @@ const IDLE_MIN = 2;
 const IDLE_MAX = 300;
 const MSG_SEC_MIN = 2;
 const MSG_SEC_MAX = 30;
-
-const BUILTIN_PULL = new Set(["weather", "mirror"]);
 
 let cache: IslandPrefs = { ...DEFAULTS };
 let hydrated = false;
@@ -98,8 +103,20 @@ export function clampStagingPanelH(h: number): number {
 
 function parsePullContent(raw: string | null): PullContent {
   if (!raw) return DEFAULTS.pullContent;
-  if (BUILTIN_PULL.has(raw) || raw.startsWith("plugin:")) return raw;
+  // Legacy Host builtins → official plugins
+  if (raw === "weather") return "plugin:com.window-hub.weather";
+  if (raw === "mirror") return "plugin:com.window-hub.mirror";
+  if (raw.startsWith("plugin:")) return raw;
   return DEFAULTS.pullContent;
+}
+
+function parseBarResident(raw: string | null | undefined): string {
+  if (raw == null) return DEFAULTS.barResident;
+  const t = String(raw).trim();
+  if (!t || t === "none" || t === "off") return "";
+  // Accept legacy pullContent-style ids
+  if (t.startsWith("plugin:")) return t.slice("plugin:".length);
+  return t;
 }
 
 function parseMsgText(raw: string | null): string {
@@ -121,6 +138,7 @@ function readLegacyLocalStorage(): IslandPrefs | null {
       autoImmerse: autoRaw == null ? DEFAULTS.autoImmerse : autoRaw === "1" || autoRaw === "true",
       immerseIdleSec: idleRaw == null ? DEFAULTS.immerseIdleSec : clampIdle(Number(idleRaw)),
       pullContent: parsePullContent(pullRaw),
+      barResident: DEFAULTS.barResident,
       msgNotify: msgRaw == null ? DEFAULTS.msgNotify : msgRaw === "1" || msgRaw === "true",
       msgNotifyText: parseMsgText(msgTextRaw),
       msgNotifySec: msgSecRaw == null ? DEFAULTS.msgNotifySec : clampMsgSec(Number(msgSecRaw)),
@@ -144,6 +162,8 @@ function mergePrefs(prev: IslandPrefs, partial: Partial<IslandPrefs>): IslandPre
     immerseIdleSec:
       partial.immerseIdleSec != null ? clampIdle(partial.immerseIdleSec) : prev.immerseIdleSec,
     pullContent: partial.pullContent != null ? parsePullContent(partial.pullContent) : prev.pullContent,
+    barResident:
+      partial.barResident != null ? parseBarResident(partial.barResident) : prev.barResident,
     msgNotify: partial.msgNotify ?? prev.msgNotify,
     msgNotifyText:
       partial.msgNotifyText != null ? parseMsgText(partial.msgNotifyText) : prev.msgNotifyText,
@@ -165,7 +185,8 @@ export async function hydrateIslandPrefs(): Promise<IslandPrefs> {
       cache = await invoke<IslandPrefs>("set_island_prefs", { prefs: legacy });
       clearLegacyLocalStorage();
     } else {
-      cache = await invoke<IslandPrefs>("get_island_prefs");
+      const raw = await invoke<IslandPrefs>("get_island_prefs");
+      cache = mergePrefs(DEFAULTS, raw);
     }
   } catch {
     cache = { ...DEFAULTS };

@@ -1,0 +1,297 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: #f4f0e8;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+input,
+textarea {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.28);
+  border-radius: 8px;
+  outline: none;
+}
+
+input:focus,
+textarea:focus {
+  border-color: rgba(232, 184, 109, 0.55);
+}
+
+/*
+ * Host mounts <main id="app" class="wg-shell"> — must style .wg-shell / #app,
+ * not only a custom class from popup.html (that markup is not used).
+ * Padding tokens: window-hub-plugin-popup skill (= 窗口组).
+ */
+#app.wg-shell,
+.wg-shell.memo-shell,
+.memo-shell {
+  box-sizing: border-box;
+  height: 100vh;
+  padding: var(--wh-popup-pad-top, 12px) var(--wh-popup-pad-x, 12px)
+    var(--wh-popup-pad-bottom, 14px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--wh-popup-gap, 10px);
+  overflow: hidden;
+}
+
+.memo-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.memo-title {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.memo-sub {
+  font-size: 11px;
+  color: rgba(244, 240, 232, 0.55);
+  margin-top: 2px;
+}
+
+.memo-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: rgba(244, 240, 232, 0.7);
+  flex-shrink: 0;
+}
+
+.memo-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.memo-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  flex-shrink: 0;
+}
+
+.memo-compose-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memo-compose input[type="text"] {
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+  width: 100%;
+}
+
+.memo-compose textarea {
+  min-height: 52px;
+  padding: 8px 10px;
+  resize: none;
+  font-size: 12px;
+  line-height: 1.4;
+  width: 100%;
+}
+
+.memo-compose-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.memo-compose-meta label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: rgba(244, 240, 232, 0.6);
+}
+
+.memo-compose-meta input[type="datetime-local"] {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+  color-scheme: dark;
+  max-width: 100%;
+}
+
+.memo-add {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: rgba(232, 184, 109, 0.92);
+  color: #1c1a17;
+  font-size: 12px;
+  font-weight: 650;
+  align-self: start;
+  flex-shrink: 0;
+}
+
+.memo-add:hover {
+  filter: brightness(1.05);
+}
+
+.memo-add:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.memo-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.memo-empty {
+  margin: auto;
+  font-size: 12px;
+  color: rgba(244, 240, 232, 0.45);
+}
+
+.memo-item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.memo-item.is-done {
+  opacity: 0.5;
+}
+
+.memo-item.is-done .memo-item-title {
+  text-decoration: line-through;
+}
+
+.memo-check {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 5px;
+  border: 1.5px solid rgba(232, 184, 109, 0.7);
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: #1c1a17;
+  background: transparent;
+}
+
+.memo-item.is-done .memo-check {
+  background: #e8b86d;
+  border-color: #e8b86d;
+}
+
+.memo-item-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.memo-item-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.memo-item-note {
+  font-size: 11px;
+  color: rgba(244, 240, 232, 0.55);
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memo-item-due {
+  font-size: 10px;
+  color: #e8b86d;
+}
+
+.memo-item-due.is-overdue {
+  color: #ff6b6b;
+}
+
+.memo-item-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.memo-item-actions button {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: rgba(244, 240, 232, 0.75);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.memo-item-actions button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.memo-item-actions button.is-danger:hover {
+  background: rgba(255, 107, 107, 0.2);
+  color: #ffb4b4;
+}
+
+.memo-edit-due {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.memo-edit-due input[type="datetime-local"] {
+  height: 26px;
+  padding: 0 6px;
+  font-size: 11px;
+  color-scheme: dark;
+}
+
+.memo-footer {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: rgba(244, 240, 232, 0.4);
+  line-height: 1.35;
+}

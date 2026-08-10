@@ -6,6 +6,7 @@ const CAP_LABELS: Record<PluginCapability, string> = {
   notify: "可推送灵动岛通知",
   popup: "可打开托管弹窗",
   "island.panel": "可在灵动岛展开显示界面",
+  "island.bar": "可写入灵动岛栏摘要（可竞选常驻）",
   "island.drop": "可接收拖到灵动岛上的文件/文字",
   "windows.read": "可枚举窗口标题与进程",
   "windows.focus": "可切换其它窗口焦点",

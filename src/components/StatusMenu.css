@@ -1,4 +1,4 @@
-.settings-btn {
+﻿.settings-btn {
   height: var(--island-bar-h);
   max-width: 108px;
   padding: 0 2px;
@@ -43,11 +43,14 @@
   min-height: 100vh;
   padding: 6px 0;
   box-sizing: border-box;
-  background: var(--glass-panel-bg, rgba(32, 32, 34, 0.42));
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
   color: var(--glass-fg, #f4f4f5);
-  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.14));
-  border-radius: 10px;
+  /* Match plugin popup: no CSS border/radius — DWM owns the single outer edge. */
+  border: none;
+  border-radius: 0;
   overflow: hidden;
+  /* Blur comes from Host SWCA/DWM — CSS backdrop-filter on transparent
+     WebView2 cannot sample the desktop and fights the real glass. */
   font-family:
     "Segoe UI",
     "PingFang SC",

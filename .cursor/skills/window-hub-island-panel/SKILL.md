@@ -2,12 +2,12 @@
 name: window-hub-island-panel
 description: >-
   Window Hub 灵动岛下拉面板 — 固定内边距/圆角 token、size clamps、onEnter/onLeave、
-  requestSize、weather/mirror/plugin panel、panelWidth/panelHeight。改岛下拉 UI 时必读。
+  requestSize、plugin panel、panelWidth/panelHeight。改岛下拉 UI 时必读。
 ---
 
 # 灵动岛面板（island.panel）
 
-Slot：`island.panel`。展开内容由 Host provider 或插件 Web 入口提供；**默认尺寸由 Host 钳制**（天气/镜子 ~380×220）。
+Slot：`island.panel`。展开内容由插件 Web 入口提供（iframe）；**无 Host 内置天气/镜子面板**。
 
 **插件面板尺寸**：`hub.settings.panelWidth` / `panelHeight`（`settings[]`）→ 否则 `slots["island.panel"].defaultSize` → 否则 380×220。中转站默认高 **152**、宽 560。**禁止按插件 id 硬编码壳型**。
 
@@ -39,9 +39,9 @@ Slot：`island.panel`。展开内容由 Host provider 或插件 Web 入口提供
 4. 插件面板 iframe 遵守同一 inset / radius。
 5. **对比度**：面板 iframe 禁止跟随设置浅色主题；深色底 + 浅色字（见 `window-hub-island-immerse`）。
 6. **尺寸只在插件 `settings[]` / `defaultSize`**：如 `panelWidth`、`panelHeight`，禁止放全局设置或 Host 壳型枚举。
-7. **禁止 iframe 四角大圆角**：`.panel-plugin-frame` 不得四角大圆角裁切标题；`is-plugin-sized` 时 iframe `border-radius: 0`。
+7. **禁止 iframe 再套圆角**：`.panel-plugin-frame` 始终 `border-radius: 0`；预览/卡片圆角由插件内层（如镜子 `.mirror-frame`）自绘，避免 Host 底角大圆角把上下裁成不一致。
 8. **`excludeFromPullContent: true`** 的面板不进「下拉内容」；`panelOverride` / `hub.panel.openSession` 仅拖入或点岛栏时临时打开，收起必须清会话。
-9. **槽位门控**：DnD → `resolveIslandDropPluginId()`（需 `island.drop` + `staging`）；岛栏 → `hub.island.setBar` 或 Host 对 `staging-changed` 的通用同步（需 `island.bar`）；禁用对应插件后宿主忽略。
+9. **槽位门控**：DnD → `resolveIslandDropPluginId()`（需 `island.drop` + `staging`）；岛栏 → `hub.island.setBar`（需 capability+slot `island.bar`）；全局 `barResident` 决定常驻层，其它插件为临时覆盖层；`excludeFromBarResident` 不进设置列表。
 
 ## 生命周期
 
@@ -51,18 +51,27 @@ hub.island.clearBar()
 hub.panel.openSession()
 hub.panel.closeSession()
 hub.panel.close()
+hub.panel.onEnter(cb)   // 岛完全展开后
+hub.panel.onLeave(cb)   // 收起一开始（摄像头等重资源必须在此 stop）
 ```
+
+**摄像头 / 媒体：** 禁止在面板脚本加载时 `getUserMedia`；只在 `onEnter` 打开，`onLeave` 关闭。折叠态 Host 不发 enter。
 
 ## 尺寸
 
 | 内容 | 宽 × 高 |
 |------|---------|
-| 天气/镜子 | 380 × 220 |
+| 默认 / 天气 / 镜子 | `defaultSize` 或 380 × 220 |
 | 中转站 | `settings.panelWidth` × `settings.panelHeight`（默认 560×152） |
 
-## 镜子（mirror）
+## 官方插件
 
-- 展开动画结束后再 `getUserMedia`；禁止下拉过程中提前开摄像头。
+| 插件 | id | 槽位 |
+|------|-----|------|
+| 天气 | `com.window-hub.weather` | `island.bar` + `island.panel`；配置在 `settings[]`；数据 `hub.storage` |
+| 镜子 | `com.window-hub.mirror` | 仅 `island.panel`；`onEnter` 开摄像头 / `onLeave` 关；iframe `allow="camera"` |
+
+示例目录：`docs/plugins/examples/{weather,mirror}/`（资源镜像 `src-tauri/resources/plugins/`）。首次启动缺失则 `ensure_official_plugins` 安装，不覆盖已装版本。
 
 ## Related
 

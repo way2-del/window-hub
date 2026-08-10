@@ -19,6 +19,10 @@ const ALLOWED_CMDS = new Set([
   "hub_windows_get",
   "hub_windows_focus",
   "get_foreground_app",
+  "hub_notify",
+  "hub_fetch",
+  "hub_island_set_bar",
+  "hub_island_clear_bar",
 ]);
 
 export function isAllowedShortcutsHubCmd(cmd: string): boolean {
@@ -121,6 +125,18 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
       open: function (opts) { hostCmd("popup.open", opts || {}); },
       close: function () { return invoke("close_plugin_popup", {}); }
     },
+    island: {
+      setBar: function (opts) {
+        return invoke("hub_island_set_bar", withPlugin({
+          text: (opts && opts.text) || "",
+          title: opts && opts.title
+        }));
+      },
+      clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }
+    },
+    fetch: function (url, opts) {
+      return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));
+    },
     foreground: {
       get: function () { return invoke("get_foreground_app", {}); },
       subscribe: function (cb) {
@@ -135,6 +151,35 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
       }
     }
   };
+  var notifyFn = function (opts) {
+    return invoke("hub_notify", withPlugin({
+      opts: {
+        title: (opts && opts.title) || "",
+        body: opts && opts.body,
+        iconPng: opts && opts.iconPng,
+        urgency: opts && opts.urgency,
+        ttlMs: opts && opts.ttlMs,
+        actions: opts && opts.actions,
+        data: opts && opts.data
+      }
+    }));
+  };
+  notifyFn.onAction = function (cb) {
+    function onEvt(ev) {
+      var d = ev && ev.detail;
+      if (!d || d.type !== "notify-action") return;
+      try {
+        cb({
+          notifyId: d.notifyId,
+          actionId: d.actionId,
+          data: d.data
+        });
+      } catch (_) {}
+    }
+    window.addEventListener("wh-shortcuts-evt", onEvt);
+    return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
+  };
+  window.hub.notify = notifyFn;
   window.addEventListener("wh-shortcuts-evt", function (ev) {
     var d = ev && ev.detail;
     if (!d || d.type !== "refresh") return;

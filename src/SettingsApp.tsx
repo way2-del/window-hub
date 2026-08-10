@@ -2,18 +2,13 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  fetchWeather,
-  getWeatherCredentials,
-  hydrateWeatherStorage,
-  setWeatherCredentials,
-} from "./weather";
-import {
   getIslandPrefs,
   hydrateIslandPrefs,
   setIslandPrefs,
   type IslandPrefs,
 } from "./islandPrefs";
 import { listPanelProviders } from "./plugins/panelProviders";
+import { listBarResidentProviders } from "./plugins/islandSlots";
 import { pluginRegistry } from "./plugins/registry";
 import {
   bootstrapPlugins,
@@ -28,7 +23,84 @@ import PluginSettingsForm from "./components/PluginSettingsForm";
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
-type NavId = "general" | "theme" | "weather" | "tray" | "plugins" | "developer";
+type NavId = "general" | "theme" | "dock" | "tray" | "plugins" | "developer";
+
+type DockDisplayMode =
+  | "default"
+  | "layered"
+  | "autoHide"
+  | "smartHide"
+  | "always"
+  | "hotkey"
+  | "alwaysFullscreen"
+  | "desktop";
+
+type DockItemLite = {
+  id: string;
+  kind: string;
+  label: string;
+  matchExe?: string;
+  launchPath?: string;
+  realPath?: string;
+  virtualPath?: string;
+  iconPath?: string;
+  uwp?: boolean;
+};
+
+type DockPrefs = {
+  enabled: boolean;
+  displayMode: DockDisplayMode | string;
+  hideSystemTaskbar: boolean;
+  items: DockItemLite[];
+  hotkey: string;
+  /** screenBottom (default) | dockBottom */
+  activationPosition: "screenBottom" | "dockBottom" | string;
+  activationThicknessPx: number;
+  bottomOffsetPx: number;
+  /** After pointer leaves, wait this many ms before hiding (auto/smart hide). */
+  hideLingerMs: number;
+  /** Max icon scale on hover (1 = off, up to 2.5). */
+  magnification: number;
+};
+
+const DOCK_ACTIVATION_POSITIONS: {
+  id: "screenBottom" | "dockBottom";
+  label: string;
+  desc: string;
+}[] = [
+  { id: "screenBottom", label: "屏幕最底部", desc: "整条底边热区（默认）" },
+  { id: "dockBottom", label: "仅 Dock 宽度", desc: "只在底栏水平范围内触发" },
+];
+
+const DOCK_MODES: { id: DockDisplayMode; label: string; desc: string }[] = [
+  { id: "default", label: "默认显示模式", desc: "常驻贴底；全屏游戏时隐藏" },
+  { id: "layered", label: "叠层显示模式", desc: "常驻并保持置顶" },
+  { id: "autoHide", label: "自动隐藏模式", desc: "鼠标靠近激活区时显示" },
+  { id: "smartHide", label: "智能隐藏模式", desc: "窗口与 Dock 重叠时隐藏" },
+  { id: "always", label: "始终显示模式", desc: "始终显示（普通窗口之上）" },
+  { id: "hotkey", label: "热键显示模式", desc: "Ctrl+Alt+D 切换显隐" },
+  { id: "alwaysFullscreen", label: "始终显示包括全屏", desc: "尽量在全屏时也保持显示" },
+  { id: "desktop", label: "桌面显示模式", desc: "仅在桌面前景时显示" },
+];
+
+function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPrefs {
+  return {
+    enabled: !!dp?.enabled,
+    displayMode: dp?.displayMode || "default",
+    hideSystemTaskbar: dp?.hideSystemTaskbar !== false,
+    items: dp?.items ?? [],
+    hotkey: dp?.hotkey || "Ctrl+Alt+D",
+    activationPosition:
+      dp?.activationPosition === "dockBottom" ? "dockBottom" : "screenBottom",
+    activationThicknessPx: Math.min(64, Math.max(4, Number(dp?.activationThicknessPx) || 20)),
+    bottomOffsetPx: Math.min(400, Math.max(0, Number(dp?.bottomOffsetPx) || 0)),
+    hideLingerMs: Math.min(10000, Math.max(200, Number(dp?.hideLingerMs) || 800)),
+    magnification: Math.min(
+      2.5,
+      Math.max(1, Number.isFinite(Number(dp?.magnification)) ? Number(dp?.magnification) : 1.6),
+    ),
+  };
+}
 
 type MaterialPrefs = {
   kind: string;
@@ -73,6 +145,26 @@ type PluginMarketEntry = {
   settings?: PluginSettingField[];
   settingsIntro?: string;
 };
+
+type PluginSurfacePreview = {
+  id: string;
+  label: string;
+  detail: string;
+};
+
+type PluginPreviewDto = {
+  id: string;
+  name: string;
+  version: string;
+  capabilities: string[];
+  surfaces: PluginSurfacePreview[];
+  networkHosts: string[];
+  description?: string | null;
+};
+
+type InstallPending =
+  | { kind: "path"; path: string; preview: PluginPreviewDto }
+  | { kind: "example"; exampleId: string; preview: PluginPreviewDto };
 
 type ScriptEnv = "python" | "node" | "powershell" | "cmd" | "exe" | "custom";
 
@@ -170,12 +262,13 @@ const NAV: { id: NavId; label: string; tint: string; icon: ReactNode }[] = [
     ),
   },
   {
-    id: "weather",
-    label: "天气",
+    id: "dock",
+    label: "Dock",
     tint: "#64d2ff",
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="14" width="18" height="6" rx="2" />
+        <path d="M7 17h.01M12 17h.01M17 17h.01" />
       </svg>
     ),
   },
@@ -220,8 +313,8 @@ const AMBIENT_MODES: { id: AmbientMode; label: string; desc: string }[] = [
 
 const MATERIAL_INFO = {
   id: "mica-alt",
-  label: "MicaAlt",
-  desc: "偏灰云母，适合分层弹窗（DWMBlurGlass MicaAlt）",
+  label: "系统磨砂",
+  desc: "系统亚克力磨砂透底（可透出壁纸，接近开始菜单观感）",
 } as const;
 
 const DARK_OPTS: { id: DarkPref; label: string }[] = [
@@ -252,14 +345,15 @@ export default function SettingsApp() {
   const [menuHeightEditId, setMenuHeightEditId] = useState<string | null>(null);
   const [menuHeightDraft, setMenuHeightDraft] = useState("");
   const [saving, setSaving] = useState(false);
-  const [weatherId, setWeatherId] = useState("88888888");
-  const [weatherKey, setWeatherKey] = useState("88888888");
-  const [weatherMsg, setWeatherMsg] = useState("");
+  const [dockPrefs, setDockPrefs] = useState<DockPrefs>(() => normalizeDockPrefs(null));
+  const [dockMsg, setDockMsg] = useState("");
+  const [dockBusy, setDockBusy] = useState(false);
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
   const [shortcutsExclusiveId, setShortcutsExclusiveId] = useState<string>("");
   const [installed, setInstalled] = useState<InstalledPluginDto[]>([]);
   const [pluginMsg, setPluginMsg] = useState("");
   const [pluginBusy, setPluginBusy] = useState(false);
+  const [installPending, setInstallPending] = useState<InstallPending | null>(null);
   const [, bumpRegistry] = useState(0);
   const [launchers, setLaunchers] = useState<ScriptLauncherRow[]>([]);
   const [launcherDraft, setLauncherDraft] = useState(emptyLauncherDraft);
@@ -273,6 +367,10 @@ export default function SettingsApp() {
       label: p.label,
       desc: p.description,
     }));
+  }, [installed, bumpRegistry]);
+
+  const barResidentOptions = useMemo(() => {
+    return listBarResidentProviders();
   }, [installed, bumpRegistry]);
 
   const pluginEntries = useMemo<PluginMarketEntry[]>(
@@ -299,6 +397,14 @@ export default function SettingsApp() {
     (entry) =>
       entry.id === "com.window-hub.transfer-station" ||
       entry.id === "com.window-hub.transfer-station__dev",
+  );
+  const weatherInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.weather" || entry.id === "com.window-hub.weather__dev",
+  );
+  const mirrorInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.mirror" || entry.id === "com.window-hub.mirror__dev",
   );
 
   const shortcutsPluginOptions = useMemo(() => {
@@ -327,6 +433,43 @@ export default function SettingsApp() {
     }
   };
 
+  const persistDockPrefs = async (patch: Partial<DockPrefs>) => {
+    const next: DockPrefs = { ...dockPrefs, ...patch };
+    setDockPrefs(next);
+    setDockBusy(true);
+    setDockMsg("");
+    try {
+      const saved = await invoke<DockPrefs>("set_dock_prefs", { prefs: next });
+      setDockPrefs(normalizeDockPrefs(saved));
+    } catch (err) {
+      console.error(err);
+      setDockMsg(String(err));
+    } finally {
+      setDockBusy(false);
+    }
+  };
+
+  const importDockIni = async () => {
+    setDockBusy(true);
+    setDockMsg("");
+    try {
+      const path = await invoke<string | null>("pick_dockico_file");
+      if (!path) {
+        setDockBusy(false);
+        return;
+      }
+      const saved = await invoke<DockPrefs>("import_dockico_ini", { path });
+      setDockPrefs(normalizeDockPrefs(saved));
+      const n = (saved.items ?? []).filter((i) => i.kind !== "separator").length;
+      setDockMsg(`已导入 ${n} 个图标`);
+    } catch (err) {
+      console.error(err);
+      setDockMsg(String(err));
+    } finally {
+      setDockBusy(false);
+    }
+  };
+
   useEffect(() => {
     void syncGlassCss({
       kind: "mica-alt",
@@ -335,10 +478,6 @@ export default function SettingsApp() {
 
     void (async () => {
       await hydrateIslandPrefs().then(setIslandPrefsState);
-      await hydrateWeatherStorage();
-      const cred = getWeatherCredentials();
-      setWeatherId(cred.id);
-      setWeatherKey(cred.key);
 
       try {
         const prefs = await invoke<MaterialPrefs>("get_material_prefs");
@@ -383,6 +522,12 @@ export default function SettingsApp() {
       try {
         const sp = await invoke<{ exclusivePluginId?: string | null }>("get_shortcuts_prefs");
         setShortcutsExclusiveId(sp.exclusivePluginId ?? "");
+      } catch {
+        /* noop */
+      }
+      try {
+        const dp = await invoke<DockPrefs>("get_dock_prefs");
+        setDockPrefs(normalizeDockPrefs(dp));
       } catch {
         /* noop */
       }
@@ -481,17 +626,6 @@ export default function SettingsApp() {
   async function changeDarkPref(next: DarkPref) {
     setDarkPref(next);
     await persistMaterial({ darkPref: next });
-  }
-
-  async function saveWeatherCreds() {
-    await setWeatherCredentials(weatherId, weatherKey);
-    setWeatherMsg("已保存，正在测试…");
-    try {
-      const w = await fetchWeather();
-      setWeatherMsg(`连接成功：${w.city} ${w.temp}°C ${w.condition}`);
-    } catch (e) {
-      setWeatherMsg(`测试失败：${e instanceof Error ? e.message : String(e)}`);
-    }
   }
 
   async function updateIslandPrefs(partial: Partial<IslandPrefs>) {
@@ -684,20 +818,56 @@ export default function SettingsApp() {
       .catch((err) => setPluginMsg(String(err)));
   }
 
-  async function installExamplePlugin(exampleId: string) {
+  async function beginInstallFromPath(path: string) {
     setPluginBusy(true);
     setPluginMsg("");
     try {
-      const rec = await invoke<InstalledPluginDto>("install_example_plugin", {
+      const preview = await invoke<PluginPreviewDto>("preview_plugin_from_path", { path });
+      setInstallPending({ kind: "path", path, preview });
+    } catch (err) {
+      setPluginMsg(String(err));
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function beginInstallExample(exampleId: string) {
+    setPluginBusy(true);
+    setPluginMsg("");
+    try {
+      const preview = await invoke<PluginPreviewDto>("preview_example_plugin", {
         exampleId,
       });
+      setInstallPending({ kind: "example", exampleId, preview });
+    } catch (err) {
+      setPluginMsg(String(err));
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function confirmInstallPending() {
+    if (!installPending) return;
+    setPluginBusy(true);
+    setPluginMsg("");
+    try {
+      const rec =
+        installPending.kind === "path"
+          ? await invoke<InstalledPluginDto>("install_plugin_from_path", {
+              path: installPending.path,
+            })
+          : await invoke<InstalledPluginDto>("install_example_plugin", {
+              exampleId: installPending.exampleId,
+            });
       const caps = (rec.capabilities ?? []) as PluginCapability[];
       const sensitive = caps.filter((c) => isSensitiveCapability(c));
+      const verb = installPending.kind === "example" ? "已导入示例" : "已安装";
       setPluginMsg(
         sensitive.length
-          ? `已导入示例「${rec.name}」。注意：${describeCapabilities(sensitive).join("；")}`
-          : `已导入示例「${rec.name}」v${rec.version}`,
+          ? `${verb}「${rec.name}」。注意：${describeCapabilities(sensitive).join("；")}`
+          : `${verb}「${rec.name}」v${rec.version}`,
       );
+      setInstallPending(null);
       bumpRegistry((n) => n + 1);
     } catch (err) {
       setPluginMsg(String(err));
@@ -776,7 +946,8 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>下拉内容</h2>
                 <p className="card-desc">
-                  选择点击或下拉展开灵动岛时默认显示的内容。中转站由插件市场启用，不在此列表；拖入文件或点击岛栏「中转站」摘要时临时打开。
+                  选择点击或下拉展开灵动岛时默认显示的内容。列表来自已启用且声明 island.panel、未设
+                  excludeFromPullContent 的插件（如天气、镜子）。中转站等排除项不出现在此，经拖入或岛栏摘要临时打开。
                 </p>
                 <div className="mode-list">
                   {pullOptions.map((item) => (
@@ -788,6 +959,34 @@ export default function SettingsApp() {
                     >
                       <span className="mode-label">{item.label}</span>
                       <span className="mode-desc">{item.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+              <section className="settings-card">
+                <h2>岛栏常驻</h2>
+                <p className="card-desc">
+                  折叠态岛栏默认展示哪个插件的摘要。列表来自已启用、声明 capability/slot
+                  island.bar、且未设 excludeFromBarResident 的插件（如天气）。中转站有条目时仍会临时覆盖，清空后回到常驻。
+                </p>
+                <div className="mode-list">
+                  <button
+                    type="button"
+                    className={`mode-item${islandPrefs.barResident === "" ? " is-selected" : ""}`}
+                    onClick={() => updateIslandPrefs({ barResident: "" })}
+                  >
+                    <span className="mode-label">无</span>
+                    <span className="mode-desc">岛栏不常驻任何插件摘要</span>
+                  </button>
+                  {barResidentOptions.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`mode-item${islandPrefs.barResident === item.id ? " is-selected" : ""}`}
+                      onClick={() => updateIslandPrefs({ barResident: item.id })}
+                    >
+                      <span className="mode-label">{item.label}</span>
+                      <span className="mode-desc">{item.description}</span>
                     </button>
                   ))}
                 </div>
@@ -913,7 +1112,7 @@ export default function SettingsApp() {
             <section className="settings-card">
               <h2>窗口材质</h2>
               <p className="card-desc">
-                设置窗、托盘弹窗、插件弹窗统一使用 MicaAlt（偏灰云母，适合分层弹窗）。其他
+                设置窗、托盘弹窗、插件弹窗、Dock 统一使用系统磨砂透底（可透出壁纸）。其他
                 DWMBlurGlass 材质暂未开放。
               </p>
               <div className="mode-list">
@@ -930,7 +1129,7 @@ export default function SettingsApp() {
 
               <div className="material-params">
                 <p className="card-desc" style={{ marginTop: 14, marginBottom: 8 }}>
-                  MicaAlt 深浅色。「跟随系统」会按 Windows 应用主题解析成深色或浅色（与点选深色/浅色同一套），不会出现第三种混搭。
+                  磨砂深浅色。「跟随系统」会按 Windows 应用主题解析成深色或浅色（与点选深色/浅色同一套），不会出现第三种混搭。
                 </p>
                 <div className="mode-list is-compact">
                   {DARK_OPTS.map((item) => (
@@ -948,39 +1147,248 @@ export default function SettingsApp() {
             </section>
           )}
 
-          {nav === "weather" && (
-            <section className="settings-card">
-              <h2>天气接口</h2>
-              <p className="card-desc">
-                接口盒子 IP 天气。公共 id/key 共享频次，建议到 apihz.cn 注册后填自己的凭证。
-              </p>
-              <div className="weather-fields">
-                <label className="weather-field">
-                  <span>开发者 ID</span>
+          {nav === "dock" && (
+            <>
+              <section className="settings-card">
+                <h2>底部 Dock</h2>
+                <p className="card-desc">
+                  Host 自带底栏（非插件）。可导入 MyDockFinder 的 .dockico.ini；图标下方白点表示该应用正在运行。
+                </p>
+                <label className="pref-row">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">启用 Dock</span>
+                    <span className="pref-row-desc">关闭后隐藏 Dock 并恢复系统任务栏</span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.enabled ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.enabled}
+                    disabled={dockBusy}
+                    onClick={() => void persistDockPrefs({ enabled: !dockPrefs.enabled })}
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">显示模式</span>
+                    <span className="pref-row-desc">对齐 MyDockFinder 的八种底栏策略</span>
+                  </span>
+                  <select
+                    className="pref-select"
+                    value={dockPrefs.displayMode}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onChange={(e) =>
+                      void persistDockPrefs({ displayMode: e.target.value as DockDisplayMode })
+                    }
+                  >
+                    {DOCK_MODES.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="card-desc" style={{ marginTop: 4 }}>
+                  {DOCK_MODES.find((m) => m.id === dockPrefs.displayMode)?.desc ?? ""}
+                  {dockPrefs.displayMode === "hotkey" ? `（${dockPrefs.hotkey || "Ctrl+Alt+D"}）` : ""}
+                </p>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">隐藏系统任务栏</span>
+                    <span className="pref-row-desc">
+                      启用 Dock 时强制隐藏；关闭 Dock 后恢复原先任务栏设置
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.enabled ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.enabled}
+                    disabled
+                    title="启用 Dock 时自动隐藏，不可单独关闭"
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">激活位置</span>
+                    <span className="pref-row-desc">
+                      自动隐藏等模式：鼠标靠近何处唤出 Dock（默认屏幕最底部）
+                    </span>
+                  </span>
+                  <select
+                    className="pref-select"
+                    value={
+                      dockPrefs.activationPosition === "dockBottom"
+                        ? "dockBottom"
+                        : "screenBottom"
+                    }
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onChange={(e) =>
+                      void persistDockPrefs({
+                        activationPosition: e.target.value as "screenBottom" | "dockBottom",
+                      })
+                    }
+                  >
+                    {DOCK_ACTIVATION_POSITIONS.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="card-desc" style={{ marginTop: 4 }}>
+                  {
+                    DOCK_ACTIVATION_POSITIONS.find(
+                      (p) => p.id === (dockPrefs.activationPosition === "dockBottom"
+                        ? "dockBottom"
+                        : "screenBottom"),
+                    )?.desc
+                  }
+                </p>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">激活热区厚度</span>
+                    <span className="pref-row-desc">逻辑像素，默认 20</span>
+                  </span>
                   <input
-                    value={weatherId}
-                    onChange={(e) => setWeatherId(e.target.value)}
-                    placeholder="88888888"
-                    spellCheck={false}
+                    className="pref-select"
+                    type="number"
+                    min={4}
+                    max={64}
+                    step={1}
+                    value={dockPrefs.activationThicknessPx}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (!Number.isFinite(n)) return;
+                      setDockPrefs((p) => ({ ...p, activationThicknessPx: n }));
+                    }}
+                    onBlur={(e) => {
+                      const n = Math.min(64, Math.max(4, Number(e.target.value) || 20));
+                      void persistDockPrefs({ activationThicknessPx: n });
+                    }}
+                    style={{ width: 72, textAlign: "right" }}
                   />
                 </label>
-                <label className="weather-field">
-                  <span>通讯 KEY</span>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">Dock 底边偏移</span>
+                    <span className="pref-row-desc">
+                      Dock 底边距屏幕底的间距；0 = 底边贴屏幕底（默认）
+                    </span>
+                  </span>
                   <input
-                    value={weatherKey}
-                    onChange={(e) => setWeatherKey(e.target.value)}
-                    placeholder="88888888"
-                    spellCheck={false}
+                    className="pref-select"
+                    type="number"
+                    min={0}
+                    max={400}
+                    step={1}
+                    value={dockPrefs.bottomOffsetPx}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (!Number.isFinite(n)) return;
+                      setDockPrefs((p) => ({ ...p, bottomOffsetPx: n }));
+                    }}
+                    onBlur={(e) => {
+                      const n = Math.min(400, Math.max(0, Number(e.target.value) || 0));
+                      void persistDockPrefs({ bottomOffsetPx: n });
+                    }}
+                    style={{ width: 72, textAlign: "right" }}
                   />
                 </label>
-              </div>
-              <div className="weather-actions">
-                <button type="button" className="close-btn" onClick={() => void saveWeatherCreds()}>
-                  保存并测试
-                </button>
-                {weatherMsg ? <span className="weather-msg">{weatherMsg}</span> : null}
-              </div>
-            </section>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">离开后隐藏延迟</span>
+                    <span className="pref-row-desc">
+                      鼠标离开 Dock / 激活条后，等待多久再收起（毫秒，默认 800）
+                    </span>
+                  </span>
+                  <input
+                    className="pref-select"
+                    type="number"
+                    min={200}
+                    max={10000}
+                    step={100}
+                    value={dockPrefs.hideLingerMs}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (!Number.isFinite(n)) return;
+                      setDockPrefs((p) => ({ ...p, hideLingerMs: n }));
+                    }}
+                    onBlur={(e) => {
+                      const n = Math.min(10000, Math.max(200, Number(e.target.value) || 800));
+                      void persistDockPrefs({ hideLingerMs: n });
+                    }}
+                    style={{ width: 88, textAlign: "right" }}
+                  />
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">图标放大</span>
+                    <span className="pref-row-desc">
+                      划过扇形放大（等比、可超出栏顶）；栏高不变。1.0 = 关闭，默认 1.6
+                    </span>
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="range"
+                      min={1}
+                      max={2.5}
+                      step={0.05}
+                      value={dockPrefs.magnification}
+                      disabled={!dockPrefs.enabled || dockBusy}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (!Number.isFinite(n)) return;
+                        setDockPrefs((p) => ({ ...p, magnification: n }));
+                      }}
+                      onPointerUp={(e) => {
+                        const n = Math.min(
+                          2.5,
+                          Math.max(1, Number((e.target as HTMLInputElement).value) || 1.6),
+                        );
+                        void persistDockPrefs({ magnification: n });
+                      }}
+                      style={{ width: 120 }}
+                    />
+                    <span style={{ minWidth: 36, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {dockPrefs.magnification.toFixed(2)}
+                    </span>
+                  </span>
+                </label>
+              </section>
+              <section className="settings-card">
+                <div className="section-head">
+                  <h2>图标配置</h2>
+                  <span className="section-hint">
+                    {dockPrefs.items.filter((i) => i.kind !== "separator").length} 个图标
+                    {dockPrefs.items.some((i) => i.kind === "separator")
+                      ? ` · ${dockPrefs.items.filter((i) => i.kind === "separator").length} 分隔`
+                      : ""}
+                  </span>
+                </div>
+                <p className="card-desc">
+                  从 MyDockFinder 备份目录选择 `.dockico.ini` 导入。特殊项：开始菜单、回收站、分隔线。
+                </p>
+                <div className="plugin-actions">
+                  <button
+                    type="button"
+                    className="settings-primary-btn"
+                    disabled={dockBusy}
+                    onClick={() => void importDockIni()}
+                  >
+                    {dockBusy ? "处理中…" : "导入 .dockico.ini"}
+                  </button>
+                </div>
+                {dockMsg ? <p className="card-desc">{dockMsg}</p> : null}
+              </section>
+            </>
           )}
 
           {nav === "tray" && (
@@ -1111,7 +1519,7 @@ export default function SettingsApp() {
             <section className="settings-card">
               <h2>插件市场</h2>
               <p className="card-desc">
-                安装 `.whpx` 包或开发目录（含 plugin.json）。也可一键导入内置示例「窗口组」。已安装插件可启用、禁用或删除；敏感能力会在安装后列出。
+                安装 `.whpx` 包或开发目录（含 plugin.json）。安装前会预览所用界面表面（快捷区/弹窗、岛通知、岛下拉等）与能力声明。也可导入内置示例。
               </p>
               <div className="plugin-actions">
                 <button
@@ -1120,26 +1528,12 @@ export default function SettingsApp() {
                   disabled={pluginBusy}
                   onClick={() => {
                     void (async () => {
-                      setPluginBusy(true);
-                      setPluginMsg("");
                       try {
                         const path = await invoke<string | null>("pick_whpx_file");
                         if (!path) return;
-                        const rec = await invoke<InstalledPluginDto>("install_plugin_from_path", {
-                          path,
-                        });
-                        const caps = (rec.capabilities ?? []) as PluginCapability[];
-                        const sensitive = caps.filter((c) => isSensitiveCapability(c));
-                        setPluginMsg(
-                          sensitive.length
-                            ? `已安装 ${rec.name}。注意：${describeCapabilities(sensitive).join("；")}`
-                            : `已安装 ${rec.name} v${rec.version}`,
-                        );
-                        bumpRegistry((n) => n + 1);
+                        await beginInstallFromPath(path);
                       } catch (err) {
                         setPluginMsg(String(err));
-                      } finally {
-                        setPluginBusy(false);
                       }
                     })();
                   }}
@@ -1152,20 +1546,12 @@ export default function SettingsApp() {
                   disabled={pluginBusy}
                   onClick={() => {
                     void (async () => {
-                      setPluginBusy(true);
-                      setPluginMsg("");
                       try {
                         const path = await invoke<string | null>("pick_plugin_directory");
                         if (!path) return;
-                        const rec = await invoke<InstalledPluginDto>("install_plugin_from_path", {
-                          path,
-                        });
-                        setPluginMsg(`已加载开发插件 ${rec.id}`);
-                        bumpRegistry((n) => n + 1);
+                        await beginInstallFromPath(path);
                       } catch (err) {
                         setPluginMsg(String(err));
-                      } finally {
-                        setPluginBusy(false);
                       }
                     })();
                   }}
@@ -1177,7 +1563,7 @@ export default function SettingsApp() {
                     type="button"
                     className="settings-secondary-btn"
                     disabled={pluginBusy}
-                    onClick={() => void installExamplePlugin("window-groups")}
+                    onClick={() => void beginInstallExample("window-groups")}
                   >
                     导入示例：窗口组
                   </button>
@@ -1187,9 +1573,29 @@ export default function SettingsApp() {
                     type="button"
                     className="settings-secondary-btn"
                     disabled={pluginBusy}
-                    onClick={() => void installExamplePlugin("transfer-station")}
+                    onClick={() => void beginInstallExample("transfer-station")}
                   >
                     导入示例：中转站
+                  </button>
+                ) : null}
+                {!weatherInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("weather")}
+                  >
+                    导入示例：天气
+                  </button>
+                ) : null}
+                {!mirrorInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("mirror")}
+                  >
+                    导入示例：镜子
                   </button>
                 ) : null}
               </div>
@@ -1479,6 +1885,90 @@ export default function SettingsApp() {
           {nav === "developer" && <SqliteDevPanel />}
         </div>
       </main>
+
+      {installPending ? (
+        <div
+          className="plugin-install-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="plugin-install-title"
+        >
+          <div className="plugin-install-dialog">
+            <h2 id="plugin-install-title">确认安装插件</h2>
+            <p className="plugin-install-lead">
+              <strong>{installPending.preview.name}</strong>
+              <span>
+                {" "}
+                · {installPending.preview.id} · v{installPending.preview.version}
+              </span>
+            </p>
+            {installPending.preview.description ? (
+              <p className="plugin-install-desc">{installPending.preview.description}</p>
+            ) : null}
+
+            <h3 className="plugin-install-section">使用的界面</h3>
+            <ul className="plugin-install-list">
+              {installPending.preview.surfaces.map((s) => (
+                <li key={s.id}>
+                  <strong>{s.label}</strong>
+                  <span>{s.detail}</span>
+                </li>
+              ))}
+            </ul>
+
+            <h3 className="plugin-install-section">声明的能力</h3>
+            {installPending.preview.capabilities.length ? (
+              <ul className="plugin-install-list">
+                {installPending.preview.capabilities.map((cap) => {
+                  const c = cap as PluginCapability;
+                  const sensitive = isSensitiveCapability(c);
+                  return (
+                    <li key={cap} className={sensitive ? "is-sensitive" : undefined}>
+                      <strong>{describeCapabilities([c])[0] ?? cap}</strong>
+                      <span>{sensitive ? "敏感 · 请确认是否信任此插件" : cap}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="plugin-install-empty">未声明 capabilities</p>
+            )}
+
+            {installPending.preview.networkHosts.length ? (
+              <>
+                <h3 className="plugin-install-section">网络白名单</h3>
+                <ul className="plugin-install-list">
+                  {installPending.preview.networkHosts.map((host) => (
+                    <li key={host}>
+                      <strong>{host}</strong>
+                      <span>hub.fetch 可访问</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+
+            <div className="plugin-install-actions">
+              <button
+                type="button"
+                className="settings-ghost-btn"
+                disabled={pluginBusy}
+                onClick={() => setInstallPending(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="settings-primary-btn"
+                disabled={pluginBusy}
+                onClick={() => void confirmInstallPending()}
+              >
+                {pluginBusy ? "安装中…" : "确认安装"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

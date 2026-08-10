@@ -28,7 +28,7 @@ description: >-
 3. 无通知横幅、非拖放命中（`.is-drop-target`）
 4. 闲置满 `immerseIdleSec`
 
-中转站有条目时：**照常可沉浸**；摘要字色跟 `data-chrome` / `--chrome-center-fg`（与天气栏同一套）。
+中转站有条目时：**照常可沉浸**；摘要字色跟 `data-chrome` / `--chrome-center-fg`（与岛栏摘要同一套）。
 
 ## 瞬时阻断（可退出沉浸，不是永久例外）
 

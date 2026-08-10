@@ -20,7 +20,7 @@ description: >-
 | 表面 | 文件 | 说明 |
 |------|------|------|
 | 快捷区 | `shortcuts.html` | Host iframe；自画入口 + pins |
-| 弹窗 | `popup.html` | 管理组 / 固定；只写 `store` |
+| 弹窗 | `popup.html` | 管理组 / 固定；只写 `store`；壳边距见 `window-hub-plugin-popup`（`.wg-shell` 12/12/14） |
 
 **禁止** `hub.shortcuts.setPins`。popup 保存后 Host 发 refresh，shortcuts 条重读 `store`。
 

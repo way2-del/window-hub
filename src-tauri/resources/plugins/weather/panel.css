@@ -1,0 +1,142 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  color: #f4f4f5;
+  font: 500 12px/1.3 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color-scheme: dark;
+  overflow: hidden;
+}
+
+.wx-root {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 2px 4px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wx-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.wx-top {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wx-refresh {
+  flex-shrink: 0;
+  margin-top: 2px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(250, 250, 250, 0.92);
+  font: 600 12px/1 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+}
+
+.wx-refresh:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.wx-refresh:disabled,
+.wx-refresh.is-busy {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.wx-error {
+  font-size: 11px;
+  color: #ff8a8a;
+}
+
+.wx-loc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 650;
+  color: rgba(250, 250, 250, 0.9);
+}
+
+.wx-temp {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.wx-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wx-condition {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: rgba(250, 250, 250, 0.82);
+}
+
+.wx-condition img {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.wx-uptime {
+  font-size: 11px;
+  color: rgba(250, 250, 250, 0.45);
+}
+
+.wx-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.wx-card {
+  padding: 10px 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.wx-card span {
+  font-size: 11px;
+  color: rgba(250, 250, 250, 0.5);
+}
+
+.wx-card strong {
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.wx-empty {
+  margin: auto;
+  color: rgba(250, 250, 250, 0.45);
+  font-size: 12px;
+  text-align: center;
+  line-height: 1.45;
+}

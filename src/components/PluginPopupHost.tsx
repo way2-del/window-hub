@@ -22,6 +22,20 @@ declare global {
       shortcuts: {
         setBadge: (badge: unknown) => Promise<unknown>;
       };
+      notify: ((opts: {
+        title: string;
+        body?: string;
+        iconPng?: string;
+        urgency?: string;
+        ttlMs?: number;
+        actions?: unknown[];
+        data?: unknown;
+      }) => Promise<unknown>) & {
+        onAction: (
+          cb: (ev: { notifyId: string; actionId: string; data?: unknown }) => void,
+        ) => () => void;
+      };
+      fetch: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
       popup: { close: () => Promise<unknown> };
       applyEffect: (material?: string) => Promise<unknown>;
     };
@@ -44,6 +58,49 @@ function ensureHub(pluginId: string) {
     pluginId,
     ...(args ?? {}),
   });
+
+  type NotifyFn = NonNullable<Window["hub"]>["notify"];
+
+  const notifyFn = ((opts: {
+    title: string;
+    body?: string;
+    iconPng?: string;
+    urgency?: string;
+    ttlMs?: number;
+    actions?: unknown[];
+    data?: unknown;
+  }) =>
+    invoke("hub_notify", withPlugin({
+      opts: {
+        title: opts?.title || "",
+        body: opts?.body,
+        iconPng: opts?.iconPng,
+        urgency: opts?.urgency,
+        ttlMs: opts?.ttlMs,
+        actions: opts?.actions,
+        data: opts?.data,
+      },
+    }))) as NotifyFn;
+
+  notifyFn.onAction = (cb) => {
+    let un = () => {};
+    void listen<{
+      pluginId?: string;
+      notifyId: string;
+      actionId: string;
+      data?: unknown;
+    }>("island-notify-action", (ev) => {
+      if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+      cb({
+        notifyId: ev.payload.notifyId,
+        actionId: ev.payload.actionId,
+        data: ev.payload.data,
+      });
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un();
+  };
 
   window.hub = {
     pluginId,
@@ -71,6 +128,9 @@ function ensureHub(pluginId: string) {
     shortcuts: {
       setBadge: (badge) => invoke("hub_shortcuts_set_badge", withPlugin({ badge })),
     },
+    notify: notifyFn,
+    fetch: (url: string, opts?: Record<string, unknown>) =>
+      invoke("hub_fetch", withPlugin({ url, opts: opts ?? null })),
     popup: {
       close: () => invoke("close_plugin_popup"),
     },

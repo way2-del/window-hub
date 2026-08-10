@@ -1,0 +1,43 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.example.memo-todo",
+  "name": "备忘 Todo",
+  "version": "1.0.0",
+  "official": false,
+  "logo": "icon.svg",
+  "description": "快捷区显示当前任务并打开列表；可设提醒；到点岛通知；下拉看详情。不写入岛栏摘要。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "popup": "popup.html",
+    "panel": "panel.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "备忘",
+      "order": 35,
+      "action": "popup.open"
+    },
+    "island.notify": {
+      "priority": "active",
+      "maxPerMinute": 6
+    },
+    "island.bar": {
+      "order": 90,
+      "excludeFromBarResident": true
+    },
+    "island.panel": {
+      "defaultSize": { "w": 380, "h": 220 },
+      "excludeFromPullContent": false
+    }
+  },
+  "settings": [],
+  "capabilities": [
+    "storage",
+    "shortcuts",
+    "popup",
+    "notify",
+    "island.panel",
+    "island.bar"
+  ]
+}

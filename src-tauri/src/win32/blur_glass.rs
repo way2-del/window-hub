@@ -4,7 +4,8 @@
 //! - **Blur** → `ACCENT_ENABLE_BLURBEHIND`
 //! - **Aero** → `ACCENT_ENABLE_ACRYLICBLURBEHIND` with light tint
 //! - **Acrylic** → Win11 `DWMSBT_TRANSIENTWINDOW`, else SWCA acrylic
-//! - **MicaAlt** → `DWMSBT_TABBEDWINDOW` via window-vibrancy
+//! - **Mica** (prefs id `mica-alt` for compat) → system `DWMSBT_MAINWINDOW`
+//!   (same Start-menu backdrop — not MicaAlt/tabbed)
 
 #![cfg(windows)]
 
@@ -13,8 +14,10 @@ use tauri::WebviewWindow;
 use windows::core::s;
 use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWM_SYSTEMBACKDROP_TYPE,
+    DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DWMWCP_ROUND, DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
@@ -119,6 +122,158 @@ pub fn clear(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// `WS_EX_TOOLWINDOW` blocks SYSTEMBACKDROP on many Win11 builds — drop it and
+/// use ITaskbarList::DeleteTab so popups stay off the taskbar.
+fn prepare_hwnd_for_system_backdrop(hwnd: HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_TOOLWINDOW,
+        };
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_TOOLWINDOW.0 != 0 {
+            let new_ex = ex & !WS_EX_TOOLWINDOW.0;
+            SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex as i32);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND::default(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        if let Ok(taskbar) =
+            CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+        {
+            let _ = taskbar.HrInit();
+            let _ = taskbar.DeleteTab(hwnd);
+        }
+    }
+}
+
+fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
+    unsafe {
+        if let Some(d) = dark {
+            let v: u32 = u32::from(d);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &v as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+        let corner = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+/// Ensure WebView2 / window clear pixels so SYSTEMBACKDROP (or CSS blur) can show through.
+fn clear_webview_fill(window: &WebviewWindow) {
+    use tauri::utils::config::Color;
+    // Alpha must be 0 — any non-zero A becomes 255 on Win8+ WebView2.
+    let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+}
+
+/// Thin always-on-top / popup glass: SYSTEMBACKDROP often paints a dead
+/// charcoal slab under WebView2. SWCA acrylic samples the desktop reliably.
+fn apply_swca_acrylic(hwnd: HWND, dark: Option<bool>) -> Result<(), String> {
+    disable_system_backdrop(hwnd);
+    let tint = if dark == Some(false) {
+        pack_gradient(245, 245, 250, 120)
+    } else {
+        // Keep tint lighter than CSS wash so wallpaper still bleeds through.
+        pack_gradient(28, 28, 30, 110)
+    };
+    if !set_window_composition_attribute(
+        hwnd,
+        ACCENT_ENABLE_ACRYLICBLURBEHIND,
+        ACCENT_FLAGS_BLUR_FULL,
+        tint,
+    ) {
+        if !set_window_composition_attribute(
+            hwnd,
+            ACCENT_ENABLE_BLURBEHIND,
+            ACCENT_FLAGS_BLUR_FULL,
+            tint,
+        ) {
+            return Err("apply SWCA acrylic failed".into());
+        }
+    }
+    Ok(())
+}
+
+/// Frosted system backdrop — Acrylic blurs desktop more like Start/flyouts;
+/// Mica alone often reads as a flat slab under WebView2.
+pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    let hwnd = hwnd_of(window)?;
+    prepare_hwnd_for_system_backdrop(hwnd);
+    clear_webview_fill(window);
+
+    // Unified SWCA acrylic for dock + popups. Mixing SYSTEMBACKDROP on one HWND
+    // with SWCA on another can wipe blur when a sibling window opens.
+    apply_swca_acrylic(hwnd, dark)?;
+    apply_mica_chrome(hwnd, dark);
+    clear_webview_fill(window);
+    Ok(())
+}
+
+/// Dock icons layer: no SWCA — a sibling `dock-glass` window owns the material
+/// on the 60px strip so magnification headroom stays fully clear.
+pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    clear_vibrancy(window);
+    let hwnd = hwnd_of(window)?;
+    disable_system_backdrop(hwnd);
+    unsafe {
+        if let Some(d) = dark {
+            let v: u32 = u32::from(d);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &v as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+    clear_webview_fill(window);
+    Ok(())
+}
+
 /// Apply one README-aligned effect to the window.
 pub fn apply_effect(
     window: &WebviewWindow,
@@ -126,13 +281,17 @@ pub fn apply_effect(
     dark: Option<bool>,
     alpha: u8,
 ) -> Result<(), String> {
+    // Icons layer must stay fully clear above the bar; glass is `dock-glass`.
+    if window.label() == "dock" {
+        return apply_dock_icons_layer(window, dark);
+    }
+
     let hwnd = hwnd_of(window)?;
     let a = alpha.max(1);
-    clear_vibrancy(window);
 
     match kind {
         WindowMaterial::Blur => {
-            // Pure blur — DWMBlurGlass "Blur"
+            clear_vibrancy(window);
             disable_system_backdrop(hwnd);
             let color = pack_gradient(18, 18, 20, a.min(120));
             if !set_window_composition_attribute(
@@ -145,7 +304,7 @@ pub fn apply_effect(
             }
         }
         WindowMaterial::Aero => {
-            // Win7-like light glass — acrylic accent + bright translucent tint
+            clear_vibrancy(window);
             disable_system_backdrop(hwnd);
             let color = pack_gradient(200, 210, 230, a.min(140).max(40));
             if !set_window_composition_attribute(
@@ -154,7 +313,6 @@ pub fn apply_effect(
                 ACCENT_FLAGS_BLUR_FULL,
                 color,
             ) {
-                // Fallback to classic blur
                 if !set_window_composition_attribute(
                     hwnd,
                     ACCENT_ENABLE_BLURBEHIND,
@@ -166,7 +324,7 @@ pub fn apply_effect(
             }
         }
         WindowMaterial::Acrylic => {
-            // Prefer Win11 system acrylic (noise baked in); else SWCA acrylic
+            clear_vibrancy(window);
             set_system_backdrop(hwnd, DWMSBT_TRANSIENTWINDOW);
             let applied = window_vibrancy::apply_acrylic(window, None).is_ok();
             if !applied {
@@ -182,9 +340,10 @@ pub fn apply_effect(
                 }
             }
         }
+        // Prefs still say "mica-alt" for storage compat; visuals are system glass.
+        // Do NOT clear_vibrancy first — deferred/open retries would flash “blur deleted”.
         WindowMaterial::MicaAlt => {
-            window_vibrancy::apply_tabbed(window, dark)
-                .map_err(|e| format!("apply MicaAlt failed: {e}"))?;
+            apply_system_mica(window, dark)?;
         }
     }
     Ok(())

@@ -6,6 +6,7 @@ export type PluginCapability =
   | "notify"
   | "popup"
   | "island.panel"
+  | "island.bar"
   | "island.drop"
   | "windows.read"
   | "windows.focus"
@@ -68,7 +69,11 @@ export type PluginManifest = {
   slots?: {
     shortcuts?: ShortcutsSlotConfig;
     "island.notify"?: { priority?: string; maxPerMinute?: number };
-    "island.bar"?: { order?: number };
+    "island.bar"?: {
+      order?: number;
+      /** 不出现在「岛栏常驻」列表（仍可临时 setBar，如中转站） */
+      excludeFromBarResident?: boolean;
+    };
     "island.drop"?: { order?: number };
     "island.panel"?: {
       defaultSize?: { w: number; h: number };

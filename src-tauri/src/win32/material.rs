@@ -1,7 +1,8 @@
 //! Popup backdrop materials — DWMBlurGlass README effects (process-local, no dwm inject).
 //!
-//! Shared by settings / tray / plugin windows.
-//! Temporarily locked to **MicaAlt** (Blur / Aero / Acrylic kept in enum for later).
+//! Shared by settings / tray / plugin / dock windows.
+//! Ships **system Mica** (`DWMSBT_MAINWINDOW`, Start-menu equivalent).
+//! Prefs id remains `mica-alt` for storage compatibility.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tauri::WebviewWindow;
@@ -14,7 +15,7 @@ pub enum WindowMaterial {
     Aero,
     /// Acrylic frost with noise (DWMBlurGlass Acrylic).
     Acrylic,
-    /// Grayish mica (DWMBlurGlass MicaAlt) — current default / only shipping option.
+    /// System Mica (Start menu). Prefs key still `mica-alt`.
     #[default]
     MicaAlt,
 }
@@ -25,6 +26,7 @@ impl WindowMaterial {
             Self::Blur => "blur",
             Self::Aero => "aero",
             Self::Acrylic => "acrylic",
+            // Keep wire id stable; visual is system Mica.
             Self::MicaAlt => "mica-alt",
         }
     }
@@ -157,7 +159,7 @@ pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
     let _ = apply_prefs(window, &prefs);
     let win = window.clone();
     std::thread::spawn(move || {
-        for ms in [40_u64, 100, 220, 450] {
+        for ms in [40_u64, 100, 220, 450, 800] {
             std::thread::sleep(std::time::Duration::from_millis(ms));
             let _ = apply_prefs(&win, &prefs);
         }

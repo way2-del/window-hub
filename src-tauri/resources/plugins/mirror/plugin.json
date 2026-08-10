@@ -1,0 +1,20 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.mirror",
+  "name": "镜子",
+  "version": "1.0.2",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "灵动岛下拉摄像头预览（仅面板）。",
+  "entry": {
+    "panel": "panel.html"
+  },
+  "slots": {
+    "island.panel": {
+      "defaultSize": { "w": 380, "h": 220 },
+      "excludeFromPullContent": false
+    }
+  },
+  "settings": [],
+  "capabilities": ["island.panel"]
+}

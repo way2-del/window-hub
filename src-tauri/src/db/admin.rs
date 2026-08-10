@@ -16,8 +16,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "prefs_shortcuts",
     "prefs_ambient",
     "prefs_island",
-    "weather_api",
-    "weather_cache",
+    "prefs_dock",
     "script_launchers",
     "plugin_kv",
 ];
@@ -33,8 +32,12 @@ fn assert_table(table: &str) -> Result<(), String> {
 fn table_pks(table: &str) -> &'static [&'static str] {
     match table {
         "schema_meta" => &["key"],
-        "prefs_material" | "prefs_tray" | "prefs_shortcuts" | "prefs_ambient" | "prefs_island"
-        | "weather_api" | "weather_cache" => &["id"],
+        "prefs_material"
+        | "prefs_tray"
+        | "prefs_shortcuts"
+        | "prefs_ambient"
+        | "prefs_island"
+        | "prefs_dock" => &["id"],
         "script_launchers" => &["id"],
         "plugin_kv" => &["plugin_id", "key"],
         _ => &[],
@@ -44,7 +47,7 @@ fn table_pks(table: &str) -> &'static [&'static str] {
 fn table_columns(table: &str) -> &'static [&'static str] {
     match table {
         "schema_meta" => &["key", "value_json", "updated_at"],
-        "prefs_material" | "prefs_tray" | "prefs_shortcuts" | "weather_cache" => {
+        "prefs_material" | "prefs_tray" | "prefs_shortcuts" | "prefs_dock" => {
             &["id", "data_json", "updated_at"]
         }
         "prefs_ambient" => &["id", "mode", "updated_at"],
@@ -56,9 +59,9 @@ fn table_columns(table: &str) -> &'static [&'static str] {
             "msg_notify",
             "msg_notify_text",
             "msg_notify_sec",
+            "bar_resident",
             "updated_at",
         ],
-        "weather_api" => &["id", "api_id", "api_key", "updated_at"],
         "script_launchers" => &[
             "id",
             "name",

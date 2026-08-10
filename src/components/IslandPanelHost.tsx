@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { isBuiltinPanel, parsePluginPanelId } from "../plugins/panelProviders";
+import { parsePluginPanelId } from "../plugins/panelProviders";
 import { pluginRegistry } from "../plugins/registry";
 import {
   isAllowedPanelHubCmd,
@@ -10,37 +10,38 @@ import {
   WH_PANEL_HUB_RES,
 } from "../plugins/panelHubBridge";
 import { normalizeStagingChanged } from "../stagingApi";
-import MirrorPreview from "./MirrorPreview";
-import type { WeatherInfo } from "../weather";
-import type { ReactNode } from "react";
 import "./IslandPanelHost.css";
 
 type Props = {
   pullContent: string;
-  weather: WeatherInfo;
-  mirrorLive: boolean;
-  IconPin: () => ReactNode;
-  IconCloud: (p: { className?: string }) => ReactNode;
-  IconDroplets: (p: { className?: string }) => ReactNode;
-  IconWind: (p: { className?: string }) => ReactNode;
+  /** 岛完全展开后为 true；收起一开始为 false。驱动 panel onEnter/onLeave */
+  active: boolean;
   onPanelClose?: () => void;
 };
 
-export default function IslandPanelHost({
-  pullContent,
-  weather,
-  mirrorLive,
-  IconPin,
-  IconCloud,
-  IconDroplets,
-  IconWind,
-  onPanelClose,
-}: Props) {
+function postPanelLifecycle(
+  frame: Window | null | undefined,
+  pluginId: string,
+  active: boolean,
+) {
+  frame?.postMessage(
+    {
+      channel: "island-panel-lifecycle-fwd",
+      pluginId,
+      phase: active ? "enter" : "leave",
+    },
+    "*",
+  );
+}
+
+export default function IslandPanelHost({ pullContent, active, onPanelClose }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
-  const pluginId = isBuiltinPanel(pullContent) ? null : parsePluginPanelId(pullContent);
+  const pluginId = parsePluginPanelId(pullContent);
 
   useEffect(() => {
     if (!pluginId) {
@@ -73,20 +74,27 @@ export default function IslandPanelHost({
           }).catch(() => ""),
         ]);
         if (cancelled) return;
-        if (css) {
-          html = html.replace(
-            /<link[^>]*href=["']\.\/panel\.css["'][^>]*>/i,
-            `<style>${css}</style>`,
-          );
-        }
+        // Strip link/script tags whether href is panel.css or ./panel.css
+        html = html.replace(/<link[^>]*href=["'][^"']*panel\.css["'][^>]*>/gi, "");
+        html = html.replace(
+          /<script[^>]*src=["'][^"']*panel\.js["'][^>]*>\s*<\/script>/gi,
+          "",
+        );
+        // Base dark shell before plugin CSS — avoids white flash / system scrollbar
+        // when panel opens from collapsed (direct island-bar click).
+        const baseReset = `<style>
+html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;overflow:hidden}
+::-webkit-scrollbar{width:0!important;height:0!important;display:none!important}
+*{scrollbar-width:none;-ms-overflow-style:none}
+</style>`;
+        const styleTag = css ? `${baseReset}<style>${css}</style>` : baseReset;
+        html = /<head[^>]*>/i.test(html)
+          ? html.replace(/<head[^>]*>/i, (m) => `${m}${styleTag}`)
+          : `${styleTag}${html}`;
         const boot = `<script>${panelHubBootstrapScript(pluginId)}</script>`;
         // Island shell is always black — never inject host light theme into panel iframe
         const themeAttr = ` data-theme="dark"`;
         const bodyJs = js ? `<script>${js}</script>` : "";
-        html = html.replace(
-          /<script[^>]*src=["']\.\/panel\.js["'][^>]*>\s*<\/script>/i,
-          "",
-        );
         if (/<html\b/i.test(html)) {
           html = html.replace(/<html\b([^>]*)>/i, (_m, attrs: string) => {
             const cleaned = String(attrs).replace(/\s*data-theme=("|')[^"']*\1/i, "");
@@ -198,56 +206,32 @@ export default function IslandPanelHost({
     return () => un?.();
   }, [pluginId]);
 
-  if (isBuiltinPanel(pullContent)) {
-    if (pullContent === "mirror") {
-      return <MirrorPreview active={mirrorLive} />;
-    }
-    return (
-      <>
-        <div className="panel-top">
-          <div className="panel-loc">
-            <IconPin />
-            <span>{weather.city}</span>
-          </div>
-          <div className="panel-temp">{weather.temp}°</div>
-        </div>
-        <div className="panel-body">
-          <div className="panel-condition">
-            {weather.iconUrl ? (
-              <img className="condition-img" src={weather.iconUrl} alt="" draggable={false} />
-            ) : (
-              <IconCloud className="condition-cloud" />
-            )}
-            <span>
-              {weather.condition}
-              {weather.uptime ? ` · 更新 ${weather.uptime}` : ""}
-            </span>
-          </div>
-          <div className="panel-cards">
-            <div className="panel-card">
-              <IconDroplets className="card-icon droplets" />
-              <span>湿度</span>
-              <strong>{weather.humidity}%</strong>
-            </div>
-            <div className="panel-card">
-              <IconWind className="card-icon wind" />
-              <span>风力</span>
-              <strong>{weather.wind}</strong>
-            </div>
-            <div className="panel-card">
-              <span className="feel-badge" aria-hidden>
-                {weather.feelsLike}°
-              </span>
-              <span>体感</span>
-              <strong>
-                {weather.low}° / {weather.high}°
-              </strong>
-            </div>
-          </div>
-        </div>
-      </>
-    );
-  }
+  useEffect(() => {
+    if (!pluginId) return;
+    let un: (() => void) | undefined;
+    void listen<{
+      pluginId?: string;
+      notifyId: string;
+      actionId: string;
+      data?: unknown;
+    }>("island-notify-action", (ev) => {
+      if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+      const frame = iframeRef.current?.contentWindow;
+      frame?.postMessage(
+        {
+          channel: "island-notify-action-fwd",
+          pluginId: ev.payload?.pluginId ?? pluginId,
+          notifyId: ev.payload.notifyId,
+          actionId: ev.payload.actionId,
+          data: ev.payload.data,
+        },
+        "*",
+      );
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un?.();
+  }, [pluginId]);
 
   if (!pluginId) {
     return <div className="panel-plugin-empty">未知面板</div>;
@@ -260,6 +244,11 @@ export default function IslandPanelHost({
       </div>
     );
   }
+  useEffect(() => {
+    if (!pluginId || !srcdoc) return;
+    postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, active);
+  }, [active, pluginId, srcdoc]);
+
   if (!srcdoc) {
     return <div className="panel-plugin-empty">加载面板…</div>;
   }
@@ -271,6 +260,12 @@ export default function IslandPanelHost({
       title={`plugin-panel-${pluginId}`}
       srcDoc={srcdoc}
       sandbox="allow-scripts allow-same-origin"
+      allow="camera"
+      onLoad={() => {
+        if (!pluginId) return;
+        // iframe 重载后 phase 复位为 leave；按当前 active 补发
+        postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, activeRef.current);
+      }}
     />
   );
 }

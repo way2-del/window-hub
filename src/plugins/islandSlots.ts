@@ -34,10 +34,30 @@ export function resolveIslandDropPluginId(): string | null {
 export function listIslandBarPlugins() {
   return pluginRegistry
     .listAll()
-    .filter((p) => p.enabled && p.manifest.slots?.["island.bar"])
+    .filter(
+      (p) =>
+        p.enabled &&
+        p.manifest.slots?.["island.bar"] &&
+        (p.manifest.capabilities ?? []).includes("island.bar"),
+    )
     .sort(
       (a, b) => orderOf(a.manifest, "island.bar") - orderOf(b.manifest, "island.bar"),
     );
+}
+
+/** 全局设置「岛栏常驻」候选：已启用 + island.bar 能力/槽位，且未 excludeFromBarResident */
+export function listBarResidentProviders(): {
+  id: string;
+  label: string;
+  description: string;
+}[] {
+  return listIslandBarPlugins()
+    .filter((p) => !p.manifest.slots?.["island.bar"]?.excludeFromBarResident)
+    .map((p) => ({
+      id: p.pluginId,
+      label: p.manifest.name,
+      description: p.manifest.description ?? "岛栏摘要",
+    }));
 }
 
 export function getPluginManifest(pluginId: string): PluginManifest | undefined {
@@ -50,6 +70,53 @@ export function resolvePanelDefaultSize(
 ): { w?: number; h?: number } {
   if (!pluginId) return {};
   return getPluginManifest(pluginId)?.slots?.["island.panel"]?.defaultSize ?? {};
+}
+
+/** Weather-like panel hard top (non-transfer). */
+export const PANEL_VIEW_W_DEFAULT = 380;
+export const PANEL_VIEW_H_DEFAULT = 220;
+
+/**
+ * Resolve plugin island panel shell size.
+ * - If settings declare panelWidth/panelHeight → staging clamps (中转站)
+ * - Else honor slots.defaultSize, fallback 380×220 (备忘/天气型)
+ * Never force weather-sized plugins through staging 440–720×120–184 clamps.
+ */
+export function resolvePluginPanelShellSize(
+  pluginId: string,
+  settings?: Record<string, unknown> | null,
+  clampStaging?: {
+    w: (n: number) => number;
+    h: (n: number) => number;
+  },
+): { w: number; h: number } {
+  const defaults = resolvePanelDefaultSize(pluginId);
+  const hasStagingKeys =
+    !!settings &&
+    (settings.panelWidth != null || settings.panelHeight != null);
+
+  if (hasStagingKeys && clampStaging) {
+    return {
+      w: clampStaging.w(
+        Number(settings?.panelWidth ?? defaults.w ?? 560),
+      ),
+      h: clampStaging.h(
+        Number(settings?.panelHeight ?? defaults.h ?? 152),
+      ),
+    };
+  }
+
+  const w = Math.round(Number(defaults.w ?? PANEL_VIEW_W_DEFAULT));
+  const h = Math.round(Number(defaults.h ?? PANEL_VIEW_H_DEFAULT));
+  return {
+    w: Math.max(280, Math.min(720, Number.isFinite(w) ? w : PANEL_VIEW_W_DEFAULT)),
+    h: Math.max(120, Math.min(320, Number.isFinite(h) ? h : PANEL_VIEW_H_DEFAULT)),
+  };
+}
+
+/** Staging / transfer-style short-wide shell (uses is-plugin-sized padding). */
+export function isStagingPanelShell(w: number, h: number): boolean {
+  return h <= 184 + 4 && w >= 440 - 4;
 }
 
 export function formatStagingBarText(

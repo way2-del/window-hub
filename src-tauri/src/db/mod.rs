@@ -12,14 +12,16 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use host::{
-    ambient_get, ambient_set, island_get, island_set, launchers_list, launchers_replace_all,
-    material_get, material_set, meta_get, meta_set, shortcuts_get, shortcuts_set, tray_get,
-    tray_set, weather_api_get, weather_api_set, weather_cache_get, weather_cache_set,
-    IslandPrefsRow, LauncherRow, WeatherApiRow,
+    ambient_get, ambient_set, dock_get, dock_set, island_get, island_set, launchers_list,
+    launchers_replace_all, material_get, material_set, meta_get, meta_set, shortcuts_get,
+    shortcuts_set, tray_get, tray_set, IslandPrefsRow, LauncherRow,
 };
 pub use migrate::migrate_legacy_files;
 
-const SCHEMA_VERSION: i32 = 5;
+/// Official weather plugin id (settings / storage live in `plugin_kv`).
+pub const WEATHER_PLUGIN_ID: &str = "com.window-hub.weather";
+
+const SCHEMA_VERSION: i32 = 8;
 const PLUGIN_KEY_MAX_BYTES: usize = 512 * 1024;
 const PLUGIN_TOTAL_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SYSTEM_KEY_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -142,6 +144,27 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
     if ver < 5 {
         conn.execute_batch("DROP TABLE IF EXISTS todo_items;")
             .map_err(|e| e.to_string())?;
+    }
+
+    if ver < 6 {
+        add_prefs_island_bar_resident(conn)?;
+    }
+
+    if ver < 7 {
+        migrate_weather_host_tables_into_plugin_kv(conn)?;
+    }
+
+    if ver < 8 {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS prefs_dock (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              data_json TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| e.to_string())?;
     }
@@ -154,10 +177,137 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS prefs_dock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
         "#,
     )
     .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+/// Move Host `weather_api` / `weather_cache` → weather plugin `plugin_kv`, then DROP tables.
+fn migrate_weather_host_tables_into_plugin_kv(conn: &Connection) -> Result<(), String> {
+    let has_api: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='weather_api'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_api > 0 {
+        let row = conn
+            .query_row(
+                "SELECT api_id, api_key FROM weather_api WHERE id = 1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some((api_id, api_key)) = row {
+            let id = api_id.trim();
+            let key = api_key.trim();
+            if !id.is_empty()
+                && !key.is_empty()
+                && !(id == "88888888" && key == "88888888")
+            {
+                let existing = plugin_get_system(conn, WEATHER_PLUGIN_ID, KEY_SETTINGS)?;
+                let mut map = match existing {
+                    Some(Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                };
+                let has_custom = map
+                    .get("apiId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty() && s != "88888888")
+                    .unwrap_or(false);
+                if !has_custom {
+                    map.insert("apiId".into(), Value::String(id.to_string()));
+                    map.insert("apiKey".into(), Value::String(key.to_string()));
+                    plugin_set_system(conn, WEATHER_PLUGIN_ID, KEY_SETTINGS, &Value::Object(map))?;
+                }
+            }
+        }
+    }
+
+    let has_cache: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='weather_cache'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_cache > 0 {
+        let cache_raw = conn
+            .query_row(
+                "SELECT data_json FROM weather_cache WHERE id = 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(text) = cache_raw {
+            if let Ok(cache) = serde_json::from_str::<Value>(&text) {
+                let existing = plugin_get(conn, WEATHER_PLUGIN_ID, "cache")?;
+                if existing.is_none() {
+                    let payload = if cache.get("info").is_some() {
+                        cache
+                    } else {
+                        serde_json::json!({ "info": cache, "savedAt": now_ms() })
+                    };
+                    let _ = plugin_set(conn, WEATHER_PLUGIN_ID, "cache", &payload);
+                }
+            }
+        }
+    }
+
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS weather_api;
+        DROP TABLE IF EXISTS weather_cache;
+        "#,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn add_prefs_island_bar_resident(conn: &Connection) -> Result<(), String> {
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='prefs_island'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has == 0 {
+        return Ok(());
+    }
+    let has_col: i64 = conn
+        .prepare("PRAGMA table_info(prefs_island)")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            let mut n = 0i64;
+            for row in rows {
+                if row.ok().as_deref() == Some("bar_resident") {
+                    n = 1;
+                    break;
+                }
+            }
+            Ok(n)
+        })
+        .unwrap_or(0);
+    if has_col != 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        ALTER TABLE prefs_island ADD COLUMN bar_resident TEXT NOT NULL DEFAULT 'com.window-hub.weather';
+        "#,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

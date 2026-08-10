@@ -13,7 +13,7 @@
 
 | 入口 | Host | 旁路资源文件名 |
 |------|------|----------------|
-| `entry.popup` | App 壳 `?window=plugin-popup` + Tauri IPC | **固定** `popup.css` / `popup.js` |
+| `entry.popup` | App 壳 `?window=plugin-popup` + Tauri IPC | **固定** `popup.css` / `popup.js`（挂 `#app.wg-shell`；边距见 `window-hub-plugin-popup`） |
 | `entry.panel` | 岛内 `IslandPanelHost` srcdoc | **固定** `panel.css` / `panel.js` |
 | `entry.shortcuts` | 顶栏 iframe srcdoc | **stem**：`{name}.css` / `{name}.js` |
 
@@ -47,13 +47,25 @@ hub.shortcuts.setBadge(badge)
 // hub.shortcuts.setPins / clearPins
 ```
 
-**未注入（勿调用）：** `hub.notify`、`hub.clipboard.*`、`hub.fetch`。
+**已注入：** `hub.notify` / `hub.notify.onAction`、`hub.fetch`（三表面均有）。  
+**未注入（勿调用）：** `hub.clipboard.*`。
+
+```ts
+hub.notify({
+  title, body?, iconPng?, urgency?, ttlMs?, data?,
+  actions?: [{ id, slot: "start"|"end", label? /* 2字 */, iconPng?, background, data? }]
+})
+hub.notify.onAction((ev) => { /* ev.actionId / ev.data */ })
+hub.fetch(url, { method?, headers?, body?, timeoutMs? }?)
+```
+
+通知按钮位置/样式由 Host 强制（仅 start/end）。`hub.fetch` 须声明 `network` + `permissions.network`。
 
 快捷区高度用 `getBounds().height` 或 `var(--wh-bar-h)`，禁止写死像素。细则：`.cursor/skills/window-hub-shortcuts/SKILL.md`。
 
 ## CapGate
 
-`capabilities` 必须覆盖所用 API。敏感项（`windows.focus`、`staging`、未来的 clipboard/network）安装 UI 明示。
+`capabilities` 必须覆盖所用 API。敏感项（`windows.focus`、`staging`、`network`、`notify` 等）在安装确认弹层明示。
 
 Companion 脚本不在 CapGate 内，见 [companion-scripts.md](./companion-scripts.md)。
 

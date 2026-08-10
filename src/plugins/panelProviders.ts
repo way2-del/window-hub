@@ -12,29 +12,15 @@ export type PanelProvider = {
   manifest?: PluginManifest;
 };
 
-const BUILTIN: PanelProvider[] = [
-  {
-    id: "weather",
-    label: "天气",
-    description: "温度、湿度与风力详情",
-    kind: "builtin",
-  },
-  {
-    id: "mirror",
-    label: "镜子",
-    description: "摄像头预览",
-    kind: "builtin",
-  },
-];
-
-/** Resolve pullContent id list for settings + island.
+/**
+ * Resolve pullContent id list for settings + island.
+ * Weather / mirror are plugins — no Host builtin entries.
  * `excludeFromPullContent` plugins open via drop / bar / session only.
- * Shell width etc. via plugin settings — not prefs_island.
  */
 export function listPanelProviders(
   panelPlugins: PluginManifest[],
 ): PanelProvider[] {
-  const fromPlugins: PanelProvider[] = panelPlugins
+  return panelPlugins
     .filter(
       (m) =>
         m.slots?.["island.panel"] &&
@@ -49,11 +35,11 @@ export function listPanelProviders(
       pluginId: m.id,
       manifest: m,
     }));
-  return [...BUILTIN, ...fromPlugins];
 }
 
-export function isBuiltinPanel(id: string): id is "weather" | "mirror" {
-  return id === "weather" || id === "mirror";
+/** @deprecated Host no longer ships builtin weather/mirror panels */
+export function isBuiltinPanel(_id: string): boolean {
+  return false;
 }
 
 export function parsePluginPanelId(pullContent: string): string | null {

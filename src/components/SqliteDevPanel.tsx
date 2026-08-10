@@ -21,10 +21,9 @@ const TABLE_LABELS: Record<string, string> = {
   prefs_ambient: "沉浸采样 prefs_ambient",
   prefs_island: "灵动岛 prefs_island",
   prefs_shortcuts: "快捷区 prefs_shortcuts",
-  weather_api: "天气凭证 weather_api",
-  weather_cache: "天气缓存 weather_cache",
+  prefs_dock: "底栏 Dock prefs_dock",
   script_launchers: "Companion 脚本",
-  plugin_kv: "插件数据 plugin_kv",
+  plugin_kv: "插件数据 plugin_kv（含天气凭证/缓存）",
 };
 
 const PKS: Record<string, string[]> = {
@@ -34,8 +33,7 @@ const PKS: Record<string, string[]> = {
   prefs_ambient: ["id"],
   prefs_island: ["id"],
   prefs_shortcuts: ["id"],
-  weather_api: ["id"],
-  weather_cache: ["id"],
+  prefs_dock: ["id"],
   script_launchers: ["id"],
   plugin_kv: ["plugin_id", "key"],
 };

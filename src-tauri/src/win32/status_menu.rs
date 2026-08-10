@@ -21,7 +21,7 @@ pub struct ForegroundApp {
 mod win {
     use super::ForegroundApp;
     use windows::core::{s, GUID};
-    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
@@ -30,12 +30,16 @@ mod win {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::Win32::UI::Shell::IShellDispatch4;
+    use windows::Win32::UI::Shell::{
+        IShellDispatch4, SHAppBarMessage, ABS_AUTOHIDE, ABM_GETSTATE, ABM_SETSTATE, APPBARDATA,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowA, FindWindowExA, GetAncestor, GetClassNameW, GetForegroundWindow,
         GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, ShowWindow, GA_ROOT,
         SW_HIDE, SW_SHOWNA,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
 
     /// Shell.Application
     const CLSID_SHELL: GUID = GUID::from_u128(0x13709620_C279_11CE_A49E_444553540000);
@@ -239,17 +243,110 @@ mod win {
         }
     }
 
-    pub fn set_taskbar_visible(visible: bool) -> Result<(), String> {
-        let mut any = false;
-        for_each_taskbar(|hwnd| {
-            any = true;
-            unsafe {
-                let _ = ShowWindow(hwnd, if visible { SW_SHOWNA } else { SW_HIDE });
+    /// Remembers shell auto-hide state so we can restore it.
+    struct TaskbarOverride {
+        prev_abm: u32,
+    }
+
+    static TASKBAR_OVERRIDE: Mutex<Option<TaskbarOverride>> = Mutex::new(None);
+    static TASKBAR_KEEP_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+    fn appbar_get_state() -> u32 {
+        let mut data = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            ..Default::default()
+        };
+        unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 }
+    }
+
+    fn appbar_set_state(tray: HWND, state: u32) {
+        let mut data = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            hWnd: tray,
+            lParam: LPARAM(state as isize),
+            ..Default::default()
+        };
+        unsafe {
+            let _ = SHAppBarMessage(ABM_SETSTATE, &mut data);
+        }
+    }
+
+    fn hide_taskbars_once() {
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+        for_each_taskbar(|hwnd| unsafe {
+            // Only hide when visible — avoids needless Show/Hide churn.
+            if IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_HIDE);
             }
         });
-        if !any {
-            return Err("找不到系统任务栏".into());
+    }
+
+    fn start_keep_hidden() {
+        if TASKBAR_KEEP_HIDDEN
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
         }
+        std::thread::spawn(|| {
+            while TASKBAR_KEEP_HIDDEN.load(Ordering::SeqCst) {
+                hide_taskbars_once();
+                // Re-assert auto-hide so Explorer keeps the work-area gap gone.
+                if let Some(primary) = shell_tray_hwnd() {
+                    let st = appbar_get_state();
+                    if st & ABS_AUTOHIDE == 0 {
+                        appbar_set_state(primary, st | ABS_AUTOHIDE);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        });
+    }
+
+    fn stop_keep_hidden() {
+        TASKBAR_KEEP_HIDDEN.store(false, Ordering::SeqCst);
+    }
+
+    /// Hide system taskbar while Dock owns the bottom edge.
+    /// Auto-hide reclaims work area; a light keep-hidden loop only calls
+    /// `SW_HIDE` when Explorer re-shows the bar (no SetWindowPos exile).
+    pub fn set_taskbar_visible(visible: bool) -> Result<(), String> {
+        let primary = shell_tray_hwnd().ok_or_else(|| "找不到系统任务栏".to_string())?;
+
+        if visible {
+            stop_keep_hidden();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Ok(mut g) = TASKBAR_OVERRIDE.lock() {
+                if let Some(prev) = g.take() {
+                    appbar_set_state(primary, prev.prev_abm);
+                }
+            }
+            for_each_taskbar(|hwnd| unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNA);
+            });
+            return Ok(());
+        }
+
+        let before = appbar_get_state();
+        let already = TASKBAR_OVERRIDE
+            .lock()
+            .ok()
+            .map(|g| g.is_some())
+            .unwrap_or(false);
+        if !already {
+            if before & ABS_AUTOHIDE == 0 {
+                appbar_set_state(primary, before | ABS_AUTOHIDE);
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            if let Ok(mut g) = TASKBAR_OVERRIDE.lock() {
+                *g = Some(TaskbarOverride { prev_abm: before });
+            }
+        } else if before & ABS_AUTOHIDE == 0 {
+            appbar_set_state(primary, before | ABS_AUTOHIDE);
+        }
+
+        hide_taskbars_once();
+        start_keep_hidden();
         Ok(())
     }
 
