@@ -1,8 +1,9 @@
 //! Reserve the top work area via the official AppBar API (`SHAppBarMessage`).
 //!
 //! The reserved strip is ALWAYS `STRIP_LOGICAL_H` (collapsed island height).
-//! Expanding the island / settings popup is a floating always-on-top overlay and
-//! must NEVER enlarge the AppBar rect or call `SPI_SETWORKAREA`.
+//! Expanding the island / settings popup must NEVER enlarge the AppBar rect or
+//! call `SPI_SETWORKAREA`. The visible main window does **not** fight TOPMOST —
+//! the strip is owned by work-area reservation, not Z-order.
 //!
 //! Anti-flicker rules:
 //! - Never poll `SPI_SETWORKAREA`.

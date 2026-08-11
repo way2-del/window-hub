@@ -61,6 +61,10 @@ type DockPrefs = {
   hideLingerMs: number;
   /** Max icon scale on hover (1 = off, up to 2.5). */
   magnification: number;
+  /** Glass strip corner radius in logical px (0 = square). */
+  cornerRadiusPx: number;
+  /** Overflow-hidden pin ids (restore via dock right-click). */
+  hiddenItemIds: string[];
 };
 
 const DOCK_ACTIVATION_POSITIONS: {
@@ -99,6 +103,8 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
       2.5,
       Math.max(1, Number.isFinite(Number(dp?.magnification)) ? Number(dp?.magnification) : 1.6),
     ),
+    cornerRadiusPx: Math.min(28, Math.max(0, Number(dp?.cornerRadiusPx) || 12)),
+    hiddenItemIds: Array.isArray(dp?.hiddenItemIds) ? dp.hiddenItemIds.map(String) : [],
   };
 }
 
@@ -117,6 +123,7 @@ type Ambient = {
 
 type TrayIconInfo = {
   id: string;
+  pin_key?: string;
   tooltip: string;
   process: string;
   uid: number;
@@ -126,13 +133,52 @@ type TrayIconInfo = {
   icon_png_base64: string;
   area: string;
   flashing?: boolean;
+  /** IME / input language — forced 常显 */
+  resident?: boolean;
 };
 
 type TrayPrefs = {
   pinned: string[];
-  /** icon id → 右键菜单高度；未设置则自动 */
+  /** pin_key → 右键菜单高度；未设置则自动 */
   menu_heights?: Record<string, number>;
 };
+
+function trayPinKey(icon: TrayIconInfo): string {
+  const k = (icon.pin_key || "").trim();
+  return k || icon.id;
+}
+
+function isTrayPinned(icon: TrayIconInfo, pinned: Set<string>): boolean {
+  return pinned.has(trayPinKey(icon)) || pinned.has(icon.id);
+}
+
+function isTrayResident(icon: TrayIconInfo): boolean {
+  if (icon.resident) return true;
+  const tip = (icon.tooltip || "").trim();
+  const tipL = tip.toLowerCase();
+  const proc = (icon.process || "").trim().toLowerCase();
+  const key = (icon.pin_key || icon.id || "").trim().toLowerCase();
+  if (
+    key === "a59b00b9-f6cd-4fed-a1dc-0f4064a12831" ||
+    key === "2c77a81e-41cc-4178-a3a7-5f8a987568e6"
+  ) {
+    return true;
+  }
+  if (
+    proc === "textinputhost" ||
+    proc === "ctfmon" ||
+    proc === "tabtip" ||
+    proc.includes("sogou") ||
+    proc.includes("inputmethod")
+  ) {
+    return true;
+  }
+  if (/输入法|语言|ime|language|微软拼音|搜狗|中文/.test(tipL) || tipL.includes("chinese")) {
+    return true;
+  }
+  if (/^[\u4e00-\u9fff]$/.test(tip)) return true;
+  return /^(en|eng|chs|cht|jp|jpn|kr|kor|中|英|日|韩)$/i.test(tip);
+}
 
 type PluginMarketEntry = {
   id: string;
@@ -232,7 +278,7 @@ function isTencentIm(icon: TrayIconInfo) {
 }
 
 function menuHeightLabel(icon: TrayIconInfo, heights: Record<string, number>) {
-  const custom = heights[icon.id];
+  const custom = heights[trayPinKey(icon)] ?? heights[icon.id];
   if (custom != null && custom > 0) return `菜单 ${custom}px`;
   if (isTencentIm(icon)) return `菜单 ${DEFAULT_TENCENT_MENU_HEIGHT}px（默认）`;
   return "菜单自动";
@@ -359,6 +405,42 @@ export default function SettingsApp() {
   const [launcherDraft, setLauncherDraft] = useState(emptyLauncherDraft);
   const [launcherMsg, setLauncherMsg] = useState("");
   const [launcherBusy, setLauncherBusy] = useState(false);
+  const [focusPluginId, setFocusPluginId] = useState<string | null>(() => {
+    const fromWin =
+      typeof window !== "undefined" && typeof window.__WH_SETTINGS_FOCUS_PLUGIN__ === "string"
+        ? window.__WH_SETTINGS_FOCUS_PLUGIN__.trim()
+        : "";
+    return fromWin || null;
+  });
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void listen<string>("settings-focus-plugin", (ev) => {
+      const id = typeof ev.payload === "string" ? ev.payload.trim() : "";
+      if (!id) return;
+      setFocusPluginId(id);
+      setNav("plugins");
+    }).then((fn) => {
+      un = fn;
+    });
+    if (focusPluginId) setNav("plugins");
+    return () => un?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed nav once from init focus
+  }, []);
+
+  useEffect(() => {
+    if (!focusPluginId || nav !== "plugins") return;
+    const t = window.setTimeout(() => {
+      const el = document.querySelector(
+        `[data-plugin-id="${CSS.escape(focusPluginId)}"]`,
+      ) as HTMLElement | null;
+      if (!el) return;
+      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      el.classList.add("is-focus-flash");
+      window.setTimeout(() => el.classList.remove("is-focus-flash"), 1600);
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [focusPluginId, nav, installed]);
 
   const pullOptions = useMemo(() => {
     const panels = listPanelProviders(pluginRegistry.listPanelManifests());
@@ -402,9 +484,18 @@ export default function SettingsApp() {
     (entry) =>
       entry.id === "com.window-hub.weather" || entry.id === "com.window-hub.weather__dev",
   );
+  const idiomInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.idiom" || entry.id === "com.window-hub.idiom__dev",
+  );
   const mirrorInstalled = pluginEntries.some(
     (entry) =>
       entry.id === "com.window-hub.mirror" || entry.id === "com.window-hub.mirror__dev",
+  );
+  const appLibraryInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.app-library" ||
+      entry.id === "com.window-hub.app-library__dev",
   );
 
   const shortcutsPluginOptions = useMemo(() => {
@@ -652,21 +743,24 @@ export default function SettingsApp() {
     }
   }
 
-  async function togglePinned(id: string) {
-    const next = pinnedSet.has(id)
-      ? pinned.filter((x) => x !== id)
-      : [...pinned, id];
+  async function togglePinned(icon: TrayIconInfo) {
+    // Input language / IME stay resident — cannot unpin.
+    if (isTrayResident(icon)) return;
+    const key = trayPinKey(icon);
+    const next = isTrayPinned(icon, pinnedSet)
+      ? pinned.filter((x) => x !== key && x !== icon.id)
+      : [...pinned.filter((x) => x !== icon.id), key];
     setPinned(next);
     await persistTrayPrefs(next, menuHeights);
   }
 
-  function openMenuHeightEditor(id: string) {
-    const icon = trays.find((t) => t.id === id);
-    const cur = menuHeights[id];
-    setMenuHeightEditId(id);
+  function openMenuHeightEditor(icon: TrayIconInfo) {
+    const key = trayPinKey(icon);
+    const cur = menuHeights[key] ?? menuHeights[icon.id];
+    setMenuHeightEditId(key);
     if (cur != null && cur > 0) {
       setMenuHeightDraft(String(cur));
-    } else if (icon && isTencentIm(icon)) {
+    } else if (isTencentIm(icon)) {
       setMenuHeightDraft(String(DEFAULT_TENCENT_MENU_HEIGHT));
     } else {
       setMenuHeightDraft("");
@@ -677,6 +771,11 @@ export default function SettingsApp() {
     const raw = menuHeightDraft.trim();
     const parsed = raw === "" ? null : Number(raw);
     const nextHeights = { ...menuHeights };
+    // Drop legacy runtime-id entry if present.
+    const icon = trays.find((t) => trayPinKey(t) === id || t.id === id);
+    if (icon && icon.id !== id) {
+      delete nextHeights[icon.id];
+    }
     if (parsed == null || !Number.isFinite(parsed) || parsed <= 0) {
       delete nextHeights[id];
     } else {
@@ -691,6 +790,10 @@ export default function SettingsApp() {
   async function clearIconMenuHeight(id: string) {
     const nextHeights = { ...menuHeights };
     delete nextHeights[id];
+    const icon = trays.find((t) => trayPinKey(t) === id || t.id === id);
+    if (icon) {
+      delete nextHeights[icon.id];
+    }
     setMenuHeights(nextHeights);
     setMenuHeightEditId(null);
     setMenuHeightDraft("");
@@ -1330,35 +1433,35 @@ export default function SettingsApp() {
                 </label>
                 <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
                   <span className="pref-row-text">
-                    <span className="pref-row-label">图标放大</span>
+                    <span className="pref-row-label">栏身圆角</span>
                     <span className="pref-row-desc">
-                      划过扇形放大（等比、可超出栏顶）；栏高不变。1.0 = 关闭，默认 1.6
+                      SWCA 毛玻璃圆角：0 直角 · 1–14 小圆角 · 15–28 大圆角（系统档，与材质同步）
                     </span>
                   </span>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                     <input
                       type="range"
-                      min={1}
-                      max={2.5}
-                      step={0.05}
-                      value={dockPrefs.magnification}
+                      min={0}
+                      max={28}
+                      step={1}
+                      value={dockPrefs.cornerRadiusPx}
                       disabled={!dockPrefs.enabled || dockBusy}
                       onChange={(e) => {
                         const n = Number(e.target.value);
                         if (!Number.isFinite(n)) return;
-                        setDockPrefs((p) => ({ ...p, magnification: n }));
+                        setDockPrefs((p) => ({ ...p, cornerRadiusPx: n }));
                       }}
                       onPointerUp={(e) => {
                         const n = Math.min(
-                          2.5,
-                          Math.max(1, Number((e.target as HTMLInputElement).value) || 1.6),
+                          28,
+                          Math.max(0, Number((e.target as HTMLInputElement).value) || 0),
                         );
-                        void persistDockPrefs({ magnification: n });
+                        void persistDockPrefs({ cornerRadiusPx: n });
                       }}
                       style={{ width: 120 }}
                     />
-                    <span style={{ minWidth: 36, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                      {dockPrefs.magnification.toFixed(2)}
+                    <span style={{ minWidth: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {dockPrefs.cornerRadiusPx}
                     </span>
                   </span>
                 </label>
@@ -1399,21 +1502,23 @@ export default function SettingsApp() {
                   {saving
                     ? "保存中…"
                     : trays.length > 0
-                      ? "勾选常显；右侧齿轮可单独设置右键菜单高度"
+                      ? "勾选常显；Wi‑Fi / 输入法为系统常驻；齿轮可设右键菜单高度"
                       : "正在抓取系统托盘…"}
                 </span>
               </div>
               <p className="card-desc">
-                右键菜单默认自动测量高度并贴到点击下方；可为每个图标自定义像素高度。定位只改消息坐标并移动菜单窗口，真实鼠标指针不会跳动。
+                右键菜单默认自动测量高度并贴到点击下方；可为每个图标自定义像素高度。定位只改消息坐标并移动菜单窗口，真实鼠标指针不会跳动。Wi‑Fi 与输入法由 Host 自绘常驻，不依赖系统 NotifyIcon。
               </p>
               {trays.length === 0 ? (
                 <p className="tray-settings-empty">暂未收到托盘图标</p>
               ) : (
                 <div className="tray-settings-list">
                   {trays.map((icon) => {
-                    const on = pinnedSet.has(icon.id);
-                    const customH = menuHeights[icon.id];
-                    const editing = menuHeightEditId === icon.id;
+                    const key = trayPinKey(icon);
+                    const resident = isTrayResident(icon);
+                    const on = resident || isTrayPinned(icon, pinnedSet);
+                    const customH = menuHeights[key] ?? menuHeights[icon.id];
+                    const editing = menuHeightEditId === key || menuHeightEditId === icon.id;
                     const tencentDefault = isTencentIm(icon);
                     return (
                       <div
@@ -1422,8 +1527,10 @@ export default function SettingsApp() {
                       >
                         <button
                           type="button"
-                          className={`tray-settings-item${on ? " is-on" : ""}`}
-                          onClick={() => void togglePinned(icon.id)}
+                          className={`tray-settings-item${on ? " is-on" : ""}${resident ? " is-resident" : ""}`}
+                          onClick={() => void togglePinned(icon)}
+                          title={resident ? "Wi‑Fi / 输入法为系统常驻，不可取消常显" : undefined}
+                          aria-disabled={resident || undefined}
                         >
                           {icon.icon_png_base64 ? (
                             <img
@@ -1441,6 +1548,7 @@ export default function SettingsApp() {
                             <span className="tray-settings-name">{trayLabel(icon)}</span>
                             <span className="tray-settings-sub">
                               {icon.process || icon.id}
+                              {resident ? " · 系统常驻" : ""}
                               {icon.area === "overflow" ? " · 溢出区" : ""}
                               {` · ${menuHeightLabel(icon, menuHeights)}`}
                             </span>
@@ -1460,7 +1568,7 @@ export default function SettingsApp() {
                               setMenuHeightEditId(null);
                               setMenuHeightDraft("");
                             } else {
-                              openMenuHeightEditor(icon.id);
+                              openMenuHeightEditor(icon);
                             }
                           }}
                         >
@@ -1482,7 +1590,7 @@ export default function SettingsApp() {
                               onChange={(e) => setMenuHeightDraft(e.target.value)}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") {
-                                  void saveIconMenuHeight(icon.id);
+                                  void saveIconMenuHeight(key);
                                 }
                                 if (e.key === "Escape") {
                                   setMenuHeightEditId(null);
@@ -1493,7 +1601,7 @@ export default function SettingsApp() {
                             <button
                               type="button"
                               className="settings-ghost-btn"
-                              onClick={() => void saveIconMenuHeight(icon.id)}
+                              onClick={() => void saveIconMenuHeight(key)}
                             >
                               保存
                             </button>
@@ -1501,7 +1609,7 @@ export default function SettingsApp() {
                               type="button"
                               className="settings-ghost-btn"
                               disabled={customH == null && !tencentDefault}
-                              onClick={() => void clearIconMenuHeight(icon.id)}
+                              onClick={() => void clearIconMenuHeight(key)}
                             >
                               {tencentDefault ? "恢复默认" : "自动"}
                             </button>
@@ -1588,6 +1696,16 @@ export default function SettingsApp() {
                     导入示例：天气
                   </button>
                 ) : null}
+                {!idiomInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("idiom")}
+                  >
+                    导入示例：成语
+                  </button>
+                ) : null}
                 {!mirrorInstalled ? (
                   <button
                     type="button"
@@ -1598,6 +1716,16 @@ export default function SettingsApp() {
                     导入示例：镜子
                   </button>
                 ) : null}
+                {!appLibraryInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("app-library")}
+                  >
+                    导入示例：应用库
+                  </button>
+                ) : null}
               </div>
               {pluginMsg ? <p className="plugin-msg">{pluginMsg}</p> : null}
 
@@ -1605,7 +1733,8 @@ export default function SettingsApp() {
                 {pluginEntries.map((entry) => (
                   <div
                     key={entry.id}
-                    className={`plugin-row${entry.official ? " is-official" : ""}${entry.enabled ? "" : " is-disabled"}`}
+                    data-plugin-id={entry.id}
+                    className={`plugin-row${entry.official ? " is-official" : ""}${entry.enabled ? "" : " is-disabled"}${focusPluginId === entry.id ? " is-focused" : ""}`}
                   >
                     <div className="plugin-meta">
                       <strong>

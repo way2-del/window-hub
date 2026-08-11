@@ -11,9 +11,18 @@ body,
 body.is-dock {
   color: var(--glass-fg, #f4f4f5);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* Fan paints into HWND headroom above the 60px chrome — must not clip. */
+  overflow: visible;
 }
 
-/* Full window is transparent; glass lives on the fixed-height chrome strip. */
+body.is-dock,
+body.is-dock #root {
+  overflow: visible;
+}
+
+/* Full window is transparent; glass lives on the fixed-height chrome strip.
+   Headroom above the bar is paint-only — do not capture pointer there so
+   AutoHide / clicks fall through to the OS when not over the chrome. */
 .dock-shell {
   box-sizing: border-box;
   position: relative;
@@ -26,7 +35,8 @@ body.is-dock {
   border: none;
   border-radius: 0;
   background: transparent;
-  overflow: hidden;
+  overflow: visible;
+  pointer-events: none;
 }
 
 /* Shrink-wraps the icon row; chrome matches this width only. */
@@ -36,13 +46,13 @@ body.is-dock {
   align-items: flex-end;
   justify-content: center;
   height: 60px;
-  max-width: 100%;
   overflow: visible;
+  pointer-events: none;
 }
 
 /* Visible dock height — never grows with magnification.
-   Real acrylic comes from sibling `dock-glass` under this strip.
-   Keep CSS wash soft — a hard fill creates a black top edge. */
+   Acrylic is painted by sibling `dock-glass` only. Do NOT paint a CSS plate
+   here: fill + radius creates the dark top hairline over the glass. */
 .dock-chrome {
   position: absolute;
   left: 0;
@@ -52,12 +62,8 @@ body.is-dock {
   pointer-events: none;
   border: none;
   outline: none;
-  border-radius: 12px;
-  background: color-mix(
-    in srgb,
-    var(--glass-panel-bg, rgba(28, 28, 30, 0.42)) 42%,
-    transparent
-  );
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
 }
 
@@ -70,29 +76,66 @@ body.is-dock {
   gap: 6px;
   /* Same as chrome — icons scale upward into transparent headroom above. */
   height: 60px;
-  padding: 0 6px;
+  padding: 0 2px;
   border: 0;
   background: transparent;
   box-shadow: none;
   overflow: visible;
+  pointer-events: auto;
 }
 
 .dock-loading {
   opacity: 0;
 }
 
+.dock-compact-tip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(60px + 10px);
+  transform: translateX(-50%);
+  z-index: 5;
+  max-width: min(420px, 90%);
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+  color: var(--glass-fg, #f4f4f5);
+  background: rgba(20, 20, 24, 0.78);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  white-space: normal;
+}
+
+/* Full bar height + flex-center the rule — parent uses align-items:flex-end
+   for icons, so a short 1px line alone sits on the bottom. */
 .dock-sep {
+  box-sizing: border-box;
+  width: 10px;
+  align-self: stretch;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.dock-sep::before {
+  content: "";
   width: 1px;
   height: 28px;
-  margin-bottom: 10px;
+  border-radius: 1px;
   background: rgba(255, 255, 255, 0.18);
-  flex-shrink: 0;
-  align-self: flex-end;
 }
 
 .dock-item {
   position: relative;
-  width: 40px;
+  width: var(--dock-slot, 40px);
   height: 100%;
   padding: 0;
   border: 0;
@@ -105,52 +148,60 @@ body.is-dock {
   cursor: pointer;
   color: inherit;
   flex-shrink: 0;
-  /* Fan width grows; icon uses uniform scale only (no skew). */
-  transition: width 80ms linear;
   margin-bottom: 0;
   padding-bottom: 6px;
   overflow: visible;
+  /* Fan via real layout size — no CSS transform on icons. */
+  transition: width 160ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: width;
 }
 
-/* Hover only on the icon tile — not the running dot below. */
+/* Icon tile grows in layout px (bottom-aligned into headroom). */
 .dock-hit {
-  width: 40px;
-  height: 40px;
+  width: var(--dock-hit, 40px);
+  height: var(--dock-hit, 40px);
+  flex-shrink: 0;
   display: grid;
   place-items: center;
-  border-radius: 10px;
+  border-radius: 0;
   background: transparent;
-  transform: scale(var(--dock-scale, 1));
-  transform-origin: bottom center;
-  transition: transform 80ms linear;
-  will-change: transform;
+  transition:
+    width 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: width, height;
 }
 
-.dock-item:hover .dock-hit,
-.dock-item.is-magnified .dock-hit {
-  background: rgba(255, 255, 255, 0.08);
+.dock-item.is-magnified {
+  z-index: 2;
 }
 
 .dock-icon {
-  width: 32px;
-  height: 32px;
+  width: calc(32px * var(--dock-scale, 1));
+  height: calc(32px * var(--dock-scale, 1));
+  flex-shrink: 0;
   object-fit: contain;
-  border-radius: 6px;
-  /* Source is 128–256px; let the browser downscale (sharper than upscaling 32px). */
+  border-radius: calc(6px * var(--dock-scale, 1));
   image-rendering: auto;
   -webkit-user-drag: none;
+  transition:
+    width 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .dock-icon-fallback {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: calc(32px * var(--dock-scale, 1));
+  height: calc(32px * var(--dock-scale, 1));
+  flex-shrink: 0;
+  border-radius: calc(8px * var(--dock-scale, 1));
   display: grid;
   place-items: center;
-  font-size: 13px;
+  font-size: calc(13px * var(--dock-scale, 1));
   font-weight: 700;
   background: rgba(255, 255, 255, 0.12);
+  transition:
+    width 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    font-size 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .dock-dot {
@@ -171,7 +222,7 @@ body.is-dock {
   opacity: 1;
 }
 
-html[data-theme="light"] .dock-sep {
+html[data-theme="light"] .dock-sep::before {
   background: rgba(0, 0, 0, 0.16);
 }
 
@@ -181,7 +232,9 @@ html[data-theme="light"] .dock-dot.is-on {
 
 @media (prefers-reduced-motion: reduce) {
   .dock-item,
-  .dock-hit {
+  .dock-hit,
+  .dock-icon,
+  .dock-icon-fallback {
     transition: none;
   }
 }

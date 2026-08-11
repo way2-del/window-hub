@@ -16,8 +16,9 @@ use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DWMWCP_ROUND, DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWCP_ROUNDSMALL,
+    DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
@@ -239,6 +240,149 @@ pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(
     Ok(())
 }
 
+/// Dock glass strip: **SWCA acrylic + DWM rounded corners**.
+///
+/// Under WebView2, SWCA paints a full HWND slab — `SetWindowRgn` cannot round it
+/// (only the CSS wash). The only way to round SWCA is `DWMWA_WINDOW_CORNER_PREFERENCE`
+/// (`ROUNDSMALL` / `ROUND`). Custom px maps to those two system sizes; 0 = square.
+pub fn apply_dock_glass_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    let hwnd = hwnd_of(window)?;
+    prepare_hwnd_for_system_backdrop(hwnd);
+    clear_webview_fill(window);
+    // Drop legacy blur-behind / region experiments that fight SWCA.
+    disable_blur_behind(hwnd);
+    clear_window_region(hwnd);
+
+    apply_swca_acrylic(hwnd, dark)?;
+    apply_dock_glass_chrome(hwnd, dark, dock_corner_radius_px());
+    let _ = window.set_shadow(false);
+    strip_class_drop_shadow(hwnd);
+
+    let win = window.clone();
+    let dark_c = dark;
+    std::thread::spawn(move || {
+        for ms in [40_u64, 100, 220, 450, 800] {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            if let Ok(h) = hwnd_of(&win) {
+                disable_blur_behind(h);
+                clear_window_region(h);
+                let _ = apply_swca_acrylic(h, dark_c);
+                apply_dock_glass_chrome(h, dark_c, dock_corner_radius_px());
+                let _ = win.set_shadow(false);
+                strip_class_drop_shadow(h);
+                clear_webview_fill(&win);
+            }
+        }
+    });
+    clear_webview_fill(window);
+    Ok(())
+}
+
+fn apply_dock_glass_chrome(hwnd: HWND, dark: Option<bool>, corner_radius_logical: u32) {
+    unsafe {
+        if let Some(d) = dark {
+            let v: u32 = u32::from(d);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &v as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+        // Map slider → system SWCA-compatible corner sizes (only API that rounds acrylic).
+        let corner = dwm_corner_for_radius(corner_radius_logical);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        // Hide the 1px visible frame border that reads as a dark top hairline.
+        let thickness: u32 = 0;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            &thickness as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+fn dwm_corner_for_radius(radius_logical: u32) -> DWM_WINDOW_CORNER_PREFERENCE {
+    match radius_logical {
+        0 => DWMWCP_DONOTROUND,
+        1..=14 => DWMWCP_ROUNDSMALL,
+        _ => DWMWCP_ROUND,
+    }
+}
+
+/// Re-apply DWM corner preference after place/resize (SWCA path).
+pub fn apply_dock_glass_corners_pub(hwnd: HWND, corner_radius_logical: u32) {
+    apply_dock_glass_chrome(hwnd, None, corner_radius_logical);
+}
+
+fn strip_class_drop_shadow(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassLongPtrW, SetClassLongPtrW, CS_DROPSHADOW, GCL_STYLE,
+    };
+    unsafe {
+        let style = GetClassLongPtrW(hwnd, GCL_STYLE);
+        let drop = CS_DROPSHADOW.0 as usize;
+        if style & drop != 0 {
+            let _ = SetClassLongPtrW(hwnd, GCL_STYLE, (style & !drop) as isize);
+        }
+    }
+}
+
+fn clear_window_region(hwnd: HWND) {
+    use windows::Win32::Graphics::Gdi::SetWindowRgn;
+    unsafe {
+        let _ = SetWindowRgn(hwnd, None, true);
+    }
+}
+
+fn disable_blur_behind(hwnd: HWND) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmEnableBlurBehindWindow, DWM_BB_ENABLE, DWM_BLURBEHIND,
+    };
+    use windows::Win32::Graphics::Gdi::HRGN;
+    let bb = DWM_BLURBEHIND {
+        dwFlags: DWM_BB_ENABLE,
+        fEnable: false.into(),
+        hRgnBlur: HRGN::default(),
+        fTransitionOnMaximized: false.into(),
+    };
+    unsafe {
+        let _ = DwmEnableBlurBehindWindow(hwnd, &bb);
+    }
+}
+
+fn dock_corner_radius_px() -> u32 {
+    crate::db::with_conn(|c| crate::db::dock_get(c))
+        .ok()
+        .flatten()
+        .and_then(|v| {
+            v.get("cornerRadiusPx")
+                .and_then(|x| x.as_u64())
+                .or_else(|| v.get("corner_radius_px").and_then(|x| x.as_u64()))
+        })
+        .map(|n| n.min(28) as u32)
+        .unwrap_or(12)
+}
+
+/// Kept for place/resize hooks — clears region and refreshes DWM corners.
+pub fn apply_dock_glass_round_frost_pub(hwnd: HWND, corner_radius_logical: u32) {
+    clear_window_region(hwnd);
+    apply_dock_glass_corners_pub(hwnd, corner_radius_logical);
+}
+
 /// Dock icons layer: no SWCA — a sibling `dock-glass` window owns the material
 /// on the 60px strip so magnification headroom stays fully clear.
 pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
@@ -270,6 +414,7 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
             std::mem::size_of::<u32>() as u32,
         );
     }
+    let _ = window.set_shadow(false);
     clear_webview_fill(window);
     Ok(())
 }
@@ -281,9 +426,12 @@ pub fn apply_effect(
     dark: Option<bool>,
     alpha: u8,
 ) -> Result<(), String> {
-    // Icons layer must stay fully clear above the bar; glass is `dock-glass`.
-    if window.label() == "dock" {
-        return apply_dock_icons_layer(window, dark);
+    match window.label() {
+        // Icons layer must stay fully clear above the bar.
+        "dock" => return apply_dock_icons_layer(window, dark),
+        // Glass strip: acrylic without rounded DWM chrome/shadow.
+        "dock-glass" => return apply_dock_glass_layer(window, dark),
+        _ => {}
     }
 
     let hwnd = hwnd_of(window)?;

@@ -17,11 +17,21 @@ export type PluginCapability =
 
 export type ShortcutsAction = "expand" | "popup.open" | "panel.open" | "command";
 
+/**
+ * 快捷区 2×2 管理/设置钮（slots.shortcuts.manage）
+ * - custom：插件自画（自定义弹窗）；Host 不重复画
+ * - none：不显示
+ * - settings：Host 画钮，点击跳转设置页对该插件
+ */
+export type ShortcutsManageMode = "custom" | "none" | "settings";
+
 export type ShortcutsSlotConfig = {
   icon: string;
   label?: string;
   order?: number;
   action?: ShortcutsAction;
+  /** 管理/设置钮：custom | none | settings（默认 none） */
+  manage?: ShortcutsManageMode;
 };
 
 export type PluginSettingType =

@@ -2,13 +2,28 @@
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::win32::enum_windows::{get_window, list_windows, parse_window_id, WindowInfo};
 
 const POLL_MS: u64 = 250;
+
+fn shared_snapshot() -> &'static Mutex<Vec<WindowInfo>> {
+    static SNAP: OnceLock<Mutex<Vec<WindowInfo>>> = OnceLock::new();
+    SNAP.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Latest poller snapshot for callers without `AppHandle` (e.g. dock layout).
+/// Falls back to a fresh EnumWindows if the poller has not filled yet.
+pub fn cached_windows() -> Vec<WindowInfo> {
+    let snap = shared_snapshot().lock().clone();
+    if !snap.is_empty() {
+        return snap;
+    }
+    list_windows(None)
+}
 
 #[derive(Clone)]
 pub struct WindowsService {
@@ -51,6 +66,7 @@ impl WindowsService {
                         next.retain(|w| w.hwnd != dh);
                     }
                 }
+                *shared_snapshot().lock() = next.clone();
                 let changed = {
                     let mut snap = poller.inner.snapshot.lock();
                     let key = |w: &WindowInfo| format!("{}:{}", w.id, w.title);
@@ -96,6 +112,7 @@ impl WindowsService {
         *self.inner.exclude.lock() = exclude;
         let next = list_windows(exclude);
         *self.inner.snapshot.lock() = next.clone();
+        *shared_snapshot().lock() = next.clone();
         next
     }
 }

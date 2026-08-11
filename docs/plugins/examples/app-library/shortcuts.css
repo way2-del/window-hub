@@ -1,0 +1,183 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+html,
+body {
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+  display: flex;
+  align-items: center;
+  color: var(--wh-chrome-fg, rgba(255, 255, 255, 0.94));
+  text-shadow: var(--wh-chrome-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
+  font-family: var(
+    --wh-chrome-font-family,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif
+  );
+  font-size: var(--wh-chrome-font-size, 12px);
+  font-weight: var(--wh-chrome-font-weight, 700);
+  user-select: none;
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+button,
+.al-chip {
+  font: inherit;
+  color: inherit;
+  text-shadow: inherit;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  cursor: pointer;
+}
+
+.al-bar {
+  display: flex;
+  align-items: center;
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  overflow: visible;
+  background: transparent !important;
+  border: none !important;
+}
+
+.al-chip {
+  flex-shrink: 0;
+  height: var(--wh-bar-h, 28px);
+  padding: 0 8px 0 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: opacity 140ms ease;
+  min-width: 0;
+  max-width: 160px;
+}
+
+.al-chip.is-manage {
+  position: relative;
+  width: 28px;
+  min-width: 28px;
+  max-width: 28px;
+  padding: 0;
+  justify-content: center;
+  align-items: center;
+  text-shadow: none;
+}
+
+.al-chip:hover,
+.al-chip.is-active {
+  opacity: 0.78;
+}
+
+.al-chip.is-fg {
+  opacity: 1;
+}
+
+.al-chip.is-stale {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.al-chip-icon {
+  display: block;
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  padding: 0;
+  stroke: currentColor;
+  overflow: visible;
+}
+
+.al-chip.is-manage .al-chip-icon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  transform: translate(-50%, -50%);
+  line-height: 0;
+  text-shadow: none;
+  filter: none;
+  pointer-events: none;
+}
+
+.al-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.al-chip-label {
+  font-size: var(--wh-chrome-font-size, 12px);
+  font-weight: var(--wh-chrome-font-weight, 700);
+  letter-spacing: 0.01em;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.al-active-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #30d158;
+  box-shadow:
+    0 0 0 1px rgba(48, 209, 88, 0.35),
+    0 0 5px 1px rgba(48, 209, 88, 0.75),
+    0 0 9px 2px rgba(48, 209, 88, 0.35);
+}
+
+.al-divider {
+  width: 6px;
+  align-self: stretch;
+  flex-shrink: 0;
+  position: relative;
+  pointer-events: none;
+  background: transparent !important;
+  border: none !important;
+}
+
+.al-divider::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 2px;
+  width: 1px;
+  background: color-mix(in srgb, currentColor 28%, transparent);
+  opacity: 0.55;
+}

@@ -32,6 +32,7 @@ hub.windows.list/get/focus/subscribe
 // Panel + Popup：
 hub.staging.*          // 需 staging
 hub.island.setBar/clearBar
+hub.island.onBarClick(cb)   // Shortcuts：岛栏摘要点击（无 panel 时仍触发）
 hub.panel.openSession/closeSession/close
 
 // Shortcuts iframe：
@@ -75,3 +76,5 @@ Companion 脚本不在 CapGate 内，见 [companion-scripts.md](./companion-scri
 |------|------|------|
 | 窗口组 | `examples/window-groups/` | shortcuts + popup |
 | 中转站 | `examples/transfer-station/` | drop + bar + panel |
+| 天气 | `examples/weather/` | bar + panel（隐形 shortcuts worker） |
+| 成语 | `examples/idiom/` | shortcuts 自画 chip（点击切换） |

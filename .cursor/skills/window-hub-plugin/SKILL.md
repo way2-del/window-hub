@@ -47,12 +47,14 @@ description: >-
 
 | 需求 | 跟谁学 | 目录 |
 |------|--------|------|
-| 快捷区常驻条 + 弹窗管理 | **窗口组** | `docs/plugins/examples/window-groups/` |
+| 快捷区常驻条 + 弹窗管理 | **窗口组** | `docs/plugins/examples/window-groups/`（`manage=custom`） |
+| 快捷区入口 + 可自建应用库 | **应用库** | `docs/plugins/examples/app-library/`（`manage=custom`） |
 | 拖放暂存 + 岛栏 + 矮面板 | **中转站** | `docs/plugins/examples/transfer-station/` |
-| 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/` |
+| 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/`（shortcuts `manage=none`） |
+| 快捷区成语 chip + 历史弹窗 + 带调拼音 | **成语** | `docs/plugins/examples/idiom/`（`manage=custom`；`pinyin-pro.min.js`） |
 | 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
-打包资源镜像：`src-tauri/resources/plugins/{window-groups|transfer-station|weather|mirror}/`（与 docs 示例保持同步）。
+打包资源镜像：`src-tauri/resources/plugins/{window-groups|app-library|transfer-station|weather|mirror|idiom}/`（与 docs 示例保持同步）。
 
 ### 1. 建目录与 `plugin.json`
 
@@ -92,7 +94,8 @@ my-plugin/
       "icon": "icon.svg",
       "label": "Demo",
       "order": 40,
-      "action": "popup.open"
+      "action": "popup.open",
+      "manage": "custom"
     },
     "island.panel": {
       "defaultSize": { "w": 380, "h": 180 },
@@ -133,12 +136,13 @@ my-plugin/
 | `panel.openSession/closeSession/close` | ✅ | ✅ | ❌ |
 | `popup.open/close` | close ✅ | ❌ | ✅ open/close |
 | `shortcuts.getBounds/requestSize` | ❌ | ❌ | ✅ |
+| `shortcuts.showTip/hideTip` | ❌ | ❌ | ✅（Host tip；与插件弹窗同 Mica） |
 | `shortcuts.setBadge` | ✅ | ❌ | ❌ |
 | `foreground.subscribe` | ❌ | ❌ | ✅ |
 | `notify` | ✅ | ✅ | ✅ |
 | `fetch` | ✅ | ✅ | ✅ |
 
-- 快捷区细则 → `window-hub-shortcuts`（高度 `getBounds().height` / `--wh-bar-h`，禁止写死 28）
+- 快捷区细则 → `window-hub-shortcuts`（高度 `getBounds().height` / `--wh-bar-h`，禁止写死 28；**`slots.shortcuts.manage`**：`custom` 自画弹窗 / `none` 不显示 / `settings` Host 跳转设置；**hover** 用 `hub.shortcuts.showTip` 或 `title`（自动改 Host tip），禁止依赖系统原生气泡；**布局**：按住 Ctrl + 左键拖动排序，持久化 `prefs_shortcuts.pluginOrder`）
 - 岛面板尺寸 → `settings.panelWidth`/`panelHeight` → 否则 `defaultSize` → 否则 380×220；`excludeFromPullContent` 不进下拉列表
 - 拖放赢家：`order` 最低且同时具备 `island.drop` + `staging`
 - **废弃：** `hub.shortcuts.setPins` / `clearPins`（勿用）

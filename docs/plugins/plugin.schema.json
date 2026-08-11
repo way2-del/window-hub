@@ -67,6 +67,11 @@
             "action": {
               "type": "string",
               "enum": ["expand", "popup.open", "panel.open", "command"]
+            },
+            "manage": {
+              "type": "string",
+              "enum": ["custom", "none", "settings"],
+              "description": "Shortcuts 2x2 manage/settings chip: custom=plugin-drawn popup; none=hidden; settings=Host chip opens Settings for this plugin"
             }
           }
         },

@@ -12,6 +12,8 @@ const WINDOW_GROUPS_EXAMPLE_ID: &str = "com.window-hub.window-groups";
 const TRANSFER_EXAMPLE_ID: &str = "com.window-hub.transfer-station";
 const WEATHER_EXAMPLE_ID: &str = "com.window-hub.weather";
 const MIRROR_EXAMPLE_ID: &str = "com.window-hub.mirror";
+const APP_LIBRARY_EXAMPLE_ID: &str = "com.window-hub.app-library";
+const IDIOM_EXAMPLE_ID: &str = "com.window-hub.idiom";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +207,7 @@ pub fn ensure_official_plugins(app: &AppHandle) {
         ("weather", WEATHER_EXAMPLE_ID),
         ("mirror", MIRROR_EXAMPLE_ID),
         ("transfer-station", TRANSFER_EXAMPLE_ID),
+        ("idiom", IDIOM_EXAMPLE_ID),
     ] {
         let reg = load_registry();
         let bundled = match resolve_example_plugin_dir(app, folder) {
@@ -442,6 +445,10 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("weather")
     } else if id == "mirror" || id == MIRROR_EXAMPLE_ID {
         Ok("mirror")
+    } else if id == "app-library" || id == APP_LIBRARY_EXAMPLE_ID {
+        Ok("app-library")
+    } else if id == "idiom" || id == IDIOM_EXAMPLE_ID {
+        Ok("idiom")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

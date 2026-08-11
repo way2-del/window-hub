@@ -51,7 +51,8 @@ Rust 单例轮询（默认 250ms），事件 `hub-windows-changed`。多插件 `
 | 方法 | 说明 |
 |------|------|
 | `island.setBar({ text, title? })` | 需 `island.bar` |
-| `island.clearBar()` | 清空岛栏摘要 |
+| `island.clearBar()` | 需 `island.bar` |
+| `island.onBarClick(cb)` | Shortcuts iframe：岛栏摘要被点击时回调（无 panel 也可） |
 | `panel.openSession()` | 需 `island.panel`；临时展开该插件面板 |
 | `panel.closeSession()` | 清会话并收起 |
 | `panel.close()` | 面板内关闭 |

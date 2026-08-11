@@ -47,6 +47,9 @@ struct VisInner {
     hide_deadline: Option<Instant>,
     /// When the HWND last finished a show transition.
     shown_at: Option<Instant>,
+    /// Consecutive polls with pointer in/out of chrome (hysteresis).
+    near_streak: u32,
+    away_streak: u32,
     last_reason: String,
 }
 
@@ -71,6 +74,8 @@ impl DockVisibility {
                 busy: false,
                 hide_deadline: None,
                 shown_at: None,
+                near_streak: 0,
+                away_streak: 0,
                 last_reason: "init".into(),
             }),
             running: AtomicBool::new(false),
@@ -224,13 +229,23 @@ impl DockVisibility {
     }
 
     fn tick(self: &Arc<Self>, app: &AppHandle) {
-        let near = self.poll_pointer(app);
-        let (want, reason) = self.compute_want(app, near);
+        let near_raw = self.poll_pointer(app);
+        let (want, reason) = self.compute_want(app, near_raw);
 
         let mut should_place: Option<(bool, bool, String)> = None;
         let mut emit: Option<DockVisibilityState> = None;
 
         if let Ok(mut g) = self.inner.lock() {
+            if near_raw {
+                g.near_streak = g.near_streak.saturating_add(1);
+                g.away_streak = 0;
+            } else {
+                g.away_streak = g.away_streak.saturating_add(1);
+                g.near_streak = 0;
+            }
+            // ~100ms stable at 50ms poll — ignore 1-frame keep-zone flicker.
+            let near = g.near_streak >= 2;
+            let away = g.away_streak >= 2;
             g.mouse_near = near;
             let shown = g.shown;
             let busy = g.busy;
@@ -257,9 +272,17 @@ impl DockVisibility {
                     g.hide_deadline = None;
                     g.desired = true;
                 } else if want_eff {
-                    g.hide_deadline = None;
+                    // Once a leave timer is armed, require a stronger "near"
+                    // (~200ms) before cancelling — prevents edge flicker resets.
+                    if g.hide_deadline.is_some() {
+                        if g.near_streak >= 4 {
+                            g.hide_deadline = None;
+                        }
+                    } else {
+                        g.hide_deadline = None;
+                    }
                     g.desired = true;
-                } else if shown {
+                } else if shown && away {
                     match g.hide_deadline {
                         None => {
                             g.hide_deadline = Some(Instant::now() + linger);
@@ -290,6 +313,9 @@ impl DockVisibility {
                             g.desired = true;
                         }
                     }
+                } else if shown {
+                    // Flicker / not yet stably away — keep visible, don't reset leave timer.
+                    g.desired = true;
                 } else {
                     g.desired = false;
                     g.hide_deadline = None;
@@ -317,10 +343,15 @@ impl DockVisibility {
 
         if let Some((target, animate, why)) = should_place {
             let prev_shown = self.ui_shown();
+            let near_log = self
+                .inner
+                .lock()
+                .map(|g| g.mouse_near)
+                .unwrap_or(false);
             eprintln!(
                 "[dock-vis] mode={} near={} want={} shown={}→{} reason={}",
                 self.mode_str(),
-                u8::from(near),
+                u8::from(near_log),
                 u8::from(want),
                 u8::from(prev_shown),
                 u8::from(target),
@@ -337,6 +368,7 @@ impl DockVisibility {
                     g.shown_at = Some(Instant::now());
                 } else {
                     g.shown_at = None;
+                    super::set_hover_expanded_pub(false);
                 }
             }
             if let Some(state) = emit {
@@ -442,9 +474,9 @@ impl DockVisibility {
                 }
 
                 if shown {
-                    // Shown: keep only while the pointer is inside the dock window.
-                    pointer_in_dock_area(app, &mi, scale, bottom_off, pt.x, pt.y)
-                        || pointer_over_dock_hwnd(app, pt)
+                    // Keep only while over the chrome strip — fan headroom above
+                    // the bar is transparent paint space and must not block hide.
+                    pointer_in_dock_chrome(app, &mi, scale, bottom_off, pt.x, pt.y)
                 } else {
                     // Hidden: thin bottom strip only.
                     let reveal_thick = thick_log.max(REVEAL_THICK_MIN);
@@ -559,29 +591,75 @@ fn point_on_activation_strip(
     x >= mi.rcMonitor.left && x < mi.rcMonitor.right
 }
 
-/// Dock keep area while shown: exact HWND rect if on-screen, else rest pose.
-/// No inflation — the dock window bounds are the keep range.
+/// Dock keep area while shown: resting **content** chrome only, centered in
+/// the icons HWND. Never trust the glass HWND width — live resize bugs made it
+/// span almost the full monitor and AutoHide could not leave.
 #[cfg(windows)]
-fn dock_area_rect(
+fn dock_chrome_keep_rect(
     app: &AppHandle,
     mi: &windows::Win32::Graphics::Gdi::MONITORINFO,
     scale: f64,
     bottom_off: u32,
 ) -> (i32, i32, i32, i32) {
-    dock_root_screen_rect(app)
-        .filter(|(_l, t, _r, _b)| *t < mi.rcMonitor.bottom - 4)
-        .unwrap_or_else(|| {
-            let prefs = super::load_dock_prefs();
-            let logical_w = super::dock_window_width(&prefs.items, prefs.magnification);
-            let logical_h = super::dock_window_height(prefs.magnification);
-            dock_rest_pose_rect(mi, scale, bottom_off, logical_w, logical_h)
-        })
+    let chrome_h = (super::dock_chrome_height() * scale).round().max(1.0) as i32;
+    let prefs = super::load_dock_prefs();
+    let layout = super::dock_layout_items(&prefs);
+    let logical_keep = if super::dock_hover_expanded() {
+        super::dock_expanded_width(&layout)
+    } else {
+        super::dock_content_width(&layout)
+    };
+    let content_w = (logical_keep * scale).round().max(1.0) as i32;
+
+    if let Some((l, _t, r, b)) = dock_root_screen_rect(app).filter(|(_l, t, _r, _b)| {
+        *t < mi.rcMonitor.bottom - 4
+    }) {
+        let win_w = r - l;
+        let left = l + ((win_w - content_w) / 2).max(0);
+        let top = (b - chrome_h).max(mi.rcMonitor.top);
+        return (left, top, left + content_w, b);
+    }
+    if let Some((gl, _gt, gr, gb)) = dock_glass_screen_rect(app) {
+        if gb > mi.rcMonitor.top + 4 {
+            let mid = (gl + gr) / 2;
+            let left = mid - content_w / 2;
+            let top = (gb - chrome_h).max(mi.rcMonitor.top);
+            return (left, top, left + content_w, gb);
+        }
+    }
+    dock_rest_pose_rect(
+        mi,
+        scale,
+        bottom_off,
+        logical_keep,
+        super::dock_chrome_height(),
+    )
+}
+
+#[cfg(windows)]
+fn dock_glass_screen_rect(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetWindowRect, GA_ROOT};
+
+    let glass = app.get_webview_window("dock-glass")?;
+    let hwnd = glass.hwnd().ok()?;
+    unsafe {
+        let h = HWND(hwnd.0 as _);
+        let root = GetAncestor(h, GA_ROOT);
+        let root = if root.0.is_null() { h } else { root };
+        let mut wr = RECT::default();
+        GetWindowRect(root, &mut wr).ok()?;
+        if wr.right <= wr.left || wr.bottom <= wr.top {
+            return None;
+        }
+        Some((wr.left, wr.top, wr.right, wr.bottom))
+    }
 }
 
 #[cfg(windows)]
 fn dock_area_rect_px(app: &AppHandle, bottom_off: u32) -> Option<(i32, i32, i32, i32)> {
     let (mi, scale) = dock_monitor_info(app)?;
-    Some(dock_area_rect(app, &mi, scale, bottom_off))
+    Some(dock_chrome_keep_rect(app, &mi, scale, bottom_off))
 }
 
 #[cfg(not(windows))]
@@ -590,7 +668,7 @@ fn dock_area_rect_px(_app: &AppHandle, _bottom_off: u32) -> Option<(i32, i32, i3
 }
 
 #[cfg(windows)]
-fn pointer_in_dock_area(
+fn pointer_in_dock_chrome(
     app: &AppHandle,
     mi: &windows::Win32::Graphics::Gdi::MONITORINFO,
     scale: f64,
@@ -598,7 +676,7 @@ fn pointer_in_dock_area(
     x: i32,
     y: i32,
 ) -> bool {
-    let (l, t, r, b) = dock_area_rect(app, mi, scale, bottom_off);
+    let (l, t, r, b) = dock_chrome_keep_rect(app, mi, scale, bottom_off);
     x >= l && x < r && y >= t && y < b
 }
 
@@ -649,42 +727,7 @@ fn dock_root_screen_rect(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-/// True if the top-level window under the cursor is our dock (or a child of it).
-#[cfg(windows)]
-fn pointer_over_dock_hwnd(app: &AppHandle, pt: windows::Win32::Foundation::POINT) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetParent, WindowFromPoint, GA_ROOT};
 
-    let Some(dock_root) = dock_root_hwnd_of(app) else {
-        return false;
-    };
-    unsafe {
-        let hit = WindowFromPoint(pt);
-        if hit.0.is_null() {
-            return false;
-        }
-        if hit == dock_root {
-            return true;
-        }
-        let hit_root = GetAncestor(hit, GA_ROOT);
-        if !hit_root.0.is_null() && hit_root == dock_root {
-            return true;
-        }
-        let mut cur = hit;
-        for _ in 0..8 {
-            if cur == dock_root {
-                return true;
-            }
-            let Ok(parent) = GetParent(cur) else {
-                break;
-            };
-            if parent.0.is_null() || parent == cur {
-                break;
-            }
-            cur = parent;
-        }
-        false
-    }
-}
 
 #[cfg(windows)]
 fn is_desktop_foreground() -> bool {
@@ -762,7 +805,8 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
                 1.0
             };
             let prefs = super::load_dock_prefs();
-            let logical_w = super::dock_window_width(&prefs.items, prefs.magnification);
+            let layout = super::dock_layout_items(&prefs);
+            let logical_w = super::dock_window_width(&layout, prefs.magnification);
             let logical_h = super::dock_window_height(prefs.magnification);
             let (l, t, r, b) =
                 dock_rest_pose_rect(&mi, scale, prefs.bottom_offset_px, logical_w, logical_h);

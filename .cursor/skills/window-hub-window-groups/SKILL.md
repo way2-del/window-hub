@@ -1,4 +1,4 @@
----
+﻿---
 name: window-hub-window-groups
 description: >-
   Official Window Groups example plugin — store.pins, shortcuts.html iframe
@@ -38,6 +38,8 @@ description: >-
 
 **窗口组要求：条内所有元素垂直居中**（manage 图标、chip 文案、绿点、badge、分隔线）。
 
+`slots.shortcuts.manage` 必须为 **`custom`**：插件自画 2×2 管理钮 + `hub.popup.open`；**不要**写成 `settings`（否则 Host 再画一颗会重复）。细则见 `window-hub-shortcuts`。
+
 ```css
 html, body, .wg-bar, .wg-chip {
   height: var(--wh-bar-h, 28px);
@@ -69,7 +71,7 @@ type WindowGroupStore = {
     "popup": "popup.html",
     "shortcuts": "shortcuts.html"
   },
-  "slots": { "shortcuts": { "icon": "windows", "label": "窗口组", "order": 20, "action": "popup.open" } },
+  "slots": { "shortcuts": { "icon": "windows", "label": "窗口组", "order": 20, "action": "popup.open", "manage": "custom" } },
   "capabilities": ["shortcuts", "storage", "popup", "windows.read", "windows.focus"]
 }
 ```

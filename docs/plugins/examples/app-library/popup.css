@@ -1,0 +1,388 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: #f4f4f5;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+/* Shell inset tokens — see window-hub-plugin-popup skill */
+.wg-shell,
+#app.wg-shell {
+  position: relative;
+  box-sizing: border-box;
+  height: 100vh;
+  padding: var(--wh-popup-pad-top, 12px) var(--wh-popup-pad-x, 12px)
+    var(--wh-popup-pad-bottom, 14px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--wh-popup-gap, 10px);
+  overflow: hidden;
+}
+
+.al-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.al-title-wrap {
+  min-width: 0;
+}
+
+.al-title {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.al-sub {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+
+.al-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.al-icon-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.al-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.al-text-btn {
+  font-size: 11px;
+  opacity: 0.72;
+  padding: 2px 0;
+}
+
+.al-text-btn:hover:not(:disabled) {
+  opacity: 1;
+}
+
+.al-text-btn.is-danger {
+  color: #fca5a5;
+}
+
+.al-search-row {
+  flex-shrink: 0;
+}
+
+.al-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.25);
+  outline: none;
+  font-size: 12px;
+}
+
+.al-input:focus {
+  border-color: rgba(61, 214, 198, 0.55);
+}
+
+.al-primary-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: rgba(61, 214, 198, 0.22);
+  color: #9af0e6;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.al-primary-btn:hover {
+  background: rgba(61, 214, 198, 0.32);
+}
+
+.al-primary-btn.is-danger {
+  background: rgba(248, 113, 113, 0.92);
+  color: #fff;
+}
+
+.al-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.al-section-label {
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.al-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.al-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+}
+
+.al-row:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.al-row:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.al-row-title {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.al-row-meta {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+.al-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-content: start;
+  padding-right: 2px;
+}
+
+.al-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  text-align: center;
+  min-width: 0;
+}
+
+.al-tile:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.al-tile.is-stale {
+  opacity: 0.55;
+}
+
+.al-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: #0f1115;
+}
+
+.al-tile-name {
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.al-tile-meta {
+  font-size: 9px;
+  color: #9ca3af;
+  line-height: 1.2;
+}
+
+.al-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px;
+  color: #9ca3af;
+  font-size: 12px;
+  text-align: center;
+}
+
+.al-muted {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.al-hint {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #9ca3af;
+  text-align: center;
+}
+
+.al-form-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.al-form-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.al-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(28, 28, 32, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.al-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+}
+
+.al-confirm-card {
+  width: min(100%, 260px);
+  padding: 14px 14px 12px;
+  border-radius: 12px;
+  background: rgba(36, 36, 40, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.al-confirm-msg {
+  font-size: 13px;
+  line-height: 1.45;
+  margin-bottom: 14px;
+}
+
+.al-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+html[data-theme="light"] body {
+  color: #1c1c1e;
+}
+
+html[data-theme="light"] .al-sub,
+html[data-theme="light"] .al-section-label,
+html[data-theme="light"] .al-row-meta,
+html[data-theme="light"] .al-tile-meta,
+html[data-theme="light"] .al-empty,
+html[data-theme="light"] .al-hint,
+html[data-theme="light"] .al-muted {
+  color: #52525b;
+}
+
+html[data-theme="light"] .al-icon-btn,
+html[data-theme="light"] .al-tile,
+html[data-theme="light"] .al-row,
+html[data-theme="light"] .al-input {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #1c1c1e;
+}
+
+html[data-theme="light"] .al-tile:hover,
+html[data-theme="light"] .al-row:hover:not(:disabled),
+html[data-theme="light"] .al-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.78);
+}
+
+html[data-theme="light"] .al-text-btn.is-danger {
+  color: #dc2626;
+}
+
+html[data-theme="light"] .al-confirm-card {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+html[data-theme="light"] .al-confirm-msg {
+  color: #1c1c1e;
+}
+
+html[data-theme="light"] .al-toast {
+  background: rgba(255, 255, 255, 0.96);
+  color: #1c1c1e;
+  border-color: rgba(0, 0, 0, 0.1);
+}

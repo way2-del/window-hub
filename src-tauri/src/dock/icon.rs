@@ -2,14 +2,47 @@
 //!
 //! Prefer high-DPI shells (`IShellItemImageFactory` @ 256px) so 32 CSS px
 //! icons stay sharp on 150%/200% displays. Legacy SHGFI_LARGEICON is 32px only.
+//!
+//! Results are cached by source path — shell extraction is expensive and the
+//! dock used to re-run it on every window-title tick.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// Source raster size — enough headroom for 200–300% DPI (UI draws at 32 CSS px).
 const SHELL_ICON_PX: i32 = 256;
 
+fn icon_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drop cached rasters (call when dock prefs / icon paths change).
+pub fn clear_icon_cache() {
+    icon_cache().lock().clear();
+}
+
 pub fn resolve_item_icon_png(icon_path: &str, launch_path: &str) -> Option<String> {
+    let key = format!(
+        "{}||{}",
+        icon_path.trim().to_ascii_lowercase(),
+        launch_path.trim().to_ascii_lowercase()
+    );
+    {
+        let cache = icon_cache().lock();
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+    }
+    let resolved = resolve_item_icon_png_uncached(icon_path, launch_path);
+    icon_cache().lock().insert(key, resolved.clone());
+    resolved
+}
+
+fn resolve_item_icon_png_uncached(icon_path: &str, launch_path: &str) -> Option<String> {
     if !icon_path.trim().is_empty() {
         let (path, _idx) = split_icon_location(icon_path.trim());
         if let Some(b) = load_image_file_png(Path::new(path)) {

@@ -21,7 +21,7 @@
         "decorations": false,
         "transparent": true,
         "shadow": false,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "skipTaskbar": true,
         "center": false,
         "fullscreen": false,
@@ -55,7 +55,9 @@
       "resources/plugins/window-groups",
       "resources/plugins/transfer-station",
       "resources/plugins/weather",
-      "resources/plugins/mirror"
+      "resources/plugins/mirror",
+      "resources/plugins/app-library",
+      "resources/plugins/idiom"
     ]
   }
 }

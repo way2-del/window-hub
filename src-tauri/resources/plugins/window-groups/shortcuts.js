@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Window Groups — shortcuts strip (Host iframe shell).
  * Draws manage chip + store.pins; no hub.shortcuts.setPins.
  */

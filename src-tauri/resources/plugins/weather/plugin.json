@@ -15,7 +15,8 @@
       "icon": "icon.svg",
       "label": "天气",
       "order": 5,
-      "action": "command"
+      "action": "command",
+      "manage": "none"
     },
     "island.bar": {
       "order": 20

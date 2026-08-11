@@ -1,0 +1,29 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.app-library",
+  "name": "应用库",
+  "version": "1.0.1",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "快捷区悬浮入口打开应用库；自行添加常用应用，点击切到已打开窗口。",
+  "entry": {
+    "popup": "popup.html",
+    "shortcuts": "shortcuts.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "应用库",
+      "order": 25,
+      "action": "popup.open",
+      "manage": "custom"
+    }
+  },
+  "capabilities": [
+    "shortcuts",
+    "storage",
+    "popup",
+    "windows.read",
+    "windows.focus"
+  ]
+}

@@ -640,6 +640,10 @@ a {
   background: rgba(52, 199, 89, 0.1);
 }
 
+.tray-settings-item.is-resident {
+  cursor: default;
+}
+
 .tray-settings-icon {
   width: 18px;
   height: 18px;
@@ -828,10 +832,17 @@ a {
   padding: 10px 12px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
+  transition: box-shadow 240ms ease, background 240ms ease;
 }
 
 .plugin-row.is-disabled {
   opacity: 0.55;
+}
+
+.plugin-row.is-focused,
+.plugin-row.is-focus-flash {
+  background: rgba(110, 168, 254, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(110, 168, 254, 0.45);
 }
 
 .plugin-meta {

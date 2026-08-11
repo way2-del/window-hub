@@ -97,9 +97,17 @@ pub struct DockPrefs {
     /// After pointer leaves Dock/activation strip, wait this many ms before hiding.
     #[serde(default = "default_hide_linger_ms")]
     pub hide_linger_ms: u32,
-    /// Max icon scale on hover (1.0 = off). Neighbors fall off symmetrically.
+    /// Hover icon scale is fixed in Host (`DOCK_MAG_SCALE`); kept for serde compat.
     #[serde(default = "default_magnification")]
     pub magnification: f64,
+    /// Logical px corner radius for the glass strip (0 = square). Uses SetWindowRgn
+    /// so Win11 DWM rounded-shadow chrome is not involved.
+    #[serde(default = "default_corner_radius_px")]
+    pub corner_radius_px: u32,
+    /// Pinned item ids temporarily omitted when the dock overflows the monitor.
+    /// Running matches still show; restore via status-menu right-click.
+    #[serde(default)]
+    pub hidden_item_ids: Vec<String>,
 }
 
 fn default_hotkey() -> String {
@@ -119,7 +127,11 @@ fn default_hide_linger_ms() -> u32 {
 }
 
 fn default_magnification() -> f64 {
-    1.6
+    1.6 // == DOCK_MAG_SCALE (const defined below with geometry)
+}
+
+fn default_corner_radius_px() -> u32 {
+    12
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +171,8 @@ impl Default for DockPrefs {
             bottom_offset_px: 0,
             hide_linger_ms: default_hide_linger_ms(),
             magnification: default_magnification(),
+            corner_radius_px: default_corner_radius_px(),
+            hidden_item_ids: Vec::new(),
         }
     }
 }
@@ -179,6 +193,7 @@ impl DockPrefs {
         self.bottom_offset_px = self.bottom_offset_px.min(400);
         self.hide_linger_ms = self.hide_linger_ms.clamp(200, 10_000);
         self.magnification = clamp_magnification(self.magnification);
+        self.corner_radius_px = self.corner_radius_px.min(28);
         self
     }
 }
@@ -211,28 +226,340 @@ fn with_icons(mut prefs: DockPrefs) -> DockPrefs {
             item.icon_png = None;
             continue;
         }
-        // Always re-extract — never keep a stale low-res raster from an older Host.
         item.icon_png = icon::resolve_item_icon_png(&item.icon_path, &item.launch_path);
     }
     prefs
 }
 
-pub(crate) const DOCK_H: f64 = 60.0;
-const DOCK_ICON: f64 = 40.0;
-const DOCK_GAP: f64 = 6.0;
-const DOCK_PAD_X: f64 = 6.0;
-const DOCK_SEP: f64 = 10.0;
-const DOCK_GLASS_LABEL: &str = "dock-glass";
+/// Merge pinned dock items with running apps that are not on the dock.
+/// Running extras sit before trash, behind an auto separator.
+pub(crate) fn dock_layout_items(prefs: &DockPrefs) -> Vec<DockItem> {
+    dock_merge_running(prefs, false)
+}
 
-fn clamp_magnification(m: f64) -> f64 {
-    if m.is_finite() {
-        m.clamp(1.0, 2.5)
-    } else {
-        default_magnification()
+fn windows_exe_sig(windows: &[crate::win32::enum_windows::WindowInfo]) -> String {
+    let mut exes: Vec<String> = windows
+        .iter()
+        .filter_map(|w| w.exe.as_ref())
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
+    exes.sort();
+    exes.dedup();
+    exes.join("|")
+}
+
+fn pinned_layout_sig(items: &[DockItem]) -> String {
+    items
+        .iter()
+        .map(|i| format!("{}:{}", i.id, i.kind))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn hidden_sig(ids: &[String]) -> String {
+    let mut v = ids.to_vec();
+    v.sort();
+    v.join("|")
+}
+
+fn item_is_running(item: &DockItem, windows: &[crate::win32::enum_windows::WindowInfo]) -> bool {
+    if item.kind != "app" {
+        return false;
+    }
+    windows.iter().any(|w| launch::item_matches_window(item, w))
+}
+
+/// Overflow-hidden pins stay omitted unless they currently have a window.
+fn item_is_overflow_hidden(
+    item: &DockItem,
+    hidden: &[String],
+    windows: &[crate::win32::enum_windows::WindowInfo],
+) -> bool {
+    if hidden.is_empty() || !hidden.iter().any(|id| id == &item.id) {
+        return false;
+    }
+    // Keep showing if the app is open — frees space was for running clicks.
+    !item_is_running(item, windows)
+}
+
+fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<DockItem> {
+    use std::collections::HashSet;
+
+    let items = &prefs.items;
+    let windows = crate::windows_service::cached_windows();
+    let key = format!(
+        "{}::{}::{}",
+        pinned_layout_sig(items),
+        hidden_sig(&prefs.hidden_item_ids),
+        windows_exe_sig(&windows)
+    );
+    {
+        let guard = merge_cache().lock();
+        if let Some(hit) = guard.as_ref() {
+            if hit.key == key && hit.with_icons == with_icons {
+                return hit.items.clone();
+            }
+            if hit.key == key && hit.with_icons && !with_icons {
+                let mut stripped = hit.items.clone();
+                for it in &mut stripped {
+                    if it.id.starts_with("running:") {
+                        it.icon_png = None;
+                    }
+                }
+                return stripped;
+            }
+        }
+    }
+
+    let self_exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let mut head: Vec<DockItem> = Vec::new();
+    let mut trash: Option<DockItem> = None;
+    for it in items {
+        if it.kind == "trash" {
+            if trash.is_none() {
+                trash = Some(it.clone());
+            }
+            continue;
+        }
+        if item_is_overflow_hidden(it, &prefs.hidden_item_ids, &windows) {
+            continue;
+        }
+        head.push(it.clone());
+    }
+
+    let mut seen_exe: HashSet<String> = HashSet::new();
+    let mut extras: Vec<DockItem> = Vec::new();
+    for w in &windows {
+        let exe = w.exe.as_deref().unwrap_or("").trim();
+        if exe.is_empty() {
+            continue;
+        }
+        let exe_key = exe.to_ascii_lowercase();
+        if !self_exe.is_empty() && exe_key == self_exe {
+            continue;
+        }
+        if seen_exe.contains(&exe_key) {
+            continue;
+        }
+        if items.iter().any(|it| launch::item_matches_window(it, w)) {
+            continue;
+        }
+        seen_exe.insert(exe_key.clone());
+        let stem = w
+            .exe_name
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                std::path::Path::new(exe)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("app")
+                    .to_string()
+            });
+        let match_exe = if stem.to_ascii_lowercase().ends_with(".exe") {
+            stem.clone()
+        } else {
+            format!("{stem}.exe")
+        };
+        let icon_png = if with_icons {
+            icon::resolve_item_icon_png("", exe)
+        } else {
+            None
+        };
+        extras.push(DockItem {
+            id: format!("running:{exe_key}"),
+            kind: "app".into(),
+            label: if w.title.trim().is_empty() {
+                stem
+            } else {
+                w.title.clone()
+            },
+            match_exe,
+            launch_path: exe.to_string(),
+            real_path: exe.to_string(),
+            virtual_path: String::new(),
+            icon_path: exe.to_string(),
+            uwp: false,
+            icon_png,
+        });
+    }
+
+    let mut out = head;
+    if !extras.is_empty() {
+        let needs_sep = out
+            .last()
+            .map(|i| i.kind != "separator")
+            .unwrap_or(true);
+        if needs_sep {
+            out.push(DockItem {
+                id: "running-sep".into(),
+                kind: "separator".into(),
+                label: String::new(),
+                match_exe: String::new(),
+                launch_path: String::new(),
+                real_path: String::new(),
+                virtual_path: String::new(),
+                icon_path: String::new(),
+                uwp: false,
+                icon_png: None,
+            });
+        }
+        out.extend(extras);
+    }
+    if let Some(t) = trash {
+        out.push(t);
+    }
+
+    *merge_cache().lock() = Some(MergeCache {
+        key,
+        with_icons,
+        items: out.clone(),
+    });
+    out
+}
+
+struct MergeCache {
+    key: String,
+    with_icons: bool,
+    items: Vec<DockItem>,
+}
+
+fn merge_cache() -> &'static parking_lot::Mutex<Option<MergeCache>> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<parking_lot::Mutex<Option<MergeCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+fn invalidate_dock_layout_cache() {
+    icon::clear_icon_cache();
+    *merge_cache().lock() = None;
+}
+
+/// Max logical width the dock may occupy (leave side margins + hover fan pad).
+fn dock_width_budget(monitor_logical_w: f64) -> f64 {
+    (monitor_logical_w - 48.0).max(200.0)
+}
+
+fn dock_monitor_logical_width(app: &AppHandle) -> Option<f64> {
+    let win = app.get_webview_window("dock")?;
+    let mon = win.current_monitor().ok().flatten()?;
+    Some(mon.size().width as f64 / mon.scale_factor())
+}
+
+#[cfg(windows)]
+fn dock_primary_monitor_logical_width() -> Option<f64> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN};
+    unsafe {
+        let px = GetSystemMetrics(SM_CXSCREEN);
+        if px <= 0 {
+            return None;
+        }
+        // Approximate 1.0 scale when dock window is not up yet.
+        Some(px as f64)
     }
 }
 
-/// Base content width (unscaled icon slots).
+#[cfg(not(windows))]
+fn dock_primary_monitor_logical_width() -> Option<f64> {
+    None
+}
+
+/// Hide unopened pinned apps (right-to-left) until hover width fits the monitor.
+/// Returns how many ids were newly added to `hidden_item_ids`.
+fn dock_auto_compact(prefs: &mut DockPrefs, monitor_logical_w: f64) -> usize {
+    let budget = dock_width_budget(monitor_logical_w);
+    let windows = crate::windows_service::cached_windows();
+    let mut newly = 0usize;
+
+    loop {
+        let layout = dock_merge_running(prefs, false);
+        if dock_expanded_width(&layout) <= budget {
+            break;
+        }
+        // Prefer hiding unopened pins near trash (end of pin list).
+        let candidate = prefs
+            .items
+            .iter()
+            .rev()
+            .find(|it| {
+                if it.kind != "app" {
+                    return false;
+                }
+                if prefs.hidden_item_ids.iter().any(|id| id == &it.id) {
+                    return false;
+                }
+                !item_is_running(it, &windows)
+            })
+            .map(|it| it.id.clone());
+        let Some(id) = candidate else {
+            break;
+        };
+        prefs.hidden_item_ids.push(id);
+        newly += 1;
+        *merge_cache().lock() = None;
+    }
+    newly
+}
+
+/// Run compact if needed; persist + notify UI when something was newly hidden.
+pub(crate) fn dock_compact_and_notify(app: &AppHandle, prefs: &mut DockPrefs) {
+    let Some(mon_w) = dock_monitor_logical_width(app).or_else(dock_primary_monitor_logical_width)
+    else {
+        return;
+    };
+    let newly = dock_auto_compact(prefs, mon_w);
+    if newly == 0 {
+        return;
+    }
+    let _ = save_dock_prefs(prefs);
+    invalidate_dock_layout_cache();
+    let payload = serde_json::json!({
+        "newlyHidden": newly,
+        "totalHidden": prefs.hidden_item_ids.len(),
+    });
+    let _ = app.emit("dock-compacted", &payload);
+    let _ = app.emit("dock-prefs", &with_icons(prefs.clone()));
+}
+
+pub(crate) const DOCK_H: f64 = 60.0;
+const DOCK_ICON: f64 = 40.0;
+const DOCK_GAP: f64 = 6.0;
+const DOCK_PAD_X: f64 = 2.0;
+const DOCK_SEP: f64 = 10.0;
+/// Fixed hover magnification (not user-configurable).
+pub(crate) const DOCK_MAG_SCALE: f64 = 1.6;
+/// Fixed total extra logical width when hovering (not dynamically measured).
+const DOCK_FAN_EXTRA: f64 = 48.0;
+const DOCK_GLASS_LABEL: &str = "dock-glass";
+
+/// True while the dock HWND is in the fixed expanded hover size.
+fn hover_expanded_flag() -> &'static std::sync::atomic::AtomicBool {
+    static FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &FLAG
+}
+
+pub(crate) fn dock_hover_expanded() -> bool {
+    hover_expanded_flag().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn set_hover_expanded(v: bool) {
+    hover_expanded_flag().store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn set_hover_expanded_pub(v: bool) {
+    set_hover_expanded(v);
+}
+
+/// Magnification is fixed — prefs field kept for serde compat only.
+fn clamp_magnification(_m: f64) -> f64 {
+    DOCK_MAG_SCALE
+}
+
+/// Base content width (unscaled icon slots) — rest glass / icons width.
 pub(crate) fn dock_content_width(items: &[DockItem]) -> f64 {
     let mut w = DOCK_PAD_X * 2.0;
     for (i, it) in items.iter().enumerate() {
@@ -248,25 +575,29 @@ pub(crate) fn dock_content_width(items: &[DockItem]) -> f64 {
     w.max(120.0)
 }
 
-/// Window width including fan-out room when magnification is on.
-pub(crate) fn dock_window_width(items: &[DockItem], magnification: f64) -> f64 {
-    let base = dock_content_width(items);
-    let mag = clamp_magnification(magnification);
-    // ~2 icon slots of growth on each side of the hover focus.
-    let fan = DOCK_ICON * (mag - 1.0) * 4.0;
-    (base + fan).max(120.0)
+/// Hover width = content + fixed pad (no per-frame fan measurement).
+pub(crate) fn dock_expanded_width(items: &[DockItem]) -> f64 {
+    dock_content_width(items) + DOCK_FAN_EXTRA
 }
 
-/// Window height: fixed dock chrome (`DOCK_H`) plus transparent headroom so
-/// magnified icons can paint above the bar. Chrome strip stays `DOCK_H`;
-/// headroom uses the max scale so changing the slider does not resize the HWND.
+/// Icons window at rest is content-sized; expands by fixed pad on hover.
+pub(crate) fn dock_window_width(items: &[DockItem], _magnification: f64) -> f64 {
+    dock_content_width(items)
+}
+
+/// Fixed headroom for `DOCK_MAG_SCALE` (slider removed).
+/// Extra 8px slack so the peaked icon is not clipped at the HWND top edge.
+pub(crate) fn dock_headroom(_magnification: f64) -> f64 {
+    DOCK_ICON * (DOCK_MAG_SCALE - 1.0) + 8.0
+}
+
 pub(crate) fn dock_window_height(magnification: f64) -> f64 {
-    let mag = clamp_magnification(magnification);
-    if mag <= 1.001 {
-        DOCK_H
-    } else {
-        DOCK_H + DOCK_ICON * (2.5 - 1.0)
-    }
+    DOCK_H + dock_headroom(magnification)
+}
+
+/// Logical height of the interactive chrome strip (excludes fan headroom).
+pub(crate) fn dock_chrome_height() -> f64 {
+    DOCK_H
 }
 
 fn dock_place_lock() -> &'static std::sync::Mutex<()> {
@@ -297,10 +628,32 @@ pub fn position_dock_window(app: &AppHandle, prefs: &DockPrefs) {
 /// taller for magnification headroom.
 pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animate: bool) {
     let _guard = dock_place_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if !shown {
+        set_hover_expanded(false);
+    }
+    // Compact against current monitor before measuring width.
+    let mut prefs_owned = prefs.clone();
+    let mon_w = dock_monitor_logical_width(app).or_else(dock_primary_monitor_logical_width);
+    if let Some(w) = mon_w {
+        let newly = dock_auto_compact(&mut prefs_owned, w);
+        if newly > 0 {
+            let _ = save_dock_prefs(&prefs_owned);
+            invalidate_dock_layout_cache();
+            let payload = serde_json::json!({
+                "newlyHidden": newly,
+                "totalHidden": prefs_owned.hidden_item_ids.len(),
+            });
+            let _ = app.emit("dock-compacted", &payload);
+            let _ = app.emit("dock-prefs", &with_icons(prefs_owned.clone()));
+        }
+    }
+    let prefs = &prefs_owned;
     let Some(win) = app.get_webview_window("dock") else {
         return;
     };
-    let width = dock_window_width(&prefs.items, prefs.magnification);
+    let layout = dock_layout_items(prefs);
+    let width = dock_window_width(&layout, prefs.magnification);
+    let glass_w = dock_content_width(&layout);
     let height = dock_window_height(prefs.magnification);
     let glass = app.get_webview_window(DOCK_GLASS_LABEL);
 
@@ -333,8 +686,10 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
                 hwnd.0 as isize,
                 glass_hwnd,
                 width,
+                glass_w,
                 height,
                 prefs.bottom_offset_px,
+                prefs.corner_radius_px,
                 shown,
                 animate,
             ) {
@@ -351,7 +706,7 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     // Non-Windows / Win32 geom failure: Tauri fallback.
     let _ = win.set_size(LogicalSize::new(width, height));
     if let Some(g) = &glass {
-        let _ = g.set_size(LogicalSize::new(width, DOCK_H));
+        let _ = g.set_size(LogicalSize::new(glass_w, DOCK_H));
     }
 
     let Ok(Some(monitor)) = win.current_monitor() else {
@@ -363,6 +718,7 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     let origin = monitor.position();
     let phys_w = (width * scale).round().max(1.0) as i32;
     let phys_h = (height * scale).round().max(1.0) as i32;
+    let glass_phys_w = (glass_w * scale).round().max(1.0) as i32;
     let glass_h = (DOCK_H * scale).round().max(1.0) as i32;
     let margin = (prefs.bottom_offset_px as f64 * scale).round() as i32;
     let x = origin.x + ((screen.width as i32 - phys_w) / 2).max(0);
@@ -374,12 +730,17 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     };
     let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
     if let Some(g) = &glass {
+        let gx = x + ((phys_w - glass_phys_w) / 2).max(0);
         let gy = y + phys_h - glass_h;
-        let _ = g.set_position(tauri::PhysicalPosition::new(x, gy));
+        let _ = g.set_position(tauri::PhysicalPosition::new(gx, gy));
         if shown {
             let _ = g.show();
         } else {
             let _ = g.hide();
+        }
+        #[cfg(windows)]
+        if let Ok(gh) = g.hwnd() {
+            win32_dock_glass_set_round(gh.0 as isize, prefs.corner_radius_px);
         }
     }
     if shown {
@@ -388,6 +749,211 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
         let _ = win.hide();
     }
     let _ = win.set_ignore_cursor_events(!shown);
+}
+
+/// Toggle between resting content width and content+fixed pad, with a short
+/// width tween. Returns whether the size change was applied (or already matched).
+#[tauri::command]
+pub fn dock_set_hover_expand(
+    app: AppHandle,
+    vis: State<'_, Arc<DockVisibility>>,
+    expanded: bool,
+) -> bool {
+    // No place-lock / busy gate: first hover often overlaps show settle; callers
+    // must be able to widen immediately and retry if the window is missing.
+    if !vis.ui_shown() {
+        set_hover_expanded(false);
+        return false;
+    }
+    if dock_hover_expanded() == expanded {
+        return true;
+    }
+    let prefs = load_dock_prefs();
+    let layout = dock_layout_items(&prefs);
+    let logical_w = if expanded {
+        dock_expanded_width(&layout)
+    } else {
+        dock_content_width(&layout)
+    };
+    let logical_h = dock_window_height(prefs.magnification);
+    let Some(win) = app.get_webview_window("dock") else {
+        return false;
+    };
+    let glass = app.get_webview_window(DOCK_GLASS_LABEL);
+
+    #[cfg(windows)]
+    {
+        let glass_hwnd = glass
+            .as_ref()
+            .and_then(|g| g.hwnd().ok())
+            .map(|h| h.0 as isize);
+        if let Ok(hwnd) = win.hwnd() {
+            if win32_dock_tween_pair_width(
+                hwnd.0 as isize,
+                glass_hwnd,
+                logical_w,
+                logical_h,
+                prefs.corner_radius_px,
+            ) {
+                set_hover_expanded(expanded);
+                return true;
+            }
+        }
+    }
+
+    let _ = win.set_size(LogicalSize::new(logical_w, logical_h));
+    if let Some(g) = &glass {
+        let _ = g.set_size(LogicalSize::new(logical_w, DOCK_H));
+    }
+    let Ok(Some(monitor)) = win.current_monitor() else {
+        set_hover_expanded(expanded);
+        return true;
+    };
+    let scale = monitor.scale_factor();
+    let screen = monitor.size();
+    let origin = monitor.position();
+    let phys_w = (logical_w * scale).round().max(1.0) as i32;
+    let phys_h = (logical_h * scale).round().max(1.0) as i32;
+    let glass_h = (DOCK_H * scale).round().max(1.0) as i32;
+    let x = origin.x + ((screen.width as i32 - phys_w) / 2).max(0);
+    let Ok(pos) = win.outer_position() else {
+        set_hover_expanded(expanded);
+        return true;
+    };
+    let y = pos.y;
+    let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    if let Some(g) = &glass {
+        let gy = y + phys_h - glass_h;
+        let _ = g.set_position(tauri::PhysicalPosition::new(x, gy));
+        #[cfg(windows)]
+        if let Ok(gh) = g.hwnd() {
+            win32_dock_glass_set_round(gh.0 as isize, prefs.corner_radius_px);
+        }
+    }
+    set_hover_expanded(expanded);
+    true
+}
+
+/// Legacy alias — maps any width request to expand/collapse vs content width.
+#[tauri::command]
+pub fn dock_set_live_width(app: AppHandle, vis: State<'_, Arc<DockVisibility>>, width: f64) -> bool {
+    let prefs = load_dock_prefs();
+    let layout = dock_layout_items(&prefs);
+    let rest = dock_content_width(&layout);
+    let expanded = width.is_finite() && width > rest + DOCK_FAN_EXTRA * 0.5;
+    dock_set_hover_expand(app, vis, expanded)
+}
+
+/// Animate icons + glass width to `logical_w` (~160ms ease-out), keep Y, re-center X.
+#[cfg(windows)]
+fn win32_dock_tween_pair_width(
+    icons_hwnd_raw: isize,
+    glass_hwnd_raw: Option<isize>,
+    logical_w: f64,
+    logical_h: f64,
+    corner_radius_px: u32,
+) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+
+    let icons = dock_root_hwnd(icons_hwnd_raw);
+    unsafe {
+        let mut wr = RECT::default();
+        if GetWindowRect(icons, &mut wr).is_err() {
+            return false;
+        }
+        let mon = MonitorFromWindow(icons, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return false;
+        }
+        let mut dpi_x = 96u32;
+        let mut dpi_y = 96u32;
+        if GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_err() {
+            dpi_x = 96;
+        }
+        let scale = if dpi_x > 0 {
+            dpi_x as f64 / 96.0
+        } else {
+            1.0
+        };
+        let cur_w = (wr.right - wr.left).max(1);
+        let from_logical = cur_w as f64 / scale;
+        let to_logical = logical_w;
+        let phys_h = (logical_h * scale).round().max(1.0) as i32;
+        let glass_h = (DOCK_H * scale).round().max(1.0) as i32;
+        let mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
+        let y = wr.top;
+
+        let apply = |w_logical: f64, round: bool| {
+            let phys_w = (w_logical * scale).round().max(1.0) as i32;
+            let x = mi.rcMonitor.left + ((mon_w - phys_w) / 2).max(0);
+            let _ = SetWindowPos(
+                icons,
+                None,
+                x,
+                y,
+                phys_w,
+                phys_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            if let Some(raw) = glass_hwnd_raw {
+                let gh = dock_root_hwnd(raw);
+                let gy = y + phys_h - glass_h;
+                let _ = SetWindowPos(
+                    gh,
+                    None,
+                    x,
+                    gy,
+                    phys_w,
+                    glass_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let _ = SetWindowPos(
+                    gh,
+                    icons,
+                    0,
+                    0,
+                    0,
+                    0,
+                    windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
+                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
+                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+                );
+                if round {
+                    win32_dock_glass_set_round(raw, corner_radius_px);
+                }
+            }
+        };
+
+        if (from_logical - to_logical).abs() < 1.0 {
+            apply(to_logical, true);
+            return true;
+        }
+
+        // ~160ms ease-out — matches icon layout transition.
+        const FRAMES: u32 = 12;
+        const FRAME_MS: u64 = 13;
+        for i in 1..=FRAMES {
+            let t = i as f64 / FRAMES as f64;
+            let e = 1.0 - (1.0 - t).powi(3);
+            let w = from_logical + (to_logical - from_logical) * e;
+            apply(w, i == FRAMES);
+            if i < FRAMES {
+                std::thread::sleep(std::time::Duration::from_millis(FRAME_MS));
+            }
+        }
+        true
+    }
 }
 
 /// Resolve Tauri/WebView HWND → outer top-level window (never SetWindowPos the child).
@@ -404,6 +970,13 @@ fn dock_root_hwnd(hwnd_raw: isize) -> windows::Win32::Foundation::HWND {
             root
         }
     }
+}
+
+/// Refresh glass corners after place/resize (SWCA + DWM corner preference).
+#[cfg(windows)]
+fn win32_dock_glass_set_round(hwnd_raw: isize, corner_radius_px: u32) {
+    let hwnd = dock_root_hwnd(hwnd_raw);
+    crate::win32::blur_glass::apply_dock_glass_round_frost_pub(hwnd, corner_radius_px);
 }
 
 /// Ensure the dock can be hit-tested (auto-hide keep-alive + clicks).
@@ -514,8 +1087,10 @@ fn win32_dock_slide_root(
     hwnd_raw: isize,
     glass_hwnd_raw: Option<isize>,
     logical_w: f64,
+    glass_logical_w: f64,
     logical_h: f64,
     bottom_offset_px: u32,
+    corner_radius_px: u32,
     shown: bool,
     animate: bool,
 ) -> bool {
@@ -526,22 +1101,24 @@ fn win32_dock_slide_root(
     };
     let hwnd = dock_root_hwnd(hwnd_raw);
     let glass = glass_hwnd_raw.map(dock_root_hwnd);
-    let glass_h = {
-        // Same DPI as geom (physical px).
-        let scale = if geom.h > 0 && logical_h > 0.0 {
-            geom.h as f64 / logical_h
-        } else {
-            1.0
-        };
-        (DOCK_H * scale).round().max(1.0) as i32
+    let glass_raw = glass_hwnd_raw;
+    let scale = if geom.h > 0 && logical_h > 0.0 {
+        geom.h as f64 / logical_h
+    } else {
+        1.0
     };
+    let glass_h = (DOCK_H * scale).round().max(1.0) as i32;
+    let glass_w = (glass_logical_w * scale).round().max(1.0) as i32;
 
     unsafe fn set_pair_pos(
         hwnd: windows::Win32::Foundation::HWND,
         glass: Option<windows::Win32::Foundation::HWND>,
+        glass_raw: Option<isize>,
         geom: DockGeom,
         y: i32,
+        glass_w: i32,
         glass_h: i32,
+        corner_radius_px: u32,
     ) {
         use windows::Win32::UI::WindowsAndMessaging::{
             SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
@@ -556,13 +1133,14 @@ fn win32_dock_slide_root(
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
         if let Some(gh) = glass {
+            let gx = geom.x + ((geom.w - glass_w) / 2).max(0);
             let gy = y + geom.h - glass_h;
             let _ = SetWindowPos(
                 gh,
                 None,
-                geom.x,
+                gx,
                 gy,
-                geom.w,
+                glass_w,
                 glass_h,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
@@ -578,6 +1156,9 @@ fn win32_dock_slide_root(
                     | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
                     | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
             );
+            if let Some(raw) = glass_raw {
+                win32_dock_glass_set_round(raw, corner_radius_px);
+            }
         }
     }
 
@@ -586,6 +1167,7 @@ fn win32_dock_slide_root(
         glass: Option<windows::Win32::Foundation::HWND>,
         geom: DockGeom,
         y: i32,
+        glass_w: i32,
         glass_h: i32,
     ) {
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -601,11 +1183,12 @@ fn win32_dock_slide_root(
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
         if let Some(gh) = glass {
+            let gx = geom.x + ((geom.w - glass_w) / 2).max(0);
             let gy = y + geom.h - glass_h;
             let _ = SetWindowPos(
                 gh,
                 None,
-                geom.x,
+                gx,
                 gy,
                 0,
                 0,
@@ -638,14 +1221,26 @@ fn win32_dock_slide_root(
     unsafe fn tween_y(
         hwnd: windows::Win32::Foundation::HWND,
         glass: Option<windows::Win32::Foundation::HWND>,
+        glass_raw: Option<isize>,
         geom: DockGeom,
         y_from: i32,
         y_to: i32,
         rising: bool,
+        glass_w: i32,
         glass_h: i32,
+        corner_radius_px: u32,
     ) {
         if (y_from - y_to).abs() <= 1 {
-            set_pair_pos(hwnd, glass, geom, y_to, glass_h);
+            set_pair_pos(
+                hwnd,
+                glass,
+                glass_raw,
+                geom,
+                y_to,
+                glass_w,
+                glass_h,
+                corner_radius_px,
+            );
             return;
         }
         // ~180ms — readable rise without feeling laggy.
@@ -655,10 +1250,19 @@ fn win32_dock_slide_root(
             let t = i as f64 / FRAMES as f64;
             let e = ease(t, rising);
             let y = (y_from as f64 + (y_to as f64 - y_from as f64) * e).round() as i32;
-            set_pair_y(hwnd, glass, geom, y, glass_h);
+            set_pair_y(hwnd, glass, geom, y, glass_w, glass_h);
             std::thread::sleep(std::time::Duration::from_millis(FRAME_MS));
         }
-        set_pair_pos(hwnd, glass, geom, y_to, glass_h);
+        set_pair_pos(
+            hwnd,
+            glass,
+            glass_raw,
+            geom,
+            y_to,
+            glass_w,
+            glass_h,
+            corner_radius_px,
+        );
     }
 
     unsafe {
@@ -666,9 +1270,12 @@ fn win32_dock_slide_root(
             set_pair_pos(
                 hwnd,
                 glass,
+                glass_raw,
                 geom,
                 if shown { geom.y_shown } else { geom.y_hidden },
+                glass_w,
                 glass_h,
+                corner_radius_px,
             );
             let cmd = if shown {
                 SW_SHOWNOACTIVATE
@@ -694,7 +1301,16 @@ fn win32_dock_slide_root(
             if let Some(gh) = glass {
                 let _ = ShowWindow(gh, SW_SHOWNOACTIVATE);
             }
-            set_pair_pos(hwnd, glass, geom, geom.y_hidden, glass_h);
+            set_pair_pos(
+                hwnd,
+                glass,
+                glass_raw,
+                geom,
+                geom.y_hidden,
+                glass_w,
+                glass_h,
+                corner_radius_px,
+            );
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             if let Some(gh) = glass {
                 let _ = ShowWindow(gh, SW_SHOWNOACTIVATE);
@@ -702,11 +1318,14 @@ fn win32_dock_slide_root(
             tween_y(
                 hwnd,
                 glass,
+                glass_raw,
                 geom,
                 geom.y_hidden,
                 geom.y_shown,
                 true,
+                glass_w,
                 glass_h,
+                corner_radius_px,
             );
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             if let Some(gh) = glass {
@@ -723,18 +1342,47 @@ fn win32_dock_slide_root(
             let y_from = y_now.clamp(geom.y_shown, geom.y_hidden);
             // Must be visible to tween out; if already tucked, just hide.
             if (y_from - geom.y_hidden).abs() <= 2 {
-                set_pair_pos(hwnd, glass, geom, geom.y_hidden, glass_h);
+                set_pair_pos(
+                    hwnd,
+                    glass,
+                    glass_raw,
+                    geom,
+                    geom.y_hidden,
+                    glass_w,
+                    glass_h,
+                    corner_radius_px,
+                );
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 if let Some(gh) = glass {
                     let _ = ShowWindow(gh, SW_HIDE);
                 }
             } else {
-                set_pair_pos(hwnd, glass, geom, y_from, glass_h);
+                set_pair_pos(
+                    hwnd,
+                    glass,
+                    glass_raw,
+                    geom,
+                    y_from,
+                    glass_w,
+                    glass_h,
+                    corner_radius_px,
+                );
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 if let Some(gh) = glass {
                     let _ = ShowWindow(gh, SW_SHOWNOACTIVATE);
                 }
-                tween_y(hwnd, glass, geom, y_from, geom.y_hidden, false, glass_h);
+                tween_y(
+                    hwnd,
+                    glass,
+                    glass_raw,
+                    geom,
+                    y_from,
+                    geom.y_hidden,
+                    false,
+                    glass_w,
+                    glass_h,
+                    corner_radius_px,
+                );
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 if let Some(gh) = glass {
                     let _ = ShowWindow(gh, SW_HIDE);
@@ -768,8 +1416,12 @@ pub async fn set_dock_prefs(
     if next.enabled {
         next.hide_system_taskbar = true;
     }
+    // Drop stale hide ids after pin list edits / imports.
+    next.hidden_item_ids
+        .retain(|id| next.items.iter().any(|it| it.id == *id));
     next = with_icons(next);
     save_dock_prefs(&next)?;
+    invalidate_dock_layout_cache();
     vis.apply_prefs(&next);
     let _ = app.emit("dock-prefs", &next);
 
@@ -820,6 +1472,7 @@ pub fn import_dockico_ini(app: AppHandle, path: String) -> Result<DockPrefs, Str
     prefs.items = items;
     prefs = with_icons(prefs);
     save_dock_prefs(&prefs)?;
+    invalidate_dock_layout_cache();
     let _ = app.emit("dock-prefs", &prefs);
     position_dock_window(&app, &prefs);
     Ok(prefs)
@@ -837,12 +1490,57 @@ pub fn pick_dockico_file() -> Result<Option<String>, String> {
 #[tauri::command]
 pub fn dock_launch_item(item_id: String) -> Result<(), String> {
     let prefs = load_dock_prefs();
-    let item = prefs
-        .items
+    let items = dock_merge_running(&prefs, false);
+    let item = items
         .iter()
         .find(|i| i.id == item_id)
-        .ok_or_else(|| format!("dock item not found: {item_id}"))?;
-    launch_or_focus(item)
+        .ok_or_else(|| format!("dock item not found: {item_id}"))?
+        .clone();
+    launch_or_focus(&item)
+}
+
+/// Pinned items + running apps not on the dock (before trash), with icons.
+#[tauri::command]
+pub fn get_dock_display_items(app: AppHandle) -> Vec<DockItem> {
+    let mut prefs = load_dock_prefs();
+    dock_compact_and_notify(&app, &mut prefs);
+    let prefs = with_icons(prefs);
+    dock_merge_running(&prefs, true)
+}
+
+#[tauri::command]
+pub fn dock_relayout(app: AppHandle) {
+    let mut prefs = load_dock_prefs();
+    if !prefs.enabled {
+        return;
+    }
+    dock_compact_and_notify(&app, &mut prefs);
+    position_dock_window(&app, &prefs);
+}
+
+/// Clear overflow-hidden pins and relayout (status-menu right-click restore).
+#[tauri::command]
+pub fn dock_restore_hidden_items(app: AppHandle) -> Result<DockPrefs, String> {
+    let mut prefs = load_dock_prefs();
+    if prefs.hidden_item_ids.is_empty() {
+        return Ok(with_icons(prefs));
+    }
+    prefs.hidden_item_ids.clear();
+    invalidate_dock_layout_cache();
+    // May immediately re-compact if still overflowing — that re-emits dock-compacted.
+    dock_compact_and_notify(&app, &mut prefs);
+    save_dock_prefs(&prefs)?;
+    let prefs = with_icons(prefs);
+    let _ = app.emit("dock-prefs", &prefs);
+    if prefs.enabled {
+        position_dock_window(&app, &prefs);
+    }
+    Ok(prefs)
+}
+
+#[tauri::command]
+pub fn get_dock_hidden_count() -> usize {
+    load_dock_prefs().hidden_item_ids.len()
 }
 
 #[tauri::command]
@@ -881,7 +1579,9 @@ async fn ensure_dock_window_inner(
     vis.apply_prefs(prefs);
     vis.start(app.clone());
 
-    let width = dock_window_width(&prefs.items, prefs.magnification);
+    let layout = dock_layout_items(prefs);
+    let width = dock_window_width(&layout, prefs.magnification);
+    let glass_w = dock_content_width(&layout);
     let height = dock_window_height(prefs.magnification);
 
     // Glass strip first (below icons): owns SWCA material at fixed DOCK_H.
@@ -895,13 +1595,14 @@ async fn ensure_dock_window_inner(
             WebviewUrl::App("index.html?window=dock-glass".into()),
         )
         .title("Dock Glass")
-        .inner_size(width, DOCK_H)
+        .inner_size(glass_w, DOCK_H)
         .resizable(false)
         .maximizable(false)
         .minimizable(false)
         .closable(false)
         .decorations(false)
         .transparent(true)
+        .shadow(false)
         .background_color(Color(0, 0, 0, 0))
         .always_on_top(true)
         .skip_taskbar(true)
@@ -911,13 +1612,24 @@ async fn ensure_dock_window_inner(
         .build()
         .map_err(|e| format!("open dock-glass failed: {e}"))?;
         let _ = glass.set_ignore_cursor_events(true);
+        let _ = glass.set_shadow(false);
         apply_saved_material_pub(&glass, state);
+        #[cfg(windows)]
+        if let Ok(gh) = glass.hwnd() {
+            win32_dock_glass_set_round(gh.0 as isize, prefs.corner_radius_px);
+        }
     } else if let Some(glass) = app.get_webview_window(DOCK_GLASS_LABEL) {
         let _ = glass.set_ignore_cursor_events(true);
+        let _ = glass.set_shadow(false);
         apply_saved_material_pub(&glass, state);
+        #[cfg(windows)]
+        if let Ok(gh) = glass.hwnd() {
+            win32_dock_glass_set_round(gh.0 as isize, prefs.corner_radius_px);
+        }
     }
 
     if let Some(existing) = app.get_webview_window("dock") {
+        let _ = existing.set_shadow(false);
         apply_saved_material_pub(&existing, state);
         sync_dock_visual(app, vis);
         return Ok(());
@@ -940,6 +1652,7 @@ async fn ensure_dock_window_inner(
     .closable(false)
     .decorations(false)
     .transparent(true)
+    .shadow(false)
     .background_color(Color(0, 0, 0, 0))
     .always_on_top(true)
     .skip_taskbar(true)
@@ -950,6 +1663,7 @@ async fn ensure_dock_window_inner(
     .map_err(|e| format!("open dock failed: {e}"))?;
 
     // Icons layer: clear material (glass sibling owns acrylic).
+    let _ = win.set_shadow(false);
     apply_saved_material_pub(&win, state);
     // Snap whole window to shown/hidden rest pose (no CSS half-state).
     sync_dock_visual(app, vis);

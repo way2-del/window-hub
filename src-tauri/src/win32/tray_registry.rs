@@ -301,11 +301,14 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
         });
     }
 
-    eprintln!(
-        "[tray] registry running icons: {} (of {} order entries)",
-        registers.len(),
-        raw.bytes.len() / 8
-    );
+    // Hot path — quiet by default (reconcile can run often at startup).
+    if std::env::var_os("WH_TRAY_REGISTRY_LOG").is_some() {
+        eprintln!(
+            "[tray] registry running icons: {} (of {} order entries)",
+            registers.len(),
+            raw.bytes.len() / 8
+        );
+    }
     registers
 }
 

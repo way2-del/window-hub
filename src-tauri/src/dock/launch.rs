@@ -4,33 +4,39 @@ use super::DockItem;
 use crate::win32::enum_windows::{focus_window, list_windows, WindowInfo};
 
 pub fn matching_windows(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowInfo> {
+    windows
+        .iter()
+        .filter(|w| item_matches_window(item, w))
+        .cloned()
+        .collect()
+}
+
+pub fn item_matches_window(item: &DockItem, w: &WindowInfo) -> bool {
     if item.kind != "app" {
-        return Vec::new();
+        return false;
     }
     let want = item.match_exe.to_ascii_lowercase();
     if want.is_empty() {
-        return Vec::new();
+        return false;
     }
     let real = item.real_path.to_ascii_lowercase();
-    windows
-        .iter()
-        .filter(|w| {
-            let exe_name = w
-                .exe_name
-                .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let exe_path = w.exe.as_deref().unwrap_or("").to_ascii_lowercase();
-            if !exe_name.is_empty() && (exe_name == want || format!("{exe_name}.exe") == want) {
-                return true;
-            }
-            if !real.is_empty() && !exe_path.is_empty() && exe_path == real {
-                return true;
-            }
-            false
-        })
-        .cloned()
-        .collect()
+    let exe_name = w
+        .exe_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let exe_path = w.exe.as_deref().unwrap_or("").to_ascii_lowercase();
+    if !exe_name.is_empty()
+        && (exe_name == want
+            || format!("{exe_name}.exe") == want
+            || exe_name == want.trim_end_matches(".exe"))
+    {
+        return true;
+    }
+    if !real.is_empty() && !exe_path.is_empty() && exe_path == real {
+        return true;
+    }
+    false
 }
 
 pub fn launch_or_focus(item: &DockItem) -> Result<(), String> {

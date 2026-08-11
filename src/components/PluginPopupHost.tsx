@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { normalizeGlassKind, subscribeSystemDark, syncGlassCss, type GlassPrefs } from "../glassPrefs";
@@ -141,7 +141,7 @@ function ensureHub(pluginId: string) {
   };
 }
 
-type Boot = { css: string; js: string };
+type Boot = { css: string; js: string; pinyin?: string };
 
 /**
  * Host shell: Tauri IPC + inject plugin CSS/JS from disk (independent package).
@@ -204,7 +204,7 @@ export default function PluginPopupHost() {
             ? entry.slice(0, entry.lastIndexOf("\\") + 1)
             : "";
 
-        const [css, js] = await Promise.all([
+        const [css, js, pinyinPro, pinyinLite] = await Promise.all([
           invoke<string>("hub_plugin_read_text", {
             pluginId,
             relativePath: `${dir}popup.css`,
@@ -213,9 +213,17 @@ export default function PluginPopupHost() {
             pluginId,
             relativePath: `${dir}popup.js`,
           }),
+          invoke<string>("hub_plugin_read_text", {
+            pluginId,
+            relativePath: `${dir}pinyin-pro.min.js`,
+          }).catch(() => ""),
+          invoke<string>("hub_plugin_read_text", {
+            pluginId,
+            relativePath: `${dir}pinyinlite.min.js`,
+          }).catch(() => ""),
         ]);
         if (cancelled) return;
-        setBoot({ css, js });
+        setBoot({ css, js, pinyin: pinyinPro || pinyinLite });
       } catch (err) {
         if (!cancelled) setError(String(err));
       }
@@ -244,6 +252,12 @@ export default function PluginPopupHost() {
       if (!document.getElementById("app")) {
         setError("插件挂载点 #app 缺失");
         return;
+      }
+      if (boot.pinyin) {
+        const py = document.createElement("script");
+        py.id = "wh-pinyin-lib";
+        py.textContent = boot.pinyin;
+        document.body.appendChild(py);
       }
       const script = document.createElement("script");
       script.textContent = boot.js;

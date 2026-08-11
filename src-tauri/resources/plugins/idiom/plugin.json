@@ -1,0 +1,43 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.idiom",
+  "name": "成语",
+  "version": "1.2.2",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "快捷区随机成语（带声调拼音）；悬停看释义，点击切换；管理钮打开历史弹窗（最近 200 条，分页详情）。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "popup": "popup.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "成语",
+      "order": 8,
+      "action": "popup.open",
+      "manage": "custom"
+    }
+  },
+  "settings": [
+    {
+      "key": "refreshSeconds",
+      "type": "select",
+      "label": "自动切换间隔",
+      "description": "定时从接口拉取新成语；点击成语文案也可立即切换",
+      "default": 60,
+      "options": [
+        { "value": 30, "label": "30 秒" },
+        { "value": 60, "label": "1 分钟" },
+        { "value": 300, "label": "5 分钟" },
+        { "value": 900, "label": "15 分钟" },
+        { "value": 1800, "label": "30 分钟" },
+        { "value": 0, "label": "仅手动点击" }
+      ]
+    }
+  ],
+  "capabilities": ["storage", "network", "shortcuts", "popup"],
+  "permissions": {
+    "network": ["43.139.23.203", "http://43.139.23.203:8765"]
+  }
+}
