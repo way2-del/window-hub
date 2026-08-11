@@ -1,0 +1,73 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+html,
+body {
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+  display: flex;
+  align-items: center;
+  color: var(--wh-chrome-fg, rgba(255, 255, 255, 0.94));
+  text-shadow: var(--wh-chrome-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
+  font-family: var(
+    --wh-chrome-font-family,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif
+  );
+  font-size: var(--wh-chrome-font-size, 12px);
+  font-weight: var(--wh-chrome-font-weight, 700);
+  user-select: none;
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.idiom-bar {
+  display: inline-flex;
+  align-items: center;
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  padding: 0 8px;
+  cursor: pointer;
+  background: transparent !important;
+  border: none !important;
+  color: inherit;
+  text-shadow: inherit;
+  font: inherit;
+}
+
+.idiom-chip-label {
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.idiom-bar:hover .idiom-chip-label,
+.idiom-bar:focus-visible .idiom-chip-label {
+  opacity: 0.88;
+}

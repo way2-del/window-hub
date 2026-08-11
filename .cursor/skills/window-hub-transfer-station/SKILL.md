@@ -1,9 +1,9 @@
 ---
 name: window-hub-transfer-station
 description: >-
-  Official Transfer Station example — island.drop + island.bar + island.panel,
-  hub.staging, panelWidth/panelHeight settings, excludeFromPullContent.
-  Install via .whpx / 开发目录 / 导入示例. Not Host-embedded.
+  Official Transfer Station example — shortcuts + popup, hub.staging,
+  pickFiles / drag-in popup. Install via .whpx / 开发目录 / 导入示例.
+  Not Host-embedded. Not island.drop.
 ---
 
 # 中转站插件（示例）
@@ -12,45 +12,40 @@ description: >-
 **真源：** `docs/plugins/examples/transfer-station/`（资源镜像 `src-tauri/resources/plugins/transfer-station/`）  
 **非** Host 内嵌；启动不刷盘。
 
-## 架构
+## 架构（v2：左侧快捷区）
 
 | 槽位 | 作用 |
 |------|------|
-| `island.drop` | Host 把岛上 DnD 路由到本插件（须同时有 `staging`） |
-| `island.bar` | 有内容时岛栏摘要；可 `hub.island.setBar`，Host 也会跟 `staging-changed` 同步 |
-| `island.panel` | 横向缩略图面板；`excludeFromPullContent: true`（不进「下拉内容」） |
+| `shortcuts` | 左侧 chip；点击 `hub.popup.open` |
+| `entry.popup` | 弹窗内暂存预览 / 添加文件 / 拖入 |
 
-入口：仅 `entry.panel` → `panel.html` + **固定** `panel.css` / `panel.js`。
+**不再**使用 `island.drop` / `island.panel` / `island.bar`（透明岛拖放不可靠）。
+
+入口：`entry.shortcuts` + `entry.popup` → 固定 `shortcuts.*` / `popup.css` / `popup.js`。
 
 ## 安装
 
 设置 → 插件：导入示例「中转站」/ 添加开发目录 / 安装 `.whpx`。
 
-## 数据与设置
+## 数据
 
 - 索引：`hub.staging.*` → `plugin_kv.__staging_items`
 - 载荷：`%APPDATA%/window-hub/plugins/<id>/staging/`
-- 尺寸：`hub.settings.panelWidth` / `panelHeight`（默认 560×152）→ 否则 `defaultSize`
 
 ## Manifest（要点）
 
 ```json
 {
-  "entry": { "panel": "panel.html" },
+  "entry": { "shortcuts": "shortcuts.html", "popup": "popup.html" },
   "slots": {
-    "island.bar": { "order": 10 },
-    "island.drop": { "order": 10 },
-    "island.panel": {
-      "defaultSize": { "w": 560, "h": 152 },
-      "excludeFromPullContent": true
-    }
+    "shortcuts": { "order": 20, "action": "popup.open", "label": "中转站" }
   },
-  "capabilities": ["island.panel", "island.drop", "staging", "storage"]
+  "capabilities": ["shortcuts", "popup", "staging", "storage"]
 }
 ```
 
 ## 相关
 
 - 总流程：`window-hub-plugin`
-- 面板几何：`window-hub-island-panel`
-- 沉浸与岛栏字色：`window-hub-island-immerse`
+- 快捷区：`window-hub-shortcuts`
+- 弹窗几何：`window-hub-plugin-popup`

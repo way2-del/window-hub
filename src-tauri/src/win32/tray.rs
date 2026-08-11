@@ -27,7 +27,7 @@ pub struct TrayIconInfo {
     pub icon_png_base64: String,
     /// `taskbar` (visible) or `overflow` (hidden / overflow flyout).
     pub area: String,
-    /// Attention / blink (e.g. WeChat new message). Cleared on click.
+    /// Attention / blink (e.g. WeChat new message). Cleared on click or when blink settles.
     #[serde(default)]
     pub flashing: bool,
 }
@@ -45,6 +45,46 @@ pub struct TrayAttention {
     pub version: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemChipVisibility {
+    #[serde(default = "default_true")]
+    pub perf: bool,
+    #[serde(default = "default_true")]
+    pub wifi: bool,
+    #[serde(default = "default_true")]
+    pub bluetooth: bool,
+    #[serde(default = "default_true")]
+    pub volume: bool,
+    #[serde(default = "default_true")]
+    pub power: bool,
+    /// 耳机 / 手柄等外设快捷芯片
+    #[serde(default = "default_true")]
+    pub peripherals: bool,
+    #[serde(default = "default_true")]
+    pub ime: bool,
+    #[serde(default = "default_true")]
+    pub clock: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for SystemChipVisibility {
+    fn default() -> Self {
+        Self {
+            perf: true,
+            wifi: true,
+            bluetooth: true,
+            volume: true,
+            power: true,
+            peripherals: true,
+            ime: true,
+            clock: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrayPrefs {
     /// Icon ids that stay visible on the bar (outside the chevron).
@@ -55,6 +95,15 @@ pub struct TrayPrefs {
     /// Legacy global height (migrated into `menu_heights` on load if present).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu_height_px: Option<i32>,
+    /// Icon ids that never arm island attention / tray blink banners.
+    #[serde(default)]
+    pub muted: Vec<String>,
+    /// Process stems (e.g. `memreduct`) muted across icon-id churn.
+    #[serde(default)]
+    pub muted_processes: Vec<String>,
+    /// 岛栏右侧系统芯片（Wi‑Fi / 蓝牙等）是否显示。
+    #[serde(default)]
+    pub system_chips: SystemChipVisibility,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,13 +153,22 @@ mod win {
     static ATTENTION_ACK: LazyLock<Mutex<HashMap<String, std::time::Instant>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
+    /// Last blink-arm activity per icon — used to auto-clear `flashing` when the app stops blinking.
+    static LAST_BLINK_AT: LazyLock<Mutex<HashMap<String, std::time::Instant>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
     /// Suppress leftover blink frames right after click (not long — new msgs must re-arm).
     const ATTENTION_ACK_MS: u128 = 700;
 
+    /// No blink frames for this long → treat attention as settled (app cleared / user read).
+    const FLASH_SETTLE_MS: u128 = 2200;
+
     type EmitFn = Box<dyn Fn(Vec<TrayIconInfo>) + Send + Sync>;
     type AttentionFn = Box<dyn Fn(TrayAttention) + Send + Sync>;
+    type AttentionClearedFn = Box<dyn Fn(String) + Send + Sync>;
     static EMIT: OnceLock<EmitFn> = OnceLock::new();
     static ATTENTION: OnceLock<AttentionFn> = OnceLock::new();
+    static ATTENTION_CLEARED: OnceLock<AttentionClearedFn> = OnceLock::new();
 
     /// Rate-limit optional cold-start TaskbarCreated (hook path only).
     static LAST_TASKBAR_CREATED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -122,12 +180,75 @@ mod win {
     /// True when explorer hook is the list source (spy disabled).
     static HOOK_PRIMARY: AtomicBool = AtomicBool::new(false);
 
+    /// Signature of last `tray-icons` payload — skip identical emits.
+    static LAST_PUBLISH_SIG: Mutex<u64> = Mutex::new(0);
+
     pub fn get_prefs() -> TrayPrefs {
         PREFS.lock().clone()
     }
 
     pub fn set_prefs(prefs: TrayPrefs) {
         *PREFS.lock() = prefs;
+        // Drop armed blink for newly muted icons so rail / island clear immediately.
+        let mut cleared: Vec<String> = Vec::new();
+        {
+            let mut icons = ICONS.lock();
+            for icon in icons.values_mut() {
+                if icon.flashing && attention_muted(&icon.id, &icon.process, &icon.tooltip) {
+                    icon.flashing = false;
+                    cleared.push(icon.id.clone());
+                }
+            }
+        }
+        if !cleared.is_empty() {
+            acknowledge_attention(cleared.clone());
+            emit_attention_cleared(cleared);
+            publish();
+        }
+    }
+
+    /// Status / metric trays (Mem Reduct, Task Manager, …) redraw glyphs often;
+    /// treat rapid swaps as updates, not WeChat-style blink attention.
+    fn is_status_metric_icon(process: &str, tooltip: &str) -> bool {
+        let tip = tooltip.trim();
+        if tip.contains('%') {
+            return true;
+        }
+        let p = process.trim().to_ascii_lowercase();
+        matches!(
+            p.as_str(),
+            "memreduct"
+                | "taskmgr"
+                | "hwinfo64"
+                | "hwinfo32"
+                | "rtss"
+                | "msi afterburner"
+                | "afterburner"
+                | "coretemp"
+                | "throttlestop"
+                | "rainmeter"
+        ) || tip.to_ascii_lowercase().contains("mem reduct")
+    }
+
+    fn attention_muted(id: &str, process: &str, tooltip: &str) -> bool {
+        let prefs = get_prefs();
+        if prefs.muted.iter().any(|m| m == id) {
+            return true;
+        }
+        let proc = process.trim().to_ascii_lowercase();
+        if !proc.is_empty()
+            && prefs
+                .muted_processes
+                .iter()
+                .any(|m| m.trim().eq_ignore_ascii_case(&proc))
+        {
+            return true;
+        }
+        let tip = tooltip.to_ascii_lowercase();
+        prefs.muted_processes.iter().any(|m| {
+            let m = m.trim().to_ascii_lowercase();
+            !m.is_empty() && tip.contains(&m)
+        })
     }
 
     /// Resolve height: per-icon custom → WeChat/QQ default custom → measured cache → 160.
@@ -145,7 +266,12 @@ mod win {
 
     pub fn list_icons() -> Vec<TrayIconInfo> {
         let _ = sweep_icons();
-        let mut v: Vec<_> = ICONS.lock().values().cloned().collect();
+        let mut v: Vec<_> = ICONS
+            .lock()
+            .values()
+            .filter(|icon| !is_replaced_shell_tray_icon(&icon.id, &icon.tooltip, &icon.process))
+            .cloned()
+            .collect();
         v.sort_by(|a, b| {
             a.tooltip
                 .to_lowercase()
@@ -153,6 +279,51 @@ mod win {
                 .then_with(|| a.id.cmp(&b.id))
         });
         v
+    }
+
+    /// Shell NotifyIcons replaced by island chips (Wi‑Fi / BT / volume / power / IME / clock).
+    fn is_replaced_shell_tray_icon(id: &str, tooltip: &str, process: &str) -> bool {
+        if known_system_name(id).is_some() {
+            let g = id.trim().to_ascii_lowercase();
+            // Keep "安全删除硬件"; hide the rest that our chips cover.
+            return g != "7820ae78-23e3-4229-82c1-e41cb67d5b9c";
+        }
+        let tip = tooltip.to_ascii_lowercase();
+        let proc = process.to_ascii_lowercase();
+        let shell_proc = proc.is_empty()
+            || proc == "explorer.exe"
+            || proc == "shellhost.exe"
+            || proc == "sihost.exe"
+            || proc == "systemsettings.exe";
+        if !shell_proc {
+            return false;
+        }
+        const KEYS: &[&str] = &[
+            "网络",
+            "network",
+            "wifi",
+            "wi-fi",
+            "扬声器",
+            "speaker",
+            "volume",
+            "音量",
+            "电源",
+            "电池",
+            "battery",
+            "power",
+            "蓝牙",
+            "bluetooth",
+            "输入法",
+            "input indicator",
+            "language",
+            "时钟",
+            "clock",
+            "日期和时间",
+            "操作中心",
+            "action center",
+            "通知",
+        ];
+        KEYS.iter().any(|k| tip.contains(k))
     }
 
     fn clean_text(s: &str) -> String {
@@ -336,29 +507,41 @@ mod win {
         }
 
         let mut flashing = prev.as_ref().map(|p| p.flashing).unwrap_or(false);
-        if is_update {
+        let muted = attention_muted(&id, &process, &tooltip);
+        if is_update && !muted {
             let prev_fp = OS_FINGERPRINT.lock().get(&id).cloned();
             let fp_changed = prev_fp.as_ref().is_some_and(|p| p != &fingerprint);
             let vis_changed = prev.as_ref().map(|p| p.area != area).unwrap_or(false);
             // Classic tray blink (WeChat etc.): blank HICON frames and/or
-            // NIS_HIDDEN toggles. Also arm on rapid glyph oscillation.
+            // NIS_HIDDEN toggles. Also arm on rapid glyph oscillation —
+            // but not for status/metric trays that redraw constantly.
             let from_or_to_blank =
                 blank_frame || prev_fp.as_deref() == Some("__blank__");
-            let rapid_swap = if fp_changed {
+            let metric = is_status_metric_icon(&process, &tooltip);
+            let rapid_swap = if fp_changed && !metric {
                 let now = std::time::Instant::now();
                 let mut map = FP_CHANGES.lock();
                 let times = map.entry(id.clone()).or_default();
                 times.push(now);
                 times.retain(|t| now.duration_since(*t).as_millis() < 2500);
-                times.len() >= 2
+                // Raise threshold: 3 changes / 2.5s ≈ real blink; 2 was too noisy.
+                times.len() >= 3
             } else {
                 false
             };
-            if blank_frame || vis_changed || from_or_to_blank || rapid_swap {
+            // Metric icons: only blank HICON frames count (true blink), not
+            // visibility churn from overflow promotion on Win11.
+            let arm = if metric {
+                blank_frame || from_or_to_blank
+            } else {
+                blank_frame || vis_changed || from_or_to_blank || rapid_swap
+            };
+            if arm {
                 flashing = true;
+                touch_blink(&id);
             }
         }
-        if flashing && attention_suppressed(&id) {
+        if muted || (flashing && attention_suppressed(&id)) {
             flashing = false;
         }
 
@@ -568,7 +751,12 @@ mod win {
                 }
             }
             let was_flashing = icons.get(&id).map(|p| p.flashing).unwrap_or(false);
-            if info.flashing && !was_flashing && !attention_suppressed(&id) {
+            let muted = attention_muted(&info.id, &info.process, &info.tooltip);
+            if info.flashing
+                && !was_flashing
+                && !muted
+                && !attention_suppressed(&id)
+            {
                 armed_attention = Some(TrayAttention {
                     id: info.id.clone(),
                     tooltip: info.tooltip.clone(),
@@ -603,13 +791,29 @@ mod win {
         }
     }
 
+    fn touch_blink(id: &str) {
+        LAST_BLINK_AT
+            .lock()
+            .insert(id.to_string(), std::time::Instant::now());
+    }
+
+    fn emit_attention_cleared(ids: impl IntoIterator<Item = String>) {
+        if let Some(emit) = ATTENTION_CLEARED.get() {
+            for id in ids {
+                emit(id);
+            }
+        }
+    }
+
     fn acknowledge_attention(ids: impl IntoIterator<Item = String>) {
         let now = std::time::Instant::now();
         let mut ack = ATTENTION_ACK.lock();
         let mut fps = FP_CHANGES.lock();
+        let mut blinks = LAST_BLINK_AT.lock();
         for id in ids {
             ack.insert(id.clone(), now);
             fps.remove(&id);
+            blinks.remove(&id);
         }
     }
 
@@ -632,12 +836,91 @@ mod win {
         if cleared.is_empty() {
             return;
         }
-        acknowledge_attention(cleared);
+        acknowledge_attention(cleared.clone());
+        emit_attention_cleared(cleared);
         publish();
+    }
+
+    /// When tray blink activity goes quiet (user read msg in-app), drop `flashing` + tell island.
+    fn settle_flashing() -> bool {
+        let now = std::time::Instant::now();
+        let mut cleared: Vec<String> = Vec::new();
+        {
+            let blinks = LAST_BLINK_AT.lock();
+            let mut icons = ICONS.lock();
+            for (id, icon) in icons.iter_mut() {
+                if !icon.flashing {
+                    continue;
+                }
+                let settled = match blinks.get(id) {
+                    Some(t) => now.duration_since(*t).as_millis() >= FLASH_SETTLE_MS,
+                    // Armed before touch_blink existed / lost timestamp → settle promptly.
+                    None => true,
+                };
+                if settled {
+                    icon.flashing = false;
+                    cleared.push(id.clone());
+                }
+            }
+        }
+        if cleared.is_empty() {
+            return false;
+        }
+        acknowledge_attention(cleared.clone());
+        emit_attention_cleared(cleared);
+        true
+    }
+
+    fn start_flash_settle_loop() {
+        std::thread::Builder::new()
+            .name("tray-flash-settle".into())
+            .spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                if settle_flashing() {
+                    publish();
+                }
+            })
+            .expect("spawn tray-flash-settle");
+    }
+
+    fn list_signature(list: &[TrayIconInfo]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        list.len().hash(&mut h);
+        for i in list {
+            i.id.hash(&mut h);
+            i.tooltip.hash(&mut h);
+            i.process.hash(&mut h);
+            i.area.hash(&mut h);
+            i.flashing.hash(&mut h);
+            i.hwnd.hash(&mut h);
+            i.uid.hash(&mut h);
+            i.callback_msg.hash(&mut h);
+            // Avoid hashing full PNG base64 every publish — length + ends suffice.
+            i.icon_png_base64.len().hash(&mut h);
+            if let Some(head) = i.icon_png_base64.get(..24) {
+                head.hash(&mut h);
+            }
+            if i.icon_png_base64.len() > 24 {
+                if let Some(tail) = i.icon_png_base64.get(i.icon_png_base64.len().saturating_sub(24)..)
+                {
+                    tail.hash(&mut h);
+                }
+            }
+        }
+        h.finish()
     }
 
     fn publish() {
         let list = list_icons();
+        let sig = list_signature(&list);
+        {
+            let mut last = LAST_PUBLISH_SIG.lock();
+            if *last == sig {
+                return;
+            }
+            *last = sig;
+        }
         if let Some(emit) = EMIT.get() {
             emit(list);
         }
@@ -958,25 +1241,33 @@ mod win {
         }
 
         let mut flashing = prev.as_ref().map(|p| p.flashing).unwrap_or(false);
-        if is_update {
+        let muted = attention_muted(&id, &process, &tooltip);
+        if is_update && !muted {
             let prev_fp = OS_FINGERPRINT.lock().get(&id).cloned();
             let fp_changed = prev_fp.as_ref().is_some_and(|p| p != &fingerprint);
             let from_or_to_blank = blank_frame || prev_fp.as_deref() == Some("__blank__");
-            let rapid_swap = if fp_changed {
+            let metric = is_status_metric_icon(&process, &tooltip);
+            let rapid_swap = if fp_changed && !metric {
                 let now = std::time::Instant::now();
                 let mut map = FP_CHANGES.lock();
                 let times = map.entry(id.clone()).or_default();
                 times.push(now);
                 times.retain(|t| now.duration_since(*t).as_millis() < 2500);
-                times.len() >= 2
+                times.len() >= 3
             } else {
                 false
             };
-            if blank_frame || from_or_to_blank || rapid_swap {
+            let arm = if metric {
+                blank_frame || from_or_to_blank
+            } else {
+                blank_frame || from_or_to_blank || rapid_swap
+            };
+            if arm {
                 flashing = true;
+                touch_blink(&id);
             }
         }
-        if flashing && attention_suppressed(&id) {
+        if muted || (flashing && attention_suppressed(&id)) {
             flashing = false;
         }
         OS_FINGERPRINT.lock().insert(id.clone(), fingerprint);
@@ -1000,7 +1291,6 @@ mod win {
         match slot.message_type {
             NIM_ADD => {
                 let info = slot_to_info(slot, false);
-                eprintln!("[tray] hook IconAdd {} tip={:?}", info.id, info.tooltip);
                 upsert_icon(info);
             }
             NIM_MODIFY | NIM_SETVERSION => {
@@ -1008,13 +1298,14 @@ mod win {
             }
             NIM_DELETE => {
                 let id = stable_id_from_slot(slot);
-                eprintln!("[tray] hook IconRemove {id}");
                 ICONS.lock().remove(&id);
                 OS_FINGERPRINT.lock().remove(&id);
                 FP_CHANGES.lock().remove(&id);
                 ATTENTION_ACK.lock().remove(&id);
+                LAST_BLINK_AT.lock().remove(&id);
                 REG_KEY_BY_ID.lock().remove(&id);
                 let _ = sweep_icons();
+                emit_attention_cleared(std::iter::once(id));
                 publish();
             }
             _ => {}
@@ -1206,8 +1497,22 @@ mod win {
         (changed, missing)
     }
 
+    fn needs_registry_enrich() -> bool {
+        ICONS.lock().values().any(|i| {
+            i.icon_png_base64.is_empty()
+                || i.process.is_empty()
+                || looks_like_raw_id(&i.tooltip)
+                || i.tooltip == "未知应用"
+        })
+    }
+
     /// Enrich from registry only — never TaskbarCreated / UIA.
     fn reconcile_once() -> bool {
+        // Hook path already owns existence; skip costly EnumWindows/GetRect
+        // when tips/glyphs are already filled (common steady state on Win11).
+        if HOOK_PRIMARY.load(Ordering::SeqCst) && !needs_registry_enrich() {
+            return false;
+        }
         let (changed, _) = apply_registry_snapshot(false);
         changed
     }
@@ -1235,7 +1540,14 @@ mod win {
 
                 let started = std::time::Instant::now();
                 loop {
-                    let interval = if started.elapsed().as_secs() < 30 {
+                    let hook = HOOK_PRIMARY.load(Ordering::SeqCst);
+                    let interval = if hook {
+                        if started.elapsed().as_secs() < 20 {
+                            std::time::Duration::from_secs(5)
+                        } else {
+                            std::time::Duration::from_secs(60)
+                        }
+                    } else if started.elapsed().as_secs() < 30 {
                         std::time::Duration::from_secs(2)
                     } else {
                         std::time::Duration::from_secs(15)
@@ -1318,23 +1630,20 @@ mod win {
                 while let Some(event) = systray.events_blocking() {
                     match event {
                         SystrayEvent::IconAdd(icon) => {
-                            eprintln!(
-                                "[tray] IconAdd {} tip={:?}",
-                                icon.stable_id, icon.tooltip
-                            );
                             upsert_icon(to_info(&icon, false));
                         }
                         SystrayEvent::IconUpdate(icon) => {
                             upsert_icon(to_info(&icon, true));
                         }
                         SystrayEvent::IconRemove(id) => {
-                            eprintln!("[tray] IconRemove {id}");
                             let key = id.to_string();
                             ICONS.lock().remove(&key);
                             OS_FINGERPRINT.lock().remove(&key);
                             FP_CHANGES.lock().remove(&key);
+                            LAST_BLINK_AT.lock().remove(&key);
                             REG_KEY_BY_ID.lock().remove(&key);
                             let _ = sweep_icons();
+                            emit_attention_cleared(std::iter::once(key));
                             publish();
                         }
                     }
@@ -1344,13 +1653,15 @@ mod win {
     }
 
     /// Start tray tracking: explorer hook first, spy only if hook fails.
-    pub fn start<F, A>(on_change: F, on_attention: A)
+    pub fn start<F, A, C>(on_change: F, on_attention: A, on_attention_cleared: C)
     where
         F: Fn(Vec<TrayIconInfo>) + Send + Sync + 'static,
         A: Fn(TrayAttention) + Send + Sync + 'static,
+        C: Fn(String) + Send + Sync + 'static,
     {
         let _ = EMIT.set(Box::new(on_change));
         let _ = ATTENTION.set(Box::new(on_attention));
+        let _ = ATTENTION_CLEARED.set(Box::new(on_attention_cleared));
 
         // Recover if a previous build left the cursor hidden via ShowCursor.
         #[cfg(windows)]
@@ -1371,6 +1682,7 @@ mod win {
             start_reconcile_loop();
             start_spy_fallback();
         }
+        start_flash_settle_loop();
     }
 
     /// Last measured popup-menu height per icon id (auto mode).
@@ -1950,15 +2262,20 @@ mod win {
             TrayClick::Left => NIN_SELECT,
             TrayClick::Right => WM_CONTEXTMENU,
         };
-        if pack_ver >= 3 || (adapt_menu && tencent) {
-            notify_icon_at(
-                hwnd,
-                callback_msg,
-                uid,
-                pack_ver.max(4),
-                extra,
-                (msg_x, msg_y),
-            )?;
+        // Always send NIN_SELECT / CONTEXTMENU — many Electron/Clash apps ignore
+        // plain LBUTTON when NotifyIcon version is 0.
+        notify_icon_at(
+            hwnd,
+            callback_msg,
+            uid,
+            pack_ver.max(4),
+            extra,
+            (msg_x, msg_y),
+        )?;
+
+        // Left click: also restore the process main window (Clash Verge / Mechrevo etc.).
+        if matches!(click, TrayClick::Left) && owner_pid != 0 {
+            let _ = crate::win32::enum_windows::focus_main_for_pid(owner_pid);
         }
 
         if adapt_menu {
@@ -2036,9 +2353,10 @@ pub fn invoke_icon_by_id(
 pub fn acknowledge_icon_attention(_id: Option<String>, _hwnd: isize, _uid: u32) {}
 
 #[cfg(not(windows))]
-pub fn start<F, A>(_on_change: F, _on_attention: A)
+pub fn start<F, A, C>(_on_change: F, _on_attention: A, _on_attention_cleared: C)
 where
     F: Fn(Vec<TrayIconInfo>) + Send + Sync + 'static,
     A: Fn(TrayAttention) + Send + Sync + 'static,
+    C: Fn(String) + Send + Sync + 'static,
 {
 }

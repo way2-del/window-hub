@@ -8,10 +8,13 @@
   max-height: 28px;
   overflow: hidden;
   pointer-events: auto;
+  /* WebView2 透明像素会点透到下层窗口；极淡底保证快捷区可点 */
+  background: rgba(0, 0, 0, 0.02);
 }
 
 .shortcuts-host.is-empty {
   pointer-events: none;
+  background: transparent;
 }
 
 .shortcuts-host.is-resizing {
@@ -35,7 +38,7 @@
   height: 28px;
   max-height: 28px;
   overflow: hidden;
-  background: transparent !important;
+  background: rgba(0, 0, 0, 0.01);
   border: none !important;
   outline: none !important;
   box-shadow: none !important;
@@ -56,6 +59,8 @@
   scrollbar-width: none;
   -webkit-appearance: none;
   appearance: none;
+  /* 点击仍由 iframe 处理；OS 文件拖放走父级/Tauri，避免 iframe 吞掉 dragenter */
+  pointer-events: auto;
 }
 
 .shortcuts-strip-error {
@@ -151,6 +156,17 @@
   flex-shrink: 0;
   justify-content: center;
   align-items: center;
+}
+
+.shortcuts-chip.is-icon-only {
+  max-width: 22px;
+  padding: 0;
+  justify-content: center;
+  width: 22px;
+}
+
+.shortcuts-chip.is-icon-only .shortcuts-chip-icon {
+  margin: 0;
 }
 
 .shortcuts-pin-divider.is-static {

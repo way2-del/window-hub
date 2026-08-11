@@ -42,7 +42,8 @@ fn ecs_loop(app: AppHandle, rx: Receiver<HubCommand>) {
     world.insert_resource(SlotsDirty::default());
     world.insert_resource(LayoutConfig { columns: 3 });
     world.insert_resource(CaptureConfig {
-        fps: 12,
+        // Mosaic UI is uncommon; 8fps is enough and halves PrintWindow+JPEG cost.
+        fps: 8,
         last_capture: Instant::now() - Duration::from_secs(1),
     });
     world.insert_resource(AppEmitter { app });
@@ -76,8 +77,17 @@ fn ecs_loop(app: AppHandle, rx: Receiver<HubCommand>) {
             break;
         }
 
+        // No attached mosaic windows → idle downclock (still drain cmds promptly).
+        let idle = {
+            let mut q = world.query::<&crate::ecs::components::LiveFrame>();
+            q.iter(&world).next().is_none()
+        };
+        let frame = if idle {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(16)
+        };
         let elapsed = start.elapsed();
-        let frame = Duration::from_millis(16);
         if elapsed < frame {
             thread::sleep(frame - elapsed);
         }

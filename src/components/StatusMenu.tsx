@@ -2,14 +2,8 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { subscribeForeground } from "../foregroundPoll";
 import "./StatusMenu.css";
-
-type ForegroundApp = {
-  title: string;
-  exeName?: string | null;
-  label: string;
-  isSelf?: boolean;
-};
 
 type Props = {
   anchorRef: RefObject<HTMLElement | null>;
@@ -45,29 +39,18 @@ export default function StatusMenu({
   onMenuOpenChange,
 }: Props) {
   const [label, setLabel] = useState("桌面");
+  const [iconPng, setIconPng] = useState<string | null>(null);
   const lastLabel = useRef("桌面");
   const btnRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const app = await invoke<ForegroundApp>("get_foreground_app");
-        if (cancelled) return;
-        if (app.isSelf) return;
-        const next = truncateLabel(app.label || app.title || "桌面");
-        lastLabel.current = next;
-        setLabel(next);
-      } catch {
-        /* noop */
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => void tick(), 700);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
+    return subscribeForeground((app) => {
+      if (app.isSelf) return;
+      const next = truncateLabel(app.label || app.title || "桌面");
+      lastLabel.current = next;
+      setLabel(next);
+      setIconPng(app.iconPng?.trim() ? app.iconPng : null);
+    });
   }, []);
 
   useEffect(() => {
@@ -127,6 +110,14 @@ export default function StatusMenu({
       aria-expanded={menuOpen}
       onClick={() => void toggleMenu()}
     >
+      {iconPng ? (
+        <img
+          className="settings-app-icon"
+          src={`data:image/png;base64,${iconPng}`}
+          alt=""
+          draggable={false}
+        />
+      ) : null}
       <span className="settings-label" title={lastLabel.current}>
         {label}
       </span>

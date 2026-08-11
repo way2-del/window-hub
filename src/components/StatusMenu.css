@@ -1,10 +1,10 @@
 ﻿.settings-btn {
   height: var(--island-bar-h);
-  max-width: 108px;
-  padding: 0 2px;
+  max-width: 124px;
+  padding: 0;
   display: inline-flex;
   align-items: center;
-  gap: 0;
+  gap: 4px;
   color: var(--chrome-left-fg, rgba(255, 255, 255, 0.94));
   text-shadow: var(--chrome-left-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
   border-radius: 0;
@@ -22,6 +22,15 @@
   background: transparent;
   border: none;
   color: var(--chrome-left-fg-hover, #fff);
+}
+
+.settings-app-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  object-fit: contain;
+  display: block;
 }
 
 .settings-label {

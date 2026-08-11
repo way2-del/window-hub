@@ -260,15 +260,42 @@ pub fn hub_storage_get(plugin_id: String, key: String) -> Result<Option<Value>, 
 }
 
 #[tauri::command]
-pub fn hub_storage_set(plugin_id: String, key: String, value: Value) -> Result<(), String> {
+pub fn hub_storage_set(
+    app: AppHandle,
+    plugin_id: String,
+    key: String,
+    value: Value,
+) -> Result<(), String> {
     assert_capability(&plugin_id, "storage")?;
-    crate::db::with_conn(|c| crate::db::plugin_set(c, &plugin_id, &key, &value))
+    crate::db::with_conn(|c| crate::db::plugin_set(c, &plugin_id, &key, &value))?;
+    let _ = app.emit(
+        "plugin-storage-changed",
+        serde_json::json!({
+            "pluginId": plugin_id,
+            "key": key,
+            "value": value,
+            "removed": false,
+        }),
+    );
+    Ok(())
 }
 
 #[tauri::command]
-pub fn hub_storage_remove(plugin_id: String, key: String) -> Result<bool, String> {
+pub fn hub_storage_remove(app: AppHandle, plugin_id: String, key: String) -> Result<bool, String> {
     assert_capability(&plugin_id, "storage")?;
-    crate::db::with_conn(|c| crate::db::plugin_remove(c, &plugin_id, &key))
+    let removed = crate::db::with_conn(|c| crate::db::plugin_remove(c, &plugin_id, &key))?;
+    if removed {
+        let _ = app.emit(
+            "plugin-storage-changed",
+            serde_json::json!({
+                "pluginId": plugin_id,
+                "key": key,
+                "value": Value::Null,
+                "removed": true,
+            }),
+        );
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -586,6 +613,23 @@ pub fn hub_init_script(plugin_id: &str) -> String {
       set: (key, value) => invoke("hub_storage_set", withPlugin({{ key, value }})),
       remove: (key) => invoke("hub_storage_remove", withPlugin({{ key }})),
       listKeys: () => invoke("hub_storage_list_keys", withPlugin()),
+      subscribe: (cb) => {{
+        const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+        if (!listen || typeof cb !== "function") return () => {{}};
+        let un = () => {{}};
+        listen("plugin-storage-changed", (ev) => {{
+          const p = ev && ev.payload;
+          if (!p || p.pluginId !== PLUGIN_ID) return;
+          try {{
+            cb({{
+              key: p.key,
+              value: p.removed ? null : p.value,
+              removed: !!p.removed
+            }});
+          }} catch (_) {{}}
+        }}).then((fn) => {{ un = fn; }});
+        return () => un();
+      }},
     }},
     settings: {{
       getAll: () => invoke("hub_settings_get_all", withPlugin()),
@@ -619,10 +663,13 @@ pub fn hub_init_script(plugin_id: &str) -> String {
       remove: (id) => invoke("hub_staging_remove", withPlugin({{ id }})),
       clear: () => invoke("hub_staging_clear", withPlugin()),
       copy: (id) => invoke("hub_staging_copy", withPlugin({{ id }})),
+      copyFiles: (id) => invoke("hub_staging_copy_files", withPlugin({{ id }})),
       copyAllPaths: () => invoke("hub_staging_copy_all_paths", withPlugin()),
       thumb: (id) => invoke("hub_staging_thumb", withPlugin({{ id }})),
       reveal: (id) => invoke("hub_staging_reveal", withPlugin({{ id }})),
       startDrag: (ids) => invoke("hub_staging_start_drag", withPlugin({{ ids }})),
+      pickFiles: () => invoke("hub_staging_pick_files", withPlugin()),
+      pickFolders: () => invoke("hub_staging_pick_folders", withPlugin()),
       subscribe: (cb) => {{
         const listenFn =
           window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
@@ -658,6 +705,9 @@ pub fn hub_init_script(plugin_id: &str) -> String {
           }}),
         ),
       clearBar: () => invoke("hub_island_clear_bar", withPlugin()),
+    }},
+    media: {{
+      neteaseNowPlaying: () => invoke("hub_netease_now_playing", withPlugin()),
     }},
     fetch: (url, opts) =>
       invoke(

@@ -18,6 +18,7 @@ pub enum StagingKind {
     File,
     Text,
     Image,
+    Folder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ pub struct StagingItem {
     pub kind: StagingKind,
     pub label: String,
     pub created_at: u64,
-    /// File/image path ref (original absolute path), or staging-owned .txt / dropped image bytes.
+    /// File/image/folder path ref (original absolute path), or staging-owned .txt / dropped image bytes.
     pub path: String,
 }
 
@@ -37,6 +38,8 @@ pub struct StagingSummary {
     pub files: u32,
     pub texts: u32,
     pub images: u32,
+    #[serde(default)]
+    pub folders: u32,
     pub total: u32,
 }
 
@@ -87,6 +90,7 @@ fn kind_str(k: &StagingKind) -> &'static str {
         StagingKind::File => "file",
         StagingKind::Text => "text",
         StagingKind::Image => "image",
+        StagingKind::Folder => "folder",
     }
 }
 
@@ -94,6 +98,7 @@ fn parse_kind(s: &str) -> StagingKind {
     match s {
         "text" => StagingKind::Text,
         "image" => StagingKind::Image,
+        "folder" => StagingKind::Folder,
         _ => StagingKind::File,
     }
 }
@@ -195,10 +200,26 @@ fn summarize(items: &[StagingItem]) -> StagingSummary {
             StagingKind::File => s.files += 1,
             StagingKind::Text => s.texts += 1,
             StagingKind::Image => s.images += 1,
+            StagingKind::Folder => s.folders += 1,
         }
         s.total += 1;
     }
     s
+}
+
+/// Strip Windows `\\?\` / `\\?\UNC\` prefixes from canonicalize() for clipboard / Explorer.
+fn path_display_string(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+    s.into_owned()
 }
 
 pub fn summary(plugin_id: &str) -> StagingSummary {
@@ -312,7 +333,8 @@ pub fn add_image_bytes(
     )
 }
 
-/// Store absolute path reference only — do not copy the file into staging/.
+/// Store absolute path reference only — do not copy into staging/.
+/// Accepts regular files and directories (`folder` kind).
 pub fn add_paths(
     app: Option<&AppHandle>,
     plugin_id: &str,
@@ -321,11 +343,13 @@ pub fn add_paths(
     let mut out = Vec::new();
     for p in paths {
         let src = PathBuf::from(&p);
-        if !src.is_file() {
+        let is_dir = src.is_dir();
+        let is_file = src.is_file();
+        if !is_file && !is_dir {
             continue;
         }
         let abs = fs::canonicalize(&src).unwrap_or(src);
-        let path_str = abs.to_string_lossy().into_owned();
+        let path_str = path_display_string(&abs);
         {
             let mut map = store().by_plugin.lock();
             ensure_loaded(&mut map, plugin_id);
@@ -344,9 +368,11 @@ pub fn add_paths(
         let name = abs
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("file")
+            .unwrap_or(if is_dir { "folder" } else { "file" })
             .to_string();
-        let kind = if is_image_name(&name) {
+        let kind = if is_dir {
+            StagingKind::Folder
+        } else if is_image_name(&name) {
             StagingKind::Image
         } else {
             StagingKind::File
@@ -365,7 +391,7 @@ pub fn add_paths(
         out.push(item);
     }
     if out.is_empty() {
-        return Err("no files added".into());
+        return Err("no items added".into());
     }
     Ok(out)
 }
@@ -433,8 +459,11 @@ pub fn paths_for_drag(plugin_id: &str, ids: &[String]) -> Result<Vec<PathBuf>, S
         let Some(item) = guard.items.iter().find(|i| i.id == *id) else {
             continue;
         };
+        if matches!(item.kind, StagingKind::Text) {
+            continue;
+        }
         let p = PathBuf::from(&item.path);
-        if !p.is_file() {
+        if !p.is_file() && !p.is_dir() {
             continue;
         }
         out.push(fs::canonicalize(&p).unwrap_or(p));
@@ -497,7 +526,7 @@ pub fn copy_to_clipboard(plugin_id: &str, id: &str) -> Result<(), String> {
     drop(map);
     let text = match item.kind {
         StagingKind::Text => fs::read_to_string(&item.path).map_err(|e| e.to_string())?,
-        StagingKind::File | StagingKind::Image => item.path,
+        StagingKind::File | StagingKind::Image | StagingKind::Folder => item.path,
     };
     set_clipboard_text(&text)
 }
@@ -511,7 +540,12 @@ pub fn copy_all_paths(plugin_id: &str) -> Result<u32, String> {
         .map(|idx| {
             idx.items
                 .iter()
-                .filter(|i| matches!(i.kind, StagingKind::File | StagingKind::Image))
+                .filter(|i| {
+                    matches!(
+                        i.kind,
+                        StagingKind::File | StagingKind::Image | StagingKind::Folder
+                    )
+                })
                 .map(|i| i.path.clone())
                 .collect()
         })
@@ -539,25 +573,34 @@ pub fn thumb_data_url(plugin_id: &str, id: &str) -> Result<Option<String>, Strin
         .cloned()
         .ok_or_else(|| "item not found".to_string())?;
     drop(map);
-    if !matches!(item.kind, StagingKind::Image) {
-        return Ok(None);
+    match item.kind {
+        StagingKind::Image => {
+            let bytes = fs::read(&item.path).map_err(|e| e.to_string())?;
+            if bytes.is_empty() || bytes.len() > 12 * 1024 * 1024 {
+                return Ok(None);
+            }
+            let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+            let thumb = img.thumbnail(96, 96);
+            let mut out = Vec::new();
+            thumb
+                .write_to(
+                    &mut std::io::Cursor::new(&mut out),
+                    image::ImageFormat::Png,
+                )
+                .map_err(|e| e.to_string())?;
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&out);
+            Ok(Some(format!("data:image/png;base64,{b64}")))
+        }
+        StagingKind::File | StagingKind::Folder => {
+            // 系统壳图标（按扩展名 / 文件夹）
+            if let Some(b64) = crate::dock::resolve_item_icon_png("", &item.path) {
+                return Ok(Some(format!("data:image/png;base64,{b64}")));
+            }
+            Ok(None)
+        }
+        StagingKind::Text => Ok(None),
     }
-    let bytes = fs::read(&item.path).map_err(|e| e.to_string())?;
-    if bytes.is_empty() || bytes.len() > 12 * 1024 * 1024 {
-        return Ok(None);
-    }
-    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-    let thumb = img.thumbnail(96, 96);
-    let mut out = Vec::new();
-    thumb
-        .write_to(
-            &mut std::io::Cursor::new(&mut out),
-            image::ImageFormat::Png,
-        )
-        .map_err(|e| e.to_string())?;
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&out);
-    Ok(Some(format!("data:image/png;base64,{b64}")))
 }
 
 #[cfg(windows)]
@@ -590,6 +633,85 @@ fn set_clipboard_text(text: &str) -> Result<(), String> {
         let _ = CloseClipboard();
     }
     Ok(())
+}
+
+/// Put file paths on the clipboard as `CF_HDROP` so Explorer paste works.
+#[cfg(windows)]
+pub fn copy_files_to_clipboard(plugin_id: &str, id: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{HANDLE, HWND, POINT};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::UI::Shell::DROPFILES;
+
+    const CF_HDROP: u32 = 15;
+
+    let mut map = store().by_plugin.lock();
+    ensure_loaded(&mut map, plugin_id);
+    let item = map
+        .get(plugin_id)
+        .and_then(|idx| idx.items.iter().find(|i| i.id == id))
+        .cloned()
+        .ok_or_else(|| "item not found".to_string())?;
+    drop(map);
+
+    if !matches!(
+        item.kind,
+        StagingKind::File | StagingKind::Image | StagingKind::Folder
+    ) {
+        return Err("only files/folders/images can be copied as files".into());
+    }
+    let path = std::path::PathBuf::from(&item.path);
+    if !path.exists() {
+        return Err("path missing".into());
+    }
+
+    let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    path_wide.push(0);
+    path_wide.push(0); // double-null terminator for HDROP list
+
+    let header_size = std::mem::size_of::<DROPFILES>();
+    let total = header_size + path_wide.len() * 2;
+    unsafe {
+        OpenClipboard(HWND::default()).map_err(|e| e.to_string())?;
+        let _ = EmptyClipboard();
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, total).map_err(|e| e.to_string())?;
+        let ptr = GlobalLock(hmem) as *mut u8;
+        if ptr.is_null() {
+            let _ = CloseClipboard();
+            return Err("GlobalLock failed".into());
+        }
+        let dropfiles = DROPFILES {
+            pFiles: header_size as u32,
+            pt: POINT { x: 0, y: 0 },
+            fNC: windows::Win32::Foundation::BOOL(0),
+            fWide: windows::Win32::Foundation::BOOL(1),
+        };
+        std::ptr::copy_nonoverlapping(
+            &dropfiles as *const DROPFILES as *const u8,
+            ptr,
+            header_size,
+        );
+        std::ptr::copy_nonoverlapping(
+            path_wide.as_ptr() as *const u8,
+            ptr.add(header_size),
+            path_wide.len() * 2,
+        );
+        let _ = GlobalUnlock(hmem);
+        if SetClipboardData(CF_HDROP, HANDLE(hmem.0 as _)).is_err() {
+            let _ = CloseClipboard();
+            return Err("SetClipboardData CF_HDROP failed".into());
+        }
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn copy_files_to_clipboard(_plugin_id: &str, _id: &str) -> Result<(), String> {
+    Err("clipboard only on Windows".into())
 }
 
 #[cfg(not(windows))]

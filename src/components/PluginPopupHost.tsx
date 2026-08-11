@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { normalizeGlassKind, subscribeSystemDark, syncGlassCss, type GlassPrefs } from "../glassPrefs";
+import {
+  normalizeStagingChanged,
+  type StagingChangedPayload,
+  type StagingSummary,
+} from "../stagingApi";
 import "./PluginPopupHost.css";
+
+/** 同会话内复用已读的 popup.css/js，换开同插件时少两次读盘 */
+const popupAssetCache = new Map<string, { css: string; js: string }>();
 
 declare global {
   interface Window {
@@ -18,9 +27,32 @@ declare global {
       storage: {
         get: (key: string) => Promise<unknown>;
         set: (key: string, value: unknown) => Promise<unknown>;
+        remove: (key: string) => Promise<unknown>;
+        listKeys: () => Promise<unknown>;
+        subscribe: (
+          cb: (ev: { key: string; value: unknown; removed: boolean }) => void,
+        ) => () => void;
       };
       shortcuts: {
         setBadge: (badge: unknown) => Promise<unknown>;
+      };
+      staging: {
+        list: () => Promise<unknown>;
+        summary: () => Promise<StagingSummary>;
+        addText: (text: string) => Promise<unknown>;
+        addPaths: (paths: string[]) => Promise<unknown>;
+        addImageBytes: (label: string, bytes: number[], ext?: string) => Promise<unknown>;
+        remove: (id: string) => Promise<unknown>;
+        clear: () => Promise<unknown>;
+        copy: (id: string) => Promise<unknown>;
+        copyFiles: (id: string) => Promise<unknown>;
+        copyAllPaths: () => Promise<unknown>;
+        thumb: (id: string) => Promise<unknown>;
+        reveal: (id: string) => Promise<unknown>;
+        startDrag: (ids: string[]) => Promise<unknown>;
+        pickFiles: () => Promise<unknown>;
+        pickFolders: () => Promise<unknown>;
+        subscribe: (cb: (summary: StagingSummary) => void) => () => void;
       };
       notify: ((opts: {
         title: string;
@@ -51,7 +83,8 @@ function resolvePluginId(): string {
 }
 
 function ensureHub(pluginId: string) {
-  if (window.hub?.pluginId === pluginId) return;
+  // staging 补全后需重建；旧会话可能只有半套 hub
+  if (window.hub?.pluginId === pluginId && window.hub.staging) return;
   window.__WH_PLUGIN_ID__ = pluginId;
 
   const withPlugin = (args?: Record<string, unknown>) => ({
@@ -124,9 +157,63 @@ function ensureHub(pluginId: string) {
     storage: {
       get: (key) => invoke("hub_storage_get", withPlugin({ key })),
       set: (key, value) => invoke("hub_storage_set", withPlugin({ key, value })),
+      remove: (key) => invoke("hub_storage_remove", withPlugin({ key })),
+      listKeys: () => invoke("hub_storage_list_keys", withPlugin()),
+      subscribe: (cb) => {
+        let un = () => {};
+        void listen<{
+          pluginId?: string;
+          key?: string;
+          value?: unknown;
+          removed?: boolean;
+        }>("plugin-storage-changed", (ev) => {
+          if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+          if (!ev.payload?.key) return;
+          cb({
+            key: ev.payload.key,
+            value: ev.payload.removed ? null : ev.payload.value,
+            removed: !!ev.payload.removed,
+          });
+        }).then((fn) => {
+          un = fn;
+        });
+        return () => un();
+      },
     },
     shortcuts: {
       setBadge: (badge) => invoke("hub_shortcuts_set_badge", withPlugin({ badge })),
+    },
+    staging: {
+      list: () => invoke("hub_staging_list", withPlugin()),
+      summary: () => invoke("hub_staging_summary", withPlugin()),
+      addText: (text) => invoke("hub_staging_add_text", withPlugin({ text })),
+      addPaths: (paths) => invoke("hub_staging_add_paths", withPlugin({ paths })),
+      addImageBytes: (label, bytes, ext) =>
+        invoke("hub_staging_add_image_bytes", withPlugin({ label, bytes, ext })),
+      remove: (id) => invoke("hub_staging_remove", withPlugin({ id })),
+      clear: () => invoke("hub_staging_clear", withPlugin()),
+      copy: (id) => invoke("hub_staging_copy", withPlugin({ id })),
+      copyFiles: (id) => invoke("hub_staging_copy_files", withPlugin({ id })),
+      copyAllPaths: () => invoke("hub_staging_copy_all_paths", withPlugin()),
+      thumb: (id) => invoke("hub_staging_thumb", withPlugin({ id })),
+      reveal: (id) => invoke("hub_staging_reveal", withPlugin({ id })),
+      startDrag: (ids) => invoke("hub_staging_start_drag", withPlugin({ ids })),
+        pickFiles: () => invoke("hub_staging_pick_files", withPlugin()),
+        pickFolders: () => invoke("hub_staging_pick_folders", withPlugin()),
+        subscribe: (cb) => {
+        let un = () => {};
+        void listen<StagingChangedPayload>("staging-changed", (ev) => {
+          const { pluginId: pid, summary } = normalizeStagingChanged(ev.payload);
+          if (pid && pid !== pluginId) return;
+          cb(summary);
+        }).then((fn) => {
+          un = fn;
+        });
+        void invoke<StagingSummary>("hub_staging_summary", withPlugin())
+          .then(cb)
+          .catch(() => undefined);
+        return () => un();
+      },
     },
     notify: notifyFn,
     fetch: (url: string, opts?: Record<string, unknown>) =>
@@ -150,7 +237,27 @@ export default function PluginPopupHost() {
   const pluginId = resolvePluginId();
   const [boot, setBoot] = useState<Boot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<"enter" | "in">("enter");
   const injectedRef = useRef(false);
+  const glassReady = useRef(false);
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+
+  /** Snap opaque — soft fade-from-0 while HWND is shown = empty mica flash. */
+  function fadeIn() {
+    if (phaseRef.current === "in") return;
+    const root = document.querySelector(".plugin-popup-root") as HTMLElement | null;
+    if (root) {
+      root.style.transition = "none";
+      root.classList.remove("is-enter");
+      root.classList.add("is-in");
+      window.requestAnimationFrame(() => {
+        root.style.transition = "";
+      });
+    }
+    phaseRef.current = "in";
+    setPhase("in");
+  }
 
   useEffect(() => {
     if (!pluginId) {
@@ -158,21 +265,25 @@ export default function PluginPopupHost() {
       return;
     }
     ensureHub(pluginId);
+
+    // CSS vars only — Rust already applied DWM material on window create.
+    // Re-calling apply_window_effect here causes a second visible flash.
     void (async () => {
+      if (glassReady.current) return;
       try {
         const prefs = await invoke<GlassPrefs>("get_material_prefs");
         await syncGlassCss({ ...prefs, kind: normalizeGlassKind(prefs.kind) });
       } catch {
         await syncGlassCss({ kind: "mica-alt", dark: true });
       }
-      await invoke("apply_window_effect", {}).catch(() => undefined);
+      glassReady.current = true;
     })();
 
     let cancelled = false;
     let unGlass: (() => void) | undefined;
     void listen<GlassPrefs>("material-prefs", (ev) => {
       void syncGlassCss({ ...ev.payload, kind: normalizeGlassKind(ev.payload.kind) });
-      void invoke("apply_window_effect", {}).catch(() => undefined);
+      // Prefer CSS vars only; DWM reapply on every prefs event flashes popups.
     }).then((fn) => {
       if (cancelled) fn();
       else unGlass = fn;
@@ -184,38 +295,53 @@ export default function PluginPopupHost() {
           const prefs = await invoke<GlassPrefs>("get_material_prefs");
           if (prefs.dark != null) return;
           await syncGlassCss({ ...prefs, kind: normalizeGlassKind(prefs.kind) });
-          await invoke("apply_window_effect", {}).catch(() => undefined);
         } catch {
           /* noop */
         }
       })();
     });
 
+    let unOpened: (() => void) | undefined;
+    let unClosed: (() => void) | undefined;
+    void listen<string>("plugin-popup-opened", (ev) => {
+      if (ev.payload && ev.payload !== pluginId) return;
+      fadeIn();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unOpened = fn;
+    });
+    void listen("plugin-popup-closed", () => {
+      // Stay transparent while hidden so the next show() isn't an opaque flash.
+      phaseRef.current = "enter";
+      setPhase("enter");
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unClosed = fn;
+    });
+
     void (async () => {
       try {
-        const list = await invoke<
-          Array<{ id: string; manifest?: { entry?: { popup?: string } } }>
-        >("list_installed_plugins");
-        const rec = list.find((p) => p.id === pluginId);
-        const entry = rec?.manifest?.entry?.popup ?? "popup.html";
-        const dir = entry.includes("/")
-          ? entry.slice(0, entry.lastIndexOf("/") + 1)
-          : entry.includes("\\")
-            ? entry.slice(0, entry.lastIndexOf("\\") + 1)
-            : "";
-
+        const cached = popupAssetCache.get(pluginId);
+        if (cached) {
+          if (!cancelled) setBoot(cached);
+          return;
+        }
+        // 约定：entry.popup 为 popup.html（或同目录），直接读兄弟 css/js，跳过 list_installed_plugins
         const [css, js] = await Promise.all([
           invoke<string>("hub_plugin_read_text", {
             pluginId,
-            relativePath: `${dir}popup.css`,
+            relativePath: "popup.css",
           }).catch(() => ""),
           invoke<string>("hub_plugin_read_text", {
             pluginId,
-            relativePath: `${dir}popup.js`,
+            relativePath: "popup.js",
           }),
         ]);
         if (cancelled) return;
-        setBoot({ css, js });
+        const next = { css, js };
+        popupAssetCache.set(pluginId, next);
+        setBoot(next);
+        // Fade waits for inject + reveal_plugin_popup → plugin-popup-opened.
       } catch (err) {
         if (!cancelled) setError(String(err));
       }
@@ -224,6 +350,8 @@ export default function PluginPopupHost() {
     return () => {
       cancelled = true;
       unGlass?.();
+      unOpened?.();
+      unClosed?.();
       unSystem();
     };
   }, [pluginId]);
@@ -239,7 +367,7 @@ export default function PluginPopupHost() {
       document.head.appendChild(style);
     }
 
-    // Defer so #app from this render is in the DOM
+    // Defer so #app from this render is in the DOM, then reveal HWND once painted.
     const t = window.setTimeout(() => {
       if (!document.getElementById("app")) {
         setError("插件挂载点 #app 缺失");
@@ -248,33 +376,67 @@ export default function PluginPopupHost() {
       const script = document.createElement("script");
       script.textContent = boot.js;
       document.body.appendChild(script);
+      // Opaque while still hidden, then show — avoids empty mica → content flash.
+      const root = document.querySelector(".plugin-popup-root") as HTMLElement | null;
+      if (root) {
+        root.style.transition = "none";
+        root.classList.remove("is-enter");
+        root.classList.add("is-in");
+      }
+      phaseRef.current = "in";
+      setPhase("in");
+      void invoke("reveal_plugin_popup").catch(() => undefined);
+      if (root) {
+        window.requestAnimationFrame(() => {
+          root.style.transition = "";
+        });
+      }
     }, 0);
 
     return () => window.clearTimeout(t);
   }, [boot, pluginId]);
 
+  /** Explorer → 弹窗：走 Tauri paths（HTML5 File.path 经常为空） */
+  useEffect(() => {
+    if (!pluginId) return;
+    let un: (() => void) | undefined;
+    void getCurrentWindow()
+      .onDragDropEvent((ev) => {
+        const p = ev.payload;
+        if (p.type !== "drop") return;
+        const paths = p.paths ?? [];
+        if (!paths.length) return;
+        // 无 staging 能力的弹窗会失败，静默忽略
+        void invoke("hub_staging_add_paths", { pluginId, paths }).catch(() => undefined);
+      })
+      .then((fn) => {
+        un = fn;
+      })
+      .catch(() => undefined);
+    return () => un?.();
+  }, [pluginId]);
+
   if (error) {
     return (
-      <div className="plugin-popup-frame">
-        <div className="plugin-popup-empty">{error}</div>
-        <button
-          type="button"
-          className="plugin-popup-close"
-          onClick={() => void invoke("close_plugin_popup")}
-        >
-          关闭
-        </button>
+      <div className={`plugin-popup-root is-${phase}`}>
+        <div className="plugin-popup-frame">
+          <div className="plugin-popup-empty">{error}</div>
+          <button
+            type="button"
+            className="plugin-popup-close"
+            onClick={() => void invoke("close_plugin_popup")}
+          >
+            关闭
+          </button>
+        </div>
       </div>
     );
   }
 
-  if (!boot) {
-    return (
-      <div className="plugin-popup-frame">
-        <div className="plugin-popup-empty">加载插件…</div>
-      </div>
-    );
-  }
-
-  return <main id="app" className="wg-shell" />;
+  // Always keep #app mounted — swapping "加载中" ↔ shell remounts and flashes.
+  return (
+    <div className={`plugin-popup-root is-${phase}`}>
+      <main id="app" className="wg-shell" />
+    </div>
+  );
 }

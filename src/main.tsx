@@ -6,16 +6,20 @@ import SettingsApp from "./SettingsApp";
 import TrayPopupApp from "./TrayPopupApp";
 import StatusMenuPopupApp from "./StatusMenuPopupApp";
 import PluginPopupHost from "./components/PluginPopupHost";
+import SystemFlyoutApp from "./SystemFlyoutApp";
 import DockApp from "./DockApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
+import "./systemFlyout.css";
 
 declare global {
   interface Window {
     __WH_IS_SETTINGS__?: boolean;
     __WH_IS_TRAY_POPUP__?: boolean;
     __WH_IS_STATUS_MENU_POPUP__?: boolean;
+    __WH_IS_SYSTEM_FLYOUT__?: boolean;
+    __WH_SYSTEM_FLYOUT_KIND__?: string;
     __WH_IS_PLUGIN_POPUP__?: boolean;
     __WH_IS_DOCK__?: boolean;
     __WH_IS_DOCK_GLASS__?: boolean;
@@ -28,6 +32,7 @@ type WindowKind =
   | "settings"
   | "tray"
   | "status-menu"
+  | "system-flyout"
   | "plugin-popup"
   | "dock"
   | "dock-glass";
@@ -36,6 +41,7 @@ function resolveWindowKind(): WindowKind {
   if (window.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
   if (window.__WH_IS_DOCK__ === true) return "dock";
   if (window.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
+  if (window.__WH_IS_SYSTEM_FLYOUT__ === true) return "system-flyout";
   if (window.__WH_IS_STATUS_MENU_POPUP__ === true) return "status-menu";
   if (window.__WH_IS_TRAY_POPUP__ === true) return "tray";
   if (window.__WH_IS_SETTINGS__ === true) return "settings";
@@ -44,6 +50,7 @@ function resolveWindowKind(): WindowKind {
     if (label === "dock-glass") return "dock-glass";
     if (label === "dock") return "dock";
     if (label === "plugin-popup") return "plugin-popup";
+    if (label === "system-flyout") return "system-flyout";
     if (label === "status-menu-popup") return "status-menu";
     if (label === "tray-popup") return "tray";
     if (label === "settings") return "settings";
@@ -54,6 +61,7 @@ function resolveWindowKind(): WindowKind {
   if (q === "dock-glass") return "dock-glass";
   if (q === "dock") return "dock";
   if (q === "plugin-popup") return "plugin-popup";
+  if (q === "system-flyout") return "system-flyout";
   if (q === "status-menu") return "status-menu";
   if (q === "tray") return "tray";
   if (q === "settings") return "settings";
@@ -67,13 +75,15 @@ document.body.classList.add(
     ? "is-settings"
     : kind === "tray"
       ? "is-tray-popup"
-      : kind === "status-menu"
-        ? "is-status-menu-popup"
-        : kind === "plugin-popup"
-          ? "is-plugin-popup"
-          : kind === "dock" || kind === "dock-glass"
-            ? "is-dock"
-            : "is-island",
+      : kind === "system-flyout"
+        ? "is-system-flyout"
+        : kind === "status-menu"
+          ? "is-status-menu-popup"
+          : kind === "plugin-popup"
+            ? "is-plugin-popup"
+            : kind === "dock" || kind === "dock-glass"
+              ? "is-dock"
+              : "is-island",
 );
 document.body.style.background = "transparent";
 document.title =
@@ -81,15 +91,17 @@ document.title =
     ? "灵动岛设置"
     : kind === "tray"
       ? "已收纳"
-      : kind === "status-menu"
-        ? "状态菜单"
-        : kind === "plugin-popup"
-          ? "插件"
-          : kind === "dock-glass"
-            ? "Dock Glass"
-            : kind === "dock"
-              ? "Dock"
-              : "灵动岛";
+      : kind === "system-flyout"
+        ? "系统面板"
+        : kind === "status-menu"
+          ? "状态菜单"
+          : kind === "plugin-popup"
+            ? "插件"
+            : kind === "dock-glass"
+              ? "Dock Glass"
+              : kind === "dock"
+                ? "Dock"
+                : "灵动岛";
 
 const root = document.getElementById("root") as HTMLElement;
 if (kind === "settings") {
@@ -107,6 +119,8 @@ ReactDOM.createRoot(root).render(
       <SettingsApp />
     ) : kind === "tray" ? (
       <TrayPopupApp />
+    ) : kind === "system-flyout" ? (
+      <SystemFlyoutApp />
     ) : kind === "status-menu" ? (
       <StatusMenuPopupApp />
     ) : kind === "plugin-popup" ? (

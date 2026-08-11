@@ -4,6 +4,7 @@ export type StagingSummary = {
   files: number;
   texts: number;
   images: number;
+  folders?: number;
   total: number;
 };
 
@@ -14,11 +15,12 @@ export type StagingChangedPayload = {
   files?: number;
   texts?: number;
   images?: number;
+  folders?: number;
   total?: number;
 };
 
 export function emptyStagingSummary(): StagingSummary {
-  return { files: 0, texts: 0, images: 0, total: 0 };
+  return { files: 0, texts: 0, images: 0, folders: 0, total: 0 };
 }
 
 export function normalizeStagingChanged(
@@ -36,6 +38,7 @@ export function normalizeStagingChanged(
         files: payload.files ?? 0,
         texts: payload.texts ?? 0,
         images: payload.images ?? 0,
+        folders: payload.folders ?? 0,
         total: payload.total,
       },
     };

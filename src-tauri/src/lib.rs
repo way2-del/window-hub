@@ -1,3 +1,4 @@
+mod autostart;
 mod commands;
 mod companion_scripts;
 mod db;
@@ -160,11 +161,11 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
         }
 
         loop {
-            // 稳定期密采；锁定后只低频侦测「当前最大化窗口是否切换」
+            // 稳定期适度密采；锁定后低频侦测切窗（略降频减轻主岛跟色卡顿）
             let ms = if crate::win32::ambient::is_settling() {
-                180
+                280
             } else {
-                700
+                1000
             };
             std::thread::sleep(Duration::from_millis(ms));
             let Some(window) = app.get_webview_window("main") else {
@@ -187,12 +188,16 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
 fn spawn_tray_watcher(app: tauri::AppHandle) {
     let app_icons = app.clone();
     let app_attn = app.clone();
+    let app_clear = app.clone();
     crate::win32::tray::start(
         move |icons| {
             let _ = app_icons.emit("tray-icons", &icons);
         },
         move |attn| {
             let _ = app_attn.emit("tray-attention", &attn);
+        },
+        move |id| {
+            let _ = app_clear.emit("tray-attention-cleared", &serde_json::json!({ "id": id }));
         },
     );
 }
@@ -224,7 +229,6 @@ pub fn run() {
                     crate::win32::topmost::set_main_hwnd(hwnd);
                 }
                 reassert_window(&window);
-                // 顶色跟随时不用 Mica/Acrylic
                 let _ = crate::win32::material::clear(&window);
             }
 
@@ -234,6 +238,10 @@ pub fn run() {
             spawn_tray_watcher(app.handle().clone());
             crate::companion_scripts::start_hub_associated_launchers();
             crate::dock::bootstrap_dock(app.handle());
+            // Warm popup webviews in background so first open isn't a cold create.
+            crate::commands::warm_popup_windows(app.handle().clone());
+            #[cfg(windows)]
+            crate::win32::system_monitor::start(app.handle().clone());
 
             Ok(())
         })
@@ -249,33 +257,74 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Focused(focused) => {
-                    // 托盘 / 插件 / 状态菜单弹窗失焦即关（WebView 侧 focus 事件不总是可靠）
+                    // 弹窗失焦关闭。托盘用 hide（可复用 + 避免箭头二次点击竞态），
+                    // 且 chevron mousedown 会 suppress 一小段时间。
                     if (window.label() == "tray-popup"
                         || window.label() == "plugin-popup"
-                        || window.label() == "status-menu-popup")
+                        || window.label() == "status-menu-popup"
+                        || window.label() == "system-flyout")
                         && !*focused
                     {
                         let label = window.label().to_string();
                         let app = window.app_handle().clone();
                         std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(60));
+                            std::thread::sleep(Duration::from_millis(80));
+                            if label == "tray-popup"
+                                && crate::commands::tray_popup_blur_suppressed()
+                            {
+                                return;
+                            }
+                            if label == "system-flyout"
+                                && crate::commands::system_flyout_blur_suppressed()
+                            {
+                                return;
+                            }
+                            if label == "plugin-popup"
+                                && crate::commands::plugin_popup_blur_suppressed()
+                            {
+                                return;
+                            }
                             if let Some(w) = app.get_webview_window(&label) {
                                 if w.is_focused().unwrap_or(false) {
                                     return;
                                 }
-                                let _ = w.close();
-                            }
-                            match label.as_str() {
-                                "tray-popup" => {
-                                    let _ = app.emit("tray-popup-closed", ());
+                                match label.as_str() {
+                                    "tray-popup" => {
+                                        let _ = w.hide();
+                                        let _ = app.emit("tray-popup-closed", ());
+                                    }
+                                    "system-flyout" => {
+                                        let _ = w.hide();
+                                        let _ = app.emit("system-flyout-closed", ());
+                                    }
+                                    "plugin-popup" => {
+                                        // Hide (not close) so reopen is show-only — avoids cold
+                                        // create + DWM material thrash flicker.
+                                        let _ = w.hide();
+                                        let _ = app.emit("plugin-popup-closed", ());
+                                    }
+                                    "status-menu-popup" => {
+                                        let _ = w.hide();
+                                        let _ = app.emit("status-menu-popup-closed", ());
+                                    }
+                                    _ => {}
                                 }
-                                "plugin-popup" => {
-                                    let _ = app.emit("plugin-popup-closed", ());
+                            } else {
+                                match label.as_str() {
+                                    "tray-popup" => {
+                                        let _ = app.emit("tray-popup-closed", ());
+                                    }
+                                    "system-flyout" => {
+                                        let _ = app.emit("system-flyout-closed", ());
+                                    }
+                                    "plugin-popup" => {
+                                        let _ = app.emit("plugin-popup-closed", ());
+                                    }
+                                    "status-menu-popup" => {
+                                        let _ = app.emit("status-menu-popup-closed", ());
+                                    }
+                                    _ => {}
                                 }
-                                "status-menu-popup" => {
-                                    let _ = app.emit("status-menu-popup-closed", ());
-                                }
-                                _ => {}
                             }
                         });
                     }
@@ -283,6 +332,9 @@ pub fn run() {
                 tauri::WindowEvent::Destroyed => {
                     if window.label() == "tray-popup" {
                         let _ = window.app_handle().emit("tray-popup-closed", ());
+                    }
+                    if window.label() == "system-flyout" {
+                        let _ = window.app_handle().emit("system-flyout-closed", ());
                     }
                     if window.label() == "plugin-popup" {
                         let _ = window.app_handle().emit("plugin-popup-closed", ());
@@ -319,12 +371,37 @@ pub fn run() {
             commands::open_tray_popup,
             commands::close_tray_popup,
             commands::is_tray_popup_open,
+            commands::suppress_tray_popup_blur,
+            commands::suppress_plugin_popup_blur,
+            commands::open_system_flyout,
+            commands::close_system_flyout,
+            commands::is_system_flyout_open,
+            commands::get_system_flyout_kind,
+            commands::suppress_system_flyout_blur,
+            commands::get_system_radio_snapshot,
+            commands::refresh_system_status,
+            commands::get_wifi_password,
+            commands::connect_wifi_network,
+            commands::open_wifi_settings,
+            commands::open_bluetooth_settings,
+            commands::set_bluetooth_device,
+            commands::open_ime_picker,
+            commands::open_ime_settings,
+            commands::set_system_volume,
+            commands::set_system_volume_muted,
+            commands::open_sound_settings,
+            commands::play_volume_preview,
+            commands::list_audio_output_devices,
+            commands::set_audio_output_device,
+            commands::open_power_settings,
             commands::open_status_menu_popup,
             commands::close_status_menu_popup,
             commands::is_status_menu_popup_open,
             commands::open_plugin_popup,
+            commands::reveal_plugin_popup,
             commands::close_plugin_popup,
             commands::is_plugin_popup_open,
+            commands::get_plugin_popup_id,
             plugin_hub::hub_windows_list,
             plugin_hub::hub_windows_get,
             plugin_hub::hub_windows_focus,
@@ -368,6 +445,8 @@ pub fn run() {
             commands::set_tray_prefs,
             commands::get_island_prefs,
             commands::set_island_prefs,
+            autostart::get_open_at_login,
+            autostart::set_open_at_login,
             commands::get_shortcuts_prefs,
             commands::set_shortcuts_prefs,
             db::admin::db_dev_info,
@@ -378,6 +457,9 @@ pub fn run() {
             db::admin::db_dev_backup,
             db::admin::db_dev_pick_restore_file,
             db::admin::db_dev_restore,
+            db::admin::export_hub_backup,
+            db::admin::pick_hub_backup_file,
+            db::admin::import_hub_backup,
             commands::invoke_tray_icon,
             commands::clear_tray_attention,
             commands::open_notification_center,
@@ -402,12 +484,16 @@ pub fn run() {
             commands::hub_staging_remove,
             commands::hub_staging_clear,
             commands::hub_staging_copy,
+            commands::hub_staging_copy_files,
             commands::hub_staging_copy_all_paths,
             commands::hub_staging_thumb,
             commands::hub_staging_reveal,
             commands::hub_staging_start_drag,
+            commands::hub_staging_pick_files,
+            commands::hub_staging_pick_folders,
             commands::hub_island_set_bar,
             commands::hub_island_clear_bar,
+            commands::hub_netease_now_playing,
             commands::hub_panel_open_session,
             commands::hub_panel_close_session,
             commands::hub_notify,

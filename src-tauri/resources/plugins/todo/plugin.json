@@ -1,0 +1,23 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.todo",
+  "name": "待办",
+  "version": "1.1.2",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "灵动岛下拉管理待办：新建时记录日期与时间，岛栏显示未完成数。",
+  "entry": {
+    "panel": "panel.html"
+  },
+  "slots": {
+    "island.bar": {
+      "order": 15
+    },
+    "island.panel": {
+      "defaultSize": { "w": 380, "h": 240 },
+      "excludeFromPullContent": false
+    }
+  },
+  "settings": [],
+  "capabilities": ["storage", "island.panel", "island.bar"]
+}

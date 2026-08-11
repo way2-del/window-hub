@@ -121,11 +121,12 @@ export function isStagingPanelShell(w: number, h: number): boolean {
 
 export function formatStagingBarText(
   pluginName: string,
-  s: { files: number; texts: number; images: number; total: number },
+  s: { files: number; texts: number; images: number; folders?: number; total: number },
 ): string {
   if (!s.total) return "";
   const parts = [pluginName];
   if (s.files > 0) parts.push(`文件 ${s.files}`);
+  if ((s.folders ?? 0) > 0) parts.push(`文件夹 ${s.folders}`);
   if (s.texts > 0) parts.push(`文字片段 ${s.texts}`);
   if (s.images > 0) parts.push(`图片 ${s.images}`);
   return parts.join(" | ");

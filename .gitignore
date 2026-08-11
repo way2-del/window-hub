@@ -7,16 +7,29 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies & local Vite
 node_modules
+*.local
+.dev-clean.stamp
+
+# Frontend / release build outputs (keep source + docs/*.whpx)
 dist
 dist-ssr
-*.local
+dist-installer
+dist-portable
 
-# Editor directories and files
+# Env secrets (commit *.example if needed)
+.env
+.env.*
+!.env.example
+
+# Editor / OS
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.suo
 *.ntvs*
 *.njsproj

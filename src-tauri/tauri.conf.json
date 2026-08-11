@@ -26,7 +26,8 @@
         "center": false,
         "fullscreen": false,
         "focus": true,
-        "visible": true
+        "visible": true,
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -42,7 +43,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -55,7 +56,20 @@
       "resources/plugins/window-groups",
       "resources/plugins/transfer-station",
       "resources/plugins/weather",
-      "resources/plugins/mirror"
-    ]
+      "resources/plugins/mirror",
+      "resources/plugins/idioms",
+      "resources/plugins/draft",
+      "resources/plugins/todo",
+      "resources/plugins/lyrics"
+    ],
+    "windows": {
+      "allowDowngrades": false,
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
+      }
+    }
   }
 }

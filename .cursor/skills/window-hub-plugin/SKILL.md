@@ -48,8 +48,9 @@ description: >-
 | 需求 | 跟谁学 | 目录 |
 |------|--------|------|
 | 快捷区常驻条 + 弹窗管理 | **窗口组** | `docs/plugins/examples/window-groups/` |
-| 拖放暂存 + 岛栏 + 矮面板 | **中转站** | `docs/plugins/examples/transfer-station/` |
+| 左侧快捷区 + 弹窗暂存 | **中转站** | `docs/plugins/examples/transfer-station/` |
 | 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/` |
+| 岛栏歌词（网易云） | **歌词** | `docs/plugins/examples/lyrics/` |
 | 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
 打包资源镜像：`src-tauri/resources/plugins/{window-groups|transfer-station|weather|mirror}/`（与 docs 示例保持同步）。

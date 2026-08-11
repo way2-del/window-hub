@@ -12,6 +12,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   SHORTCUTS_HEIGHT,
   computeShortcutsBounds,
+  shortcutsAllowsDragOpen,
   type ShortcutsBounds,
 } from "../plugins/shortcutsGeometry";
 import { pluginRegistry } from "../plugins/registry";
@@ -20,9 +21,34 @@ import ShortcutsPluginStrip from "./ShortcutsPluginStrip";
 import "./ShortcutsHost.css";
 
 const POPUP_GAP = 8;
-const HOVER_OPEN_MS = 140;
-const DEFAULT_STRIP_W = 28;
-const MIN_STRIP_W = 28;
+/** 隐形 worker（天气/歌词）可报到 1px；可见图标条约 22 */
+const MIN_STRIP_W = 1;
+const DEFAULT_STRIP_W = 22;
+const ICON_STRIP_W = 22;
+
+/** Explorer → 顶栏：HTML5 dragenter 常不触发，靠 Tauri position 命中芯片 */
+function hitDragOpenStrip(
+  host: HTMLElement,
+  logicalX: number,
+  logicalY: number,
+): { pluginId: string; el: HTMLElement } | null {
+  const strips = host.querySelectorAll<HTMLElement>("[data-plugin]");
+  for (const el of strips) {
+    const pluginId = el.dataset.plugin;
+    if (!pluginId || !shortcutsAllowsDragOpen(pluginId)) continue;
+    const r = el.getBoundingClientRect();
+    const pad = 4;
+    if (
+      logicalX >= r.left - pad &&
+      logicalX <= r.right + pad &&
+      logicalY >= r.top - pad &&
+      logicalY <= r.bottom + pad
+    ) {
+      return { pluginId, el };
+    }
+  }
+  return null;
+}
 
 type Props = {
   settingsRef: RefObject<HTMLElement | null>;
@@ -79,7 +105,6 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   const anchorRefs = useRef<Map<string, HTMLElement>>(new Map());
   const openingRef = useRef(false);
   const popupOpenRef = useRef(false);
-  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [bounds, setBounds] = useState<ShortcutsBounds>({
     x: 0,
@@ -89,16 +114,11 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   });
   const [popupOpen, setPopupOpen] = useState(false);
   const [popupPluginId, setPopupPluginId] = useState<string | null>(null);
+  const popupPluginIdRef = useRef<string | null>(null);
+  popupPluginIdRef.current = popupPluginId;
   const [, setRegistryVersion] = useState(0);
-  const [exclusivePluginId, setExclusivePluginId] = useState<string | null>(null);
+  const [visiblePluginIds, setVisiblePluginIds] = useState<string[] | null>(null);
   const [stripWidths, setStripWidths] = useState<Record<string, number>>({});
-
-  const clearHoverTimer = () => {
-    if (hoverTimerRef.current) {
-      clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-  };
 
   const recomputeBounds = useCallback(() => {
     const settingsEl = settingsRef.current;
@@ -113,7 +133,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
 
   useLayoutEffect(() => {
     recomputeBounds();
-  }, [recomputeBounds, exclusivePluginId, popupOpen, stripWidths]);
+  }, [recomputeBounds, visiblePluginIds, popupOpen, stripWidths]);
 
   useEffect(() => {
     const onResize = () => recomputeBounds();
@@ -133,17 +153,35 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    const applyPrefs = (prefs: {
+      visiblePluginIds?: string[] | null;
+      exclusivePluginId?: string | null;
+    }) => {
+      const ids = prefs.visiblePluginIds;
+      if (Array.isArray(ids)) {
+        setVisiblePluginIds(ids.length ? ids : null);
+        return;
+      }
+      const exclusive = prefs.exclusivePluginId?.trim();
+      setVisiblePluginIds(exclusive ? [exclusive] : null);
+    };
     void (async () => {
       try {
-        const prefs = await invoke<{ exclusivePluginId?: string | null }>("get_shortcuts_prefs");
-        if (!cancelled) setExclusivePluginId(prefs.exclusivePluginId ?? null);
+        const prefs = await invoke<{
+          visiblePluginIds?: string[] | null;
+          exclusivePluginId?: string | null;
+        }>("get_shortcuts_prefs");
+        if (!cancelled) applyPrefs(prefs);
       } catch {
         /* noop */
       }
     })();
     let un: (() => void) | undefined;
-    void listen<{ exclusivePluginId?: string | null }>("shortcuts-prefs", (ev) => {
-      if (!cancelled) setExclusivePluginId(ev.payload?.exclusivePluginId ?? null);
+    void listen<{
+      visiblePluginIds?: string[] | null;
+      exclusivePluginId?: string | null;
+    }>("shortcuts-prefs", (ev) => {
+      if (!cancelled) applyPrefs(ev.payload ?? {});
     }).then((fn) => {
       if (cancelled) fn();
       else un = fn;
@@ -192,33 +230,105 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     })();
     return () => {
       cancelled = true;
-      clearHoverTimer();
       unsubs.forEach((fn) => fn());
     };
   }, []);
 
-  const openPopupAt = useCallback(async (pluginId: string, anchorKey: string) => {
-    const el = anchorRefs.current.get(anchorKey);
-    if (!el || openingRef.current) return;
-    openingRef.current = true;
-    try {
-      const { x, y } = await popupAnchor(el);
-      await invoke("open_plugin_popup", { pluginId, x, y });
-    } catch (err) {
-      console.error("[ShortcutsHost] open popup failed", err);
-    } finally {
-      openingRef.current = false;
-    }
-  }, []);
+  /** 点击：同插件已开则关闭；拖入：只保证打开，禁止 toggle 关掉 */
+  const openPopupFromEl = useCallback(
+    async (pluginId: string, el: HTMLElement, opts?: { forceOpen?: boolean }) => {
+      if (openingRef.current) return;
+      const sameOpen =
+        popupOpenRef.current && popupPluginIdRef.current === pluginId;
+      if (sameOpen) {
+        if (opts?.forceOpen) return;
+        void invoke("close_plugin_popup").catch(() => undefined);
+        return;
+      }
+      if (opts?.forceOpen) {
+        const openId = await invoke<string | null>("get_plugin_popup_id").catch(
+          () => null,
+        );
+        if (openId === pluginId) return;
+      }
+      openingRef.current = true;
+      try {
+        // 拖放中开窗：多压制一会儿 blur，避免弹窗立刻被关掉
+        await invoke("suppress_plugin_popup_blur", {
+          ms: opts?.forceOpen ? 1200 : 500,
+        }).catch(() => undefined);
+        const { x, y } = await popupAnchor(el);
+        await invoke("open_plugin_popup", {
+          pluginId,
+          x,
+          y,
+          forceOpen: opts?.forceOpen === true,
+        });
+      } catch (err) {
+        console.error("[ShortcutsHost] open popup failed", err);
+      } finally {
+        openingRef.current = false;
+      }
+    },
+    [],
+  );
 
-  const scheduleOpen = (pluginId: string, anchorKey: string) => {
-    clearHoverTimer();
-    if (popupOpenRef.current && popupPluginId === pluginId) return;
-    hoverTimerRef.current = setTimeout(() => {
-      hoverTimerRef.current = null;
-      void openPopupAt(pluginId, anchorKey);
-    }, HOVER_OPEN_MS);
-  };
+  const openPopupAt = useCallback(
+    async (pluginId: string, anchorKey: string) => {
+      const el = anchorRefs.current.get(anchorKey);
+      if (!el) return;
+      await openPopupFromEl(pluginId, el);
+    },
+    [openPopupFromEl],
+  );
+
+  /** 从资源管理器拖到「中转站」芯片：开弹窗；在芯片上松开则直接入库 */
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let lastOpenAt = 0;
+    void getCurrentWindow()
+      .onDragDropEvent((ev) => {
+        const host = hostRef.current;
+        if (!host) return;
+        const p = ev.payload;
+        if (p.type === "leave") return;
+
+        void (async () => {
+          const win = getCurrentWindow();
+          const factor = await win.scaleFactor();
+          const pos = "position" in p ? p.position : null;
+          if (!pos) return;
+          const lx = pos.x / factor;
+          const ly = pos.y / factor;
+          const hit = hitDragOpenStrip(host, lx, ly);
+          if (!hit) return;
+
+          if (p.type === "enter" || p.type === "over") {
+            const now = Date.now();
+            if (now - lastOpenAt < 200) return;
+            lastOpenAt = now;
+            void openPopupFromEl(hit.pluginId, hit.el, { forceOpen: true });
+            return;
+          }
+
+          if (p.type === "drop") {
+            const paths = p.paths ?? [];
+            if (paths.length) {
+              void invoke("hub_staging_add_paths", {
+                pluginId: hit.pluginId,
+                paths,
+              }).catch(console.error);
+            }
+            void openPopupFromEl(hit.pluginId, hit.el, { forceOpen: true });
+          }
+        })();
+      })
+      .then((fn) => {
+        un = fn;
+      })
+      .catch(() => undefined);
+    return () => un?.();
+  }, [openPopupFromEl]);
 
   const onRequestWidth = useCallback((pluginId: string, width: number) => {
     const next = Math.max(MIN_STRIP_W, Math.round(width || DEFAULT_STRIP_W));
@@ -229,10 +339,10 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   }, []);
 
   const pluginsAll = pluginRegistry.listShortcuts();
-  // 独占某插件时仍挂载「岛栏 worker」：声明 island.bar + entry.shortcuts 的隐形条（如天气）
-  const plugins = exclusivePluginId
+  // 筛选时仍挂载「岛栏 worker」：声明 island.bar + entry.shortcuts 的隐形条（如天气）
+  const plugins = visiblePluginIds?.length
     ? pluginsAll.filter((p) => {
-        if (p.pluginId === exclusivePluginId) return true;
+        if (visiblePluginIds.includes(p.pluginId)) return true;
         const m = pluginRegistry.get(p.pluginId)?.manifest;
         return Boolean(m?.slots?.["island.bar"] && m.entry?.shortcuts);
       })
@@ -240,6 +350,13 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
 
   const webPlugins = plugins.filter((p) => hasShortcutsEntry(p));
   const chipPlugins = plugins.filter((p) => !hasShortcutsEntry(p));
+
+  const initialStripWidth = (p: ShortcutsPluginRuntime) => {
+    const action = p.manifest.slots?.shortcuts?.action ?? "popup.open";
+    // command = 隐形 worker，勿占 22/28 把标题与可见插件撑开
+    if (action === "command") return 1;
+    return ICON_STRIP_W;
+  };
 
   if (bounds.maxExpandWidth < 48 || plugins.length === 0) {
     return (
@@ -268,7 +385,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       <div className="shortcuts-collapsed" role="toolbar" aria-label="快捷区">
         {webPlugins.map((p) => {
           const entry = hasShortcutsEntry(p)!;
-          const requested = stripWidths[p.pluginId] ?? DEFAULT_STRIP_W;
+          const requested = stripWidths[p.pluginId] ?? initialStripWidth(p);
           return (
             <ShortcutsPluginStrip
               key={p.pluginId}
@@ -276,6 +393,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
               entryPath={entry}
               width={requested}
               maxWidth={bounds.maxExpandWidth}
+              action={p.manifest.slots?.shortcuts?.action ?? "popup.open"}
               onRequestWidth={onRequestWidth}
             />
           );
@@ -284,26 +402,21 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
         {chipPlugins.map((p) => {
           const config = p.manifest.slots?.shortcuts;
           const label = config?.label ?? p.manifest.name;
+          const iconOnly = Boolean(config?.iconOnly);
           const active = popupOpen && popupPluginId === p.pluginId;
           return (
             <button
               key={p.pluginId}
               type="button"
-              className={`shortcuts-chip${active ? " is-active" : ""}`}
+              className={`shortcuts-chip${active ? " is-active" : ""}${iconOnly ? " is-icon-only" : ""}`}
               aria-label={label}
+              title={label}
               ref={(el) => {
                 const key = `chip:${p.pluginId}`;
                 if (el) anchorRefs.current.set(key, el);
                 else anchorRefs.current.delete(key);
               }}
-              onPointerEnter={() => {
-                if ((config?.action ?? "popup.open") === "popup.open") {
-                  scheduleOpen(p.pluginId, `chip:${p.pluginId}`);
-                }
-              }}
-              onPointerLeave={clearHoverTimer}
               onClick={() => {
-                clearHoverTimer();
                 if (popupOpenRef.current && popupPluginId === p.pluginId) {
                   void invoke("close_plugin_popup").catch(() => undefined);
                   return;
@@ -312,7 +425,9 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
               }}
             >
               <PluginIcon icon={config?.icon} />
-              <span className="shortcuts-chip-label">{truncate(label, 4)}</span>
+              {iconOnly ? null : (
+                <span className="shortcuts-chip-label">{truncate(label, 4)}</span>
+              )}
               {p.badge != null ? <span className="shortcuts-badge">{p.badge}</span> : null}
             </button>
           );

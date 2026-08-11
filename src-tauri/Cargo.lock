@@ -5842,6 +5842,7 @@ dependencies = [
  "ureq",
  "window-vibrancy",
  "windows 0.58.0",
+ "windows-core 0.58.0",
  "winreg 0.52.0",
  "zip",
 ]

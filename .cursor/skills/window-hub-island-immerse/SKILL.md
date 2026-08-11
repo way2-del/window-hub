@@ -7,7 +7,7 @@ description: >-
 
 # 灵动岛沉浸式（immerse）
 
-沉浸 = 闲置后岛壳 `fill-opacity: 0`，栏内文字跟环境明暗切换（`data-chrome` = `chromeCenter.scheme`）。
+沉浸 = 闲置后岛壳 `fill-opacity: 0.02`（勿用 0，否则 WebView2 点透、中转站拖放失效），栏内文字跟环境明暗切换（`data-chrome` = `chromeCenter.scheme`）。
 
 源码：`src/App.tsx`（`scheduleImmerse` / `bumpIslandActivity`）、`src/App.css`（`.is-immersed`）、`src/islandPrefs.ts`（`autoImmerse`）。
 

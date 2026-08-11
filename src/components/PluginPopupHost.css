@@ -1,17 +1,36 @@
+.plugin-popup-root {
+  width: 100%;
+  height: 100%;
+  min-height: 100vh;
+  /* 与 DWM 材质同色填充，避免圆角处露毛边 */
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.92));
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.plugin-popup-root.is-enter {
+  opacity: 0;
+}
+
+.plugin-popup-root.is-in {
+  opacity: 1;
+}
+
 .plugin-popup-frame {
   width: 100%;
   height: 100%;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.92));
   color: var(--glass-fg, #f4f4f5);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   /* Full-window shell: no CSS radius (DWM rounds the HWND). */
   border-radius: 0;
+  overflow: hidden;
 }
 
 .plugin-popup-empty {
@@ -51,7 +70,7 @@
   flex-direction: column;
   gap: var(--wh-popup-gap);
   overflow: hidden;
-  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.92));
   color: var(--glass-fg, #f4f4f5);
   /* Full-window shell: no CSS radius (DWM rounds the HWND). */
   border-radius: 0;

@@ -20,6 +20,13 @@ import type { PluginCapability, PluginSettingField } from "./plugins/types";
 import { subscribeSystemDark, syncGlassCss } from "./glassPrefs";
 import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginSettingsForm from "./components/PluginSettingsForm";
+import {
+  DEFAULT_SYSTEM_CHIPS,
+  normalizeSystemChips,
+  type SystemChipVisibility,
+  type TrayIconInfo as SharedTrayIconInfo,
+  type TrayPrefs as SharedTrayPrefs,
+} from "./components/TrayCluster";
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
@@ -115,24 +122,20 @@ type Ambient = {
   png_base64?: string;
 };
 
-type TrayIconInfo = {
-  id: string;
-  tooltip: string;
-  process: string;
-  uid: number;
-  hwnd: number;
-  callback_msg: number;
-  version?: number;
-  icon_png_base64: string;
-  area: string;
-  flashing?: boolean;
-};
+type TrayIconInfo = SharedTrayIconInfo;
 
-type TrayPrefs = {
-  pinned: string[];
-  /** icon id → 右键菜单高度；未设置则自动 */
-  menu_heights?: Record<string, number>;
-};
+type TrayPrefs = SharedTrayPrefs;
+
+const SYSTEM_CHIP_TOGGLES: { key: keyof SystemChipVisibility; label: string; desc: string }[] = [
+  { key: "perf", label: "性能温度", desc: "CPU / GPU 温度与内存占用" },
+  { key: "wifi", label: "Wi‑Fi", desc: "网络状态与无线列表" },
+  { key: "bluetooth", label: "蓝牙", desc: "蓝牙开关与已配对设备" },
+  { key: "volume", label: "声音", desc: "音量与输出设备" },
+  { key: "power", label: "电源", desc: "电池与电源计划" },
+  { key: "peripherals", label: "外设", desc: "耳机 / 手柄等快捷芯片" },
+  { key: "ime", label: "输入法", desc: "当前输入法与大小写" },
+  { key: "clock", label: "时钟", desc: "日期时间与日历" },
+];
 
 type PluginMarketEntry = {
   id: string;
@@ -341,6 +344,9 @@ export default function SettingsApp() {
   const [darkPref, setDarkPref] = useState<DarkPref>("dark");
   const [trays, setTrays] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
+  const [muted, setMuted] = useState<string[]>([]);
+  const [mutedProcesses, setMutedProcesses] = useState<string[]>([]);
+  const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
   const [menuHeightEditId, setMenuHeightEditId] = useState<string | null>(null);
   const [menuHeightDraft, setMenuHeightDraft] = useState("");
@@ -349,7 +355,9 @@ export default function SettingsApp() {
   const [dockMsg, setDockMsg] = useState("");
   const [dockBusy, setDockBusy] = useState(false);
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
-  const [shortcutsExclusiveId, setShortcutsExclusiveId] = useState<string>("");
+  const [openAtLogin, setOpenAtLogin] = useState(false);
+  const [openAtLoginBusy, setOpenAtLoginBusy] = useState(false);
+  const [shortcutsVisibleIds, setShortcutsVisibleIds] = useState<string[]>([]);
   const [installed, setInstalled] = useState<InstalledPluginDto[]>([]);
   const [pluginMsg, setPluginMsg] = useState("");
   const [pluginBusy, setPluginBusy] = useState(false);
@@ -359,6 +367,8 @@ export default function SettingsApp() {
   const [launcherDraft, setLauncherDraft] = useState(emptyLauncherDraft);
   const [launcherMsg, setLauncherMsg] = useState("");
   const [launcherBusy, setLauncherBusy] = useState(false);
+  const [backupMsg, setBackupMsg] = useState("");
+  const [backupBusy, setBackupBusy] = useState(false);
 
   const pullOptions = useMemo(() => {
     const panels = listPanelProviders(pluginRegistry.listPanelManifests());
@@ -406,6 +416,22 @@ export default function SettingsApp() {
     (entry) =>
       entry.id === "com.window-hub.mirror" || entry.id === "com.window-hub.mirror__dev",
   );
+  const idiomsInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.idioms" || entry.id === "com.window-hub.idioms__dev",
+  );
+  const draftInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.draft" || entry.id === "com.window-hub.draft__dev",
+  );
+  const todoInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.todo" || entry.id === "com.window-hub.todo__dev",
+  );
+  const lyricsInstalled = pluginEntries.some(
+    (entry) =>
+      entry.id === "com.window-hub.lyrics" || entry.id === "com.window-hub.lyrics__dev",
+  );
 
   const shortcutsPluginOptions = useMemo(() => {
     return installed
@@ -421,16 +447,30 @@ export default function SettingsApp() {
       }));
   }, [installed]);
 
-  const persistShortcutsExclusive = async (pluginId: string) => {
-    setShortcutsExclusiveId(pluginId);
+  const persistShortcutsVisible = async (ids: string[]) => {
+    const nextIds = [...new Set(ids.map((s) => s.trim()).filter(Boolean))];
+    setShortcutsVisibleIds(nextIds);
     try {
-      const next = await invoke<{ exclusivePluginId?: string | null }>("set_shortcuts_prefs", {
-        prefs: { exclusivePluginId: pluginId || null },
+      const next = await invoke<{
+        visiblePluginIds?: string[] | null;
+        exclusivePluginId?: string | null;
+      }>("set_shortcuts_prefs", {
+        prefs: { visiblePluginIds: nextIds, exclusivePluginId: null },
       });
-      setShortcutsExclusiveId(next.exclusivePluginId ?? "");
+      setShortcutsVisibleIds(next.visiblePluginIds ?? []);
     } catch (err) {
       console.error(err);
     }
+  };
+
+  const toggleShortcutsVisible = (pluginId: string) => {
+    const id = pluginId.trim();
+    if (!id) return;
+    const has = shortcutsVisibleIds.includes(id);
+    const next = has
+      ? shortcutsVisibleIds.filter((x) => x !== id)
+      : [...shortcutsVisibleIds, id];
+    void persistShortcutsVisible(next);
   };
 
   const persistDockPrefs = async (patch: Partial<DockPrefs>) => {
@@ -480,6 +520,13 @@ export default function SettingsApp() {
       await hydrateIslandPrefs().then(setIslandPrefsState);
 
       try {
+        const boot = await invoke<boolean>("get_open_at_login");
+        setOpenAtLogin(!!boot);
+      } catch {
+        /* noop */
+      }
+
+      try {
         const prefs = await invoke<MaterialPrefs>("get_material_prefs");
         setDarkPref(prefs.dark === true ? "dark" : prefs.dark === false ? "light" : "auto");
         await syncGlassCss({
@@ -515,13 +562,22 @@ export default function SettingsApp() {
         ]);
         setTrays(list);
         setPinned(prefs.pinned ?? []);
+        setMuted(prefs.muted ?? []);
+        setMutedProcesses(prefs.muted_processes ?? []);
+        setSystemChips(normalizeSystemChips(prefs.system_chips));
         setMenuHeights(prefs.menu_heights ?? {});
       } catch {
         /* noop */
       }
       try {
-        const sp = await invoke<{ exclusivePluginId?: string | null }>("get_shortcuts_prefs");
-        setShortcutsExclusiveId(sp.exclusivePluginId ?? "");
+        const sp = await invoke<{
+          visiblePluginIds?: string[] | null;
+          exclusivePluginId?: string | null;
+        }>("get_shortcuts_prefs");
+        const ids = Array.isArray(sp.visiblePluginIds) ? sp.visiblePluginIds : [];
+        if (ids.length) setShortcutsVisibleIds(ids);
+        else if (sp.exclusivePluginId?.trim()) setShortcutsVisibleIds([sp.exclusivePluginId.trim()]);
+        else setShortcutsVisibleIds([]);
       } catch {
         /* noop */
       }
@@ -542,10 +598,22 @@ export default function SettingsApp() {
     }).then((fn) => unsubs.push(fn));
     void listen<TrayPrefs>("tray-prefs", (ev) => {
       setPinned(ev.payload.pinned ?? []);
+      setMuted(ev.payload.muted ?? []);
+      setMutedProcesses(ev.payload.muted_processes ?? []);
+      setSystemChips(normalizeSystemChips(ev.payload.system_chips));
       setMenuHeights(ev.payload.menu_heights ?? {});
     }).then((fn) => unsubs.push(fn));
-    void listen<{ exclusivePluginId?: string | null }>("shortcuts-prefs", (ev) => {
-      setShortcutsExclusiveId(ev.payload?.exclusivePluginId ?? "");
+    void listen<{
+      visiblePluginIds?: string[] | null;
+      exclusivePluginId?: string | null;
+    }>("shortcuts-prefs", (ev) => {
+      const ids = Array.isArray(ev.payload?.visiblePluginIds)
+        ? ev.payload.visiblePluginIds
+        : [];
+      if (ids.length) setShortcutsVisibleIds(ids);
+      else if (ev.payload?.exclusivePluginId?.trim()) {
+        setShortcutsVisibleIds([ev.payload.exclusivePluginId.trim()]);
+      } else setShortcutsVisibleIds([]);
     }).then((fn) => unsubs.push(fn));
 
     void bootstrapPlugins().then((list) => {
@@ -562,11 +630,12 @@ export default function SettingsApp() {
       void refreshLaunchers();
     }).then((fn) => unsubs.push(fn));
 
+    // Event-driven updates are primary; light poll only covers missed emits.
     const poll = window.setInterval(() => {
       void invoke<TrayIconInfo[]>("list_tray_icons")
         .then((list) => setTrays(list))
         .catch(() => undefined);
-    }, 800);
+    }, 8000);
 
     return () => {
       window.clearInterval(poll);
@@ -633,23 +702,52 @@ export default function SettingsApp() {
     setIslandPrefsState(next);
   }
 
+  async function toggleOpenAtLogin() {
+    if (openAtLoginBusy) return;
+    setOpenAtLoginBusy(true);
+    const next = !openAtLogin;
+    try {
+      const applied = await invoke<boolean>("set_open_at_login", { enabled: next });
+      setOpenAtLogin(!!applied);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setOpenAtLoginBusy(false);
+    }
+  }
+
   async function persistTrayPrefs(
     nextPinned: string[],
     nextHeights: Record<string, number>,
+    nextMuted: string[] = muted,
+    nextMutedProcesses: string[] = mutedProcesses,
+    nextSystemChips: SystemChipVisibility = systemChips,
   ) {
     setSaving(true);
     try {
       const prefs = await invoke<TrayPrefs>("set_tray_prefs", {
         pinned: nextPinned,
         menuHeights: nextHeights,
+        muted: nextMuted,
+        mutedProcesses: nextMutedProcesses,
+        systemChips: nextSystemChips,
       });
       setPinned(prefs.pinned ?? nextPinned);
       setMenuHeights(prefs.menu_heights ?? nextHeights);
+      setMuted(prefs.muted ?? nextMuted);
+      setMutedProcesses(prefs.muted_processes ?? nextMutedProcesses);
+      setSystemChips(normalizeSystemChips(prefs.system_chips ?? nextSystemChips));
     } catch {
       /* noop */
     } finally {
       setSaving(false);
     }
+  }
+
+  async function toggleSystemChip(key: keyof SystemChipVisibility) {
+    const next = { ...systemChips, [key]: !systemChips[key] };
+    setSystemChips(next);
+    await persistTrayPrefs(pinned, menuHeights, muted, mutedProcesses, next);
   }
 
   async function togglePinned(id: string) {
@@ -658,6 +756,30 @@ export default function SettingsApp() {
       : [...pinned, id];
     setPinned(next);
     await persistTrayPrefs(next, menuHeights);
+  }
+
+  function isNotifyMuted(icon: TrayIconInfo) {
+    if (muted.includes(icon.id)) return true;
+    const proc = (icon.process || "").trim().toLowerCase();
+    if (proc && mutedProcesses.some((p) => p.toLowerCase() === proc)) return true;
+    const tip = (icon.tooltip || "").toLowerCase();
+    return mutedProcesses.some((p) => tip.includes(p.toLowerCase()));
+  }
+
+  async function toggleNotifyMute(icon: TrayIconInfo) {
+    const on = isNotifyMuted(icon);
+    const proc = (icon.process || "").trim().toLowerCase();
+    let nextMuted = muted.filter((id) => id !== icon.id);
+    let nextProcs = mutedProcesses.filter((p) => p.toLowerCase() !== proc);
+    if (!on) {
+      nextMuted = [...nextMuted, icon.id];
+      if (proc && !nextProcs.some((p) => p.toLowerCase() === proc)) {
+        nextProcs = [...nextProcs, proc];
+      }
+    }
+    setMuted(nextMuted);
+    setMutedProcesses(nextProcs);
+    await persistTrayPrefs(pinned, menuHeights, nextMuted, nextProcs);
   }
 
   function openMenuHeightEditor(id: string) {
@@ -920,34 +1042,72 @@ export default function SettingsApp() {
           {nav === "general" && (
             <>
               <section className="settings-card">
-                <h2>快捷区</h2>
+                <h2>启动</h2>
                 <p className="card-desc">
-                  状态菜单左侧快捷区可显示多个插件入口，也可独占给某一个插件（例如窗口组固定项占满整条）。
+                  登录 Windows 后自动启动 Window Hub（写入当前用户的「启动」文件夹）。
                 </p>
                 <label className="pref-row">
                   <span className="pref-row-text">
-                    <span className="pref-row-label">快捷区占用</span>
-                    <span className="pref-row-desc">选「全部插件」或指定一个 shortcuts 插件</span>
+                    <span className="pref-row-label">开机自启</span>
+                    <span className="pref-row-desc">
+                      {openAtLogin ? "已启用：登录后自动运行" : "关闭时需手动打开"}
+                    </span>
                   </span>
-                  <select
-                    className="pref-select"
-                    value={shortcutsExclusiveId}
-                    onChange={(e) => void persistShortcutsExclusive(e.target.value)}
+                  <button
+                    type="button"
+                    className={`pref-switch${openAtLogin ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={openAtLogin}
+                    disabled={openAtLoginBusy}
+                    onClick={() => void toggleOpenAtLogin()}
                   >
-                    <option value="">全部插件</option>
-                    {shortcutsPluginOptions.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
+                    <span className="pref-switch-knob" />
+                  </button>
                 </label>
+              </section>
+              <section className="settings-card">
+                <h2>快捷区</h2>
+                <p className="card-desc">
+                  状态菜单左侧快捷区可显示多个插件入口。可全开，或勾选若干 shortcuts 插件（例如只保留窗口组与中转站）。
+                </p>
+                <div className="pref-row pref-row-stack">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">快捷区占用</span>
+                    <span className="pref-row-desc">
+                      未勾选任何项 = 全部插件；勾选后仅显示所选插件
+                    </span>
+                  </span>
+                  <div className="mode-list is-compact">
+                    <button
+                      type="button"
+                      className={`mode-item${shortcutsVisibleIds.length === 0 ? " is-selected" : ""}`}
+                      onClick={() => void persistShortcutsVisible([])}
+                    >
+                      <span className="mode-label">全部插件</span>
+                      <span className="mode-desc">显示所有已启用的 shortcuts 入口</span>
+                    </button>
+                    {shortcutsPluginOptions.map((p) => {
+                      const selected = shortcutsVisibleIds.includes(p.id);
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          className={`mode-item${selected ? " is-selected" : ""}`}
+                          onClick={() => toggleShortcutsVisible(p.id)}
+                        >
+                          <span className="mode-label">{p.name}</span>
+                          <span className="mode-desc">{selected ? "已选入快捷区" : "点击加入快捷区"}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </section>
               <section className="settings-card">
                 <h2>下拉内容</h2>
                 <p className="card-desc">
                   选择点击或下拉展开灵动岛时默认显示的内容。列表来自已启用且声明 island.panel、未设
-                  excludeFromPullContent 的插件（如天气、镜子）。中转站等排除项不出现在此，经拖入或岛栏摘要临时打开。
+                  excludeFromPullContent 的插件（如天气、镜子）。中转站在左侧快捷区打开弹窗使用。
                 </p>
                 <div className="mode-list">
                   {pullOptions.map((item) => (
@@ -967,7 +1127,7 @@ export default function SettingsApp() {
                 <h2>岛栏常驻</h2>
                 <p className="card-desc">
                   折叠态岛栏默认展示哪个插件的摘要。列表来自已启用、声明 capability/slot
-                  island.bar、且未设 excludeFromBarResident 的插件（如天气）。中转站有条目时仍会临时覆盖，清空后回到常驻。
+                  island.bar、且未设 excludeFromBarResident 的插件（如天气、歌词）。中转站有条目时仍会临时覆盖，清空后回到常驻。
                 </p>
                 <div className="mode-list">
                   <button
@@ -990,6 +1150,26 @@ export default function SettingsApp() {
                     </button>
                   ))}
                 </div>
+              </section>
+              <section className="settings-card">
+                <h2>声音</h2>
+                <p className="card-desc">调节岛栏音量滑条时，可播放系统提示音以便确认当前音量。</p>
+                <label className="pref-row">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">音量调节提示音</span>
+                    <span className="pref-row-desc">松手提交音量后播放短提示音</span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${islandPrefs.volumePreviewSound ? " is-on" : ""}`}
+                    aria-pressed={islandPrefs.volumePreviewSound}
+                    onClick={() =>
+                      updateIslandPrefs({ volumePreviewSound: !islandPrefs.volumePreviewSound })
+                    }
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
               </section>
               <section className="settings-card">
                 <h2>自动沉浸</h2>
@@ -1035,7 +1215,7 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>消息通知</h2>
                 <p className="card-desc">
-                  微信等应用托盘图标闪动时，退出沉浸并在岛上落下消息提示（不自动消失）；点击打开应用或左滑均可清掉。展示时岛内描一圈绿色内边框。
+                  微信等应用托盘图标闪动时，退出沉浸并在岛上落下消息提示；点击打开应用或左滑可清掉。应用侧已读、托盘停止闪动后也会自动收起。展示时岛内描一圈绿色内边框。可在「托盘」页对单个应用关闭通知（如 Mem Reduct）。
                 </p>
                 <label className="pref-row">
                   <span className="pref-row-text">
@@ -1070,6 +1250,19 @@ export default function SettingsApp() {
                     }
                   />
                 </label>
+                {(muted.length > 0 || mutedProcesses.length > 0) && (
+                  <p className="card-desc">
+                    已静音：
+                    {[...new Set([
+                      ...trays.filter((t) => isNotifyMuted(t)).map((t) => t.tooltip || t.process || t.id),
+                      ...mutedProcesses,
+                    ])]
+                      .filter(Boolean)
+                      .slice(0, 8)
+                      .join("、") || "若干应用"}
+                    。可在「托盘」页重新开启。
+                  </p>
+                )}
               </section>
               <section className="settings-card">
                 <h2>顶栏采样</h2>
@@ -1104,6 +1297,71 @@ export default function SettingsApp() {
                 <p className="swatch-meta">
                   rgb({ambient.r}, {ambient.g}, {ambient.b})
                 </p>
+              </section>
+              <section className="settings-card">
+                <h2>数据备份</h2>
+                <p className="card-desc">
+                  设置、托盘/岛栏偏好、插件配置与数据、已安装插件包均保存在本机
+                  <code> %APPDATA%/window-hub </code>
+                  。可导出为 <code>.whbak</code> 备份包，换机或重装后导入即可恢复。
+                </p>
+                <div className="plugin-actions">
+                  <button
+                    type="button"
+                    className="settings-primary-btn"
+                    disabled={backupBusy}
+                    onClick={() => {
+                      void (async () => {
+                        setBackupBusy(true);
+                        setBackupMsg("");
+                        try {
+                          const path = await invoke<string | null>("export_hub_backup");
+                          setBackupMsg(path ? `已导出：${path}` : "已取消导出");
+                        } catch (err) {
+                          setBackupMsg(`导出失败：${String(err)}`);
+                        } finally {
+                          setBackupBusy(false);
+                        }
+                      })();
+                    }}
+                  >
+                    导出设置与插件
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={backupBusy}
+                    onClick={() => {
+                      void (async () => {
+                        setBackupBusy(true);
+                        setBackupMsg("");
+                        try {
+                          const path = await invoke<string | null>("pick_hub_backup_file");
+                          if (!path) {
+                            setBackupMsg("已取消导入");
+                            return;
+                          }
+                          const ok = window.confirm(
+                            `将用备份覆盖当前设置与已安装插件：\n${path}\n\n建议先导出一份当前备份。导入后若界面异常请重启应用。继续？`,
+                          );
+                          if (!ok) {
+                            setBackupMsg("已取消导入");
+                            return;
+                          }
+                          await invoke("import_hub_backup", { path });
+                          setBackupMsg("导入成功。若部分界面仍显示旧数据，请重启应用。");
+                        } catch (err) {
+                          setBackupMsg(`导入失败：${String(err)}`);
+                        } finally {
+                          setBackupBusy(false);
+                        }
+                      })();
+                    }}
+                  >
+                    导入备份
+                  </button>
+                </div>
+                {backupMsg ? <p className="plugin-msg">{backupMsg}</p> : null}
               </section>
             </>
           )}
@@ -1392,19 +1650,54 @@ export default function SettingsApp() {
           )}
 
           {nav === "tray" && (
-            <section className="settings-card settings-card-grow">
+            <>
+              <section className="settings-card">
+                <div className="section-head">
+                  <h2>系统芯片</h2>
+                  <span className="section-hint">
+                    {saving ? "保存中…" : "控制岛栏右侧 Wi‑Fi / 蓝牙等是否显示"}
+                  </span>
+                </div>
+                <p className="card-desc">
+                  关闭后对应芯片从岛栏右侧消失；不影响系统本身的网络 / 蓝牙功能。展开托盘箭头始终保留。
+                </p>
+                <div>
+                  {SYSTEM_CHIP_TOGGLES.map((item) => {
+                    const on = systemChips[item.key];
+                    return (
+                      <label key={item.key} className="pref-row">
+                        <span className="pref-row-text">
+                          <span className="pref-row-label">{item.label}</span>
+                          <span className="pref-row-desc">{item.desc}</span>
+                        </span>
+                        <button
+                          type="button"
+                          className={`pref-switch${on ? " is-on" : ""}`}
+                          aria-pressed={on}
+                          onClick={() => void toggleSystemChip(item.key)}
+                        >
+                          <span className="pref-switch-knob" />
+                        </button>
+                      </label>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="settings-card settings-card-grow">
               <div className="section-head">
                 <h2>托盘常显</h2>
                 <span className="section-hint">
                   {saving
                     ? "保存中…"
                     : trays.length > 0
-                      ? "勾选常显；右侧齿轮可单独设置右键菜单高度"
+                      ? "勾选常显；铃铛关闭岛通知；齿轮设菜单高度"
                       : "正在抓取系统托盘…"}
                 </span>
               </div>
               <p className="card-desc">
-                右键菜单默认自动测量高度并贴到点击下方；可为每个图标自定义像素高度。定位只改消息坐标并移动菜单窗口，真实鼠标指针不会跳动。
+                仅列出应用托盘图标。系统芯片（网络 / 音量 / 电源 / 蓝牙 / 输入法 / 时钟）请在上方单独开关。
+                右键菜单默认自动测量高度；铃铛关闭后该应用托盘闪动不再弹出岛通知。
               </p>
               {trays.length === 0 ? (
                 <p className="tray-settings-empty">暂未收到托盘图标</p>
@@ -1412,13 +1705,14 @@ export default function SettingsApp() {
                 <div className="tray-settings-list">
                   {trays.map((icon) => {
                     const on = pinnedSet.has(icon.id);
+                    const notifyMuted = isNotifyMuted(icon);
                     const customH = menuHeights[icon.id];
                     const editing = menuHeightEditId === icon.id;
                     const tencentDefault = isTencentIm(icon);
                     return (
                       <div
                         key={icon.id}
-                        className={`tray-settings-row${on ? " is-on" : ""}${editing ? " is-editing" : ""}`}
+                        className={`tray-settings-row${on ? " is-on" : ""}${editing ? " is-editing" : ""}${notifyMuted ? " is-muted" : ""}`}
                       >
                         <button
                           type="button"
@@ -1442,12 +1736,39 @@ export default function SettingsApp() {
                             <span className="tray-settings-sub">
                               {icon.process || icon.id}
                               {icon.area === "overflow" ? " · 溢出区" : ""}
+                              {notifyMuted ? " · 已静音" : ""}
                               {` · ${menuHeightLabel(icon, menuHeights)}`}
                             </span>
                           </span>
                           <span className={`tray-check${on ? " is-on" : ""}`} aria-hidden>
                             {on ? "✓" : ""}
                           </span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`tray-settings-mute${notifyMuted ? " is-on" : ""}`}
+                          title={notifyMuted ? "允许岛通知" : "勿打扰（不弹岛通知）"}
+                          aria-label={`${trayLabel(icon)} ${notifyMuted ? "允许通知" : "勿打扰"}`}
+                          aria-pressed={notifyMuted}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void toggleNotifyMute(icon);
+                          }}
+                        >
+                          {notifyMuted ? (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                              <path d="M18.63 13A17.89 17.89 0 0 1 18 8" />
+                              <path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14" />
+                              <path d="M18 8a6 6 0 0 0-9.33-5" />
+                              <line x1="1" y1="1" x2="23" y2="23" />
+                            </svg>
+                          ) : (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                            </svg>
+                          )}
                         </button>
                         <button
                           type="button"
@@ -1513,6 +1834,7 @@ export default function SettingsApp() {
                 </div>
               )}
             </section>
+            </>
           )}
 
           {nav === "plugins" && (
@@ -1598,7 +1920,52 @@ export default function SettingsApp() {
                     导入示例：镜子
                   </button>
                 ) : null}
+                {!idiomsInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("idioms")}
+                  >
+                    导入示例：背成语
+                  </button>
+                ) : null}
+                {!draftInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("draft")}
+                  >
+                    导入示例：随心记
+                  </button>
+                ) : null}
+                {!todoInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("todo")}
+                  >
+                    导入示例：待办
+                  </button>
+                ) : null}
+                {!lyricsInstalled ? (
+                  <button
+                    type="button"
+                    className="settings-secondary-btn"
+                    disabled={pluginBusy}
+                    onClick={() => void beginInstallExample("lyrics")}
+                  >
+                    导入示例：歌词
+                  </button>
+                ) : null}
               </div>
+              {!idiomsInstalled || !draftInstalled ? (
+                <p className="plugin-msg" style={{ marginTop: 6 }}>
+                  「背成语 / 随心记」启用后出现在左侧快捷区；点击芯片打开弹窗。首次启动缺失时会尝试自动安装。
+                </p>
+              ) : null}
               {pluginMsg ? <p className="plugin-msg">{pluginMsg}</p> : null}
 
               <div className="plugin-list">

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { subscribeForeground } from "../foregroundPoll";
 import {
   WH_SHORTCUTS_EVT,
   WH_SHORTCUTS_HUB,
@@ -9,17 +10,24 @@ import {
   buildShortcutsSrcdoc,
   isAllowedShortcutsHubCmd,
 } from "../plugins/shortcutsHubBridge";
-import { SHORTCUTS_HEIGHT } from "../plugins/shortcutsGeometry";
+import {
+  SHORTCUTS_HEIGHT,
+  shortcutsAllowsDragOpen,
+} from "../plugins/shortcutsGeometry";
 
 const POPUP_GAP = 8;
+const ICON_STRIP_FALLBACK = 22;
 
 type Props = {
   pluginId: string;
   entryPath: string;
   width: number;
   maxWidth: number;
+  /** slots.shortcuts.action */
+  action?: string;
   onRequestWidth: (pluginId: string, width: number) => void;
 };
+
 
 async function popupAnchorFromEl(el: HTMLElement) {
   const win = getCurrentWindow();
@@ -39,6 +47,7 @@ export default function ShortcutsPluginStrip({
   entryPath,
   width,
   maxWidth,
+  action = "popup.open",
   onRequestWidth,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -48,6 +57,40 @@ export default function ShortcutsPluginStrip({
   onRequestWidthRef.current = onRequestWidth;
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const openSurface = async (opts?: { forceOpen?: boolean }) => {
+    if (openingRef.current || !wrapRef.current) return;
+    openingRef.current = true;
+    try {
+      if (action === "panel.open") {
+        await invoke("hub_panel_open_session", { pluginId }).catch(() => undefined);
+        return;
+      }
+      if (action !== "popup.open") return;
+      const openId = await invoke<string | null>("get_plugin_popup_id").catch(() => null);
+      if (openId === pluginId) {
+        // 拖入只保证打开，勿 toggle 关掉
+        if (opts?.forceOpen) return;
+        await invoke("close_plugin_popup").catch(() => undefined);
+        return;
+      }
+      await invoke("suppress_plugin_popup_blur", {
+        ms: opts?.forceOpen ? 1200 : 500,
+      }).catch(() => undefined);
+      const { x, y } = await popupAnchorFromEl(wrapRef.current);
+      await invoke("open_plugin_popup", {
+        pluginId,
+        x,
+        y,
+        preferGroupId: null,
+        forceOpen: opts?.forceOpen === true,
+      });
+    } catch (err) {
+      console.error("[ShortcutsPluginStrip] open", err);
+    } finally {
+      openingRef.current = false;
+    }
+  };
 
   const measureAndReport = () => {
     const iframe = iframeRef.current;
@@ -93,10 +136,11 @@ export default function ShortcutsPluginStrip({
       }
       const bar = doc.getElementById("bar") ?? doc.body;
       if (!bar) return;
-      const w = Math.ceil(
-        Math.max(bar.scrollWidth, bar.getBoundingClientRect().width, 28),
+      const measured = Math.ceil(
+        Math.max(bar.scrollWidth, bar.getBoundingClientRect().width),
       );
-      if (w > 0) onRequestWidthRef.current(pluginId, w);
+      // 勿强行抬到 28：天气/歌词 worker 仅 1px；图标 chip 约 22
+      if (measured > 0) onRequestWidthRef.current(pluginId, measured);
     } catch {
       /* sandbox / not ready */
     }
@@ -208,16 +252,21 @@ export default function ShortcutsPluginStrip({
               typeof d.args?.preferGroupId === "string" && d.args.preferGroupId
                 ? d.args.preferGroupId
                 : null;
-            const open = await invoke<boolean>("is_plugin_popup_open").catch(() => false);
+            const openId = await invoke<string | null>("get_plugin_popup_id").catch(() => null);
+            // 无 preferGroup：二次点击同插件 → 关闭（随心记/中转站/窗口组管理）
+            if (openId === pluginId && !preferGroupId) {
+              await invoke("close_plugin_popup").catch(() => undefined);
+              return;
+            }
+            await invoke("suppress_plugin_popup_blur", { ms: 500 }).catch(() => undefined);
             const { x, y } = await popupAnchorFromEl(wrapRef.current);
             await invoke("open_plugin_popup", {
               pluginId,
               x,
               y,
               preferGroupId,
+              forceOpen: false,
             });
-            // If already open, Rust emits prefer-group; still call open for idempotent path.
-            void open;
           } catch (err) {
             console.error("[ShortcutsPluginStrip] popup", err);
           } finally {
@@ -255,7 +304,6 @@ export default function ShortcutsPluginStrip({
   }, [pluginId, onRequestWidth]);
 
   useEffect(() => {
-    let cancelled = false;
     const unsubs: Array<() => void> = [];
     const frame = () => iframeRef.current?.contentWindow;
 
@@ -309,6 +357,26 @@ export default function ShortcutsPluginStrip({
         unsubs.push(
           await listen<{
             pluginId?: string;
+            key?: string;
+            value?: unknown;
+            removed?: boolean;
+          }>("plugin-storage-changed", (ev) => {
+            if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+            frame()?.postMessage(
+              {
+                channel: WH_SHORTCUTS_EVT,
+                type: "storage-changed",
+                key: ev.payload?.key,
+                value: ev.payload?.value,
+                removed: !!ev.payload?.removed,
+              },
+              "*",
+            );
+          }),
+        );
+        unsubs.push(
+          await listen<{
+            pluginId?: string;
             notifyId: string;
             actionId: string;
             data?: unknown;
@@ -331,37 +399,25 @@ export default function ShortcutsPluginStrip({
       }
     })();
 
-    const tick = async () => {
-      try {
-        const fg = await invoke<{
-          isSelf?: boolean;
-          windowId?: string | null;
-        }>("get_foreground_app");
-        if (cancelled) return;
-        if (fg.isSelf) return;
-        frame()?.postMessage(
-          {
-            channel: WH_SHORTCUTS_EVT,
-            type: "foreground-changed",
-            windowId: fg.windowId ?? null,
-          },
-          "*",
-        );
-      } catch {
-        /* noop */
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => void tick(), 450);
+    const unsubFg = subscribeForeground((fg) => {
+      if (fg.isSelf) return;
+      frame()?.postMessage(
+        {
+          channel: WH_SHORTCUTS_EVT,
+          type: "foreground-changed",
+          windowId: fg.windowId ?? null,
+        },
+        "*",
+      );
+    });
 
     return () => {
-      cancelled = true;
-      window.clearInterval(id);
+      unsubFg();
       unsubs.forEach((fn) => fn());
     };
   }, [pluginId, srcdoc]);
 
-  const w = Math.max(28, Math.min(maxWidth, width || 28));
+  const w = Math.max(1, Math.min(maxWidth, width || ICON_STRIP_FALLBACK));
 
   return (
     <div
@@ -369,6 +425,33 @@ export default function ShortcutsPluginStrip({
       className="shortcuts-plugin-strip"
       style={{ width: w, minWidth: w, height: SHORTCUTS_HEIGHT, flexShrink: 0 }}
       data-plugin={pluginId}
+      onDragEnter={(e) => {
+        if (!shortcutsAllowsDragOpen(pluginId)) return;
+        e.preventDefault();
+        void openSurface({ forceOpen: true });
+      }}
+      onDragOver={(e) => {
+        if (!shortcutsAllowsDragOpen(pluginId)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={(e) => {
+        if (!shortcutsAllowsDragOpen(pluginId)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const files = e.dataTransfer?.files;
+        const paths: string[] = [];
+        if (files?.length) {
+          for (let i = 0; i < files.length; i++) {
+            const f = files.item(i) as File & { path?: string };
+            if (f?.path?.trim()) paths.push(f.path);
+          }
+        }
+        if (paths.length) {
+          void invoke("hub_staging_add_paths", { pluginId, paths }).catch(console.error);
+        }
+        void openSurface({ forceOpen: true });
+      }}
     >
       {error ? (
         <span className="shortcuts-strip-error" title={error}>

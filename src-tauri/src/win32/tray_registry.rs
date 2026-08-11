@@ -6,12 +6,17 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::GUID;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use winreg::enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ};
 use winreg::RegKey;
+
+/// Avoid spamming when NotifyIconSettings is blocked (policy / locked profile).
+static LOGGED_SETTINGS_UNREADABLE: AtomicBool = AtomicBool::new(false);
+static LOGGED_UIORDER_MISSING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone)]
 pub struct RegTrayIcon {
@@ -227,11 +232,15 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
     let Ok(settings) =
         hkcu.open_subkey_with_flags(r"Control Panel\NotifyIconSettings", KEY_READ)
     else {
-        eprintln!("[tray] NotifyIconSettings not readable");
+        if !LOGGED_SETTINGS_UNREADABLE.swap(true, Ordering::Relaxed) {
+            eprintln!("[tray] NotifyIconSettings not readable (further errors suppressed)");
+        }
         return Vec::new();
     };
     let Ok(raw) = settings.get_raw_value("UIOrderList") else {
-        eprintln!("[tray] UIOrderList missing");
+        if !LOGGED_UIORDER_MISSING.swap(true, Ordering::Relaxed) {
+            eprintln!("[tray] UIOrderList missing (further errors suppressed)");
+        }
         return Vec::new();
     };
 
@@ -301,11 +310,7 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
         });
     }
 
-    eprintln!(
-        "[tray] registry running icons: {} (of {} order entries)",
-        registers.len(),
-        raw.bytes.len() / 8
-    );
+    let _ = raw.bytes.len();
     registers
 }
 

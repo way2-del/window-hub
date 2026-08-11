@@ -172,6 +172,79 @@ pub fn focus_window(hwnd: isize) -> Result<(), String> {
     }
 }
 
+/// Restore / focus the largest visible top-level window owned by `pid`
+/// (used after left-clicking a tray icon for apps that don't activate themselves).
+#[cfg(windows)]
+pub fn focus_main_for_pid(pid: u32) -> Result<(), String> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible, GWL_EXSTYLE, GWL_STYLE, WS_EX_TOOLWINDOW, WS_VISIBLE,
+    };
+
+    if pid == 0 {
+        return Err("pid is 0".into());
+    }
+
+    struct Ctx {
+        pid: u32,
+        best: Mutex<(isize, i64)>,
+    }
+    use std::sync::Mutex;
+
+    let ctx = Box::new(Ctx {
+        pid,
+        best: Mutex::new((0, -1)),
+    });
+    let ctx_ptr = Box::into_raw(ctx);
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &*(lparam.0 as *const Ctx);
+        let mut wpid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut wpid));
+        if wpid != ctx.pid {
+            return BOOL(1);
+        }
+        if !IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
+            return BOOL(1);
+        }
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        if style & WS_VISIBLE.0 == 0 && !IsIconic(hwnd).as_bool() {
+            return BOOL(1);
+        }
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_TOOLWINDOW.0 != 0 {
+            return BOOL(1);
+        }
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_err() {
+            return BOOL(1);
+        }
+        let area = ((rc.right - rc.left) as i64).max(0) * ((rc.bottom - rc.top) as i64).max(0);
+        if let Ok(mut best) = ctx.best.lock() {
+            if area > best.1 {
+                *best = (hwnd.0 as isize, area);
+            }
+        }
+        BOOL(1)
+    }
+
+    let hwnd = unsafe {
+        let _ = EnumWindows(Some(enum_cb), LPARAM(ctx_ptr as isize));
+        let ctx = Box::from_raw(ctx_ptr);
+        ctx.best.into_inner().map(|b| b.0).unwrap_or(0)
+    };
+    if hwnd == 0 {
+        return Err("no main window for pid".into());
+    }
+    focus_window(hwnd)
+}
+
+#[cfg(not(windows))]
+pub fn focus_main_for_pid(_pid: u32) -> Result<(), String> {
+    Err("focus_main_for_pid is only available on Windows".into())
+}
+
 #[cfg(not(windows))]
 pub fn focus_window(_hwnd: isize) -> Result<(), String> {
     Err("focus_window is only available on Windows".into())

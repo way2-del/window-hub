@@ -5,6 +5,7 @@ mod ini;
 mod launch;
 mod visibility;
 
+pub use icon::resolve_item_icon_png;
 pub use ini::parse_dockico_ini;
 pub use launch::launch_or_focus;
 pub use visibility::DockVisibility;

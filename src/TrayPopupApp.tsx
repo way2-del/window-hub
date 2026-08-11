@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   trayLabel,
   type TrayIconInfo,
@@ -39,9 +38,18 @@ async function clickTray(icon: TrayIconInfo, action: "left" | "right") {
   }
 }
 
+function fadeIn(setPhase: (p: "enter" | "in" | "leave") => void) {
+  setPhase("enter");
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => setPhase("in"));
+  });
+}
+
 export default function TrayPopupApp() {
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
+  // Stay at enter (opacity 0) while hidden / warming — never auto-fade-in on mount.
+  const [phase, setPhase] = useState<"enter" | "in" | "leave">("enter");
 
   useEffect(() => {
     const syncGlass = (prefs: GlassPrefs) => {
@@ -63,22 +71,15 @@ export default function TrayPopupApp() {
       } catch {
         await syncGlassCss({ kind: "mica-alt", dark: true });
       }
-      await invoke("apply_window_effect", {}).catch(() => undefined);
+      // Rust already applied DWM on create/warm — do not re-invoke apply_window_effect.
     })();
-
-    const retryA = window.setTimeout(() => {
-      void invoke("apply_window_effect", {}).catch(() => undefined);
-    }, 120);
-    const retryB = window.setTimeout(() => {
-      void invoke("apply_window_effect", {}).catch(() => undefined);
-    }, 350);
 
     let cancelled = false;
     const unsubs: Array<() => void> = [];
+    let closing = false;
 
     void listen<GlassPrefs>("material-prefs", (ev) => {
       syncGlass(ev.payload);
-      void invoke("apply_window_effect", {}).catch(() => undefined);
     }).then((fn) => {
       if (!cancelled) unsubs.push(fn);
       else fn();
@@ -91,7 +92,6 @@ export default function TrayPopupApp() {
             const prefs = await invoke<GlassPrefs>("get_material_prefs");
             if (prefs.dark != null) return;
             await syncGlassCss({ kind: "mica-alt", dark: null });
-            await invoke("apply_window_effect", {}).catch(() => undefined);
           } catch {
             /* noop */
           }
@@ -131,6 +131,26 @@ export default function TrayPopupApp() {
       } catch {
         /* noop */
       }
+      try {
+        unsubs.push(
+          await listen("tray-popup-opened", () => {
+            closing = false;
+            fadeIn(setPhase);
+          }),
+        );
+      } catch {
+        /* noop */
+      }
+      try {
+        unsubs.push(
+          await listen("tray-popup-closed", () => {
+            // Keep opacity 0 while hidden so the next show() isn't an opaque flash.
+            setPhase("enter");
+          }),
+        );
+      } catch {
+        /* noop */
+      }
     })();
 
     const poll = window.setInterval(() => {
@@ -139,26 +159,24 @@ export default function TrayPopupApp() {
           if (!cancelled) setIcons(list);
         })
         .catch(() => undefined);
-    }, 2000);
+    }, 5000);
 
-    let unFocus: (() => void) | undefined;
-    getCurrentWindow()
-      .onFocusChanged((ev) => {
-        if (!ev.payload) {
-          void invoke("close_tray_popup").catch(() => undefined);
-        }
-      })
-      .then((fn) => {
-        unFocus = fn;
-      });
+    // Blur close is owned by Rust (hide + suppress). Keep Escape here.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || closing) return;
+      closing = true;
+      setPhase("leave");
+      window.setTimeout(() => {
+        void invoke("close_tray_popup").catch(() => undefined);
+      }, 160);
+    };
+    document.addEventListener("keydown", onKey);
 
     return () => {
       cancelled = true;
-      window.clearTimeout(retryA);
-      window.clearTimeout(retryB);
       window.clearInterval(poll);
+      document.removeEventListener("keydown", onKey);
       unsubs.forEach((fn) => fn());
-      unFocus?.();
     };
   }, []);
 
@@ -173,7 +191,7 @@ export default function TrayPopupApp() {
   );
 
   return (
-    <div className="tray-popup-shell" role="menu">
+    <div className={`tray-popup-shell is-${phase}`} role="menu">
       {icons.length === 0 ? (
         <div className="tray-empty">暂无系统托盘图标</div>
       ) : (

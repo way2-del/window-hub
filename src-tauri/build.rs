@@ -23,12 +23,15 @@ fn build_trayhook() {
         manifest_dir.join("trayhook").join("src").display()
     );
 
+    // Keep trayhook artifacts under the main Cargo target dir so `tauri dev`
+    // does not treat nested `trayhook/target` writes as app source changes.
+    let trayhook_target = target_dir.join("trayhook");
     let status = Command::new("cargo")
         .arg("build")
         .arg("--manifest-path")
         .arg(&trayhook_manifest)
         .arg("--target-dir")
-        .arg(manifest_dir.join("trayhook").join("target"))
+        .arg(&trayhook_target)
         .args(if profile == "release" {
             vec!["--release"]
         } else {
@@ -49,11 +52,7 @@ fn build_trayhook() {
     }
 
     let dll_name = "window_hub_trayhook.dll";
-    let built = manifest_dir
-        .join("trayhook")
-        .join("target")
-        .join(&profile)
-        .join(dll_name);
+    let built = trayhook_target.join(&profile).join(dll_name);
     if !built.is_file() {
         println!(
             "cargo:warning=trayhook DLL missing after build: {}",

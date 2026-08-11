@@ -133,7 +133,7 @@ mod win {
     const MODE_CENTER: u8 = 1;
 
     /// How long to keep sampling after a window/desktop target switch.
-    const SETTLE_MS: u64 = 3000;
+    const SETTLE_MS: u64 = 2000;
     /// Top rows to average from the target window (window-local Y).
     const TOP_ROWS: i32 = 2;
 

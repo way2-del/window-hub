@@ -1086,9 +1086,10 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: number | undefined;
     const fallback = { r: ambient.r, g: ambient.g, b: ambient.b };
 
-    void (async () => {
+    const run = async () => {
       let left = fallback;
       let center = fallback;
       let right = fallback;
@@ -1104,10 +1105,14 @@ function App() {
       setChromeLeft(chromeTokens(left));
       setChromeCenter(chromeTokens(center));
       setChromeRight(chromeTokens(right));
-    })();
+    };
+
+    // Debounce chrome updates so rapid ambient emits don't thrash React.
+    timer = window.setTimeout(() => void run(), 100);
 
     return () => {
       cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
     };
   }, [ambient.r, ambient.g, ambient.b, ambient.png_base64, ambient.width]);
 
@@ -1435,9 +1440,17 @@ function App() {
     }
     const files = dt.files;
     if (files?.length) {
+      const paths: string[] = [];
       for (let i = 0; i < files.length; i++) {
         const f = files.item(i);
-        if (!f || !f.type.startsWith("image/")) continue;
+        if (!f) continue;
+        // WebView2 / Chromium：本地文件常带 path，与 onDragDropEvent 双通道
+        const path = (f as File & { path?: string }).path;
+        if (typeof path === "string" && path.trim()) {
+          paths.push(path);
+          continue;
+        }
+        if (!f.type.startsWith("image/")) continue;
         try {
           const buf = new Uint8Array(await f.arrayBuffer());
           const ext = (f.name.split(".").pop() || "png").toLowerCase();
@@ -1450,6 +1463,9 @@ function App() {
         } catch (err) {
           console.error(err);
         }
+      }
+      if (paths.length) {
+        await invoke("hub_staging_add_paths", { pluginId, paths }).catch(console.error);
       }
     }
   }
@@ -1744,13 +1760,14 @@ function App() {
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void openPluginSession(islandBar?.pluginId);
+                      // 常驻摘要仅展示；展开一律用设置里的「下拉内容」
+                      if (!expandedRef.current) void expand();
                     }}
                     onKeyDown={(e) => {
                       if (e.key !== "Enter" && e.key !== " ") return;
                       e.preventDefault();
                       e.stopPropagation();
-                      void openPluginSession(islandBar?.pluginId);
+                      if (!expandedRef.current) void expand();
                     }}
                   >
                     <span className="bar-staging-dot" aria-hidden />
@@ -1842,6 +1859,7 @@ function App() {
             <div
               ref={panelRef}
               className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}`}
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
             >
               <IslandPanelHost

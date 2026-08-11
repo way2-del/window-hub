@@ -2,7 +2,7 @@
  * 快捷区几何常量（与 .cursor/skills/window-hub-shortcuts 契约一致）。
  * 基座 ShortcutsHost 实现时应引用本文件，避免魔法数漂移。
  */
-export const SHORTCUTS_LEFT_INSET = 12;
+export const SHORTCUTS_LEFT_INSET = 8;
 /** 默认安全距；运行时不得低于 SHORTCUTS_ISLAND_GAP_MIN */
 export const SHORTCUTS_ISLAND_GAP = 24;
 export const SHORTCUTS_ISLAND_GAP_MIN = 16;
@@ -20,6 +20,19 @@ export const SHORTCUTS_PIN_MIN_W = 56;
 export const SHORTCUTS_PIN_MAX_W = 220;
 export const SHORTCUTS_EXPAND_MAX_RATIO = 1;
 export const SHORTCUTS_SCROLL_STEP = 100;
+
+/**
+ * 左侧快捷区不再悬停即开弹窗（一律点击 / 拖入）。
+ * 保留函数以免旧调用方报错；恒为 false。
+ */
+export function shortcutsAllowsHoverOpen(_pluginId: string): boolean {
+  return false;
+}
+
+/** 拖入快捷区条时自动开表面：仅中转站（接文件）。 */
+export function shortcutsAllowsDragOpen(pluginId: string): boolean {
+  return pluginId.startsWith("com.window-hub.transfer-station");
+}
 
 export type ShortcutsBounds = {
   x: number;

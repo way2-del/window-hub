@@ -233,6 +233,37 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
     return () => un?.();
   }, [pluginId]);
 
+  useEffect(() => {
+    if (!pluginId || !srcdoc) return;
+    postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, active);
+  }, [active, pluginId, srcdoc]);
+
+  useEffect(() => {
+    if (!pluginId) return;
+    let un: (() => void) | undefined;
+    void listen<{
+      pluginId?: string;
+      key?: string;
+      value?: unknown;
+      removed?: boolean;
+    }>("plugin-storage-changed", (ev) => {
+      if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+      iframeRef.current?.contentWindow?.postMessage(
+        {
+          channel: "plugin-storage-changed-fwd",
+          pluginId: ev.payload?.pluginId ?? pluginId,
+          key: ev.payload?.key,
+          value: ev.payload?.value,
+          removed: !!ev.payload?.removed,
+        },
+        "*",
+      );
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un?.();
+  }, [pluginId]);
+
   if (!pluginId) {
     return <div className="panel-plugin-empty">未知面板</div>;
   }
@@ -244,11 +275,6 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
       </div>
     );
   }
-  useEffect(() => {
-    if (!pluginId || !srcdoc) return;
-    postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, active);
-  }, [active, pluginId, srcdoc]);
-
   if (!srcdoc) {
     return <div className="panel-plugin-empty">加载面板…</div>;
   }

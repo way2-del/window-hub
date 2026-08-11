@@ -378,7 +378,7 @@ function render() {
       list = `
         <div class="wg-empty">
           组内还没有窗口
-          <button type="button" class="wg-primary-btn" id="to-add" style="margin-top:12px">添加窗口</button>
+          <button type="button" class="wg-primary-btn" data-to-add="1" style="margin-top:12px">添加窗口</button>
         </div>
       `;
     } else {
@@ -436,7 +436,7 @@ function render() {
       <div class="wg-toolbar">
         <button type="button" class="wg-text-btn" id="pin-group">${groupPinned ? "取消固定" : "固定到快捷区"}</button>
         <button type="button" class="wg-text-btn" id="rename-group">重命名</button>
-        <button type="button" class="wg-text-btn" id="to-add">${mode === "add" ? "取消添加" : "添加窗口"}</button>
+        <button type="button" class="wg-text-btn" data-to-add="1">${mode === "add" ? "取消添加" : "添加窗口"}</button>
         <button type="button" class="wg-text-btn is-danger" id="delete-group">删除组</button>
         ${staleCount > 0 ? `<button type="button" class="wg-text-btn" id="clear-stale">清理失效 (${staleCount})</button>` : ""}
       </div>
@@ -530,9 +530,11 @@ function bindEvents() {
   q("#clear-stale")?.addEventListener("click", () => {
     if (active) patch(() => clearStale(active.id));
   });
-  q("#to-add")?.addEventListener("click", () => {
-    state.mode = state.mode === "add" ? "list" : "add";
-    render();
+  document.querySelectorAll("[data-to-add]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.mode = state.mode === "add" ? "list" : "add";
+      render();
+    });
   });
 
   document.querySelectorAll("[data-group]").forEach((el) => {
@@ -635,24 +637,36 @@ void (async () => {
   async function boot() {
     // Host already applies Mica Alt (settings sidebar). Do not re-apply mica here —
     // a second DWM backdrop looks like an extra frosted overlay.
-    try {
-      const raw = await hub().storage.get("store");
-      state.store = normalize(raw);
-    } catch (err) {
-      console.error(err);
-    }
     const prefer =
       new URLSearchParams(window.location.search).get("preferGroup") ||
       new URLSearchParams(window.location.search).get("preferGroupId");
-    if (prefer) applyPreferGroup(prefer);
-    render();
+
+    // 存储与窗口列表并行，先出壳再填数据
+    const storeP = hub()
+      .storage.get("store")
+      .catch((err) => {
+        console.error(err);
+        return null;
+      });
     try {
       hub().windows.subscribe(onWindows);
     } catch (err) {
       console.error(err);
-      const list = await hub().windows.list().catch(() => []);
-      onWindows(list);
+      void hub()
+        .windows.list()
+        .then(onWindows)
+        .catch(() => onWindows([]));
     }
+
+    try {
+      const raw = await storeP;
+      state.store = normalize(raw);
+    } catch (err) {
+      console.error(err);
+    }
+    if (prefer) applyPreferGroup(prefer);
+    render();
+
     try {
       const listen = window.__TAURI__?.event?.listen;
       if (typeof listen === "function") {

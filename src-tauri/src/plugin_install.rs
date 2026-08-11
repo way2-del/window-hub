@@ -12,6 +12,10 @@ const WINDOW_GROUPS_EXAMPLE_ID: &str = "com.window-hub.window-groups";
 const TRANSFER_EXAMPLE_ID: &str = "com.window-hub.transfer-station";
 const WEATHER_EXAMPLE_ID: &str = "com.window-hub.weather";
 const MIRROR_EXAMPLE_ID: &str = "com.window-hub.mirror";
+const IDIOMS_EXAMPLE_ID: &str = "com.window-hub.idioms";
+const DRAFT_EXAMPLE_ID: &str = "com.window-hub.draft";
+const TODO_EXAMPLE_ID: &str = "com.window-hub.todo";
+const LYRICS_EXAMPLE_ID: &str = "com.window-hub.lyrics";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,13 +202,18 @@ fn plugin_already_installed(reg: &RegistryFile, id: &str) -> bool {
     reg.plugins.iter().any(|p| p.id == id || p.id == dev)
 }
 
-/// Install or bump official weather / mirror / transfer from resources when missing or version differs.
+/// Install or bump official weather / mirror / transfer / idioms / draft from resources when missing or version differs.
 /// Does not touch `__dev` installs.
 pub fn ensure_official_plugins(app: &AppHandle) {
     for (folder, id) in [
         ("weather", WEATHER_EXAMPLE_ID),
         ("mirror", MIRROR_EXAMPLE_ID),
         ("transfer-station", TRANSFER_EXAMPLE_ID),
+        ("window-groups", WINDOW_GROUPS_EXAMPLE_ID),
+        ("idioms", IDIOMS_EXAMPLE_ID),
+        ("draft", DRAFT_EXAMPLE_ID),
+        ("todo", TODO_EXAMPLE_ID),
+        ("lyrics", LYRICS_EXAMPLE_ID),
     ] {
         let reg = load_registry();
         let bundled = match resolve_example_plugin_dir(app, folder) {
@@ -442,6 +451,14 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("weather")
     } else if id == "mirror" || id == MIRROR_EXAMPLE_ID {
         Ok("mirror")
+    } else if id == "idioms" || id == IDIOMS_EXAMPLE_ID {
+        Ok("idioms")
+    } else if id == "draft" || id == DRAFT_EXAMPLE_ID {
+        Ok("draft")
+    } else if id == "todo" || id == TODO_EXAMPLE_ID {
+        Ok("todo")
+    } else if id == "lyrics" || id == LYRICS_EXAMPLE_ID {
+        Ok("lyrics")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

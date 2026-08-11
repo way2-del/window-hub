@@ -22,6 +22,8 @@ export type ShortcutsSlotConfig = {
   label?: string;
   order?: number;
   action?: ShortcutsAction;
+  /** Host 回退 chip：只显示图标，不显示 label */
+  iconOnly?: boolean;
 };
 
 export type PluginSettingType =

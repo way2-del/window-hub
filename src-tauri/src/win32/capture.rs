@@ -31,7 +31,7 @@ pub struct CapturedFrame {
 
 #[cfg(windows)]
 pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, String> {
-    use image::{ImageBuffer, ImageFormat, Rgb};
+    use image::{ImageBuffer, Rgb};
     use std::io::Cursor;
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Gdi::{
@@ -143,8 +143,14 @@ pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, S
         let img: ImageBuffer<Rgb<u8>, _> =
             ImageBuffer::from_raw(cw as u32, ch as u32, rgb).ok_or("ImageBuffer failed")?;
         let mut cursor = Cursor::new(Vec::new());
-        img.write_to(&mut cursor, ImageFormat::Jpeg)
-            .map_err(|e| format!("JPEG encode: {e}"))?;
+        // Slightly lower quality: mosaic preview, not archival.
+        {
+            use image::codecs::jpeg::JpegEncoder;
+            use image::ImageEncoder;
+            let enc = JpegEncoder::new_with_quality(&mut cursor, 62);
+            enc.write_image(img.as_raw(), cw as u32, ch as u32, image::ExtendedColorType::Rgb8)
+                .map_err(|e| format!("JPEG encode: {e}"))?;
+        }
 
         Ok(CapturedFrame {
             jpeg: cursor.into_inner(),

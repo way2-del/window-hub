@@ -23,6 +23,9 @@ const ALLOWED_CMDS = new Set([
   "hub_fetch",
   "hub_island_set_bar",
   "hub_island_clear_bar",
+  "hub_netease_now_playing",
+  "hub_panel_open_session",
+  "hub_panel_close_session",
 ]);
 
 export function isAllowedShortcutsHubCmd(cmd: string): boolean {
@@ -79,7 +82,23 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
       get: function (key) { return invoke("hub_storage_get", withPlugin({ key: key })); },
       set: function (key, value) { return invoke("hub_storage_set", withPlugin({ key: key, value: value })); },
       remove: function (key) { return invoke("hub_storage_remove", withPlugin({ key: key })); },
-      listKeys: function () { return invoke("hub_storage_list_keys", withPlugin()); }
+      listKeys: function () { return invoke("hub_storage_list_keys", withPlugin()); },
+      subscribe: function (cb) {
+        if (typeof cb !== "function") return function () {};
+        function onEvt(ev) {
+          var d = ev && ev.detail;
+          if (!d || d.type !== "storage-changed") return;
+          try {
+            cb({
+              key: d.key,
+              value: d.removed ? null : d.value,
+              removed: !!d.removed
+            });
+          } catch (_) {}
+        }
+        window.addEventListener("wh-shortcuts-evt", onEvt);
+        return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
+      }
     },
     settings: {
       getAll: function () { return invoke("hub_settings_get_all", withPlugin()); },
@@ -133,6 +152,16 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
         }));
       },
       clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }
+    },
+    media: {
+      neteaseNowPlaying: function () {
+        return invoke("hub_netease_now_playing", withPlugin());
+      }
+    },
+    panel: {
+      openSession: function () { return invoke("hub_panel_open_session", withPlugin()); },
+      closeSession: function () { return invoke("hub_panel_close_session", {}); },
+      close: function () { return invoke("hub_panel_close_session", {}); }
     },
     fetch: function (url, opts) {
       return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));

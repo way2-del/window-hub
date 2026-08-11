@@ -23,6 +23,8 @@ export type IslandPrefs = {
   msgNotifyText: string;
   /** 提示展示时长（秒）——仅作插件 notify 默认 TTL；托盘提示仍常驻 */
   msgNotifySec: number;
+  /** 调节岛栏音量后播放系统提示音 */
+  volumePreviewSound: boolean;
 };
 
 const LS_AUTO = "wh-island-auto-immerse";
@@ -63,6 +65,7 @@ const DEFAULTS: IslandPrefs = {
   msgNotify: true,
   msgNotifyText: "收到一条消息",
   msgNotifySec: 4,
+  volumePreviewSound: true,
 };
 
 const IDLE_MIN = 2;
@@ -142,6 +145,7 @@ function readLegacyLocalStorage(): IslandPrefs | null {
       msgNotify: msgRaw == null ? DEFAULTS.msgNotify : msgRaw === "1" || msgRaw === "true",
       msgNotifyText: parseMsgText(msgTextRaw),
       msgNotifySec: msgSecRaw == null ? DEFAULTS.msgNotifySec : clampMsgSec(Number(msgSecRaw)),
+      volumePreviewSound: DEFAULTS.volumePreviewSound,
     };
   } catch {
     return null;
@@ -169,6 +173,7 @@ function mergePrefs(prev: IslandPrefs, partial: Partial<IslandPrefs>): IslandPre
       partial.msgNotifyText != null ? parseMsgText(partial.msgNotifyText) : prev.msgNotifyText,
     msgNotifySec:
       partial.msgNotifySec != null ? clampMsgSec(partial.msgNotifySec) : prev.msgNotifySec,
+    volumePreviewSound: partial.volumePreviewSound ?? prev.volumePreviewSound,
   };
 }
 

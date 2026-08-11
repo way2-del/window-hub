@@ -3,10 +3,12 @@
 use rusqlite::{params, types::ValueRef, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, State};
 
-use super::{db_path, with_conn};
+use super::{app_data_root, db_path, with_conn};
 use crate::plugin_hub::ShortcutsPinStore;
 
 const ALLOWED_TABLES: &[&str] = &[
@@ -60,6 +62,7 @@ fn table_columns(table: &str) -> &'static [&'static str] {
             "msg_notify_text",
             "msg_notify_sec",
             "bar_resident",
+            "volume_preview_sound",
             "updated_at",
         ],
         "script_launchers" => &[
@@ -514,4 +517,196 @@ fn chrono_like_stamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+fn plugins_dir() -> Result<PathBuf, String> {
+    Ok(app_data_root()?.join("plugins"))
+}
+
+fn add_dir_to_zip(
+    zip: &mut zip::ZipWriter<fs::File>,
+    opts: zip::write::SimpleFileOptions,
+    dir: &Path,
+    prefix: &str,
+) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let zip_path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if path.is_dir() {
+            zip.add_directory(format!("{zip_path}/"), opts)
+                .map_err(|e| e.to_string())?;
+            add_dir_to_zip(zip, opts, &path, &zip_path)?;
+        } else if path.is_file() {
+            zip.start_file(&zip_path, opts).map_err(|e| e.to_string())?;
+            let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+            zip.write_all(&bytes).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// 导出设置 + 已安装插件包为 `.whbak`（zip：数据库 + plugins/）。
+#[tauri::command]
+pub fn export_hub_backup() -> Result<Option<String>, String> {
+    let stamp = chrono_like_stamp();
+    let default_name = format!("window-hub-backup-{stamp}.whbak");
+    let dest = rfd::FileDialog::new()
+        .set_title("导出 Window Hub 设置与插件")
+        .set_file_name(&default_name)
+        .add_filter("Window Hub 备份", &["whbak", "zip"])
+        .save_file();
+    let Some(dest) = dest else {
+        return Ok(None);
+    };
+
+    let temp_root = std::env::temp_dir().join(format!("wh-backup-{stamp}"));
+    let _ = fs::remove_dir_all(&temp_root);
+    fs::create_dir_all(&temp_root).map_err(|e| e.to_string())?;
+    let db_tmp = temp_root.join("window-hub.db");
+    let db_tmp_str = db_tmp
+        .to_str()
+        .ok_or_else(|| "invalid temp db path".to_string())?
+        .replace('\'', "''");
+
+    with_conn(|conn| {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        conn.execute(&format!("VACUUM INTO '{db_tmp_str}'"), [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+
+    let file = fs::File::create(&dest).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let manifest = serde_json::json!({
+        "kind": "window-hub-backup",
+        "version": 1,
+        "createdAt": stamp,
+    });
+    zip.start_file("manifest.json", opts)
+        .map_err(|e| e.to_string())?;
+    zip.write_all(manifest.to_string().as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    zip.start_file("window-hub.db", opts)
+        .map_err(|e| e.to_string())?;
+    let db_bytes = fs::read(&db_tmp).map_err(|e| e.to_string())?;
+    zip.write_all(&db_bytes).map_err(|e| e.to_string())?;
+
+    let plugins = plugins_dir()?;
+    if plugins.is_dir() {
+        zip.add_directory("plugins/", opts)
+            .map_err(|e| e.to_string())?;
+        add_dir_to_zip(&mut zip, opts, &plugins, "plugins")?;
+    }
+
+    zip.finish().map_err(|e| e.to_string())?;
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(Some(dest.display().to_string()))
+}
+
+#[tauri::command]
+pub fn pick_hub_backup_file() -> Result<Option<String>, String> {
+    let file = rfd::FileDialog::new()
+        .set_title("选择 Window Hub 备份")
+        .add_filter("Window Hub 备份", &["whbak", "zip", "db", "sqlite"])
+        .pick_file();
+    Ok(file.map(|p| p.display().to_string()))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if from.is_file() {
+            fs::copy(&from, &to).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// 导入 `.whbak` / `.zip`（设置+插件）或纯 `.db`（仅设置库）。
+#[tauri::command]
+pub fn import_hub_backup(
+    app: AppHandle,
+    path: String,
+    pins: State<'_, ShortcutsPinStore>,
+) -> Result<(), String> {
+    let src = PathBuf::from(path.trim());
+    if !src.is_file() {
+        return Err("备份文件不存在".into());
+    }
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    // Plain SQLite backup — reuse existing restore.
+    if matches!(ext.as_str(), "db" | "sqlite") {
+        return db_dev_restore(app, src.display().to_string(), pins);
+    }
+
+    let stamp = chrono_like_stamp();
+    let temp_root = std::env::temp_dir().join(format!("wh-restore-{stamp}"));
+    let _ = fs::remove_dir_all(&temp_root);
+    fs::create_dir_all(&temp_root).map_err(|e| e.to_string())?;
+
+    {
+        let file = fs::File::open(&src).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无法打开备份: {e}"))?;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry
+                .enclosed_name()
+                .ok_or_else(|| "备份含非法路径".to_string())?
+                .to_path_buf();
+            let out = temp_root.join(&name);
+            if entry.is_dir() {
+                fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut outfile = fs::File::create(&out).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let db_file = temp_root.join("window-hub.db");
+    if !db_file.is_file() {
+        let _ = fs::remove_dir_all(&temp_root);
+        return Err("备份中缺少 window-hub.db".into());
+    }
+    db_dev_restore(app.clone(), db_file.display().to_string(), pins)?;
+
+    let plugins_src = temp_root.join("plugins");
+    if plugins_src.is_dir() {
+        let plugins_dst = plugins_dir()?;
+        if plugins_dst.exists() {
+            fs::remove_dir_all(&plugins_dst).map_err(|e| e.to_string())?;
+        }
+        copy_dir_recursive(&plugins_src, &plugins_dst)?;
+        let list = crate::plugin_install::list_installed_plugins_sync();
+        let _ = app.emit("plugins-changed", &list);
+    }
+
+    let _ = fs::remove_dir_all(&temp_root);
+    Ok(())
 }

@@ -25,6 +25,7 @@ const ALLOWED_CMDS = new Set([
   "hub_staging_start_drag",
   "hub_island_set_bar",
   "hub_island_clear_bar",
+  "hub_netease_now_playing",
   "hub_panel_open_session",
   "hub_panel_close_session",
   "hub_windows_list",
@@ -74,7 +75,24 @@ export function panelHubBootstrapScript(pluginId: string): string {
       get: function (key) { return invoke("hub_storage_get", withPlugin({ key: key })); },
       set: function (key, value) { return invoke("hub_storage_set", withPlugin({ key: key, value: value })); },
       remove: function (key) { return invoke("hub_storage_remove", withPlugin({ key: key })); },
-      listKeys: function () { return invoke("hub_storage_list_keys", withPlugin()); }
+      listKeys: function () { return invoke("hub_storage_list_keys", withPlugin()); },
+      subscribe: function (cb) {
+        if (typeof cb !== "function") return function () {};
+        function onMsg(ev) {
+          var d = ev && ev.data;
+          if (!d || d.channel !== "plugin-storage-changed-fwd") return;
+          if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+          try {
+            cb({
+              key: d.key,
+              value: d.removed ? null : d.value,
+              removed: !!d.removed
+            });
+          } catch (_) {}
+        }
+        window.addEventListener("message", onMsg);
+        return function () { window.removeEventListener("message", onMsg); };
+      }
     },
     settings: {
       getAll: function () { return invoke("hub_settings_get_all", withPlugin()); },
@@ -127,6 +145,11 @@ export function panelHubBootstrapScript(pluginId: string): string {
         }));
       },
       clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }
+    },
+    media: {
+      neteaseNowPlaying: function () {
+        return invoke("hub_netease_now_playing", withPlugin());
+      }
     },
     fetch: function (url, opts) {
       return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));

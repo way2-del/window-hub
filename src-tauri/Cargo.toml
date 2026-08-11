@@ -32,7 +32,10 @@ ureq = { version = "2.12", features = ["json"] }
 # Vendored: blank NIF_ICON frames (WeChat flash) must not be dropped.
 systray-util = { path = "vendor/systray-util" }
 winreg = "0.52"
+# Required by `#[implement]` macro (resolves `::windows_core` in crate root)
+windows-core = "0.58"
 windows = { version = "0.58", features = [
+  "implement",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
@@ -42,9 +45,15 @@ windows = { version = "0.58", features = [
   "Win32_UI_Controls",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Input_Ime",
+  "Win32_UI_Input_XboxController",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
   "Win32_UI_HiDpi",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
   "Win32_System_SystemServices",
   "Win32_System_Memory",
   "Win32_System_DataExchange",
@@ -52,4 +61,13 @@ windows = { version = "0.58", features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_LibraryLoader",
+  "Win32_NetworkManagement_WiFi",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
+  "Win32_Devices_Bluetooth",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Power",
+  "Win32_System_SystemInformation",
 ] }

@@ -67,6 +67,10 @@
             "action": {
               "type": "string",
               "enum": ["expand", "popup.open", "panel.open", "command"]
+            },
+            "iconOnly": {
+              "type": "boolean",
+              "description": "Host fallback chip shows icon without label"
             }
           }
         },

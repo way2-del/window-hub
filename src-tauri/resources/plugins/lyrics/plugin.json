@@ -1,0 +1,45 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.lyrics",
+  "name": "歌词",
+  "version": "1.0.0",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "从网易云音乐读取当前歌词/曲目，写入灵动岛栏。建议在网易云开启「桌面歌词」以获得更稳的逐行同步。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "panel": "panel.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "歌词",
+      "order": 8,
+      "action": "command"
+    },
+    "island.bar": {
+      "order": 15
+    },
+    "island.panel": {
+      "defaultSize": { "w": 360, "h": 140 },
+      "excludeFromPullContent": false
+    }
+  },
+  "settings": [
+    {
+      "key": "showWhenIdle",
+      "type": "boolean",
+      "label": "未播放时仍占岛栏",
+      "description": "关闭后：未检测到网易云播放时清空岛栏（便于切回天气等常驻）",
+      "default": false
+    },
+    {
+      "key": "preferLyric",
+      "type": "boolean",
+      "label": "优先显示歌词行",
+      "description": "有歌词时显示当前行；否则显示「歌名 · 歌手」",
+      "default": true
+    }
+  ],
+  "capabilities": ["storage", "island.panel", "island.bar", "shortcuts"]
+}

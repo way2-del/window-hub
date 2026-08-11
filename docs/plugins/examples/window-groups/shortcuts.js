@@ -1,21 +1,18 @@
 /**
  * Window Groups — shortcuts strip (Host iframe shell).
  * Draws manage chip + store.pins; no hub.shortcuts.setPins.
+ * 仅点击开/关弹窗（不悬停即开）。
  */
 const hub = () => {
   if (!window.hub) throw new Error("window.hub missing");
   return window.hub;
 };
 
-const HOVER_OPEN_MS = 180;
-
 const state = {
   store: { version: 2, activeGroupId: null, groups: [], pins: [] },
   windows: [],
   foregroundId: null,
   popupOpen: false,
-  hoverTimer: null,
-  hoverGen: 0,
   /** Last preferGroup sent while popup open — avoid repeat opens from DOM rebuild. */
   lastPreferSent: null,
 };
@@ -117,15 +114,7 @@ function pinViews() {
   });
 }
 
-function clearHover() {
-  if (state.hoverTimer) {
-    clearTimeout(state.hoverTimer);
-    state.hoverTimer = null;
-  }
-  state.hoverGen += 1;
-}
-
-/** Open or switch group; never toggle-close (used by hover + group click). */
+/** Open or switch group. */
 function requestPopupOpen(preferGroupId) {
   const gid =
     typeof preferGroupId === "string" && preferGroupId.trim()
@@ -141,7 +130,7 @@ function requestPopupOpen(preferGroupId) {
         }
       }
       if (state.popupOpen) {
-        // Already open: ignore bare manage hover/re-enter; only switch group once.
+        // Already open: only switch to another group (same group → close below).
         if (!gid) return;
         if (state.lastPreferSent === gid) return;
         state.lastPreferSent = gid;
@@ -156,23 +145,8 @@ function requestPopupOpen(preferGroupId) {
   })();
 }
 
-function schedulePopup(preferGroupId) {
-  clearHover();
-  const gid =
-    typeof preferGroupId === "string" && preferGroupId.trim()
-      ? preferGroupId.trim()
-      : null;
-  const gen = state.hoverGen;
-  state.hoverTimer = setTimeout(() => {
-    state.hoverTimer = null;
-    if (gen !== state.hoverGen) return;
-    requestPopupOpen(gid);
-  }, HOVER_OPEN_MS);
-}
-
-/** Manage click: toggle. Group click: open/switch. */
+/** Manage click: toggle. */
 function onManageClick() {
-  clearHover();
   if (state.popupOpen) {
     void hub()
       .popup.close()
@@ -222,7 +196,7 @@ function render() {
     </button>
   `;
 
-  pins.forEach((pin, index) => {
+  pins.forEach((pin) => {
     const isFg = !!(state.foregroundId && pin.windowId === state.foregroundId);
     const title =
       pin.kind === "window" && pin.stale
@@ -236,7 +210,6 @@ function render() {
         ${pin.badge != null ? `<span class="wg-badge">${escapeHtml(pin.badge)}</span>` : ""}
       </button>
     `;
-    void index;
   });
 
   bar.innerHTML = html;
@@ -247,27 +220,15 @@ function render() {
   });
 }
 
-function getActiveGroup() {
-  const { groups, activeGroupId } = state.store;
-  return groups.find((g) => g.id === activeGroupId) ?? groups[0] ?? null;
-}
-
 function bind() {
   const manage = document.querySelector("[data-manage]");
-  manage?.addEventListener("pointerenter", () => schedulePopup(null));
-  manage?.addEventListener("pointerleave", clearHover);
   manage?.addEventListener("click", onManageClick);
 
   document.querySelectorAll("[data-pin]").forEach((el) => {
     const kind = el.getAttribute("data-kind");
     const windowId = el.getAttribute("data-window-id");
     const refId = el.getAttribute("data-ref-id");
-    if (kind === "group") {
-      el.addEventListener("pointerenter", () => schedulePopup(refId));
-      el.addEventListener("pointerleave", clearHover);
-    }
     el.addEventListener("click", () => {
-      clearHover();
       if (kind === "window") {
         if (!windowId) return;
         void hub()
@@ -276,6 +237,13 @@ function bind() {
         return;
       }
       if (kind === "group") {
+        // 二次点击同一组 pin → 关闭
+        if (state.popupOpen && state.lastPreferSent === refId) {
+          void hub()
+            .popup.close()
+            .catch(() => undefined);
+          return;
+        }
         requestPopupOpen(refId);
       }
     });
@@ -326,7 +294,6 @@ async function boot() {
       const id = fg?.windowId ?? null;
       if (id === state.foregroundId) return;
       state.foregroundId = id;
-      // Update green dots without wiping DOM (avoids pointerenter → popup spam).
       document.querySelectorAll("[data-pin][data-kind=window]").forEach((el) => {
         const wid = el.getAttribute("data-window-id");
         const on = !!(id && wid && wid === id);

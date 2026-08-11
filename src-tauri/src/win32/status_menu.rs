@@ -15,6 +15,9 @@ pub struct ForegroundApp {
     pub hwnd: isize,
     /// Stable id `hwnd:{hwnd}` for matching shortcut pins.
     pub window_id: Option<String>,
+    /// Exe icon as PNG base64 (empty / None when desktop or unavailable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_png: Option<String>,
 }
 
 #[cfg(windows)]
@@ -38,11 +41,15 @@ mod win {
         GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, ShowWindow, GA_ROOT,
         SW_HIDE, SW_SHOWNA,
     };
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     /// Shell.Application
     const CLSID_SHELL: GUID = GUID::from_u128(0x13709620_C279_11CE_A49E_444553540000);
+
+    static ICON_CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     fn class_name(hwnd: HWND) -> String {
         unsafe {
@@ -70,7 +77,7 @@ mod win {
         }
     }
 
-    fn process_exe_stem(pid: u32) -> Option<String> {
+    fn process_exe_path(pid: u32) -> Option<String> {
         if pid == 0 {
             return None;
         }
@@ -90,12 +97,26 @@ mod win {
             if ok.is_err() || size == 0 {
                 return None;
             }
-            let path = String::from_utf16_lossy(&buf[..size as usize]);
-            std::path::Path::new(&path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
+            Some(String::from_utf16_lossy(&buf[..size as usize]))
         }
+    }
+
+    fn icon_for_exe(exe_path: Option<&str>) -> Option<String> {
+        let path = exe_path?.trim();
+        if path.is_empty() {
+            return None;
+        }
+        {
+            let cache = ICON_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(hit) = cache.get(path) {
+                return hit.clone();
+            }
+        }
+        let png = crate::dock::resolve_item_icon_png("", path);
+        if let Ok(mut cache) = ICON_CACHE.lock() {
+            cache.insert(path.to_string(), png.clone());
+        }
+        png
     }
 
     fn is_desktop(hwnd: HWND) -> bool {
@@ -141,6 +162,7 @@ mod win {
                 is_self,
                 hwnd: 0,
                 window_id: None,
+                icon_png: None,
             }
         }
 
@@ -162,6 +184,7 @@ mod win {
                         is_self: true,
                         hwnd,
                         window_id,
+                        icon_png: None,
                     };
                 }
             }
@@ -183,12 +206,19 @@ mod win {
                     is_self: true,
                     hwnd,
                     window_id,
+                    icon_png: None,
                 };
             }
             let title = window_title(fg);
             let mut pid = 0u32;
             GetWindowThreadProcessId(fg, Some(&mut pid));
-            let exe = process_exe_stem(pid);
+            let exe_path = process_exe_path(pid);
+            let exe = exe_path.as_ref().and_then(|path| {
+                std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            });
             // Same process (settings / tray popup) — keep previous chip
             if let Some(me) = self_hwnd {
                 let mut my_pid = 0u32;
@@ -201,10 +231,12 @@ mod win {
                         is_self: true,
                         hwnd,
                         window_id,
+                        icon_png: None,
                     };
                 }
             }
             let label = make_label(&title, exe.as_deref());
+            let icon_png = icon_for_exe(exe_path.as_deref());
             ForegroundApp {
                 title,
                 exe_name: exe,
@@ -212,6 +244,7 @@ mod win {
                 is_self: false,
                 hwnd,
                 window_id,
+                icon_png,
             }
         }
     }
@@ -387,6 +420,7 @@ pub fn foreground_app(_self_hwnd: Option<isize>) -> ForegroundApp {
         is_self: false,
         hwnd: 0,
         window_id: None,
+        icon_png: None,
     }
 }
 

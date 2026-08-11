@@ -1,0 +1,48 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.idioms",
+  "name": "背成语",
+  "version": "1.2.2",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "随机抽取成语背记：快捷区显示当前词，点击在芯片下方弹窗查看释义；可揭晓 / 换一条。数据来自随机成语 API。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "popup": "popup.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "成语",
+      "order": 45,
+      "action": "popup.open"
+    }
+  },
+  "settings": [
+    {
+      "key": "autoRefreshSeconds",
+      "type": "number",
+      "label": "自动换词间隔（秒）",
+      "description": "快捷区有词时定时拉取新成语；填 0 表示仅手动换词",
+      "default": 0,
+      "min": 0,
+      "max": 86400,
+      "step": 1
+    },
+    {
+      "key": "showMeaningAlways",
+      "type": "boolean",
+      "label": "每次直接显示意思",
+      "description": "开启后弹窗始终展示释义，无需点「揭晓」",
+      "default": false
+    }
+  ],
+  "capabilities": ["storage", "network", "popup", "shortcuts"],
+  "permissions": {
+    "network": [
+      "43.139.23.203",
+      "http://43.139.23.203",
+      "http://43.139.23.203:8765"
+    ]
+  }
+}

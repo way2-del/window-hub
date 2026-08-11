@@ -53,11 +53,12 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 ## 允许
 
-- 插件网页横向 chip / 分隔线 / 绿点 / 悬停开 popup
+- 插件网页横向 chip / 分隔线 / 绿点；点击开 popup（不悬停即开）
 - `hub.shortcuts.getBounds()` 读状态栏/条几何
 - `hub.shortcuts.requestSize({ width })` 通知 Host 条宽
-- 独占：`prefs_shortcuts.exclusivePluginId`
+- 可见插件：`prefs_shortcuts.visiblePluginIds`（空 = 全部；可多选）
 - 无 `entry.shortcuts` 时回退 Host 入口 chip
+- 隐形 worker（`action: "command"`，如天气/歌词）条宽可为 1px，勿被 Host 抬到 28
 
 ## 禁止
 

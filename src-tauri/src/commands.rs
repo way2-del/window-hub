@@ -254,6 +254,58 @@ pub async fn close_settings_window(app: AppHandle) -> Result<(), String> {
 const TRAY_POPUP_W: f64 = 280.0;
 const TRAY_POPUP_H: f64 = 520.0;
 
+static TRAY_BLUR_SUPPRESS_UNTIL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static FLYOUT_BLUR_SUPPRESS_UNTIL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PLUGIN_POPUP_BLUR_SUPPRESS_UNTIL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn tray_popup_blur_suppressed() -> bool {
+    now_ms() < TRAY_BLUR_SUPPRESS_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn system_flyout_blur_suppressed() -> bool {
+    now_ms() < FLYOUT_BLUR_SUPPRESS_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn plugin_popup_blur_suppressed() -> bool {
+    now_ms() < PLUGIN_POPUP_BLUR_SUPPRESS_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tauri::command]
+pub fn suppress_tray_popup_blur(ms: Option<u64>) {
+    let until = now_ms().saturating_add(ms.unwrap_or(450));
+    TRAY_BLUR_SUPPRESS_UNTIL.store(until, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn suppress_system_flyout_blur(ms: Option<u64>) {
+    let until = now_ms().saturating_add(ms.unwrap_or(450));
+    FLYOUT_BLUR_SUPPRESS_UNTIL.store(until, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn suppress_plugin_popup_blur(ms: Option<u64>) {
+    let until = now_ms().saturating_add(ms.unwrap_or(450));
+    PLUGIN_POPUP_BLUR_SUPPRESS_UNTIL.store(until, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn hide_popup_label(app: &AppHandle, label: &str, closed_event: &str) {
+    if let Some(w) = app.get_webview_window(label) {
+        let _ = w.hide();
+    }
+    let _ = app.emit(closed_event, ());
+}
+
 /// 独立窄高托盘弹窗：与设置/插件共用材质配置。
 #[tauri::command]
 pub async fn open_tray_popup(
@@ -262,20 +314,25 @@ pub async fn open_tray_popup(
     x: f64,
     y: f64,
 ) -> Result<(), String> {
+    suppress_tray_popup_blur(Some(500));
     if let Some(wg) = app.get_webview_window("plugin-popup") {
-        let _ = wg.close();
+        let _ = wg.hide();
         let _ = app.emit("plugin-popup-closed", ());
     }
     if let Some(status) = app.get_webview_window("status-menu-popup") {
         let _ = status.close();
         let _ = app.emit("status-menu-popup-closed", ());
     }
+    hide_popup_label(&app, "system-flyout", "system-flyout-closed");
 
     if let Some(existing) = app.get_webview_window("tray-popup") {
-        apply_saved_material(&existing, &state);
         let _ = existing.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
         let _ = existing.set_position(LogicalPosition::new(x, y));
         let _ = existing.unminimize();
+        // Force opacity 0 before show — avoids one opaque frame then fade (double flash).
+        let _ = existing.eval(
+            r#"(function(){var el=document.querySelector('.tray-popup-shell');if(!el)return;el.classList.remove('is-in','is-leave');el.classList.add('is-enter');})();"#,
+        );
         let _ = existing.show();
         let _ = existing.set_focus();
         let _ = app.emit("tray-popup-opened", ());
@@ -327,7 +384,7 @@ pub async fn open_tray_popup(
 #[tauri::command]
 pub async fn close_tray_popup(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("tray-popup") {
-        w.close().map_err(|e| e.to_string())?;
+        let _ = w.hide();
     }
     let _ = app.emit("tray-popup-closed", ());
     Ok(())
@@ -338,6 +395,491 @@ pub fn is_tray_popup_open(app: AppHandle) -> bool {
     app.get_webview_window("tray-popup")
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false)
+}
+
+const SYSTEM_FLYOUT_W: f64 = 280.0;
+
+fn system_flyout_height(kind: &str) -> f64 {
+    match kind {
+        "volume" => 340.0,
+        "ime" => 220.0,
+        "power" => 200.0,
+        "calendar" => 320.0,
+        "wifi" => 420.0,
+        "bluetooth" => 360.0,
+        _ => 380.0,
+    }
+}
+
+static SYSTEM_FLYOUT_KIND: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn set_system_flyout_kind(kind: &str) {
+    if let Ok(mut g) = SYSTEM_FLYOUT_KIND.lock() {
+        *g = kind.to_string();
+    }
+}
+
+fn push_flyout_kind_to_webview(win: &WebviewWindow, kind: &str) {
+    // Synchronous push — do not rely solely on `system-flyout-opened` (race on first open).
+    let script = format!(
+        r#"window.__WH_SYSTEM_FLYOUT_KIND__={kind:?};window.dispatchEvent(new CustomEvent("wh-system-flyout-kind",{{detail:{kind:?}}}));"#,
+        kind = kind
+    );
+    let _ = win.eval(&script);
+}
+
+/// kind: wifi | bluetooth | volume | ime | power | calendar
+#[tauri::command]
+pub async fn open_system_flyout(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    kind: String,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let kind = kind.trim().to_ascii_lowercase();
+    if !matches!(
+        kind.as_str(),
+        "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar"
+    ) {
+        return Err(format!("unknown system flyout kind: {kind}"));
+    }
+    set_system_flyout_kind(&kind);
+    suppress_system_flyout_blur(Some(350));
+
+    hide_popup_label(&app, "tray-popup", "tray-popup-closed");
+    if let Some(wg) = app.get_webview_window("plugin-popup") {
+        let _ = wg.hide();
+        let _ = app.emit("plugin-popup-closed", ());
+    }
+    if let Some(status) = app.get_webview_window("status-menu-popup") {
+        let _ = status.hide();
+        let _ = app.emit("status-menu-popup-closed", ());
+    }
+
+    let h = system_flyout_height(&kind);
+
+    if let Some(existing) = app.get_webview_window("system-flyout") {
+        // Kind first so UI paints before show — avoids wifi flash / lag.
+        push_flyout_kind_to_webview(&existing, &kind);
+        let _ = app.emit("system-flyout-opened", &kind);
+        let _ = existing.set_size(LogicalSize::new(SYSTEM_FLYOUT_W, h));
+        let _ = existing.set_position(LogicalPosition::new(x, y));
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let init = format!(
+        r#"
+      window.__WH_IS_SYSTEM_FLYOUT__ = true;
+      window.__WH_SYSTEM_FLYOUT_KIND__ = {kind:?};
+      document.addEventListener('keydown', function (e) {{
+        if (e.key === 'Escape') {{
+          try {{ window.__TAURI__.core.invoke('close_system_flyout'); }} catch (_) {{}}
+        }}
+      }});
+    "#,
+        kind = kind
+    );
+
+    let win = WebviewWindowBuilder::new(
+        &app,
+        "system-flyout",
+        WebviewUrl::App(format!("index.html?window=system-flyout&kind={kind}").into()),
+    )
+    .title("系统面板")
+    .inner_size(SYSTEM_FLYOUT_W, h)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .decorations(false)
+    .transparent(true)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(true)
+    .visible(false)
+    .initialization_script(init)
+    .build()
+    .map_err(|e| format!("open system flyout failed: {e}"))?;
+
+    let _ = win.set_position(LogicalPosition::new(x, y));
+    apply_saved_material(&win, &state);
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    }
+    push_flyout_kind_to_webview(&win, &kind);
+    let _ = win.show();
+    let _ = win.set_focus();
+    let _ = app.emit("system-flyout-opened", &kind);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_system_flyout_kind() -> String {
+    SYSTEM_FLYOUT_KIND
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "wifi".into())
+}
+
+#[tauri::command]
+pub async fn close_system_flyout(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("system-flyout") {
+        let _ = w.hide();
+    }
+    let _ = app.emit("system-flyout-closed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_system_flyout_open(app: AppHandle) -> bool {
+    app.get_webview_window("system-flyout")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// Prefetch hidden popup windows so the first click is show/focus only.
+pub fn warm_popup_windows(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("popup-warm".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            let state = app.state::<MaterialState>();
+            if app.get_webview_window("tray-popup").is_none() {
+                let init = r#"window.__WH_IS_TRAY_POPUP__ = true;"#;
+                if let Ok(win) = WebviewWindowBuilder::new(
+                    &app,
+                    "tray-popup",
+                    WebviewUrl::App("index.html?window=tray".into()),
+                )
+                .title("已收纳")
+                .inner_size(TRAY_POPUP_W, TRAY_POPUP_H)
+                .resizable(false)
+                .maximizable(false)
+                .minimizable(false)
+                .closable(true)
+                .decorations(false)
+                .transparent(true)
+                .background_color(Color(0, 0, 0, 0))
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .visible(false)
+                .initialization_script(init)
+                .build()
+                {
+                    apply_saved_material(&win, &state);
+                    if let Ok(hwnd) = win.hwnd() {
+                        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+                    }
+                    let _ = win.hide();
+                }
+            }
+            if app.get_webview_window("system-flyout").is_none() {
+                let init = r#"window.__WH_IS_SYSTEM_FLYOUT__ = true;window.__WH_SYSTEM_FLYOUT_KIND__ = 'wifi';"#;
+                if let Ok(win) = WebviewWindowBuilder::new(
+                    &app,
+                    "system-flyout",
+                    WebviewUrl::App("index.html?window=system-flyout&kind=wifi".into()),
+                )
+                .title("系统面板")
+                .inner_size(SYSTEM_FLYOUT_W, system_flyout_height("wifi"))
+                .resizable(false)
+                .maximizable(false)
+                .minimizable(false)
+                .closable(true)
+                .decorations(false)
+                .transparent(true)
+                .background_color(Color(0, 0, 0, 0))
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .visible(false)
+                .initialization_script(init)
+                .build()
+                {
+                    apply_saved_material(&win, &state);
+                    if let Ok(hwnd) = win.hwnd() {
+                        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+                    }
+                    let _ = win.hide();
+                }
+            }
+            if app.get_webview_window("status-menu-popup").is_none() {
+                let init = r#"window.__WH_IS_STATUS_MENU_POPUP__ = true;"#;
+                if let Ok(win) = WebviewWindowBuilder::new(
+                    &app,
+                    "status-menu-popup",
+                    WebviewUrl::App("index.html?window=status-menu".into()),
+                )
+                .title("状态菜单")
+                .inner_size(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H)
+                .resizable(false)
+                .maximizable(false)
+                .minimizable(false)
+                .closable(true)
+                .decorations(false)
+                .transparent(true)
+                .background_color(Color(0, 0, 0, 0))
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .visible(false)
+                .initialization_script(init)
+                .build()
+                {
+                    apply_saved_material(&win, &state);
+                    if let Ok(hwnd) = win.hwnd() {
+                        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+                    }
+                    let _ = win.hide();
+                }
+            }
+            #[cfg(windows)]
+            {
+                // Soft kick only — never block warm thread on full WLAN/BT/temp scan.
+                crate::win32::system_monitor::request_full_refresh();
+            }
+        })
+        .ok();
+}
+
+/// Instant cache read. `force=true` only schedules background refresh (non-blocking).
+#[tauri::command]
+pub fn get_system_radio_snapshot(force: Option<bool>) -> crate::win32::system_radio::SystemRadioSnapshot {
+    #[cfg(windows)]
+    {
+        if force.unwrap_or(false) {
+            crate::win32::system_monitor::request_full_refresh();
+        }
+        crate::win32::system_monitor::cached_snapshot()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = force;
+        panic!("Windows only");
+    }
+}
+
+/// Schedule domain refresh without waiting. domains: wifi|bluetooth|audio|power|perf|temp|ime|all
+#[tauri::command]
+pub fn refresh_system_status(domains: Option<Vec<String>>) {
+    #[cfg(windows)]
+    {
+        use crate::win32::system_monitor::Domain;
+        let list = domains.unwrap_or_else(|| vec!["all".into()]);
+        let mut out = Vec::new();
+        for d in list {
+            match d.to_ascii_lowercase().as_str() {
+                "wifi" => out.push(Domain::Wifi),
+                "bluetooth" | "bt" => out.push(Domain::Bluetooth),
+                "audio" | "volume" => out.push(Domain::Audio),
+                "power" | "battery" => out.push(Domain::Power),
+                "perf" | "cpu" | "mem" => out.push(Domain::Perf),
+                "temp" | "temperature" => out.push(Domain::Temperature),
+                "ime" => out.push(Domain::Ime),
+                "all" => {
+                    crate::win32::system_monitor::request_full_refresh();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if !out.is_empty() {
+            crate::win32::system_monitor::request_refresh(&out);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = domains;
+    }
+}
+
+/// On-demand WiFi password — only when user explicitly asks.
+#[tauri::command]
+pub fn get_wifi_password(ssid: String) -> Option<String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_radio::read_wifi_password_for_ssid(&ssid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ssid;
+        None
+    }
+}
+
+#[tauri::command]
+pub fn connect_wifi_network(ssid: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_radio::connect_wifi_profile(&ssid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ssid;
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn open_wifi_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_radio::open_wifi_settings()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn open_bluetooth_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_radio::open_bluetooth_settings()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn set_bluetooth_device(id: String, connect: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_radio::set_bluetooth_device(&id, connect)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (id, connect);
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn open_ime_picker() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::topmost::yield_for(200);
+        crate::win32::system_radio::open_ime_picker()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn open_ime_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_radio::open_ime_settings()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn set_system_volume(level: u8) -> Result<crate::win32::system_audio::VolumeSnapshot, String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_audio::set_level(level)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = level;
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn set_system_volume_muted(
+    muted: bool,
+) -> Result<crate::win32::system_audio::VolumeSnapshot, String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_audio::set_muted(muted)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = muted;
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn open_sound_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_audio::open_sound_settings()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn play_volume_preview() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_audio::play_preview()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn list_audio_output_devices(
+) -> Result<Vec<crate::win32::system_audio::AudioOutputDevice>, String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_audio::list_output_devices()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn set_audio_output_device(
+    id: String,
+) -> Result<crate::win32::system_audio::VolumeSnapshot, String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_audio::set_default_output(&id)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = id;
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn open_power_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_power::open_power_settings()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
 }
 
 const STATUS_MENU_POPUP_W: f64 = 200.0;
@@ -352,16 +894,19 @@ pub async fn open_status_menu_popup(
     y: f64,
 ) -> Result<(), String> {
     if let Some(tray) = app.get_webview_window("tray-popup") {
-        let _ = tray.close();
+        let _ = tray.hide();
         let _ = app.emit("tray-popup-closed", ());
     }
+    if let Some(fly) = app.get_webview_window("system-flyout") {
+        let _ = fly.hide();
+        let _ = app.emit("system-flyout-closed", ());
+    }
     if let Some(plugin) = app.get_webview_window("plugin-popup") {
-        let _ = plugin.close();
+        let _ = plugin.hide();
         let _ = app.emit("plugin-popup-closed", ());
     }
 
     if let Some(existing) = app.get_webview_window("status-menu-popup") {
-        apply_saved_material(&existing, &state);
         let _ = existing.set_size(LogicalSize::new(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H));
         let _ = existing.set_position(LogicalPosition::new(x, y));
         let _ = existing.unminimize();
@@ -416,7 +961,7 @@ pub async fn open_status_menu_popup(
 #[tauri::command]
 pub async fn close_status_menu_popup(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("status-menu-popup") {
-        w.close().map_err(|e| e.to_string())?;
+        let _ = w.hide();
     }
     let _ = app.emit("status-menu-popup-closed", ());
     Ok(())
@@ -484,13 +1029,15 @@ pub async fn open_plugin_popup(
     x: f64,
     y: f64,
     prefer_group_id: Option<String>,
+    force_open: Option<bool>,
 ) -> Result<(), String> {
+    suppress_plugin_popup_blur(Some(500));
     if let Some(tray) = app.get_webview_window("tray-popup") {
-        let _ = tray.close();
+        let _ = tray.hide();
         let _ = app.emit("tray-popup-closed", ());
     }
     if let Some(status) = app.get_webview_window("status-menu-popup") {
-        let _ = status.close();
+        let _ = status.hide();
         let _ = app.emit("status-menu-popup-closed", ());
     }
 
@@ -508,22 +1055,43 @@ pub async fn open_plugin_popup(
         .ok_or_else(|| "plugin popup has no parent directory".to_string())?;
     let _ = app.asset_protocol_scope().allow_directory(parent, true);
 
-    // Idempotent: same plugin popup already visible → do not recreate (avoids hover/slide spam).
+    let force_open = force_open.unwrap_or(false);
+
+    // Idempotent: same plugin already loaded (visible or hidden).
+    // Avoids cold create + DWM material thrash that looks like double-flash.
     if let Some(existing) = app.get_webview_window("plugin-popup") {
-        let already =
-            existing.is_visible().unwrap_or(false) && popup_plugin_id_of(&existing) == Some(plugin_id.clone());
-        if already {
-            if let Some(gid) = prefer_group_id.as_ref().filter(|s| !s.is_empty()) {
+        if popup_plugin_id_of(&existing) == Some(plugin_id.clone()) {
+            let was_visible = existing.is_visible().unwrap_or(false);
+            let prefer = prefer_group_id.as_ref().filter(|s| !s.is_empty());
+            // 二次点击同一插件入口（无 preferGroup）→ 关闭；拖入 force_open 禁止关掉
+            if was_visible && prefer.is_none() && !force_open {
+                let _ = existing.hide();
+                let _ = app.emit("plugin-popup-closed", ());
+                return Ok(());
+            }
+            if let Some(gid) = prefer {
                 let _ = app.emit("plugin-popup-prefer-group", gid);
             }
             let _ = existing.set_position(LogicalPosition::new(x, y));
+            let _ = existing.unminimize();
+            if was_visible {
+                // Already painted — don't force opacity 0 / re-emit fade (content flash).
+                let _ = existing.set_focus();
+                return Ok(());
+            }
+            // Was hidden: paint opaque *before* show so DWM doesn't flash an empty shell.
+            let _ = existing.eval(
+                r#"(function(){var el=document.querySelector('.plugin-popup-root');if(!el)return;el.style.transition='none';el.classList.remove('is-enter');el.classList.add('is-in');})();"#,
+            );
+            let _ = existing.show();
             let _ = existing.set_focus();
             let _ = app.emit("plugin-popup-opened", &plugin_id);
             return Ok(());
         }
         let _ = existing.close();
         let _ = app.emit("plugin-popup-closed", ());
-        std::thread::sleep(std::time::Duration::from_millis(40));
+        // Yield briefly so WebView2 can tear down before rebuild.
+        std::thread::sleep(std::time::Duration::from_millis(16));
     }
 
     let mut url_s = format!("index.html?window=plugin-popup&plugin={plugin_id}");
@@ -563,16 +1131,41 @@ pub async fn open_plugin_popup(
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
-    let _ = win.show();
-    let _ = win.set_focus();
-    let _ = app.emit("plugin-popup-opened", &plugin_id);
+    // Stay hidden until frontend injects popup.js — early show = empty mica flash.
+    // Fallback if Host never calls reveal (crash / old frontend).
+    let win_fallback = win.clone();
+    let app_fallback = app.clone();
+    let pid_fallback = plugin_id.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        if win_fallback.is_visible().unwrap_or(false) {
+            return;
+        }
+        let _ = win_fallback.show();
+        let _ = win_fallback.set_focus();
+        let _ = app_fallback.emit("plugin-popup-opened", &pid_fallback);
+    });
+    Ok(())
+}
+
+/// Show plugin popup after Host has injected CSS/JS (avoids empty-shell flash).
+#[tauri::command]
+pub async fn reveal_plugin_popup(app: AppHandle) -> Result<(), String> {
+    let Some(w) = app.get_webview_window("plugin-popup") else {
+        return Ok(());
+    };
+    let _ = w.show();
+    let _ = w.set_focus();
+    if let Some(id) = popup_plugin_id_of(&w) {
+        let _ = app.emit("plugin-popup-opened", &id);
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_plugin_popup(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("plugin-popup") {
-        w.close().map_err(|e| e.to_string())?;
+        let _ = w.hide();
     }
     let _ = app.emit("plugin-popup-closed", ());
     Ok(())
@@ -583,6 +1176,16 @@ pub fn is_plugin_popup_open(app: AppHandle) -> bool {
     app.get_webview_window("plugin-popup")
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false)
+}
+
+/// Currently visible plugin-popup id (if any).
+#[tauri::command]
+pub fn get_plugin_popup_id(app: AppHandle) -> Option<String> {
+    let w = app.get_webview_window("plugin-popup")?;
+    if !w.is_visible().unwrap_or(false) {
+        return None;
+    }
+    popup_plugin_id_of(&w)
 }
 
 fn load_material_prefs() -> crate::win32::material::MaterialPrefs {
@@ -790,6 +1393,21 @@ pub fn health() -> Health {
 
 /// Legacy shim removed — plugins use hub.storage.
 
+fn normalize_mute_list(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in items {
+        let t = raw.trim().to_string();
+        if t.is_empty() {
+            continue;
+        }
+        if out.iter().any(|x: &String| x.eq_ignore_ascii_case(&t)) {
+            continue;
+        }
+        out.push(t);
+    }
+    out
+}
+
 pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
     let mut prefs: crate::win32::tray::TrayPrefs =
         if let Ok(Some(v)) = crate::db::with_conn(|c| crate::db::tray_get(c)) {
@@ -802,6 +1420,14 @@ pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
         *h = (*h).clamp(48, 640);
     }
     prefs.menu_heights.retain(|_, h| *h > 0);
+    prefs.muted = normalize_mute_list(prefs.muted);
+    prefs.muted_processes = normalize_mute_list(
+        prefs
+            .muted_processes
+            .into_iter()
+            .map(|p| p.to_ascii_lowercase())
+            .collect(),
+    );
     prefs
 }
 
@@ -827,16 +1453,29 @@ pub fn set_tray_prefs(
     app: AppHandle,
     pinned: Vec<String>,
     menu_heights: Option<std::collections::HashMap<String, i32>>,
+    muted: Option<Vec<String>>,
+    muted_processes: Option<Vec<String>>,
+    system_chips: Option<crate::win32::tray::SystemChipVisibility>,
 ) -> Result<crate::win32::tray::TrayPrefs, String> {
     let mut heights = menu_heights.unwrap_or_default();
     heights.retain(|_, h| *h > 0);
     for h in heights.values_mut() {
         *h = (*h).clamp(48, 640);
     }
+    let prev = crate::win32::tray::get_prefs();
     let prefs = crate::win32::tray::TrayPrefs {
         pinned,
         menu_heights: heights,
         menu_height_px: None,
+        muted: normalize_mute_list(muted.unwrap_or(prev.muted)),
+        muted_processes: normalize_mute_list(
+            muted_processes
+                .unwrap_or(prev.muted_processes)
+                .into_iter()
+                .map(|p| p.to_ascii_lowercase())
+                .collect(),
+        ),
+        system_chips: system_chips.unwrap_or(prev.system_chips),
     };
     crate::win32::tray::set_prefs(prefs.clone());
     save_tray_prefs(&prefs)?;
@@ -980,6 +1619,12 @@ pub fn hub_staging_copy(plugin_id: String, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn hub_staging_copy_files(plugin_id: String, id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
+    crate::staging::copy_files_to_clipboard(&plugin_id, &id)
+}
+
+#[tauri::command]
 pub fn hub_staging_copy_all_paths(plugin_id: String) -> Result<u32, String> {
     crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
     crate::staging::copy_all_paths(&plugin_id)
@@ -1005,6 +1650,51 @@ pub fn hub_staging_start_drag(
 ) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
     crate::staging::start_drag_out(&window, &plugin_id, &ids)
+}
+
+/// File/folder picker → staging (fallback when Explorer drag is flaky).
+#[tauri::command]
+pub fn hub_staging_pick_files(
+    app: AppHandle,
+    plugin_id: String,
+) -> Result<Vec<crate::staging::StagingItem>, String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
+    let files = rfd::FileDialog::new()
+        .set_title("添加文件到中转站")
+        .pick_files();
+    let Some(paths) = files else {
+        return Ok(Vec::new());
+    };
+    let paths: Vec<String> = paths
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::staging::add_paths(Some(&app), &plugin_id, paths)
+}
+
+#[tauri::command]
+pub fn hub_staging_pick_folders(
+    app: AppHandle,
+    plugin_id: String,
+) -> Result<Vec<crate::staging::StagingItem>, String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
+    let folders = rfd::FileDialog::new()
+        .set_title("添加文件夹到中转站")
+        .pick_folders();
+    let Some(paths) = folders else {
+        return Ok(Vec::new());
+    };
+    let paths: Vec<String> = paths
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::staging::add_paths(Some(&app), &plugin_id, paths)
 }
 
 // ── Island bar / panel session (platform slots) ────────────────────
@@ -1053,6 +1743,27 @@ pub fn hub_island_clear_bar(app: AppHandle, plugin_id: String) -> Result<(), Str
         },
     );
     Ok(())
+}
+
+/// NetEase Cloud Music now-playing / desktop lyric line (Host Win32 reader).
+#[tauri::command]
+pub fn hub_netease_now_playing(plugin_id: String) -> Result<serde_json::Value, String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
+    #[cfg(windows)]
+    {
+        let snap = crate::win32::netease_lyrics::snapshot();
+        serde_json::to_value(snap).map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(serde_json::json!({
+            "active": false,
+            "title": null,
+            "artist": null,
+            "lyric": null,
+            "source": null
+        }))
+    }
 }
 
 #[tauri::command]
@@ -1255,10 +1966,16 @@ pub struct IslandPrefsDto {
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
+    #[serde(default = "default_volume_preview_pref")]
+    pub volume_preview_sound: bool,
 }
 
 fn default_bar_resident_pref() -> String {
     "com.window-hub.weather".into()
+}
+
+fn default_volume_preview_pref() -> bool {
+    true
 }
 
 impl Default for IslandPrefsDto {
@@ -1271,6 +1988,7 @@ impl Default for IslandPrefsDto {
             msg_notify: true,
             msg_notify_text: "收到一条消息".into(),
             msg_notify_sec: 4,
+            volume_preview_sound: true,
         }
     }
 }
@@ -1285,6 +2003,7 @@ impl From<crate::db::IslandPrefsRow> for IslandPrefsDto {
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text,
             msg_notify_sec: p.msg_notify_sec,
+            volume_preview_sound: p.volume_preview_sound,
         }
     }
 }
@@ -1299,6 +2018,7 @@ impl From<&IslandPrefsDto> for crate::db::IslandPrefsRow {
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text.clone(),
             msg_notify_sec: p.msg_notify_sec,
+            volume_preview_sound: p.volume_preview_sound,
         }
     }
 }
@@ -1366,27 +2086,43 @@ pub fn set_island_prefs(app: AppHandle, prefs: IslandPrefsDto) -> Result<IslandP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShortcutsPrefsDto {
-    /// When set, shortcuts bar only shows this plugin entry + its pins.
+    /// Empty = show all shortcuts plugins; non-empty = only these ids (plus island.bar workers).
     #[serde(default)]
+    pub visible_plugin_ids: Vec<String>,
+    /// Legacy single-exclusive field — migrated into `visible_plugin_ids` on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusive_plugin_id: Option<String>,
 }
 
 impl Default for ShortcutsPrefsDto {
     fn default() -> Self {
         Self {
+            visible_plugin_ids: Vec::new(),
             exclusive_plugin_id: None,
         }
     }
 }
 
 fn normalize_shortcuts_prefs(mut p: ShortcutsPrefsDto) -> ShortcutsPrefsDto {
-    if let Some(id) = p.exclusive_plugin_id.as_mut() {
-        let t = id.trim().to_string();
-        if t.is_empty() {
-            p.exclusive_plugin_id = None;
-        } else {
-            *id = t;
+    p.visible_plugin_ids = p
+        .visible_plugin_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Dedup preserve order
+    let mut seen = std::collections::HashSet::new();
+    p.visible_plugin_ids.retain(|id| seen.insert(id.clone()));
+
+    if p.visible_plugin_ids.is_empty() {
+        if let Some(id) = p.exclusive_plugin_id.take() {
+            let t = id.trim().to_string();
+            if !t.is_empty() {
+                p.visible_plugin_ids.push(t);
+            }
         }
+    } else {
+        p.exclusive_plugin_id = None;
     }
     p
 }

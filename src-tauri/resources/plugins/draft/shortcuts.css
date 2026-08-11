@@ -1,0 +1,84 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+html,
+body {
+  width: max-content;
+  min-width: 22px;
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+  display: flex;
+  align-items: center;
+  color: var(--wh-chrome-fg, rgba(255, 255, 255, 0.94));
+  text-shadow: var(--wh-chrome-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
+  font-family: var(
+    --wh-chrome-font-family,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif
+  );
+  user-select: none;
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.draft-bar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  width: 22px;
+  min-width: 22px;
+  padding: 0;
+  cursor: pointer;
+  background: transparent !important;
+  border: none !important;
+  color: inherit;
+  text-shadow: inherit;
+  opacity: 0;
+}
+
+.draft-bar.is-ready {
+  opacity: 1;
+  transition: opacity 120ms ease;
+}
+
+.draft-bar.is-loading {
+  min-width: 0;
+  width: 0;
+  padding: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.draft-chip-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.draft-bar:hover .draft-chip-icon,
+.draft-bar:focus-visible .draft-chip-icon {
+  opacity: 0.88;
+}
