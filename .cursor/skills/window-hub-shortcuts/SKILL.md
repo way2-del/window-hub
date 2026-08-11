@@ -2,8 +2,9 @@
 name: window-hub-shortcuts
 description: >-
   Window Hub 快捷区 — Host iframe strips per plugin (entry.shortcuts),
-  shortcutsHubBridge, getBounds bar height, exclusive prefs. setPins is
-  deprecated. Use when implementing ShortcutsHost or shortcuts slot plugins.
+  slots.shortcuts.manage (custom|none|settings), shortcutsHubBridge,
+  getBounds bar height, exclusive prefs. setPins is deprecated. Use when
+  implementing ShortcutsHost or shortcuts slot plugins.
 ---
 
 # 快捷区（状态菜单 · shortcuts）
@@ -16,6 +17,49 @@ Host 在顶栏快捷区几何内 **并排挂矮 iframe**（每插件一块）。
 **不要**用 `hub.shortcuts.setPins`（已废弃）。
 
 模式对齐岛 panel：`srcdoc` + [`shortcutsHubBridge`](../../../src/plugins/shortcutsHubBridge.ts)。
+
+## 管理/设置钮 `slots.shortcuts.manage`（必读）
+
+快捷区左侧常见的 **2×2 宫格钮** 由 manifest **显式声明**，禁止 Host 对所有插件一律补画（会与自定义弹窗重复）。
+
+| 值 | 中文语义 | 谁画钮 | 点击行为 |
+|----|----------|--------|----------|
+| `custom` | **显示**（自定义） | **插件**在 `shortcuts.js` 自画 | 插件自定（通常 `hub.popup.open`） |
+| `none` | **不显示** | 无人 | — |
+| `settings` | **显示并跳转设置** | **Host** 在条前画 2×2 | `open_settings_window` 聚焦该插件 |
+
+- **缺省 / 省略** = `none`（不画）。
+- `custom` 时 Host **禁止**再画一颗 2×2。
+- `settings` 时插件条内 **禁止**再画同款管理钮。
+- 仅有声明式 `settings[]`、无自定义弹窗 → 用 `settings`（例：成语）。
+- 有自画管理弹窗（窗口组、应用库）→ 用 `custom`，条内保留 manage chip。
+- 隐形 worker（天气 shortcuts 只轮询）→ `none`。
+
+```json
+"slots": {
+  "shortcuts": {
+    "icon": "windows",
+    "label": "窗口组",
+    "order": 20,
+    "action": "popup.open",
+    "manage": "custom"
+  }
+}
+```
+
+```json
+"slots": {
+  "shortcuts": {
+    "icon": "icon.svg",
+    "label": "成语",
+    "order": 8,
+    "action": "command",
+    "manage": "settings"
+  }
+}
+```
+
+实现：[`ShortcutsHost.tsx`](../../../src/components/ShortcutsHost.tsx) 仅当 `manage === "settings"` 渲染 Host chip。
 
 ## 状态栏高度（必须可读）
 
@@ -31,7 +75,6 @@ Host 在顶栏快捷区几何内 **并排挂矮 iframe**（每插件一块）。
 
 ```ts
 const { height, barHeight } = await hub.shortcuts.getBounds();
-// height === barHeight === 状态栏高度（逻辑 px）
 document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 ```
 
@@ -39,21 +82,20 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 ### 垂直对齐（由插件自决）
 
-拿到 `height` / `--wh-bar-h` 后，插件选择内容在条内的垂直对齐：
-
 | 对齐 | CSS 做法（示例） |
 |------|------------------|
 | **居中**（推荐常驻 chip） | `html, body, .bar { display:flex; align-items:center; height:var(--wh-bar-h); }` |
 | **顶对齐** | `align-items: flex-start` 或 `padding-top` |
 | **底对齐** | `align-items: flex-end` 或 `padding-bottom` |
 
-官方窗口组：**全部元素垂直居中**（见 `window-hub-window-groups`）。
+官方窗口组（`manage=custom`）：条内 **manage 图标、chip 文案、绿点、badge、分隔线** 全部垂直居中。
 
 高度硬顶：内容区不得超过 `getBounds().height`（= `SHORTCUTS_HEIGHT`）。
 
 ## 允许
 
 - 插件网页横向 chip / 分隔线 / 绿点 / 悬停开 popup
+- 按 `manage` 三态画或不画 2×2（见上表）
 - `hub.shortcuts.getBounds()` 读状态栏/条几何
 - `hub.shortcuts.requestSize({ width })` 通知 Host 条宽
 - 独占：`prefs_shortcuts.exclusivePluginId`
@@ -61,6 +103,8 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 ## 禁止
 
+- Host 对 `manage=custom` 的插件再画一颗 2×2
+- `manage=settings` 时插件条内再画同款管理钮
 - 另开叠层 WebviewWindow 画快捷区
 - 高度 > `SHORTCUTS_HEIGHT`（28px）
 - 自建置顶窗（用 `hub.popup.open`）
@@ -80,7 +124,8 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
       "icon": "windows",
       "label": "窗口组",
       "order": 20,
-      "action": "popup.open"
+      "action": "popup.open",
+      "manage": "custom"
     }
   },
   "capabilities": ["shortcuts", "storage", "popup", "windows.read", "windows.focus"]
@@ -93,11 +138,16 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 - `popup.open` / `popup.close`
 - `shortcuts.getBounds()` → `{ height, barHeight, width, maxExpandWidth }`
 - `shortcuts.requestSize({ width })`
+- `shortcuts.showTip({ lines, x, y })` / `hideTip()` — **系统统一 hover tip**（独立 overlay，与插件弹窗同一套 Mica + `--glass-panel-bg`）；快捷区 iframe 内原生 `title` 会自动改走 Host tip（`data-host-tip="off"` 可退出）
+- Host 顶栏/托盘/Dock 用 [`chromeHoverTip.ts`](../../../src/chromeHoverTip.ts) `hostTipPointerProps` / `showChromeHoverTip`，禁止再用系统 `title` 气泡
 - `foreground.subscribe`（绿点）
 - 父页在 popup 关闭时发 `refresh`
 
 ## 实现
 
-1. [`ShortcutsHost.tsx`](../../../src/components/ShortcutsHost.tsx) 并排 `ShortcutsPluginStrip`
+1. [`ShortcutsHost.tsx`](../../../src/components/ShortcutsHost.tsx) 并排 `ShortcutsPluginStrip`；`manage=settings` 时前置 Host 设置钮
 2. 几何：[`shortcutsGeometry.ts`](../../../src/plugins/shortcutsGeometry.ts)
-3. 官方示例：[`window-groups/shortcuts.*`](../../../docs/plugins/examples/window-groups/)
+3. 官方示例：
+   - [`window-groups`](../../../docs/plugins/examples/window-groups/) — `manage=custom`
+   - [`app-library`](../../../docs/plugins/examples/app-library/) — `manage=custom`
+   - [`idiom`](../../../docs/plugins/examples/idiom/) — `manage=custom`（历史弹窗 + pinyin-pro 带调）

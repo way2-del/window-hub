@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { hostTipPointerProps } from "../chromeHoverTip";
 import "./StatusMenu.css";
 
 type ForegroundApp = {
@@ -127,7 +128,7 @@ export default function StatusMenu({
       aria-expanded={menuOpen}
       onClick={() => void toggleMenu()}
     >
-      <span className="settings-label" title={lastLabel.current}>
+      <span className="settings-label" {...hostTipPointerProps(lastLabel.current)}>
         {label}
       </span>
     </button>

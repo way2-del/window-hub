@@ -18,10 +18,9 @@ use crate::commands::initial_material_state;
 use crate::ecs::{spawn_ecs_thread, EcsHandle};
 use crate::plugin_hub::ShortcutsPinStore;
 use crate::win32::appbar;
-use crate::win32::topmost::force_topmost;
 use crate::windows_service::WindowsService;
 
-/// 因全屏游戏隐藏顶栏时为 true；watchdog 期间勿强制置顶/重挂 AppBar。
+/// 因全屏游戏隐藏顶栏时为 true；watchdog 期间勿重挂 AppBar / 几何。
 static HIDDEN_FOR_FULLSCREEN: AtomicBool = AtomicBool::new(false);
 
 fn hwnd_of(window: &tauri::WebviewWindow) -> Option<isize> {
@@ -61,15 +60,8 @@ fn reassert_window(window: &tauri::WebviewWindow) {
         // 持续排除 Alt+Tab / Win+Tab，防止样式被重置后又出现在窗口切换里
         crate::win32::switcher::exclude_from_switcher(hwnd);
     }
-    if crate::win32::topmost::is_yielding() {
-        // Keep geometry pinned, but don't steal Z-order over tray menus.
-        pin_top_bar(window);
-        return;
-    }
-    let _ = window.set_always_on_top(true);
-    if let Some(hwnd) = hwnd_of(window) {
-        force_topmost(hwnd);
-    }
+    // AppBar 已预留顶栏工作区；勿再抢 TOPMOST（与其它壳争 Z 序无益）。
+    let _ = window.set_always_on_top(false);
     pin_top_bar(window);
 }
 
@@ -183,16 +175,34 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
     });
 }
 
+/// Push foreground keyboard layout / IME state to the menubar chips.
+fn spawn_input_lang_watcher(app: tauri::AppHandle) {
+    crate::win32::input_lang::start(move |state| {
+        let _ = app.emit("input-lang", &state);
+    });
+}
+
+/// Push WLAN radio / association state to the menubar chip.
+fn spawn_wifi_watcher(app: tauri::AppHandle) {
+    crate::win32::wifi::start(move |state| {
+        let _ = app.emit("wifi-state", &state);
+    });
+}
+
 /// 用 explorer 托盘钩子（失败则 spy fallback）监听系统托盘；变化时推送前端。
 fn spawn_tray_watcher(app: tauri::AppHandle) {
     let app_icons = app.clone();
     let app_attn = app.clone();
+    let app_prefs = app.clone();
     crate::win32::tray::start(
         move |icons| {
             let _ = app_icons.emit("tray-icons", &icons);
         },
         move |attn| {
             let _ = app_attn.emit("tray-attention", &attn);
+        },
+        move |prefs| {
+            let _ = app_prefs.emit("tray-prefs", &prefs);
         },
     );
 }
@@ -232,6 +242,8 @@ pub fn run() {
             spawn_ambient_watcher(app.handle().clone());
             spawn_fullscreen_watcher(app.handle().clone());
             spawn_tray_watcher(app.handle().clone());
+            spawn_input_lang_watcher(app.handle().clone());
+            spawn_wifi_watcher(app.handle().clone());
             crate::companion_scripts::start_hub_associated_launchers();
             crate::dock::bootstrap_dock(app.handle());
 
@@ -252,7 +264,9 @@ pub fn run() {
                     // 托盘 / 插件 / 状态菜单弹窗失焦即关（WebView 侧 focus 事件不总是可靠）
                     if (window.label() == "tray-popup"
                         || window.label() == "plugin-popup"
-                        || window.label() == "status-menu-popup")
+                        || window.label() == "status-menu-popup"
+                        || window.label() == "input-lang-popup"
+                        || window.label() == "wifi-popup")
                         && !*focused
                     {
                         let label = window.label().to_string();
@@ -275,6 +289,12 @@ pub fn run() {
                                 "status-menu-popup" => {
                                     let _ = app.emit("status-menu-popup-closed", ());
                                 }
+                                "input-lang-popup" => {
+                                    let _ = app.emit("input-lang-popup-closed", ());
+                                }
+                                "wifi-popup" => {
+                                    let _ = app.emit("wifi-popup-closed", ());
+                                }
                                 _ => {}
                             }
                         });
@@ -289,6 +309,15 @@ pub fn run() {
                     }
                     if window.label() == "status-menu-popup" {
                         let _ = window.app_handle().emit("status-menu-popup-closed", ());
+                    }
+                    if window.label() == "input-lang-popup" {
+                        let _ = window.app_handle().emit("input-lang-popup-closed", ());
+                    }
+                    if window.label() == "wifi-popup" {
+                        let _ = window.app_handle().emit("wifi-popup-closed", ());
+                    }
+                    if window.label() == "wifi-auth-popup" {
+                        let _ = window.app_handle().emit("wifi-auth-popup-closed", ());
                     }
                     if window.label() == "main" {
                         appbar::restore();
@@ -366,6 +395,33 @@ pub fn run() {
             commands::list_tray_icons,
             commands::get_tray_prefs,
             commands::set_tray_prefs,
+            commands::get_input_lang,
+            commands::cycle_input_lang,
+            commands::toggle_input_ime,
+            commands::open_input_lang_settings,
+            commands::list_input_layouts,
+            commands::select_input_layout,
+            commands::open_input_emoji_panel,
+            commands::open_touch_keyboard,
+            commands::open_keyboard_settings,
+            commands::open_input_lang_popup,
+            commands::show_chrome_hover_tip,
+            commands::close_chrome_hover_tip,
+            commands::get_chrome_hover_tip,
+            commands::close_input_lang_popup,
+            commands::is_input_lang_popup_open,
+            commands::get_wifi_state,
+            commands::list_wifi_networks,
+            commands::set_wifi_enabled,
+            commands::connect_wifi,
+            commands::disconnect_wifi,
+            commands::open_network_settings,
+            commands::open_wifi_popup,
+            commands::close_wifi_popup,
+            commands::is_wifi_popup_open,
+            commands::open_wifi_auth_popup,
+            commands::close_wifi_auth_popup,
+            commands::is_wifi_auth_popup_open,
             commands::get_island_prefs,
             commands::set_island_prefs,
             commands::get_shortcuts_prefs,
@@ -389,6 +445,12 @@ pub fn run() {
             dock::pick_dockico_file,
             dock::dock_launch_item,
             dock::dock_set_mouse_near_bottom,
+            dock::dock_set_live_width,
+            dock::dock_set_hover_expand,
+            dock::get_dock_display_items,
+            dock::dock_relayout,
+            dock::dock_restore_hidden_items,
+            dock::get_dock_hidden_count,
             dock::get_dock_visibility,
             dock::ensure_dock_window,
             commands::show_desktop,

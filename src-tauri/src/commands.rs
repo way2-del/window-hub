@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
@@ -172,14 +173,13 @@ pub fn dock_set_visual_height(_window: WebviewWindow, _height: i32) -> Result<()
     Ok(())
 }
 
-/// 弹窗/岛展开时仅置顶悬浮，不改工作区预留。
+/// 弹窗/岛展开时保持壳标志；AppBar 已占位，不再强制 TOPMOST 争 Z 序。
 #[tauri::command]
 pub fn float_overlay(window: WebviewWindow) -> Result<(), String> {
-    let _ = window.set_always_on_top(true);
+    let _ = window.set_always_on_top(false);
     let _ = window.set_skip_taskbar(true);
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
-    crate::win32::topmost::force_topmost(hwnd.0 as isize);
     Ok(())
 }
 
@@ -192,23 +192,45 @@ pub fn float_overlay(window: WebviewWindow) -> Result<(), String> {
 pub async fn open_settings_window(
     app: AppHandle,
     state: State<'_, MaterialState>,
+    plugin_id: Option<String>,
 ) -> Result<(), String> {
+    let focus = plugin_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     if let Some(existing) = app.get_webview_window("settings") {
         apply_saved_material(&existing, &state);
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
+        if let Some(pid) = focus {
+            let _ = app.emit("settings-focus-plugin", pid);
+        }
         return Ok(());
     }
 
-    let init = r#"
+    let focus_js = focus
+        .as_ref()
+        .map(|pid| {
+            format!(
+                "window.__WH_SETTINGS_FOCUS_PLUGIN__ = {};",
+                serde_json::to_string(pid).unwrap_or_else(|_| "null".into())
+            )
+        })
+        .unwrap_or_default();
+
+    let init = format!(
+        r#"
       window.__WH_IS_SETTINGS__ = true;
-      document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-          try { window.__TAURI__.core.invoke('close_settings_window'); } catch (_) {}
-        }
-      });
-    "#;
+      {focus_js}
+      document.addEventListener('keydown', function (e) {{
+        if (e.key === 'Escape') {{
+          try {{ window.__TAURI__.core.invoke('close_settings_window'); }} catch (_) {{}}
+        }}
+      }});
+    "#
+    );
 
     // async command 会把创建窗口挪出 IPC 同步路径，避免 WebView2 死锁
     let win = WebviewWindowBuilder::new(
@@ -252,9 +274,11 @@ pub async fn close_settings_window(app: AppHandle) -> Result<(), String> {
 }
 
 const TRAY_POPUP_W: f64 = 280.0;
-const TRAY_POPUP_H: f64 = 520.0;
+/// Placeholder only — frontend measures + slide-reveals while still hidden.
+const TRAY_POPUP_H: f64 = 320.0;
 
 /// 独立窄高托盘弹窗：与设置/插件共用材质配置。
+/// Kept invisible until the webview fits content — same path as status menu.
 #[tauri::command]
 pub async fn open_tray_popup(
     app: AppHandle,
@@ -262,22 +286,14 @@ pub async fn open_tray_popup(
     x: f64,
     y: f64,
 ) -> Result<(), String> {
-    if let Some(wg) = app.get_webview_window("plugin-popup") {
-        let _ = wg.close();
-        let _ = app.emit("plugin-popup-closed", ());
-    }
-    if let Some(status) = app.get_webview_window("status-menu-popup") {
-        let _ = status.close();
-        let _ = app.emit("status-menu-popup-closed", ());
-    }
+    close_sibling_popups(&app, "tray-popup");
 
     if let Some(existing) = app.get_webview_window("tray-popup") {
         apply_saved_material(&existing, &state);
+        let _ = existing.hide();
         let _ = existing.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
         let _ = existing.set_position(LogicalPosition::new(x, y));
         let _ = existing.unminimize();
-        let _ = existing.show();
-        let _ = existing.set_focus();
         let _ = app.emit("tray-popup-opened", ());
         return Ok(());
     }
@@ -307,7 +323,7 @@ pub async fn open_tray_popup(
     .background_color(Color(0, 0, 0, 0))
     .always_on_top(true)
     .skip_taskbar(true)
-    .focused(true)
+    .focused(false)
     .visible(false)
     .initialization_script(init)
     .build()
@@ -318,8 +334,7 @@ pub async fn open_tray_popup(
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
-    let _ = win.show();
-    let _ = win.set_focus();
+    // Do not show yet — TrayPopupApp fits height, then slide-reveal.
     let _ = app.emit("tray-popup-opened", ());
     Ok(())
 }
@@ -335,15 +350,16 @@ pub async fn close_tray_popup(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn is_tray_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("tray-popup")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+    // Window may be hidden while frontend fits height before show().
+    app.get_webview_window("tray-popup").is_some()
 }
 
 const STATUS_MENU_POPUP_W: f64 = 200.0;
-const STATUS_MENU_POPUP_H: f64 = 248.0;
+/// Placeholder only — frontend measures + fits while still hidden, then shows.
+const STATUS_MENU_POPUP_H: f64 = 292.0;
 
 /// 左侧状态菜单弹窗：与插件/托盘共用 MicaAlt 材质与深浅色。
+/// Kept invisible until the webview fits content — avoids 80→full height stutter.
 #[tauri::command]
 pub async fn open_status_menu_popup(
     app: AppHandle,
@@ -351,22 +367,14 @@ pub async fn open_status_menu_popup(
     x: f64,
     y: f64,
 ) -> Result<(), String> {
-    if let Some(tray) = app.get_webview_window("tray-popup") {
-        let _ = tray.close();
-        let _ = app.emit("tray-popup-closed", ());
-    }
-    if let Some(plugin) = app.get_webview_window("plugin-popup") {
-        let _ = plugin.close();
-        let _ = app.emit("plugin-popup-closed", ());
-    }
+    close_sibling_popups(&app, "status-menu-popup");
 
     if let Some(existing) = app.get_webview_window("status-menu-popup") {
         apply_saved_material(&existing, &state);
+        let _ = existing.hide();
         let _ = existing.set_size(LogicalSize::new(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H));
         let _ = existing.set_position(LogicalPosition::new(x, y));
         let _ = existing.unminimize();
-        let _ = existing.show();
-        let _ = existing.set_focus();
         let _ = app.emit("status-menu-popup-opened", ());
         return Ok(());
     }
@@ -396,7 +404,7 @@ pub async fn open_status_menu_popup(
     .background_color(Color(0, 0, 0, 0))
     .always_on_top(true)
     .skip_taskbar(true)
-    .focused(true)
+    .focused(false)
     .visible(false)
     .initialization_script(init)
     .build()
@@ -407,8 +415,7 @@ pub async fn open_status_menu_popup(
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
-    let _ = win.show();
-    let _ = win.set_focus();
+    // Do not show yet — StatusMenuPopupApp fits height, then show()+slide.
     let _ = app.emit("status-menu-popup-opened", ());
     Ok(())
 }
@@ -424,9 +431,8 @@ pub async fn close_status_menu_popup(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn is_status_menu_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("status-menu-popup")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+    // Window may be hidden while frontend fits height before show().
+    app.get_webview_window("status-menu-popup").is_some()
 }
 
 const PLUGIN_POPUP_W: f64 = 320.0;
@@ -485,14 +491,7 @@ pub async fn open_plugin_popup(
     y: f64,
     prefer_group_id: Option<String>,
 ) -> Result<(), String> {
-    if let Some(tray) = app.get_webview_window("tray-popup") {
-        let _ = tray.close();
-        let _ = app.emit("tray-popup-closed", ());
-    }
-    if let Some(status) = app.get_webview_window("status-menu-popup") {
-        let _ = status.close();
-        let _ = app.emit("status-menu-popup-closed", ());
-    }
+    close_sibling_popups(&app, "plugin-popup");
 
     let record = crate::plugin_install::find_installed_plugin(&plugin_id)
         .ok_or_else(|| "plugin not installed".to_string())?;
@@ -631,6 +630,10 @@ fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::M
         "tray-popup",
         "plugin-popup",
         "status-menu-popup",
+        "input-lang-popup",
+        "wifi-popup",
+        "wifi-auth-popup",
+        "chrome-hover-tip",
         "dock",
         "dock-glass",
     ] {
@@ -833,6 +836,21 @@ pub fn set_tray_prefs(
     for h in heights.values_mut() {
         *h = (*h).clamp(48, 640);
     }
+    // Keep IME / language icons pinned even if the UI omitted them.
+    let mut pinned = pinned;
+    for icon in crate::win32::tray::list_icons() {
+        if !icon.resident {
+            continue;
+        }
+        let pk = if !icon.pin_key.is_empty() {
+            icon.pin_key.clone()
+        } else {
+            icon.id.clone()
+        };
+        if !pinned.iter().any(|p| p == &pk || p == &icon.id) {
+            pinned.push(pk);
+        }
+    }
     let prefs = crate::win32::tray::TrayPrefs {
         pinned,
         menu_heights: heights,
@@ -842,6 +860,611 @@ pub fn set_tray_prefs(
     save_tray_prefs(&prefs)?;
     let _ = app.emit("tray-prefs", &prefs);
     Ok(prefs)
+}
+
+#[tauri::command]
+pub fn get_input_lang() -> crate::win32::input_lang::InputLangState {
+    crate::win32::input_lang::get()
+}
+
+#[tauri::command]
+pub fn cycle_input_lang() -> Result<crate::win32::input_lang::InputLangState, String> {
+    crate::win32::input_lang::cycle_layout()
+}
+
+#[tauri::command]
+pub fn toggle_input_ime() -> Result<crate::win32::input_lang::InputLangState, String> {
+    crate::win32::input_lang::toggle_ime()
+}
+
+#[tauri::command]
+pub fn open_input_lang_settings() -> Result<(), String> {
+    crate::win32::input_lang::open_language_settings()
+}
+
+#[tauri::command]
+pub fn list_input_layouts() -> Vec<crate::win32::input_lang::InputLayoutItem> {
+    crate::win32::input_lang::list_layouts()
+}
+
+#[tauri::command]
+pub fn select_input_layout(
+    profile_type: Option<u32>,
+    lang_id: Option<u16>,
+    clsid: Option<String>,
+    guid_profile: Option<String>,
+    hkl: Option<u64>,
+) -> Result<crate::win32::input_lang::InputLangState, String> {
+    crate::win32::input_lang::select_layout(
+        profile_type.unwrap_or(0),
+        lang_id.unwrap_or(0),
+        clsid,
+        guid_profile,
+        hkl.unwrap_or(0),
+    )
+}
+
+#[tauri::command]
+pub fn open_input_emoji_panel() -> Result<(), String> {
+    crate::win32::input_lang::open_emoji_panel()
+}
+
+#[tauri::command]
+pub fn open_touch_keyboard() -> Result<(), String> {
+    crate::win32::input_lang::open_touch_keyboard()
+}
+
+#[tauri::command]
+pub fn open_keyboard_settings() -> Result<(), String> {
+    crate::win32::input_lang::open_keyboard_settings()
+}
+
+const INPUT_LANG_POPUP_W: f64 = 240.0;
+/// Placeholder only — frontend `fitPopupToContent` resizes to content.
+const INPUT_LANG_POPUP_H: f64 = 80.0;
+
+/// Self-drawn IME / language picker (figure-2 style).
+#[tauri::command]
+pub async fn open_input_lang_popup(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    close_sibling_popups(&app, "input-lang-popup");
+
+    if let Some(existing) = app.get_webview_window("input-lang-popup") {
+        apply_saved_material(&existing, &state);
+        let _ = existing.set_size(LogicalSize::new(INPUT_LANG_POPUP_W, INPUT_LANG_POPUP_H));
+        let _ = existing.set_position(LogicalPosition::new(x, y));
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        let _ = app.emit("input-lang-popup-opened", ());
+        return Ok(());
+    }
+
+    let init = r#"
+      window.__WH_IS_INPUT_LANG_POPUP__ = true;
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+          try { window.__TAURI__.core.invoke('close_input_lang_popup'); } catch (_) {}
+        }
+      });
+    "#;
+
+    let win = WebviewWindowBuilder::new(
+        &app,
+        "input-lang-popup",
+        WebviewUrl::App("index.html?window=input-lang".into()),
+    )
+    .title("输入法")
+    .inner_size(INPUT_LANG_POPUP_W, INPUT_LANG_POPUP_H)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .decorations(false)
+    .transparent(true)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(true)
+    .visible(false)
+    .initialization_script(init)
+    .build()
+    .map_err(|e| format!("open input-lang popup failed: {e}"))?;
+
+    let _ = win.set_position(LogicalPosition::new(x, y));
+    apply_saved_material(&win, &state);
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+    let _ = app.emit("input-lang-popup-opened", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_input_lang_popup(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("input-lang-popup") {
+        w.close().map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("input-lang-popup-closed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_input_lang_popup_open(app: AppHandle) -> bool {
+    app.get_webview_window("input-lang-popup")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false)
+}
+
+static CHROME_HOVER_TIP: Mutex<Option<ChromeHoverTipPayload>> = Mutex::new(None);
+static CHROME_HOVER_TIP_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Chrome hover tip payload (status-bar tip must be a separate window — main is ~28px tall).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChromeHoverTipPayload {
+    pub lines: Vec<String>,
+    pub x: f64,
+    pub y: f64,
+}
+
+const CHROME_HOVER_TIP_W: f64 = 160.0;
+const CHROME_HOVER_TIP_H: f64 = 48.0;
+
+#[tauri::command]
+pub fn get_chrome_hover_tip() -> Option<ChromeHoverTipPayload> {
+    CHROME_HOVER_TIP.lock().ok().and_then(|g| g.clone())
+}
+
+#[tauri::command]
+pub async fn show_chrome_hover_tip(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    lines: Vec<String>,
+    x: f64,
+    y: f64,
+    epoch: Option<u64>,
+) -> Result<(), String> {
+    let lines: Vec<String> = lines
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .take(8)
+        .collect();
+    if lines.is_empty() {
+        return close_chrome_hover_tip(app, epoch).await;
+    }
+
+    let ep = match epoch {
+        Some(e) => {
+            let cur = CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+            // Stale show that lost to a newer hide/show — do not revive tip.
+            if e < cur {
+                return Ok(());
+            }
+            CHROME_HOVER_TIP_EPOCH.store(e, std::sync::atomic::Ordering::SeqCst);
+            e
+        }
+        None => CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+    };
+
+    let payload = ChromeHoverTipPayload { lines, x, y };
+    if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
+        *g = Some(payload.clone());
+    }
+
+    if let Some(existing) = app.get_webview_window("chrome-hover-tip") {
+        if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != ep {
+            return Ok(());
+        }
+        apply_saved_material(&existing, &state);
+        let _ = existing.set_size(LogicalSize::new(CHROME_HOVER_TIP_W, CHROME_HOVER_TIP_H));
+        let _ = existing.set_position(LogicalPosition::new(x, y));
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_ignore_cursor_events(true);
+        let _ = app.emit("chrome-hover-tip-show", &payload);
+        return Ok(());
+    }
+
+    let init = r#"
+      window.__WH_IS_CHROME_HOVER_TIP__ = true;
+    "#;
+
+    let win = WebviewWindowBuilder::new(
+        &app,
+        "chrome-hover-tip",
+        WebviewUrl::App("index.html?window=chrome-tip".into()),
+    )
+    .title("提示")
+    .inner_size(CHROME_HOVER_TIP_W, CHROME_HOVER_TIP_H)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .decorations(false)
+    .transparent(true)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .initialization_script(init)
+    .build()
+    .map_err(|e| format!("open chrome hover tip failed: {e}"))?;
+
+    if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != ep {
+        let _ = win.close();
+        return Ok(());
+    }
+
+    let _ = win.set_position(LogicalPosition::new(x, y));
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    }
+    apply_saved_material(&win, &state);
+    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.show();
+    apply_saved_material(&win, &state);
+    let _ = app.emit("chrome-hover-tip-show", &payload);
+    let app2 = app.clone();
+    let payload2 = payload.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != ep {
+            return;
+        }
+        if CHROME_HOVER_TIP
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_none()
+        {
+            return;
+        }
+        let _ = app2.emit("chrome-hover-tip-show", &payload2);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_chrome_hover_tip(app: AppHandle, epoch: Option<u64>) -> Result<(), String> {
+    let cur = CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(e) = epoch {
+        if e > cur {
+            CHROME_HOVER_TIP_EPOCH.store(e, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    } else {
+        CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
+        *g = None;
+    }
+    if let Some(w) = app.get_webview_window("chrome-hover-tip") {
+        let _ = w.hide();
+    }
+    let _ = app.emit("chrome-hover-tip-hide", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_wifi_state() -> crate::win32::wifi::WifiState {
+    crate::win32::wifi::get()
+}
+
+#[tauri::command]
+pub fn list_wifi_networks() -> Result<Vec<crate::win32::wifi::WifiNetwork>, String> {
+    crate::win32::wifi::list_networks()
+}
+
+#[tauri::command]
+pub fn set_wifi_enabled(enabled: bool) -> Result<crate::win32::wifi::WifiState, String> {
+    crate::win32::wifi::set_enabled(enabled)
+}
+
+#[tauri::command]
+pub fn connect_wifi(
+    ssid: String,
+    password: Option<String>,
+) -> Result<crate::win32::wifi::WifiState, String> {
+    crate::win32::wifi::connect(&ssid, password.as_deref())
+}
+
+#[tauri::command]
+pub fn disconnect_wifi() -> Result<crate::win32::wifi::WifiState, String> {
+    crate::win32::wifi::disconnect()
+}
+
+#[tauri::command]
+pub fn open_network_settings() -> Result<(), String> {
+    crate::win32::wifi::open_network_settings()
+}
+
+const WIFI_POPUP_W: f64 = 280.0;
+/// Placeholder only — frontend `fitPopupToContent` resizes to content.
+/// Keep tall enough that clipped layouts still show 首选/其他网络 before fit.
+const WIFI_POPUP_H: f64 = 320.0;
+
+const WIFI_AUTH_W: f64 = 420.0;
+const WIFI_AUTH_H: f64 = 220.0;
+
+fn close_sibling_popups(app: &AppHandle, except: &str) {
+    for label in [
+        "tray-popup",
+        "plugin-popup",
+        "status-menu-popup",
+        "input-lang-popup",
+        "wifi-popup",
+        "wifi-auth-popup",
+    ] {
+        if label == except {
+            continue;
+        }
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.close();
+            match label {
+                "tray-popup" => {
+                    let _ = app.emit("tray-popup-closed", ());
+                }
+                "plugin-popup" => {
+                    let _ = app.emit("plugin-popup-closed", ());
+                }
+                "status-menu-popup" => {
+                    let _ = app.emit("status-menu-popup-closed", ());
+                }
+                "input-lang-popup" => {
+                    let _ = app.emit("input-lang-popup-closed", ());
+                }
+                "wifi-popup" => {
+                    let _ = app.emit("wifi-popup-closed", ());
+                }
+                "wifi-auth-popup" => {
+                    let _ = app.emit("wifi-auth-popup-closed", ());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Self-drawn WLAN menu (resident tray chip).
+#[tauri::command]
+pub async fn open_wifi_popup(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    close_sibling_popups(&app, "wifi-popup");
+    let _ = crate::win32::wifi::refresh();
+
+    if let Some(existing) = app.get_webview_window("wifi-popup") {
+        apply_saved_material(&existing, &state);
+        let _ = existing.set_size(LogicalSize::new(WIFI_POPUP_W, WIFI_POPUP_H));
+        let _ = existing.set_position(LogicalPosition::new(x, y));
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        let _ = app.emit("wifi-popup-opened", ());
+        return Ok(());
+    }
+
+    let init = r#"
+      window.__WH_IS_WIFI_POPUP__ = true;
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+          try { window.__TAURI__.core.invoke('close_wifi_popup'); } catch (_) {}
+        }
+      });
+    "#;
+
+    let win = WebviewWindowBuilder::new(
+        &app,
+        "wifi-popup",
+        WebviewUrl::App("index.html?window=wifi".into()),
+    )
+    .title("WLAN")
+    .inner_size(WIFI_POPUP_W, WIFI_POPUP_H)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .decorations(false)
+    .transparent(true)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(true)
+    .visible(false)
+    .initialization_script(init)
+    .build()
+    .map_err(|e| format!("open wifi popup failed: {e}"))?;
+
+    let _ = win.set_position(LogicalPosition::new(x, y));
+    apply_saved_material(&win, &state);
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+    let _ = app.emit("wifi-popup-opened", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_wifi_popup(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("wifi-popup") {
+        w.close().map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("wifi-popup-closed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_wifi_popup_open(app: AppHandle) -> bool {
+    app.get_webview_window("wifi-popup")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// Centered global password dialog for joining a secured WLAN.
+#[tauri::command]
+pub async fn open_wifi_auth_popup(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    ssid: String,
+) -> Result<(), String> {
+    let ssid = ssid.trim().to_string();
+    if ssid.is_empty() {
+        return Err("SSID 为空".into());
+    }
+
+    // Close the WLAN menu but keep other chrome; auth is the focused modal.
+    if let Some(w) = app.get_webview_window("wifi-popup") {
+        let _ = w.close();
+        let _ = app.emit("wifi-popup-closed", ());
+    }
+    for label in ["tray-popup", "plugin-popup", "status-menu-popup", "input-lang-popup"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.close();
+            match label {
+                "tray-popup" => {
+                    let _ = app.emit("tray-popup-closed", ());
+                }
+                "plugin-popup" => {
+                    let _ = app.emit("plugin-popup-closed", ());
+                }
+                "status-menu-popup" => {
+                    let _ = app.emit("status-menu-popup-closed", ());
+                }
+                "input-lang-popup" => {
+                    let _ = app.emit("input-lang-popup-closed", ());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let ssid_js = serde_json::to_string(&ssid).unwrap_or_else(|_| "\"\"".into());
+    let init = format!(
+        r#"
+      window.__WH_IS_WIFI_AUTH_POPUP__ = true;
+      window.__WH_WIFI_AUTH_SSID__ = {ssid_js};
+      document.addEventListener('keydown', function (e) {{
+        if (e.key === 'Escape') {{
+          try {{ window.__TAURI__.core.invoke('close_wifi_auth_popup'); }} catch (_) {{}}
+        }}
+      }});
+    "#
+    );
+
+    let (pos_x, pos_y) = {
+        let main = app.get_webview_window("main");
+        let monitor = main
+            .as_ref()
+            .and_then(|w| w.current_monitor().ok().flatten())
+            .or_else(|| app.primary_monitor().ok().flatten());
+        if let Some(m) = monitor {
+            let scale = m.scale_factor();
+            let size = m.size();
+            let pos = m.position();
+            let w = size.width as f64 / scale;
+            let h = size.height as f64 / scale;
+            let x = pos.x as f64 / scale + (w - WIFI_AUTH_W) / 2.0;
+            let y = pos.y as f64 / scale + (h - WIFI_AUTH_H) / 2.0;
+            (x, y)
+        } else {
+            (200.0, 200.0)
+        }
+    };
+
+    if let Some(existing) = app.get_webview_window("wifi-auth-popup") {
+        apply_saved_material(&existing, &state);
+        let _ = existing.set_size(LogicalSize::new(WIFI_AUTH_W, WIFI_AUTH_H));
+        let _ = existing.set_position(LogicalPosition::new(pos_x, pos_y));
+        let _ = existing.eval(&format!("window.__WH_WIFI_AUTH_SSID__ = {ssid_js};"));
+        let _ = app.emit("wifi-auth-ssid", &ssid);
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        let _ = app.emit("wifi-auth-popup-opened", &ssid);
+        return Ok(());
+    }
+
+    let win = WebviewWindowBuilder::new(
+        &app,
+        "wifi-auth-popup",
+        WebviewUrl::App(
+            format!(
+                "index.html?window=wifi-auth&ssid={}",
+                urlencoding_encode(&ssid)
+            )
+            .into(),
+        ),
+    )
+    .title("加入网络")
+    .inner_size(WIFI_AUTH_W, WIFI_AUTH_H)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .decorations(false)
+    .transparent(true)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(true)
+    .visible(false)
+    .initialization_script(&init)
+    .build()
+    .map_err(|e| format!("open wifi auth popup failed: {e}"))?;
+
+    let _ = win.set_position(LogicalPosition::new(pos_x, pos_y));
+    apply_saved_material(&win, &state);
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+    let _ = app.emit("wifi-auth-popup-opened", &ssid);
+    Ok(())
+}
+
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[tauri::command]
+pub async fn close_wifi_auth_popup(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("wifi-auth-popup") {
+        w.close().map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("wifi-auth-popup-closed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_wifi_auth_popup_open(app: AppHandle) -> bool {
+    app.get_webview_window("wifi-auth-popup")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -1369,12 +1992,16 @@ pub struct ShortcutsPrefsDto {
     /// When set, shortcuts bar only shows this plugin entry + its pins.
     #[serde(default)]
     pub exclusive_plugin_id: Option<String>,
+    /// User order of shortcuts plugin ids (Ctrl+drag). `None` = leave unchanged on patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_order: Option<Vec<String>>,
 }
 
 impl Default for ShortcutsPrefsDto {
     fn default() -> Self {
         Self {
             exclusive_plugin_id: None,
+            plugin_order: None,
         }
     }
 }
@@ -1387,6 +2014,18 @@ fn normalize_shortcuts_prefs(mut p: ShortcutsPrefsDto) -> ShortcutsPrefsDto {
         } else {
             *id = t;
         }
+    }
+    if let Some(order) = p.plugin_order.as_mut() {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(order.len());
+        for id in order.drain(..) {
+            let t = id.trim().to_string();
+            if t.is_empty() || !seen.insert(t.clone()) {
+                continue;
+            }
+            out.push(t);
+        }
+        *order = out;
     }
     p
 }
@@ -1406,7 +2045,12 @@ pub fn set_shortcuts_prefs(
     app: AppHandle,
     prefs: ShortcutsPrefsDto,
 ) -> Result<ShortcutsPrefsDto, String> {
-    let next = normalize_shortcuts_prefs(prefs);
+    let patch = normalize_shortcuts_prefs(prefs);
+    let mut next = get_shortcuts_prefs();
+    next.exclusive_plugin_id = patch.exclusive_plugin_id;
+    if let Some(order) = patch.plugin_order {
+        next.plugin_order = Some(order);
+    }
     let val = serde_json::to_value(&next).map_err(|e| e.to_string())?;
     crate::db::with_conn(|c| crate::db::shortcuts_set(c, &val))?;
     let _ = app.emit("shortcuts-prefs", &next);

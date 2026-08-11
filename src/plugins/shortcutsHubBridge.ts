@@ -119,7 +119,28 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
       /** Status-menu bar / shortcuts strip geometry (logical px). */
       getBounds: function () {
         return invoke("shortcuts.getBounds", {});
-      }
+      },
+      /**
+       * Host chrome hover tip — same Mica/glass as plugin popup.
+       * opts.lines | opts.text; opts.x/y = coords inside iframe viewport.
+       * Native [title] is also auto-routed here (opt-out: data-host-tip="off").
+       */
+      showTip: function (opts) {
+        var lines = [];
+        if (opts && Array.isArray(opts.lines)) {
+          lines = opts.lines.map(function (l) { return String(l || ""); }).filter(Boolean);
+        } else if (opts && typeof opts.text === "string") {
+          lines = String(opts.text).split(/\\r?\\n/).map(function (l) {
+            return l.trim();
+          }).filter(Boolean);
+        }
+        hostCmd("shortcuts.showTip", {
+          lines: lines,
+          x: opts && typeof opts.x === "number" ? opts.x : null,
+          y: opts && typeof opts.y === "number" ? opts.y : null
+        });
+      },
+      hideTip: function () { hostCmd("shortcuts.hideTip", {}); }
     },
     popup: {
       open: function (opts) { hostCmd("popup.open", opts || {}); },
@@ -132,7 +153,17 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
           title: opts && opts.title
         }));
       },
-      clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }
+      clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); },
+      /** Fired when user clicks the island bar summary for this plugin. */
+      onBarClick: function (cb) {
+        function onEvt(ev) {
+          var d = ev && ev.detail;
+          if (!d || d.type !== "bar-click") return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("wh-shortcuts-evt", onEvt);
+        return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
+      }
     },
     fetch: function (url, opts) {
       return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));
@@ -187,6 +218,44 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
       window.dispatchEvent(new CustomEvent("wh-shortcuts-refresh"));
     } catch (_) {}
   });
+  /** System-wide: native title → Host chrome tip (same mica as plugin popup). opt-out: data-host-tip="off" */
+  (function bindNativeTitleAsHostTip() {
+    var active = null;
+    function tipText(el) {
+      if (!el || el.getAttribute("data-host-tip") === "off") return "";
+      var cached = el.getAttribute("data-wh-tip");
+      if (cached != null && cached !== "") return cached;
+      var t = (el.getAttribute("title") || "").trim();
+      if (!t) return cached || "";
+      el.setAttribute("data-wh-tip", t);
+      el.removeAttribute("title");
+      return t;
+    }
+    document.addEventListener("pointerover", function (ev) {
+      var t = ev.target;
+      var el = t && t.closest ? t.closest("[title], [data-wh-tip]") : null;
+      if (!el || el === active) return;
+      var text = tipText(el);
+      if (!text) return;
+      active = el;
+      var r = el.getBoundingClientRect();
+      try {
+        window.hub.shortcuts.showTip({
+          text: text,
+          x: r.left + r.width / 2,
+          y: r.bottom
+        });
+      } catch (_) {}
+    }, true);
+    document.addEventListener("pointerout", function (ev) {
+      if (!active) return;
+      var to = ev.relatedTarget;
+      if (to && active.contains && active.contains(to)) return;
+      if (to && to.closest && to.closest("[title], [data-wh-tip]") === active) return;
+      active = null;
+      try { window.hub.shortcuts.hideTip(); } catch (_) {}
+    }, true);
+  })();
 })();
 `;
 }
@@ -212,6 +281,17 @@ export async function buildShortcutsSrcdoc(pluginId: string, entryPath: string):
       relativePath: `${dir}${stem}.js`,
     }).catch(() => ""),
   ]);
+  const vendorPinyinPro = await invoke<string>("hub_plugin_read_text", {
+    pluginId,
+    relativePath: `${dir}pinyin-pro.min.js`,
+  }).catch(() => "");
+  const vendorPinyinLite = vendorPinyinPro
+    ? ""
+    : await invoke<string>("hub_plugin_read_text", {
+        pluginId,
+        relativePath: `${dir}pinyinlite.min.js`,
+      }).catch(() => "");
+  const vendorPinyin = vendorPinyinPro || vendorPinyinLite;
   if (css) {
     const linkRe = new RegExp(
       `<link[^>]*href=["'](?:\\.\\/)?${stem}\\.css["'][^>]*>`,
@@ -237,6 +317,9 @@ button{border:none!important;background:transparent!important;outline:none!impor
 ::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}
 </style>`;
   const boot = `${shellCss}<script>${shortcutsHubBootstrapScript(pluginId)}</script>`;
+  const vendorJs = vendorPinyin
+    ? `<script id="wh-pinyin-lib">${vendorPinyin}</script>`
+    : "";
   const bodyJs = js ? `<script>${js}</script>` : "";
   html = html.replace(
     new RegExp(
@@ -252,6 +335,6 @@ button{border:none!important;background:transparent!important;outline:none!impor
     ? html.replace(/<head[^>]*>/i, (m) => `${m}${boot}`)
     : `${boot}${html}`;
   return /<\/body>/i.test(injected)
-    ? injected.replace(/<\/body>/i, `${bodyJs}</body>`)
-    : `${injected}${bodyJs}`;
+    ? injected.replace(/<\/body>/i, `${vendorJs}${bodyJs}</body>`)
+    : `${injected}${vendorJs}${bodyJs}`;
 }

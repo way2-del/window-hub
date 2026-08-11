@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { applyGlassCss, type GlassPrefs } from "./glassPrefs";
+import { hideChromeHoverTip, hostTipPointerProps } from "./chromeHoverTip";
 import "./DockApp.css";
 
 type DockItem = {
@@ -33,6 +34,7 @@ type DockPrefs = {
   items: DockItem[];
   hotkey: string;
   magnification?: number;
+  hiddenItemIds?: string[];
 };
 
 type HubWindow = {
@@ -44,25 +46,20 @@ type HubWindow = {
 };
 
 const STATUS_MENU_W = 200;
-const STATUS_MENU_H = 248;
+const STATUS_MENU_H = 292;
 const STATUS_MENU_GAP = 8;
 const STATUS_MENU_MARGIN = 8;
 
 /** Icon slot width (matches CSS / Rust DOCK_ICON). */
 const ICON_SLOT = 40;
 const ICON_GAP = 6;
-const BAR_PAD_X = 6;
+const BAR_PAD_X = 2;
 const SEP_W = 10;
 /** How many icon-widths the fan reaches on each side. */
 const MAG_RANGE = 2.25;
+/** Fixed magnification — not user-configurable (matches Rust DOCK_MAG_SCALE). */
+const DOCK_MAG = 1.6;
 
-function clampMagnification(raw: unknown): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 1.6;
-  return Math.min(2.5, Math.max(1, n));
-}
-
-/** Cosine falloff: focus largest, left/right symmetric to 1.0. Uniform scale only. */
 function fanScale(distancePx: number, maxScale: number): number {
   if (maxScale <= 1.001) return 1;
   const reach = ICON_SLOT * MAG_RANGE;
@@ -86,6 +83,16 @@ function restingCenters(items: DockItem[]): Map<string, number> {
     x += ICON_SLOT;
   });
   return map;
+}
+
+/** Resting bar width — used to map pointer X into unscaled layout space. */
+function restingBarWidth(items: DockItem[]): number {
+  let w = BAR_PAD_X * 2;
+  items.forEach((item, i) => {
+    if (i > 0) w += ICON_GAP;
+    w += item.kind === "separator" ? SEP_W : ICON_SLOT;
+  });
+  return Math.max(120, w);
 }
 
 function exeMatches(item: DockItem, w: HubWindow): boolean {
@@ -139,16 +146,52 @@ async function openStatusMenuAtClientPoint(clientX: number, clientY: number) {
   if (visible) {
     await invoke("close_status_menu_popup");
   }
+  // Popup will auto-fit height; pin bottom so it grows upward toward the dock.
+  try {
+    sessionStorage.setItem("wh.statusMenu.pinBottom", String(originY + clientY - STATUS_MENU_GAP));
+  } catch {
+    /* noop */
+  }
   await invoke("open_status_menu_popup", { x, y });
 }
 
 export default function DockApp() {
   const [prefs, setPrefs] = useState<DockPrefs | null>(null);
+  /** Pinned + running-not-pinned (before trash); may differ from prefs.items. */
+  const [displayItems, setDisplayItems] = useState<DockItem[]>([]);
   const [windows, setWindows] = useState<HubWindow[]>([]);
+  /** Overflow compact toast. */
+  const [compactTip, setCompactTip] = useState<string | null>(null);
   /** Pointer X relative to `.dock-bar` content box. */
   const [localX, setLocalX] = useState<number | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
   const rafRef = useRef(0);
+  const expandedRef = useRef(false);
+  const expandInflightRef = useRef<boolean | null>(null);
+  const layoutSigRef = useRef("");
+  const winExeSigRef = useRef("");
+  const winRunSigRef = useRef("");
+
+  const setExpanded = (next: boolean) => {
+    if (expandedRef.current === next) return;
+    if (expandInflightRef.current === next) return;
+    expandInflightRef.current = next;
+    void invoke<boolean>("dock_set_hover_expand", { expanded: next })
+      .then((ok) => {
+        if (ok) {
+          expandedRef.current = next;
+        }
+        // If failed (place lock / not shown), clear inflight so the next move retries.
+        if (expandInflightRef.current === next) {
+          expandInflightRef.current = null;
+        }
+      })
+      .catch(() => {
+        if (expandInflightRef.current === next) {
+          expandInflightRef.current = null;
+        }
+      });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -177,39 +220,96 @@ export default function DockApp() {
       void applyMaterial();
     }, 400);
 
+    const refreshDisplay = async () => {
+      try {
+        const items = await invoke<DockItem[]>("get_dock_display_items");
+        if (cancelled) return;
+        const sig = items.map((i) => `${i.id}:${i.kind}`).join("|");
+        const changed = sig !== layoutSigRef.current;
+        layoutSigRef.current = sig;
+        setDisplayItems(items);
+        if (changed) {
+          await invoke("dock_relayout").catch(() => undefined);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    const applyWindowList = (list: HubWindow[], allowDisplayRefresh: boolean) => {
+      if (cancelled) return;
+      // Ignore title-only flaps (Clash / browsers) — they fire every 250ms.
+      const runSig = list
+        .map((w) => `${w.hwnd}:${(w.exe || "").toLowerCase()}`)
+        .sort()
+        .join("|");
+      if (runSig !== winRunSigRef.current) {
+        winRunSigRef.current = runSig;
+        setWindows(list);
+      }
+      const exeSig = list
+        .map((w) => (w.exe || "").toLowerCase())
+        .filter(Boolean)
+        .sort()
+        .join("|");
+      if (exeSig !== winExeSigRef.current) {
+        winExeSigRef.current = exeSig;
+        if (allowDisplayRefresh) void refreshDisplay();
+      }
+    };
+
     void (async () => {
       try {
         const p = await invoke<DockPrefs>("get_dock_prefs");
-        if (!cancelled) setPrefs(p);
+        if (!cancelled) {
+          setPrefs(p);
+          setDisplayItems(p.items);
+        }
       } catch (e) {
         console.error(e);
       }
       try {
         const list = await invoke<HubWindow[]>("list_open_windows");
-        if (!cancelled) setWindows(list);
+        applyWindowList(list, false);
       } catch {
         /* noop */
       }
+      await refreshDisplay();
     })();
 
     const unsubs: Array<() => void> = [];
     void listen<DockPrefs>("dock-prefs", (e) => {
-      if (!cancelled) setPrefs(e.payload);
+      if (!cancelled) {
+        setPrefs(e.payload);
+        // Pins already carry icons from the emit — merge running on top.
+        setDisplayItems(e.payload.items);
+      }
+      void refreshDisplay();
     }).then((u) => unsubs.push(u));
     void listen<{ windows: HubWindow[] }>("hub-windows-changed", (e) => {
-      if (!cancelled) setWindows(e.payload?.windows ?? []);
+      // Titles flap every poll; only rebuild dock tiles when exe set changes.
+      applyWindowList(e.payload?.windows ?? [], true);
     }).then((u) => unsubs.push(u));
     void listen("material-prefs", () => {
       void applyMaterial();
     }).then((u) => unsubs.push(u));
+    void listen<{ newlyHidden?: number; totalHidden?: number }>("dock-compacted", (e) => {
+      if (cancelled) return;
+      const n = e.payload?.newlyHidden ?? 0;
+      const total = e.payload?.totalHidden ?? n;
+      if (n <= 0) return;
+      setCompactTip(
+        `空间不足，已隐藏 ${n} 个未打开图标（共 ${total}）。右键菜单可恢复。`,
+      );
+      void refreshDisplay();
+    }).then((u) => unsubs.push(u));
 
+    // Backup poll — dots only; display refresh gated by exe signature.
     const winTimer = window.setInterval(() => {
       void invoke<HubWindow[]>("list_open_windows")
-        .then((list) => {
-          if (!cancelled) setWindows(list);
-        })
+        .then((list) => applyWindowList(list, true))
         .catch(() => undefined);
-    }, 1500);
+    }, 2500);
 
     return () => {
       cancelled = true;
@@ -221,28 +321,35 @@ export default function DockApp() {
     };
   }, []);
 
-  const maxScale = clampMagnification(prefs?.magnification);
-  const magOn = maxScale > 1.001;
+  useEffect(() => {
+    if (!compactTip) return;
+    const t = window.setTimeout(() => setCompactTip(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [compactTip]);
+
+  const maxScale = DOCK_MAG;
+  const magOn = true;
 
   const activeIds = useMemo(() => {
     const set = new Set<string>();
-    if (!prefs) return set;
-    for (const item of prefs.items) {
+    for (const item of displayItems) {
       if (item.kind !== "app") continue;
+      // Ephemeral running:* tiles are always "on".
+      if (item.id.startsWith("running:")) {
+        set.add(item.id);
+        continue;
+      }
       if (windows.some((w) => exeMatches(item, w))) set.add(item.id);
     }
     return set;
-  }, [prefs, windows]);
+  }, [displayItems, windows]);
 
-  const centers = useMemo(
-    () => (prefs ? restingCenters(prefs.items) : new Map<string, number>()),
-    [prefs],
-  );
+  const centers = useMemo(() => restingCenters(displayItems), [displayItems]);
 
   const scales = useMemo(() => {
     const map = new Map<string, number>();
-    if (!prefs || !magOn || localX == null) return map;
-    for (const item of prefs.items) {
+    if (localX == null) return map;
+    for (const item of displayItems) {
       if (item.kind === "separator") continue;
       const c = centers.get(item.id);
       if (c == null) {
@@ -252,14 +359,31 @@ export default function DockApp() {
       map.set(item.id, fanScale(Math.abs(localX - c), maxScale));
     }
     return map;
-  }, [prefs, magOn, localX, maxScale, centers]);
+  }, [displayItems, localX, maxScale, centers]);
+
+  // AutoHide / hide snap must clear fan + collapse HWND pad.
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    void listen<{ visible?: boolean }>("dock-visibility", (ev) => {
+      if (ev.payload?.visible === false) {
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        setLocalX(null);
+        setExpanded(false);
+      }
+    }).then((u) => {
+      unsub = u;
+    });
+    return () => unsub?.();
+  }, []);
 
   const onBarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!magOn) return;
     const bar = barRef.current;
-    if (!bar) return;
-    const left = bar.getBoundingClientRect().left;
-    const x = e.clientX - left;
+    if (!bar || !prefs) return;
+    setExpanded(true);
+    const rect = bar.getBoundingClientRect();
+    // Map through live (scaled) bar width → resting layout X for stable fan centers.
+    const restW = restingBarWidth(displayItems);
+    const x = ((e.clientX - rect.left) / Math.max(rect.width, 1)) * restW;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
       setLocalX(x);
@@ -269,10 +393,19 @@ export default function DockApp() {
   const onBarPointerLeave = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setLocalX(null);
+    setExpanded(false);
+  };
+
+  const onBarPointerCancel = () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    setLocalX(null);
+    setExpanded(false);
   };
 
   async function onItemClick(item: DockItem) {
     if (item.kind === "separator") return;
+    setLocalX(null);
+    setExpanded(false);
     try {
       await invoke("dock_launch_item", { itemId: item.id });
       const win = getCurrentWindow();
@@ -304,15 +437,22 @@ export default function DockApp() {
       data-mag={magOn ? "on" : "off"}
       onContextMenu={onBackgroundContextMenu}
     >
+      {compactTip ? (
+        <div className="dock-compact-tip" role="status">
+          {compactTip}
+        </div>
+      ) : null}
       <div className="dock-stack">
         <div className="dock-chrome" aria-hidden />
         <div
           ref={barRef}
           className="dock-bar"
+          onPointerEnter={() => setExpanded(true)}
           onPointerMove={onBarPointerMove}
           onPointerLeave={onBarPointerLeave}
+          onPointerCancel={onBarPointerCancel}
         >
-          {prefs.items.map((item) => {
+          {displayItems.map((item) => {
             if (item.kind === "separator") {
               return <span key={item.id} className="dock-sep" aria-hidden />;
             }
@@ -324,18 +464,20 @@ export default function DockApp() {
                 : item.kind === "trash"
                   ? "回收站"
                   : item.label || item.matchExe || item.id;
+            const slot = ICON_SLOT * scale;
             const style = {
               ["--dock-scale" as string]: String(scale),
-              width: `${ICON_SLOT * scale}px`,
+              ["--dock-slot" as string]: `${slot}px`,
+              ["--dock-hit" as string]: `${slot}px`,
             } as CSSProperties;
             return (
               <button
                 key={item.id}
                 type="button"
                 className={`dock-item${running ? " is-running" : ""}${scale > 1.02 ? " is-magnified" : ""}`}
-                title={label}
+                {...hostTipPointerProps(label)}
                 style={style}
-                onClick={() => void onItemClick(item)}
+                onClick={() => { void hideChromeHoverTip(); void onItemClick(item); }}
                 onContextMenu={(e) => e.preventDefault()}
               >
                 <span className="dock-hit">

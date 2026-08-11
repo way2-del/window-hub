@@ -13,8 +13,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayIconInfo {
-    /// Stable id from systray-util (`guid` or `hwnd:uid`).
+    /// Runtime-unique id (`guid` or `hwnd:uid`). HWND changes across reboots.
     pub id: String,
+    /// Reboot-stable key for 常显 / menu height prefs (`guid` or `exe:path:uid`).
+    #[serde(default)]
+    pub pin_key: String,
     /// Human-readable label for UI (tooltip / process / known system name).
     pub tooltip: String,
     pub process: String,
@@ -30,6 +33,9 @@ pub struct TrayIconInfo {
     /// Attention / blink (e.g. WeChat new message). Cleared on click.
     #[serde(default)]
     pub flashing: bool,
+    /// Always keep on the menubar rail (IME / input language). Auto-pinned.
+    #[serde(default)]
+    pub resident: bool,
 }
 
 /// Rising-edge tray blink for island notification UI.
@@ -109,8 +115,10 @@ mod win {
 
     type EmitFn = Box<dyn Fn(Vec<TrayIconInfo>) + Send + Sync>;
     type AttentionFn = Box<dyn Fn(TrayAttention) + Send + Sync>;
+    type PrefsFn = Box<dyn Fn(TrayPrefs) + Send + Sync>;
     static EMIT: OnceLock<EmitFn> = OnceLock::new();
     static ATTENTION: OnceLock<AttentionFn> = OnceLock::new();
+    static PREFS_EMIT: OnceLock<PrefsFn> = OnceLock::new();
 
     /// Rate-limit optional cold-start TaskbarCreated (hook path only).
     static LAST_TASKBAR_CREATED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -126,13 +134,184 @@ mod win {
         PREFS.lock().clone()
     }
 
-    pub fn set_prefs(prefs: TrayPrefs) {
+    pub fn set_prefs(mut prefs: TrayPrefs) {
+        let icons: Vec<TrayIconInfo> = ICONS.lock().values().cloned().collect();
+        normalize_prefs_keys(&mut prefs, &icons);
         *PREFS.lock() = prefs;
     }
 
+    /// Persist current in-memory tray prefs (after pin_key migration).
+    fn persist_prefs_disk() {
+        let prefs = get_prefs();
+        if let Ok(v) = serde_json::to_value(&prefs) {
+            let _ = crate::db::with_conn(|c| crate::db::tray_set(c, &v));
+        }
+    }
+
+    fn looks_like_guid_id(id: &str) -> bool {
+        let g = id
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .to_ascii_lowercase();
+        if g.len() != 36 {
+            return false;
+        }
+        g.as_bytes().iter().enumerate().all(|(i, &b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+    }
+
+    /// Legacy runtime id `hwnd:uid` (digits only) — not reboot-stable.
+    fn is_legacy_hwnd_uid(id: &str) -> bool {
+        let Some((h, u)) = id.split_once(':') else {
+            return false;
+        };
+        if id.starts_with("exe:") || id.starts_with("proc:") || id.starts_with("hwnd:") {
+            return false;
+        }
+        h.parse::<isize>().is_ok() && u.parse::<u32>().is_ok()
+    }
+
+    /// Reboot-stable pin key: GUID → full exe+uid → process stem+uid → runtime id.
+    fn compute_pin_key(guid_id: Option<&str>, hwnd: isize, uid: u32, process_stem: &str) -> String {
+        if let Some(g) = guid_id {
+            let g = g
+                .trim()
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .to_ascii_lowercase();
+            if looks_like_guid_id(&g) && g != "00000000-0000-0000-0000-000000000000" {
+                return g;
+            }
+        }
+        let path = process_image_path(hwnd);
+        if !path.is_empty() {
+            return format!("exe:{path}:{uid}");
+        }
+        let stem = process_stem.trim().to_ascii_lowercase();
+        if !stem.is_empty() {
+            return format!("proc:{stem}:{uid}");
+        }
+        if hwnd != 0 {
+            return format!("hwnd:{hwnd}:{uid}");
+        }
+        format!("uid:{uid}")
+    }
+
+    fn pin_key_of(info: &TrayIconInfo) -> String {
+        if !info.pin_key.is_empty() {
+            info.pin_key.clone()
+        } else if looks_like_guid_id(&info.id) {
+            info.id.clone()
+        } else {
+            compute_pin_key(None, info.hwnd, info.uid, &info.process)
+        }
+    }
+
+    /// Rewrite pinned / menu_heights onto reboot-stable `pin_key`s. Returns true if changed.
+    fn normalize_prefs_keys(prefs: &mut TrayPrefs, icons: &[TrayIconInfo]) -> bool {
+        let mut remap: HashMap<String, String> = HashMap::new();
+        for icon in icons {
+            let pk = pin_key_of(icon);
+            remap.insert(icon.id.clone(), pk.clone());
+            if !icon.pin_key.is_empty() {
+                remap.insert(icon.pin_key.clone(), pk.clone());
+            }
+            if icon.hwnd != 0 {
+                remap.insert(format!("{}:{}", icon.hwnd, icon.uid), pk.clone());
+                remap.insert(format!("hwnd:{}:{}", icon.hwnd, icon.uid), pk.clone());
+            }
+            let path = process_image_path(icon.hwnd);
+            if !path.is_empty() {
+                remap.insert(format!("exe:{path}:{}", icon.uid), pk.clone());
+            }
+            let stem = icon.process.trim().to_ascii_lowercase();
+            if !stem.is_empty() {
+                remap.insert(format!("proc:{stem}:{}", icon.uid), pk.clone());
+            }
+        }
+
+        let resolve = |raw: &str| -> String {
+            if let Some(pk) = remap.get(raw) {
+                return pk.clone();
+            }
+            if is_legacy_hwnd_uid(raw) {
+                let uid = raw
+                    .split_once(':')
+                    .and_then(|(_, u)| u.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let hits: Vec<&TrayIconInfo> = icons
+                    .iter()
+                    .filter(|i| i.uid == uid && (i.hwnd != 0 || looks_like_guid_id(&i.id)))
+                    .collect();
+                if hits.len() == 1 {
+                    return pin_key_of(hits[0]);
+                }
+            }
+            raw.to_string()
+        };
+
+        let mut changed = false;
+        let mut new_pinned = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for p in &prefs.pinned {
+            let n = resolve(p);
+            if n != *p {
+                changed = true;
+            }
+            if seen.insert(n.clone()) {
+                new_pinned.push(n);
+            } else {
+                changed = true;
+            }
+        }
+        prefs.pinned = new_pinned;
+
+        let old_heights = std::mem::take(&mut prefs.menu_heights);
+        let mut new_heights = std::collections::HashMap::new();
+        for (k, h) in old_heights {
+            let nk = resolve(&k);
+            if nk != k {
+                changed = true;
+            }
+            new_heights.insert(nk, h);
+        }
+        prefs.menu_heights = new_heights;
+        changed
+    }
+
+    fn rewrite_prefs_against_live_icons() -> bool {
+        let icons: Vec<TrayIconInfo> = ICONS.lock().values().cloned().collect();
+        let mut prefs = PREFS.lock();
+        let mut changed = normalize_prefs_keys(&mut prefs, &icons);
+        // IME / input-language indicators must stay in 常显.
+        for icon in &icons {
+            if !icon.resident {
+                continue;
+            }
+            let pk = pin_key_of(icon);
+            if pk.is_empty() {
+                continue;
+            }
+            if !prefs.pinned.iter().any(|p| p == &pk || p == &icon.id) {
+                prefs.pinned.push(pk);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Resolve height: per-icon custom → WeChat/QQ default custom → measured cache → 160.
-    fn effective_menu_height(icon_id: &str, process: &str, tip: &str) -> i32 {
-        if let Some(h) = get_prefs().menu_heights.get(icon_id).copied() {
+    fn effective_menu_height(icon_id: &str, pin_key: &str, process: &str, tip: &str) -> i32 {
+        let prefs = get_prefs();
+        if let Some(h) = prefs
+            .menu_heights
+            .get(pin_key)
+            .or_else(|| prefs.menu_heights.get(icon_id))
+            .copied()
+        {
             if h > 0 {
                 return h.clamp(48, 640);
             }
@@ -189,9 +368,79 @@ mod win {
             "7820ae76-23e3-4229-82c1-e41cb67d5b9c" => Some("操作中心"),
             "7820ae78-23e3-4229-82c1-e41cb67d5b9c" => Some("安全删除硬件"),
             "6da68f06-00f1-4e6e-8158-7f1ffd4f9db9" => Some("蓝牙"),
+            // Shell Input Indicator / language + IME branding
             "a59b00b9-f6cd-4fed-a1dc-0f4064a12831" => Some("输入法"),
+            // GUID_LBI_INPUTMODE — IME on/off / mode switch glyph
+            "2c77a81e-41cc-4178-a3a7-5f8a987568e6" => Some("输入法切换"),
             _ => None,
         }
+    }
+
+    /// Input language abbreviation + IME mode/branding — always 常显 on the rail.
+    fn is_language_ime_icon(id: &str, process: &str, tip: &str) -> bool {
+        let g = id
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .to_ascii_lowercase();
+        if matches!(
+            g.as_str(),
+            "a59b00b9-f6cd-4fed-a1dc-0f4064a12831"
+                | "2c77a81e-41cc-4178-a3a7-5f8a987568e6"
+        ) {
+            return true;
+        }
+        if known_system_name(id).is_some_and(|n| n.contains("输入法")) {
+            return true;
+        }
+
+        let proc = process.trim().to_ascii_lowercase();
+        if matches!(
+            proc.as_str(),
+            "textinputhost"
+                | "ctfmon"
+                | "tabtip"
+                | "inputapp"
+                | "msctfmonitor"
+                | "chsime"
+                | "chtime"
+        ) || proc.contains("sogou")
+            || proc.contains("baiduinput")
+            || proc.contains("qqpinyin")
+            || proc.contains("rime")
+            || proc.contains("weasel")
+            || proc.contains("inputmethod")
+        {
+            return true;
+        }
+
+        let tip_raw = tip.trim();
+        let tip_l = tip_raw.to_ascii_lowercase();
+        if tip_l.contains("输入法")
+            || tip_l.contains("语言")
+            || tip_l.contains("ime")
+            || tip_l.contains("language")
+            || tip_l.contains("微软拼音")
+            || tip_l.contains("搜狗")
+            || tip_l.contains("微信输入法")
+            || tip_l.contains("chinese")
+            || tip_l.contains("中文")
+        {
+            return true;
+        }
+
+        // Shell language abbreviation tile: "中" / "英" / "EN" / "CHS" …
+        let chars: Vec<char> = tip_raw.chars().collect();
+        if chars.len() == 1 {
+            let c = chars[0];
+            if ('\u{4e00}'..='\u{9fff}').contains(&c) {
+                return true;
+            }
+        }
+        matches!(
+            tip_l.as_str(),
+            "en" | "eng" | "chs" | "cht" | "jp" | "jpn" | "kr" | "kor" | "中" | "英" | "日" | "韩"
+        )
     }
 
     fn window_title(hwnd: isize) -> String {
@@ -364,8 +613,19 @@ mod win {
 
         OS_FINGERPRINT.lock().insert(id.clone(), fingerprint);
 
+        let pin_key = {
+            let guid = if looks_like_guid_id(&id) {
+                Some(id.as_str())
+            } else {
+                None
+            };
+            compute_pin_key(guid, hwnd, uid, &process)
+        };
+        let resident = is_language_ime_icon(&id, &process, &tooltip);
+
         TrayIconInfo {
-            id,
+            id: id.clone(),
+            pin_key,
             tooltip,
             process,
             uid,
@@ -375,6 +635,7 @@ mod win {
             icon_png_base64,
             area,
             flashing,
+            resident,
         }
     }
 
@@ -637,6 +898,12 @@ mod win {
     }
 
     fn publish() {
+        if rewrite_prefs_against_live_icons() {
+            persist_prefs_disk();
+            if let Some(emit) = PREFS_EMIT.get() {
+                emit(get_prefs());
+            }
+        }
         let list = list_icons();
         if let Some(emit) = EMIT.get() {
             emit(list);
@@ -981,8 +1248,19 @@ mod win {
         }
         OS_FINGERPRINT.lock().insert(id.clone(), fingerprint);
 
+        let pin_key = {
+            let guid = if looks_like_guid_id(&id) {
+                Some(id.as_str())
+            } else {
+                None
+            };
+            compute_pin_key(guid, hwnd, uid, &process)
+        };
+        let resident = is_language_ime_icon(&id, &process, &tooltip);
+
         TrayIconInfo {
             id,
+            pin_key,
             tooltip,
             process,
             uid,
@@ -992,6 +1270,7 @@ mod win {
             icon_png_base64,
             area,
             flashing,
+            resident,
         }
     }
 
@@ -1082,6 +1361,11 @@ mod win {
                     info.process = item.process.clone();
                     changed = true;
                 }
+                let resident = is_language_ime_icon(&info.id, &info.process, &info.tooltip);
+                if info.resident != resident {
+                    info.resident = resident;
+                    changed = true;
+                }
                 return changed;
             }
 
@@ -1098,22 +1382,58 @@ mod win {
                     info.area = area.to_string();
                     changed = true;
                 }
+                let resident = is_language_ime_icon(&info.id, &info.process, &info.tooltip);
+                if info.resident != resident {
+                    info.resident = resident;
+                    changed = true;
+                }
                 return changed;
             }
 
             icons.insert(
                 id.clone(),
-                TrayIconInfo {
-                    id,
-                    tooltip: tip_from_reg(item, uia_name),
-                    process: item.process.clone(),
-                    uid: item.icon_uid.unwrap_or(0),
-                    hwnd: 0,
-                    callback_msg: 0,
-                    version: 0,
-                    icon_png_base64: snapshot_to_png_b64(&item.icon_snapshot),
-                    area: area.to_string(),
-                    flashing: false,
+                {
+                    let tip = tip_from_reg(item, uia_name);
+                    let process = item.process.clone();
+                    let pin_key = {
+                        let guid = item
+                            .icon_guid
+                            .as_ref()
+                            .map(|g| crate::win32::tray_registry::guid_key(g));
+                        let path = item
+                            .executable_path
+                            .to_string_lossy()
+                            .to_ascii_lowercase();
+                        let uid = item.icon_uid.unwrap_or(0);
+                        if let Some(ref g) = guid {
+                            if looks_like_guid_id(g) {
+                                g.clone()
+                            } else if !path.is_empty() {
+                                format!("exe:{path}:{uid}")
+                            } else {
+                                compute_pin_key(None, 0, uid, &item.process)
+                            }
+                        } else if !path.is_empty() {
+                            format!("exe:{path}:{uid}")
+                        } else {
+                            compute_pin_key(None, 0, uid, &item.process)
+                        }
+                    };
+                    let resident = is_language_ime_icon(&id, &process, &tip);
+                    TrayIconInfo {
+                        id: id.clone(),
+                        pin_key,
+                        tooltip: tip,
+                        process,
+                        uid: item.icon_uid.unwrap_or(0),
+                        hwnd: 0,
+                        callback_msg: 0,
+                        version: 0,
+                        icon_png_base64: snapshot_to_png_b64(&item.icon_snapshot),
+                        area: area.to_string(),
+                        flashing: false,
+                        resident,
+                    }
                 },
             );
             true
@@ -1344,13 +1664,15 @@ mod win {
     }
 
     /// Start tray tracking: explorer hook first, spy only if hook fails.
-    pub fn start<F, A>(on_change: F, on_attention: A)
+    pub fn start<F, A, P>(on_change: F, on_attention: A, on_prefs: P)
     where
         F: Fn(Vec<TrayIconInfo>) + Send + Sync + 'static,
         A: Fn(TrayAttention) + Send + Sync + 'static,
+        P: Fn(TrayPrefs) + Send + Sync + 'static,
     {
         let _ = EMIT.set(Box::new(on_change));
         let _ = ATTENTION.set(Box::new(on_attention));
+        let _ = PREFS_EMIT.set(Box::new(on_prefs));
 
         // Recover if a previous build left the cursor hidden via ShowCursor.
         #[cfg(windows)]
@@ -1898,9 +2220,17 @@ mod win {
         let click_pt = cursor_pos();
         let adapt_menu = matches!(click, TrayClick::Right);
         let tencent = is_tencent_im(process, tip);
+        let pin_key = {
+            let guid = if looks_like_guid_id(icon_id) {
+                Some(icon_id)
+            } else {
+                None
+            };
+            compute_pin_key(guid, hwnd, uid, process)
+        };
 
         let est_h = if adapt_menu {
-            effective_menu_height(icon_id, process, tip)
+            effective_menu_height(icon_id, &pin_key, process, tip)
         } else {
             160
         };
@@ -2036,9 +2366,10 @@ pub fn invoke_icon_by_id(
 pub fn acknowledge_icon_attention(_id: Option<String>, _hwnd: isize, _uid: u32) {}
 
 #[cfg(not(windows))]
-pub fn start<F, A>(_on_change: F, _on_attention: A)
+pub fn start<F, A, P>(_on_change: F, _on_attention: A, _on_prefs: P)
 where
     F: Fn(Vec<TrayIconInfo>) + Send + Sync + 'static,
     A: Fn(TrayAttention) + Send + Sync + 'static,
+    P: Fn(TrayPrefs) + Send + Sync + 'static,
 {
 }

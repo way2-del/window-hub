@@ -24,23 +24,25 @@ description: >-
 ## 允许沉浸的前提
 
 1. `autoImmerse === true`
-2. 岛折叠、未拉高、托盘未开、非 busy
+2. 岛折叠、未拉高、非 busy
 3. 无通知横幅、非拖放命中（`.is-drop-target`）
 4. 闲置满 `immerseIdleSec`
 
 中转站有条目时：**照常可沉浸**；摘要字色跟 `data-chrome` / `--chrome-center-fg`（与岛栏摘要同一套）。
+
+独立顶栏弹窗（托盘收纳 / 左侧状态菜单）**不**退出沉浸：它们会抢焦点，但岛应保持常驻透底外观。
 
 ## 瞬时阻断（可退出沉浸，不是永久例外）
 
 | 条件 | 原因 |
 |------|------|
 | 展开 / `reveal` | 面板打开 |
-| 托盘 / 弹窗 | 交互 |
 | `.is-drop-target` | 放置高亮，需不透明壳 |
 | `.is-notifying` | 横幅可读 |
 | busy / pulling / springing | 动画中 |
 
-**不要**把 `staging.total > 0` 放进 `scheduleImmerse` 早退或「强制清沉浸」的 effect。
+**不要**把 `staging.total > 0` 放进 `scheduleImmerse` 早退或「强制清沉浸」的 effect。  
+**不要**把独立 `tray-popup` / `status-menu-popup` 的打开状态当作沉浸阻断。
 
 ## chrome 反色
 

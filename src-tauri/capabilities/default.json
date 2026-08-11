@@ -2,7 +2,22 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for main + settings windows",
-  "windows": ["main", "settings", "tray-popup", "plugin-popup", "status-menu-popup", "dock"],
+  "windows": [
+    "main",
+    "settings",
+    "tray-popup",
+    "plugin-popup",
+    "status-menu-popup",
+    "input-lang-popup",
+    "chrome-hover-tip",
+    "wifi-popup",
+    "wifi-auth-popup",
+    "dock",
+    "dock-glass"
+  ],
+  "remote": {
+    "urls": ["http://localhost:1420/*", "http://127.0.0.1:1420/*"]
+  },
   "permissions": [
     "core:default",
     "core:event:default",
@@ -20,6 +35,7 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-unminimize",
+    "core:window:allow-set-ignore-cursor-events",
     "core:webview:allow-create-webview-window"
   ]
 }

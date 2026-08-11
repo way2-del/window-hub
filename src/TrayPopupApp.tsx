@@ -1,13 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  isTrayPinned,
+  isTrayResident,
   trayLabel,
   type TrayIconInfo,
   type TrayPrefs,
 } from "./components/TrayCluster";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
+import { slideRevealPopup } from "./popupFit";
+
+const POPUP_W = 280;
 
 function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
   if (icon.icon_png_base64) {
@@ -39,32 +44,60 @@ async function clickTray(icon: TrayIconInfo, action: "left" | "right") {
   }
 }
 
+async function syncGlass() {
+  try {
+    const prefs = await invoke<GlassPrefs>("get_material_prefs");
+    await syncGlassCss({
+      kind: "mica-alt",
+      dark: prefs.dark ?? null,
+      acrylicAlpha: prefs.acrylicAlpha,
+    });
+  } catch {
+    await syncGlassCss({ kind: "mica-alt", dark: true });
+  }
+  await invoke("apply_window_effect", {}).catch(() => undefined);
+}
+
 export default function TrayPopupApp() {
+  const [boot, setBoot] = useState<{
+    icons: TrayIconInfo[];
+    pinned: string[];
+  } | null>(null);
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
+  const [entered, setEntered] = useState(false);
+  const revealGen = useRef(0);
+  const reuseArmedRef = useRef(false);
+  const enteredRef = useRef(false);
+  enteredRef.current = entered;
 
   useEffect(() => {
-    const syncGlass = (prefs: GlassPrefs) => {
-      void syncGlassCss({
-        kind: "mica-alt",
-        dark: prefs.dark ?? null,
-        acrylicAlpha: prefs.acrylicAlpha,
-      });
+    let cancelled = false;
+    const unsubs: Array<() => void> = [];
+
+    const start = async () => {
+      await syncGlass();
+      if (cancelled) return;
+      try {
+        const [list, prefs] = await Promise.all([
+          invoke<TrayIconInfo[]>("list_tray_icons"),
+          invoke<TrayPrefs>("get_tray_prefs"),
+        ]);
+        if (cancelled) return;
+        setEntered(false);
+        setIcons(list);
+        setPinned(prefs.pinned ?? []);
+        setBoot({ icons: list, pinned: prefs.pinned ?? [] });
+      } catch {
+        if (cancelled) return;
+        setEntered(false);
+        setIcons([]);
+        setPinned([]);
+        setBoot({ icons: [], pinned: [] });
+      }
     };
 
-    void (async () => {
-      try {
-        const prefs = await invoke<GlassPrefs>("get_material_prefs");
-        await syncGlassCss({
-          kind: "mica-alt",
-          dark: prefs.dark ?? null,
-          acrylicAlpha: prefs.acrylicAlpha,
-        });
-      } catch {
-        await syncGlassCss({ kind: "mica-alt", dark: true });
-      }
-      await invoke("apply_window_effect", {}).catch(() => undefined);
-    })();
+    void start();
 
     const retryA = window.setTimeout(() => {
       void invoke("apply_window_effect", {}).catch(() => undefined);
@@ -73,11 +106,12 @@ export default function TrayPopupApp() {
       void invoke("apply_window_effect", {}).catch(() => undefined);
     }, 350);
 
-    let cancelled = false;
-    const unsubs: Array<() => void> = [];
-
     void listen<GlassPrefs>("material-prefs", (ev) => {
-      syncGlass(ev.payload);
+      void syncGlassCss({
+        kind: "mica-alt",
+        dark: ev.payload.dark ?? null,
+        acrylicAlpha: ev.payload.acrylicAlpha,
+      });
       void invoke("apply_window_effect", {}).catch(() => undefined);
     }).then((fn) => {
       if (!cancelled) unsubs.push(fn);
@@ -99,39 +133,27 @@ export default function TrayPopupApp() {
       }),
     );
 
-    void (async () => {
-      try {
-        const [list, prefs] = await Promise.all([
-          invoke<TrayIconInfo[]>("list_tray_icons"),
-          invoke<TrayPrefs>("get_tray_prefs"),
-        ]);
-        if (!cancelled) {
-          setIcons(list);
-          setPinned(prefs.pinned ?? []);
-        }
-      } catch {
-        /* noop */
-      }
+    void listen("tray-popup-opened", () => {
+      if (!reuseArmedRef.current) return;
+      void start();
+    }).then((fn) => {
+      if (!cancelled) unsubs.push(fn);
+      else fn();
+    });
 
-      try {
-        unsubs.push(
-          await listen<TrayIconInfo[]>("tray-icons", (ev) => {
-            setIcons(ev.payload);
-          }),
-        );
-      } catch {
-        /* noop */
-      }
-      try {
-        unsubs.push(
-          await listen<TrayPrefs>("tray-prefs", (ev) => {
-            setPinned(ev.payload.pinned ?? []);
-          }),
-        );
-      } catch {
-        /* noop */
-      }
-    })();
+    void listen<TrayIconInfo[]>("tray-icons", (ev) => {
+      setIcons(ev.payload);
+    }).then((fn) => {
+      if (!cancelled) unsubs.push(fn);
+      else fn();
+    });
+
+    void listen<TrayPrefs>("tray-prefs", (ev) => {
+      setPinned(ev.payload.pinned ?? []);
+    }).then((fn) => {
+      if (!cancelled) unsubs.push(fn);
+      else fn();
+    });
 
     const poll = window.setInterval(() => {
       void invoke<TrayIconInfo[]>("list_tray_icons")
@@ -144,7 +166,9 @@ export default function TrayPopupApp() {
     let unFocus: (() => void) | undefined;
     getCurrentWindow()
       .onFocusChanged((ev) => {
-        if (!ev.payload) {
+        // Ignore blur until slide reveal finished — intermediate show/focus
+        // handoff must not close the popup.
+        if (!ev.payload && reuseArmedRef.current && enteredRef.current) {
           void invoke("close_tray_popup").catch(() => undefined);
         }
       })
@@ -162,18 +186,65 @@ export default function TrayPopupApp() {
     };
   }, []);
 
+  useLayoutEffect(() => {
+    if (!boot) return;
+    let cancelled = false;
+    const gen = ++revealGen.current;
+    void (async () => {
+      try {
+        await slideRevealPopup({
+          width: POPUP_W,
+          selector: ".tray-popup-shell",
+          minHeight: 72,
+          maxHeight: 520,
+          direction: "down",
+        });
+        if (cancelled || gen !== revealGen.current) return;
+        reuseArmedRef.current = true;
+        setEntered(true);
+      } catch (e) {
+        console.error("[TrayPopup]", e);
+        try {
+          await getCurrentWindow().show();
+          reuseArmedRef.current = true;
+          if (!cancelled) setEntered(true);
+        } catch {
+          /* noop */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [boot]);
+
   const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
-  const pinnedIcons = useMemo(
-    () => icons.filter((i) => pinnedSet.has(i.id)),
-    [icons, pinnedSet],
-  );
+  const pinnedIcons = useMemo(() => {
+    const list = icons.filter((i) => isTrayResident(i) || isTrayPinned(i, pinnedSet));
+    return [
+      ...list.filter((i) => !isTrayResident(i)),
+      ...list.filter((i) => isTrayResident(i)),
+    ];
+  }, [icons, pinnedSet]);
   const overflowIcons = useMemo(
-    () => icons.filter((i) => !pinnedSet.has(i.id)),
+    () => icons.filter((i) => !isTrayResident(i) && !isTrayPinned(i, pinnedSet)),
     [icons, pinnedSet],
   );
 
+  if (!boot) {
+    return <div className="tray-popup-shell is-booting" aria-hidden />;
+  }
+
+  const shellClass = [
+    "tray-popup-shell",
+    "is-origin-down",
+    entered ? "is-entered" : "is-revealing",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className="tray-popup-shell" role="menu">
+    <div className={shellClass} role="menu">
       {icons.length === 0 ? (
         <div className="tray-empty">暂无系统托盘图标</div>
       ) : (

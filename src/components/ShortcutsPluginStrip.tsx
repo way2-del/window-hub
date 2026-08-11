@@ -13,12 +13,21 @@ import { SHORTCUTS_HEIGHT } from "../plugins/shortcutsGeometry";
 
 const POPUP_GAP = 8;
 
+export type ShortcutsHoverTip = {
+  pluginId: string;
+  lines: string[];
+  /** Viewport coords (CSS px) for tip top-center anchor. */
+  x: number;
+  y: number;
+};
+
 type Props = {
   pluginId: string;
   entryPath: string;
   width: number;
   maxWidth: number;
   onRequestWidth: (pluginId: string, width: number) => void;
+  onHoverTip?: (tip: ShortcutsHoverTip | null) => void;
 };
 
 async function popupAnchorFromEl(el: HTMLElement) {
@@ -40,12 +49,15 @@ export default function ShortcutsPluginStrip({
   width,
   maxWidth,
   onRequestWidth,
+  onHoverTip,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const openingRef = useRef(false);
   const onRequestWidthRef = useRef(onRequestWidth);
   onRequestWidthRef.current = onRequestWidth;
+  const onHoverTipRef = useRef(onHoverTip);
+  onHoverTipRef.current = onHoverTip;
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -93,10 +105,12 @@ export default function ShortcutsPluginStrip({
       }
       const bar = doc.getElementById("bar") ?? doc.body;
       if (!bar) return;
-      const w = Math.ceil(
-        Math.max(bar.scrollWidth, bar.getBoundingClientRect().width, 28),
+      const measured = Math.ceil(
+        Math.max(bar.scrollWidth, bar.getBoundingClientRect().width, 0),
       );
-      if (w > 0) onRequestWidthRef.current(pluginId, w);
+      // Empty worker / pinless strips may be 0–1px; don't floor to 28.
+      const w = measured <= 1 ? measured : Math.max(measured, 28);
+      if (w >= 0) onRequestWidthRef.current(pluginId, w);
     } catch {
       /* sandbox / not ready */
     }
@@ -178,6 +192,34 @@ export default function ShortcutsPluginStrip({
       if (d.cmd === "shortcuts.requestSize") {
         const w = Number(d.args?.width) || 0;
         onRequestWidth(pluginId, w);
+        return;
+      }
+      if (d.cmd === "shortcuts.showTip") {
+        const iframe = iframeRef.current;
+        if (!iframe || !onHoverTipRef.current) return;
+        const rawLines = Array.isArray(d.args?.lines) ? d.args!.lines : [];
+        const lines = rawLines
+          .map((l) => String(l ?? "").trim())
+          .filter(Boolean)
+          .slice(0, 8);
+        if (!lines.length) {
+          onHoverTipRef.current(null);
+          return;
+        }
+        const fr = iframe.getBoundingClientRect();
+        const ax =
+          typeof d.args?.x === "number" && Number.isFinite(d.args.x)
+            ? fr.left + Number(d.args.x)
+            : fr.left + fr.width / 2;
+        const ay =
+          typeof d.args?.y === "number" && Number.isFinite(d.args.y)
+            ? fr.top + Number(d.args.y)
+            : fr.bottom + 4;
+        onHoverTipRef.current({ pluginId, lines, x: ax, y: ay });
+        return;
+      }
+      if (d.cmd === "shortcuts.hideTip") {
+        onHoverTipRef.current?.(null);
         return;
       }
       if (d.cmd === "shortcuts.getBounds" && d.id) {
@@ -324,6 +366,12 @@ export default function ShortcutsPluginStrip({
               },
               "*",
             );
+          }),
+        );
+        unsubs.push(
+          await listen<{ pluginId?: string }>("island-bar-click", (ev) => {
+            if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+            frame()?.postMessage({ channel: WH_SHORTCUTS_EVT, type: "bar-click" }, "*");
           }),
         );
       } catch {

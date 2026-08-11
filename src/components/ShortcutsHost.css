@@ -30,6 +30,65 @@
   overflow: hidden;
 }
 
+.shortcuts-strip-unit {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  max-height: 28px;
+  flex-shrink: 0;
+  min-width: 0;
+  position: relative;
+}
+
+.shortcuts-host.is-reorder .shortcuts-strip-unit {
+  cursor: grab;
+}
+
+/* Reorder overlay owns the pointer — kill iframe / chip hover & tip traffic. */
+.shortcuts-host.is-reorder .shortcuts-plugin-frame,
+.shortcuts-host.is-reorder .shortcuts-chip {
+  pointer-events: none;
+}
+
+.shortcuts-host.is-dragging .shortcuts-strip-unit.is-dragging {
+  opacity: 0.55;
+  cursor: grabbing;
+}
+
+.shortcuts-strip-unit.is-drop-before::before,
+.shortcuts-strip-unit.is-drop-after::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--chrome-left-fg, #fff) 75%, transparent);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.shortcuts-strip-unit.is-drop-before::before {
+  left: 0;
+}
+
+.shortcuts-strip-unit.is-drop-after::after {
+  right: 0;
+}
+
+.shortcuts-reorder-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  cursor: grab;
+  touch-action: none;
+  background: color-mix(in srgb, var(--chrome-left-fg, #fff) 8%, transparent);
+}
+
+.shortcuts-host.is-dragging .shortcuts-reorder-hit {
+  cursor: grabbing;
+}
+
 .shortcuts-plugin-strip {
   position: relative;
   height: 28px;
@@ -145,12 +204,26 @@
 }
 
 .shortcuts-chip.is-manage {
+  position: relative;
+  width: 28px;
+  min-width: 28px;
   max-width: 28px;
-  padding: 0 6px;
+  padding: 0;
   margin-right: 0;
   flex-shrink: 0;
   justify-content: center;
   align-items: center;
+  text-shadow: none;
+}
+
+.shortcuts-chip.is-manage .shortcuts-chip-icon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
 .shortcuts-pin-divider.is-static {
@@ -218,4 +291,55 @@
   opacity: 0.55;
   white-space: nowrap;
   color: var(--chrome-left-fg, rgba(255, 255, 255, 0.94));
+}
+
+/* Host chrome hover tip — matches ambient strip; size fits content */
+.shortcuts-hover-tip {
+  position: fixed;
+  z-index: 80;
+  transform: translate(-50%, 6px);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
+  height: auto;
+  padding: 8px 11px;
+  border-radius: 8px;
+  pointer-events: none;
+  background: rgb(var(--ambient-r, 32), var(--ambient-g, 32), var(--ambient-b, 34));
+  color: var(--chrome-left-fg, rgba(255, 255, 255, 0.94));
+  text-shadow: var(--chrome-left-shadow, none);
+  font-family: var(
+    --wh-chrome-font-family,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif
+  );
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--chrome-left-fg, #fff) 14%, transparent),
+    0 8px 22px rgba(0, 0, 0, 0.22);
+}
+
+.shortcuts-hover-tip-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.shortcuts-hover-tip-line + .shortcuts-hover-tip-line {
+  margin-top: 4px;
+  font-weight: 500;
+  opacity: 0.88;
+}
+
+.shortcuts-hover-tip-line.is-lead {
+  font-weight: 650;
+  opacity: 1;
+  letter-spacing: 0.03em;
 }

@@ -38,6 +38,7 @@ import {
 } from "./plugins/islandSlots";
 import { parsePluginPanelId } from "./plugins/panelProviders";
 import { pluginRegistry } from "./plugins/registry";
+import { hideChromeHoverTip, hostTipPointerProps, installChromeHoverTipGlobalDismiss } from "./chromeHoverTip";
 import "./App.css";
 
 /** 默认插件面板展开尺寸（非中转站） */
@@ -438,6 +439,8 @@ function App() {
   shellPanelHRef.current = shellPanelH;
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
 
+  useEffect(() => installChromeHoverTipGlobalDismiss(), []);
+
   useEffect(() => {
     const sync = () => {
       setDropPluginId(resolveIslandDropPluginId());
@@ -564,16 +567,17 @@ function App() {
     clearIdleTimer();
     const prefs = islandPrefsRef.current;
     if (!prefs.autoImmerse) return;
-    if (expandedRef.current || trayOpenRef.current) return;
+    if (expandedRef.current) return;
     if (revealRef.current > 0.02) return;
     if (busy.current) return;
     if (msgBannerRef.current) return;
     // 中转站不阻断沉浸：只跟设置「自动沉浸」
+    // 独立托盘/状态菜单弹窗会抢焦点，但不应打断岛的常驻透底外观
     idleTimer.current = window.setTimeout(() => {
       idleTimer.current = null;
       const latest = islandPrefsRef.current;
       if (!latest.autoImmerse) return;
-      if (expandedRef.current || trayOpenRef.current || busy.current) return;
+      if (expandedRef.current || busy.current) return;
       if (revealRef.current > 0.02) return;
       if (msgBannerRef.current) return;
       immersedRef.current = true;
@@ -1318,8 +1322,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // 展开 / 托盘 / 拖放高亮 / 通知：暂停沉浸。中转站有内容不阻断。
-    if (expanded || trayOpen || pulling || springing || reveal > 0.02 || msgBanner || dropTarget) {
+    // 展开 / 拖放高亮 / 通知：暂停沉浸。中转站有内容不阻断。
+    // 独立托盘弹窗不再退出沉浸（与左侧状态菜单一致，保持常驻透底）。
+    if (expanded || pulling || springing || reveal > 0.02 || msgBanner || dropTarget) {
       clearIdleTimer();
       if (immersedRef.current) {
         immersedRef.current = false;
@@ -1340,7 +1345,6 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     expanded,
-    trayOpen,
     pulling,
     springing,
     reveal,
@@ -1644,6 +1648,7 @@ function App() {
             if (!expandedRef.current && !busy.current) void ensureExpandedWindow();
           }}
           onPointerLeave={() => {
+            void hideChromeHoverTip();
             if (drag.current?.active || expandedRef.current || busy.current) return;
             if (revealRef.current > 0.01) return;
             lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
@@ -1740,17 +1745,33 @@ function App() {
                     className="bar-staging"
                     role="button"
                     tabIndex={0}
-                    title={islandBar?.title || "打开面板"}
+                    {...hostTipPointerProps(islandBar?.title || stagingBar || "打开面板")}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void openPluginSession(islandBar?.pluginId);
+                      void hideChromeHoverTip();
+                      const pid = islandBar?.pluginId;
+                      if (!pid) return;
+                      void emit("island-bar-click", { pluginId: pid }).catch(console.error);
+                      const rec = pluginRegistry.get(pid);
+                      const hasPanel =
+                        Boolean(rec?.manifest.slots?.["island.panel"]) &&
+                        (rec?.manifest.capabilities ?? []).includes("island.panel");
+                      if (hasPanel) void openPluginSession(pid);
                     }}
                     onKeyDown={(e) => {
                       if (e.key !== "Enter" && e.key !== " ") return;
                       e.preventDefault();
                       e.stopPropagation();
-                      void openPluginSession(islandBar?.pluginId);
+                      void hideChromeHoverTip();
+                      const pid = islandBar?.pluginId;
+                      if (!pid) return;
+                      void emit("island-bar-click", { pluginId: pid }).catch(console.error);
+                      const rec = pluginRegistry.get(pid);
+                      const hasPanel =
+                        Boolean(rec?.manifest.slots?.["island.panel"]) &&
+                        (rec?.manifest.capabilities ?? []).includes("island.panel");
+                      if (hasPanel) void openPluginSession(pid);
                     }}
                   >
                     <span className="bar-staging-dot" aria-hidden />
@@ -1769,10 +1790,11 @@ function App() {
                           type="button"
                           className="bar-notify-action"
                           style={{ background: act.background }}
-                          title={act.label || act.id}
+                          {...hostTipPointerProps(act.label || act.id)}
                           onPointerDown={(e) => e.stopPropagation()}
                           onClick={(e) => {
                             e.stopPropagation();
+                            void hideChromeHoverTip();
                             fireNotifyAction(act);
                           }}
                         >
@@ -1814,10 +1836,11 @@ function App() {
                           type="button"
                           className="bar-notify-action"
                           style={{ background: act.background }}
-                          title={act.label || act.id}
+                          {...hostTipPointerProps(act.label || act.id)}
                           onPointerDown={(e) => e.stopPropagation()}
                           onClick={(e) => {
                             e.stopPropagation();
+                            void hideChromeHoverTip();
                             fireNotifyAction(act);
                           }}
                         >

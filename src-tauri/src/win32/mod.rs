@@ -22,3 +22,5 @@ pub mod tray_hook_host;
 pub mod tray_registry;
 #[cfg(windows)]
 pub mod tray_uia;
+pub mod input_lang;
+pub mod wifi;
