@@ -333,6 +333,8 @@ mod tests {
         }
         eprintln!("[tray-hook test] drained {total} slot(s)");
         // Soft assert: environment may have zero tray apps, but hook must stay live.
+        // High-frequency NIM_MODIFY should not stall explorer after DrawIconEx slim-path;
+        // full latency measurement lives in tools/tray-visual-smoke (manual).
         assert!(is_running(), "hook should remain installed");
         assert!(
             ensure_hook().unwrap_or(false),

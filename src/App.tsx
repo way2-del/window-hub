@@ -379,6 +379,7 @@ function App() {
   const islandBar = overlayBar ?? residentBar;
   const [dropTarget, setDropTarget] = useState(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
+  const panelOverrideRef = useRef<string | null>(null);
   const [dropPluginId, setDropPluginId] = useState<string | null>(() =>
     resolveIslandDropPluginId(),
   );
@@ -396,6 +397,7 @@ function App() {
   const busy = useRef(false);
   const expandedRef = useRef(expanded);
   const trayOpenRef = useRef(trayOpen);
+  const pluginPopupOpenRef = useRef(false);
   const sizeRef = useRef(size);
   const revealRef = useRef(0);
   const immersedRef = useRef(false);
@@ -434,6 +436,7 @@ function App() {
   immersedRef.current = immersed;
   dropPluginIdRef.current = dropPluginId;
   islandPrefsRef.current = islandPrefs;
+  panelOverrideRef.current = panelOverride;
   shellPanelWRef.current = shellPanelW;
   shellPanelHRef.current = shellPanelH;
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
@@ -1058,20 +1061,113 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** Track plugin-popup visibility for click-outside close on the island bar. */
+  useEffect(() => {
+    const unsubs: Array<() => void> = [];
+    void listen("plugin-popup-opened", () => {
+      pluginPopupOpenRef.current = true;
+    }).then((fn) => unsubs.push(fn));
+    void listen("plugin-popup-closed", () => {
+      pluginPopupOpenRef.current = false;
+    }).then((fn) => unsubs.push(fn));
+    void invoke<boolean>("is_plugin_popup_open")
+      .then((open) => {
+        pluginPopupOpenRef.current = !!open;
+      })
+      .catch(() => undefined);
+    return () => unsubs.forEach((fn) => fn());
+  }, []);
+
+  function closePluginPopupFromIsland(e?: { target?: EventTarget | null }) {
+    if (!pluginPopupOpenRef.current) return;
+    const t = e?.target as Element | null | undefined;
+    // Let shortcuts / tray / status menu handle their own toggle.
+    if (
+      t?.closest?.(
+        ".shortcuts-host, .shortcuts-plugin-strip, .settings-anchor, .tray-cluster, .tray-root",
+      )
+    ) {
+      return;
+    }
+    pluginPopupOpenRef.current = false;
+    void invoke("close_plugin_popup").catch(() => undefined);
+  }
+
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    let chromeTimer: number | undefined;
+    let lastRgb = "";
+
+    const applyStripDom = (a: Ambient) => {
+      const el = document.querySelector(".ambient-strip") as HTMLElement | null;
+      if (!el) return;
+      el.style.backgroundColor = `rgb(${a.r}, ${a.g}, ${a.b})`;
+      if (a.png_base64 && (a.width ?? 0) > 1) {
+        el.style.backgroundImage = `url(data:image/png;base64,${a.png_base64})`;
+        el.style.backgroundRepeat = "no-repeat";
+        el.style.backgroundSize =
+          a.offset_x === 0
+            ? "100% 100%"
+            : a.span_width && a.span_width > 0
+              ? `${a.span_width}px 100%`
+              : "100% 100%";
+        el.style.backgroundPosition =
+          a.offset_x === 0
+            ? "0 0"
+            : typeof a.offset_x === "number"
+              ? `${a.offset_x}px 0`
+              : "0 0";
+      } else {
+        el.style.backgroundImage = "none";
+      }
+    };
+
+    const scheduleChrome = (a: Ambient) => {
+      if (chromeTimer != null) window.clearTimeout(chromeTimer);
+      chromeTimer = window.setTimeout(() => {
+        void (async () => {
+          let left = { r: a.r, g: a.g, b: a.b };
+          let center = left;
+          let right = left;
+          if (a.png_base64 && (a.width ?? 0) > 1) {
+            const bands = await sampleStripBands(a.png_base64);
+            if (bands) {
+              left = bands.left;
+              center = bands.center;
+              right = bands.right;
+            }
+          }
+          if (cancelled) return;
+          setChromeLeft(chromeTokens(left));
+          setChromeCenter(chromeTokens(center));
+          setChromeRight(chromeTokens(right));
+        })();
+      }, 180);
+    };
 
     void (async () => {
       try {
         const first = await invoke<Ambient>("sample_ambient_color");
-        if (!cancelled) setAmbient(first);
+        if (cancelled) return;
+        applyStripDom(first);
+        lastRgb = `${first.r},${first.g},${first.b}`;
+        setAmbient({ r: first.r, g: first.g, b: first.b });
+        scheduleChrome(first);
       } catch {
         /* noop */
       }
       try {
         unlisten = await listen<Ambient>("ambient-color", (ev) => {
-          setAmbient(ev.payload);
+          const a = ev.payload;
+          applyStripDom(a);
+          const rgb = `${a.r},${a.g},${a.b}`;
+          if (rgb !== lastRgb) {
+            lastRgb = rgb;
+            // Keep React state lean — no giant png_base64 in state.
+            setAmbient({ r: a.r, g: a.g, b: a.b });
+          }
+          scheduleChrome(a);
         });
       } catch {
         /* noop */
@@ -1081,40 +1177,9 @@ function App() {
     return () => {
       cancelled = true;
       unlisten?.();
+      if (chromeTimer != null) window.clearTimeout(chromeTimer);
     };
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    const fallback = { r: ambient.r, g: ambient.g, b: ambient.b };
-
-    const run = async () => {
-      let left = fallback;
-      let center = fallback;
-      let right = fallback;
-      if (ambient.png_base64 && (ambient.width ?? 0) > 1) {
-        const bands = await sampleStripBands(ambient.png_base64);
-        if (bands) {
-          left = bands.left;
-          center = bands.center;
-          right = bands.right;
-        }
-      }
-      if (cancelled) return;
-      setChromeLeft(chromeTokens(left));
-      setChromeCenter(chromeTokens(center));
-      setChromeRight(chromeTokens(right));
-    };
-
-    // Debounce chrome updates so rapid ambient emits don't thrash React.
-    timer = window.setTimeout(() => void run(), 100);
-
-    return () => {
-      cancelled = true;
-      if (timer != null) window.clearTimeout(timer);
-    };
-  }, [ambient.r, ambient.g, ambient.b, ambient.png_base64, ambient.width]);
 
   /** 当前会话 / 投放插件：同步面板壳尺寸（defaultSize 或 staging settings） */
   const sizePluginId =
@@ -1264,6 +1329,15 @@ function App() {
       const action = ev.payload?.action;
       const pluginId = ev.payload?.pluginId;
       if (action === "open" && pluginId) {
+        // Same plugin panel already expanded → collapse (second click closes).
+        const cur =
+          parsePluginPanelId(panelOverrideRef.current ?? islandPrefsRef.current.pullContent) ??
+          null;
+        if (expandedRef.current && cur === pluginId) {
+          setPanelOverride(null);
+          void collapse();
+          return;
+        }
         armPluginSession(pluginId);
         if (!expandedRef.current) void expand();
       } else if (action === "close") {
@@ -1553,31 +1627,10 @@ function App() {
     ...chromeCssVars("right", chromeRight),
   } as CSSProperties;
 
-  const stripStyle: CSSProperties =
-    ambient.png_base64 && (ambient.width ?? 0) > 1
-      ? {
-          // 整条边缘：色带铺满顶栏（offset=0 时用 100% 避免 DPI 缝）
-          backgroundColor: `rgb(${ambient.r}, ${ambient.g}, ${ambient.b})`,
-          backgroundImage: `url(data:image/png;base64,${ambient.png_base64})`,
-          backgroundRepeat: "no-repeat",
-          backgroundSize:
-            ambient.offset_x === 0
-              ? "100% 100%"
-              : ambient.span_width && ambient.span_width > 0
-                ? `${ambient.span_width}px 100%`
-                : "100% 100%",
-          backgroundPosition:
-            ambient.offset_x === 0
-              ? "0 0"
-              : typeof ambient.offset_x === "number"
-                ? `${ambient.offset_x}px 0`
-                : "0 0",
-        }
-      : {
-          // 仅取中间：整条纯色
-          backgroundColor: `rgb(${ambient.r}, ${ambient.g}, ${ambient.b})`,
-          backgroundImage: "none",
-        };
+  const stripStyle: CSSProperties = {
+    // PNG band is applied via DOM in ambient listener (avoids React re-render thrash).
+    backgroundColor: `rgb(${ambient.r}, ${ambient.g}, ${ambient.b})`,
+  };
 
   const shellExpanded = expanded || reveal > 0.2;
 
@@ -1588,6 +1641,7 @@ function App() {
       data-material={material}
       data-chrome-left={chromeLeft.scheme}
       data-chrome-right={chromeRight.scheme}
+      onPointerDownCapture={(e) => closePluginPopupFromIsland(e)}
     >
       <div className="ambient-strip" style={stripStyle} aria-hidden />
 
@@ -1600,6 +1654,8 @@ function App() {
             e.preventDefault();
             trayOpenRef.current = false;
             setTrayOpen(false);
+            pluginPopupOpenRef.current = false;
+            void invoke("close_plugin_popup").catch(() => undefined);
             if (expandedRef.current || revealRef.current > 0.01) {
               void collapse();
             }

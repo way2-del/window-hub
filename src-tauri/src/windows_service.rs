@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::win32::enum_windows::{get_window, list_windows, parse_window_id, WindowInfo};
 
-const POLL_MS: u64 = 250;
+const POLL_MS: u64 = 700;
 
 #[derive(Clone)]
 pub struct WindowsService {

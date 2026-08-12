@@ -481,8 +481,8 @@ export default function SystemFlyoutApp() {
   function applyKind(next: FlyoutKind) {
     setKind(next);
     window.__WH_SYSTEM_FLYOUT_KIND__ = next;
-    setEntering(true);
-    window.setTimeout(() => setEntering(false), 8);
+    // Keep shell opaque — never flip to is-enter/opacity:0 on slim Win10.
+    setEntering(false);
     setMsg("");
     setWifiMenu(null);
     setShowMenuPw(false);
@@ -627,8 +627,7 @@ export default function SystemFlyoutApp() {
         } catch {
           await syncGlassCss({ kind: "mica-alt", dark: true });
         }
-        // Once per window lifetime — avoid DWM thrash on every open.
-        await invoke("apply_window_effect", {}).catch(() => undefined);
+        // Rust already applied material on create — skip apply_window_effect (DWM flash).
         glassReady.current = true;
       }
 
@@ -638,6 +637,8 @@ export default function SystemFlyoutApp() {
       } catch {
         applyKind(resolveKind());
       }
+      // Reveal after CSS; fill cache after (never show empty HWND then repaint).
+      void invoke("reveal_system_flyout").catch(() => undefined);
       void refresh(false);
       requestSoftRefresh(["audio", "power", "perf", "ime"]);
     })();

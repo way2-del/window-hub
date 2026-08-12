@@ -1,0 +1,22 @@
+[package]
+name = "tray-visual-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Screenshot + OCR smoke checks for Window Hub tray/plugin popups"
+
+[[bin]]
+name = "tray-visual-smoke"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Threading",
+] }

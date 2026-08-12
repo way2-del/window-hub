@@ -39,16 +39,20 @@ export function resolveDark(prefs: GlassPrefs, resolvedSystemDark?: boolean): bo
  * System Mica wash + light/dark UI tokens.
  * Keep washes thin so SYSTEMBACKDROP mica actually shows through (Start-menu-like).
  */
-export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean) {
+export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean, compatOpaque?: boolean) {
   const dark = resolveDark(prefs, resolvedSystemDark);
   const root = document.documentElement;
   root.dataset.glass = "mica";
   root.dataset.theme = dark ? "dark" : "light";
+  root.dataset.glassCompat = compatOpaque ? "1" : "0";
   root.style.colorScheme = dark ? "dark" : "light";
 
   if (dark) {
-    // Denser wash: Win10 acrylic is weak; low alpha made flyouts unreadable.
-    root.style.setProperty("--glass-panel-bg", "rgba(28, 28, 30, 0.86)");
+    // Compat: fully opaque wash — transparent+acrylic freezes slim Win10 DWM.
+    root.style.setProperty(
+      "--glass-panel-bg",
+      compatOpaque ? "rgb(28, 28, 30)" : "rgba(28, 28, 30, 0.92)",
+    );
     root.style.setProperty("--glass-fg", "#f4f4f5");
     root.style.setProperty("--glass-fg-muted", "#a1a1aa");
     root.style.setProperty("--glass-side", "rgba(255, 255, 255, 0.05)");
@@ -58,7 +62,10 @@ export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean) {
     root.style.setProperty("--glass-btn", "rgba(255, 255, 255, 0.1)");
     root.style.setProperty("--glass-btn-border", "rgba(255, 255, 255, 0.14)");
   } else {
-    root.style.setProperty("--glass-panel-bg", "rgba(245, 245, 247, 0.9)");
+    root.style.setProperty(
+      "--glass-panel-bg",
+      compatOpaque ? "rgb(245, 245, 247)" : "rgba(245, 245, 247, 0.94)",
+    );
     root.style.setProperty("--glass-fg", "#1c1c1e");
     root.style.setProperty("--glass-fg-muted", "#3f3f46");
     root.style.setProperty("--glass-side", "rgba(255, 255, 255, 0.35)");
@@ -80,7 +87,13 @@ export async function syncGlassCss(prefs: GlassPrefs): Promise<boolean> {
       /* matchMedia fallback */
     }
   }
-  applyGlassCss(prefs, systemDark);
+  let compat = false;
+  try {
+    compat = await invoke<boolean>("is_glass_compat_mode");
+  } catch {
+    /* older host */
+  }
+  applyGlassCss(prefs, systemDark, compat);
   return resolveDark(prefs, systemDark);
 }
 

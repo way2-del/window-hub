@@ -157,10 +157,18 @@ pub fn apply_prefs(window: &WebviewWindow, prefs: &MaterialPrefs) -> Result<(), 
 pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
     let prefs = prefs.clone().normalize();
     let _ = apply_prefs(window, &prefs);
+    // Win10 / hard-safe: never spawn deferred DWM retries (freeze source).
+    if crate::win32::blur_glass::is_hard_safe() {
+        return;
+    }
     let win = window.clone();
     std::thread::spawn(move || {
-        for ms in [40_u64, 100, 220, 450, 800] {
+        for ms in [80_u64, 280] {
             std::thread::sleep(std::time::Duration::from_millis(ms));
+            if crate::win32::blur_glass::is_hard_safe() {
+                let _ = apply_prefs(&win, &prefs);
+                return;
+            }
             let _ = apply_prefs(&win, &prefs);
         }
     });

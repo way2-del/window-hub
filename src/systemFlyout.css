@@ -7,6 +7,11 @@ body.is-system-flyout #root {
   background: transparent !important;
 }
 
+html[data-glass-compat="1"] body.is-system-flyout,
+html[data-glass-compat="1"] body.is-system-flyout #root {
+  background: var(--glass-panel-bg, rgb(28, 28, 30)) !important;
+}
+
 .system-flyout-shell {
   width: 100%;
   height: 100%;
@@ -20,8 +25,9 @@ body.is-system-flyout #root {
   user-select: none;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
-  opacity: 0;
-  transition: opacity 70ms linear;
+  /* Never opacity:0 while HWND may be visible — white frost zombie on slim Win10. */
+  opacity: 1;
+  transition: none;
   contain: layout paint;
   font-family: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   position: relative;

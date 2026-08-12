@@ -5,7 +5,7 @@ cd /d "%~dp0"
 REM ============================================================
 REM  Window Hub NSIS installer (single *-setup.exe)
 REM  Same identifier + higher version => upgrade existing install.
-REM  Version: src-tauri/tauri.conf.json "version"
+REM  Env: SKIP_VERSION_PROMPT=1 | BUILD_VERSION=x.y.z | BUILD_NO_PAUSE=1 | BUILD_NO_OPEN=1
 REM ============================================================
 
 call :check_tools
@@ -14,6 +14,11 @@ if errorlevel 1 exit /b 1
 call :ensure_deps
 if errorlevel 1 exit /b 1
 
+call "%~dp0scripts\prompt-version.bat"
+if errorlevel 1 (
+  call :maybe_pause
+  exit /b 1
+)
 call :read_app_version
 if not defined APP_VER set "APP_VER=?"
 
@@ -50,7 +55,7 @@ if "%COPIED%"=="0" (
 )
 
 echo.
-echo [OK] Installer package ready.
+echo [OK] Installer package ready. version=%APP_VER%
 echo.
 echo Bundle dir:
 echo   %NSIS_DIR%
@@ -58,10 +63,7 @@ echo.
 echo Copied to:
 echo   %OUT_ROOT%
 echo.
-echo Upgrade notes:
-echo   - Keep identifier unchanged in tauri.conf.json
-echo   - Bump version before release (e.g. 0.1.0 -^> 0.1.1)
-echo   - New *-setup.exe detects existing install and upgrades in place
+echo Upgrade: keep identifier, bump version, run new *-setup.exe
 echo.
 
 if /i not "%BUILD_NO_OPEN%"=="1" (
@@ -77,7 +79,7 @@ exit /b 0
 
 :read_app_version
 set "APP_VER="
-for /f "usebackq delims=" %%V in (`node -p "require('./src-tauri/tauri.conf.json').version"`) do set "APP_VER=%%V"
+for /f "usebackq delims=" %%V in (`node "scripts\set-version.mjs" --get`) do set "APP_VER=%%V"
 goto :eof
 
 :check_tools

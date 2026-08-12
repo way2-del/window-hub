@@ -10,6 +10,8 @@ pub const EVENT_NAME: &str = "Local\\WindowHubTrayHookEventV2";
 pub const MAGIC: u32 = 0x5748_5452; // 'WHTR'
 pub const SLOT_COUNT: usize = 256;
 pub const ICON_PIXELS: usize = 48 * 48;
+/// Slot buffer is 48×48; trayhook currently captures **32×32** via DrawIconEx
+/// and sets `icon_w`/`icon_h` accordingly (packed at the start of `icon_rgba`).
 pub const ICON_BYTES: usize = ICON_PIXELS * 4;
 pub const TOOLTIP_LEN: usize = 128;
 

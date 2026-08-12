@@ -163,9 +163,9 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
         loop {
             // 稳定期适度密采；锁定后低频侦测切窗（略降频减轻主岛跟色卡顿）
             let ms = if crate::win32::ambient::is_settling() {
-                280
+                450
             } else {
-                1000
+                1400
             };
             std::thread::sleep(Duration::from_millis(ms));
             let Some(window) = app.get_webview_window("main") else {
@@ -257,8 +257,50 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Focused(focused) => {
-                    // 弹窗失焦关闭。托盘用 hide（可复用 + 避免箭头二次点击竞态），
-                    // 且 chevron mousedown 会 suppress 一小段时间。
+                    // 主岛获得焦点：关掉仍开着的弹窗（点岛栏空白/其它 chip 等常见关闭方式）
+                    if window.label() == "main" && *focused {
+                        let app = window.app_handle().clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(8));
+                            let _ = crate::commands::try_with_popup_ops(|| {
+                                if !crate::commands::plugin_popup_blur_suppressed() {
+                                    if let Some(w) = app.get_webview_window("plugin-popup") {
+                                        if w.is_visible().unwrap_or(false) {
+                                            let id = crate::commands::peek_plugin_popup_id(&w);
+                                            let _ = w.hide();
+                                            crate::commands::note_plugin_popup_focus_close(
+                                                id.as_deref(),
+                                            );
+                                            let _ = app.emit("plugin-popup-closed", ());
+                                        }
+                                    }
+                                }
+                                if !crate::commands::tray_popup_blur_suppressed() {
+                                    if let Some(w) = app.get_webview_window("tray-popup") {
+                                        if w.is_visible().unwrap_or(false) {
+                                            let _ = w.hide();
+                                            let _ = app.emit("tray-popup-closed", ());
+                                        }
+                                    }
+                                }
+                                if !crate::commands::system_flyout_blur_suppressed() {
+                                    if let Some(w) = app.get_webview_window("system-flyout") {
+                                        if w.is_visible().unwrap_or(false) {
+                                            let _ = w.hide();
+                                            let _ = app.emit("system-flyout-closed", ());
+                                        }
+                                    }
+                                }
+                                if let Some(w) = app.get_webview_window("status-menu-popup") {
+                                    if w.is_visible().unwrap_or(false) {
+                                        let _ = w.hide();
+                                        let _ = app.emit("status-menu-popup-closed", ());
+                                    }
+                                }
+                            });
+                        });
+                    }
+                    // 弹窗失焦关闭。托盘用 hide（可复用）；勿在 hide 前 eval（拖慢关闭）。
                     if (window.label() == "tray-popup"
                         || window.label() == "plugin-popup"
                         || window.label() == "status-menu-popup"
@@ -268,7 +310,7 @@ pub fn run() {
                         let label = window.label().to_string();
                         let app = window.app_handle().clone();
                         std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(80));
+                            std::thread::sleep(Duration::from_millis(8));
                             if label == "tray-popup"
                                 && crate::commands::tray_popup_blur_suppressed()
                             {
@@ -284,48 +326,53 @@ pub fn run() {
                             {
                                 return;
                             }
-                            if let Some(w) = app.get_webview_window(&label) {
-                                if w.is_focused().unwrap_or(false) {
-                                    return;
+                            let _ = crate::commands::try_with_popup_ops(|| {
+                                if let Some(w) = app.get_webview_window(&label) {
+                                    if w.is_focused().unwrap_or(false) {
+                                        return;
+                                    }
+                                    let plugin_id = if label == "plugin-popup" {
+                                        crate::commands::peek_plugin_popup_id(&w)
+                                    } else {
+                                        None
+                                    };
+                                    let _ = w.hide();
+                                    match label.as_str() {
+                                        "tray-popup" => {
+                                            let _ = app.emit("tray-popup-closed", ());
+                                        }
+                                        "system-flyout" => {
+                                            let _ = app.emit("system-flyout-closed", ());
+                                        }
+                                        "plugin-popup" => {
+                                            crate::commands::note_plugin_popup_focus_close(
+                                                plugin_id.as_deref(),
+                                            );
+                                            let _ = app.emit("plugin-popup-closed", ());
+                                        }
+                                        "status-menu-popup" => {
+                                            let _ = app.emit("status-menu-popup-closed", ());
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    match label.as_str() {
+                                        "tray-popup" => {
+                                            let _ = app.emit("tray-popup-closed", ());
+                                        }
+                                        "system-flyout" => {
+                                            let _ = app.emit("system-flyout-closed", ());
+                                        }
+                                        "plugin-popup" => {
+                                            let _ = app.emit("plugin-popup-closed", ());
+                                        }
+                                        "status-menu-popup" => {
+                                            let _ = app.emit("status-menu-popup-closed", ());
+                                        }
+                                        _ => {}
+                                    }
                                 }
-                                match label.as_str() {
-                                    "tray-popup" => {
-                                        let _ = w.hide();
-                                        let _ = app.emit("tray-popup-closed", ());
-                                    }
-                                    "system-flyout" => {
-                                        let _ = w.hide();
-                                        let _ = app.emit("system-flyout-closed", ());
-                                    }
-                                    "plugin-popup" => {
-                                        // Hide (not close) so reopen is show-only — avoids cold
-                                        // create + DWM material thrash flicker.
-                                        let _ = w.hide();
-                                        let _ = app.emit("plugin-popup-closed", ());
-                                    }
-                                    "status-menu-popup" => {
-                                        let _ = w.hide();
-                                        let _ = app.emit("status-menu-popup-closed", ());
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                match label.as_str() {
-                                    "tray-popup" => {
-                                        let _ = app.emit("tray-popup-closed", ());
-                                    }
-                                    "system-flyout" => {
-                                        let _ = app.emit("system-flyout-closed", ());
-                                    }
-                                    "plugin-popup" => {
-                                        let _ = app.emit("plugin-popup-closed", ());
-                                    }
-                                    "status-menu-popup" => {
-                                        let _ = app.emit("status-menu-popup-closed", ());
-                                    }
-                                    _ => {}
-                                }
-                            }
+                            });
                         });
                     }
                 }
@@ -369,11 +416,13 @@ pub fn run() {
             commands::open_settings_window,
             commands::close_settings_window,
             commands::open_tray_popup,
+            commands::reveal_tray_popup,
             commands::close_tray_popup,
             commands::is_tray_popup_open,
             commands::suppress_tray_popup_blur,
             commands::suppress_plugin_popup_blur,
             commands::open_system_flyout,
+            commands::reveal_system_flyout,
             commands::close_system_flyout,
             commands::is_system_flyout_open,
             commands::get_system_flyout_kind,
@@ -433,6 +482,7 @@ pub fn run() {
             companion_scripts::stop_script_launcher,
             commands::apply_window_effect,
             commands::get_material_prefs,
+            commands::is_glass_compat_mode,
             commands::system_apps_dark,
             commands::set_material_prefs,
             commands::sample_ambient_color,

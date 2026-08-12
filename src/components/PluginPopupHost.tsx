@@ -75,11 +75,10 @@ declare global {
 }
 
 function resolvePluginId(): string {
-  return (
-    new URLSearchParams(window.location.search).get("plugin") ??
-    window.__WH_PLUGIN_ID__ ??
-    ""
-  );
+  const q = new URLSearchParams(window.location.search);
+  // Prefetched warm shell has no plugin yet.
+  if (q.get("warm") === "1" && !q.get("plugin")) return "";
+  return q.get("plugin") ?? window.__WH_PLUGIN_ID__ ?? "";
 }
 
 function ensureHub(pluginId: string) {
@@ -230,44 +229,121 @@ function ensureHub(pluginId: string) {
 
 type Boot = { css: string; js: string };
 
+type InstalledRow = {
+  id: string;
+  enabled: boolean;
+  manifest?: { entry?: { popup?: string } };
+};
+
+function clearInjectedDom() {
+  document.querySelectorAll("[data-wh-popup-css]").forEach((el) => el.remove());
+  document.querySelectorAll("[data-wh-popup-js]").forEach((el) => el.remove());
+  const app = document.getElementById("app");
+  if (app) app.innerHTML = "";
+  window.hub = undefined;
+}
+
+async function readPopupAssets(pluginId: string): Promise<Boot> {
+  const cached = popupAssetCache.get(pluginId);
+  if (cached) return cached;
+  const [css, js] = await Promise.all([
+    invoke<string>("hub_plugin_read_text", {
+      pluginId,
+      relativePath: "popup.css",
+    }).catch(() => ""),
+    invoke<string>("hub_plugin_read_text", {
+      pluginId,
+      relativePath: "popup.js",
+    }),
+  ]);
+  const next = { css, js };
+  popupAssetCache.set(pluginId, next);
+  return next;
+}
+
+function injectBoot(pluginId: string, boot: Boot) {
+  if (boot.css) {
+    const style = document.createElement("style");
+    style.setAttribute("data-wh-popup-css", pluginId);
+    style.textContent = boot.css;
+    document.head.appendChild(style);
+  }
+  const mount = document.getElementById("app");
+  if (!mount) throw new Error("插件挂载点 #app 缺失");
+  const script = document.createElement("script");
+  script.setAttribute("data-wh-popup-js", pluginId);
+  script.textContent = boot.js;
+  document.body.appendChild(script);
+}
+
+function snapOpaque() {
+  const root = document.querySelector(".plugin-popup-root") as HTMLElement | null;
+  if (root) {
+    root.style.transition = "none";
+    root.classList.remove("is-enter");
+    root.classList.add("is-in");
+    window.requestAnimationFrame(() => {
+      root.style.transition = "";
+    });
+  }
+}
+
 /**
  * Host shell: Tauri IPC + inject plugin CSS/JS from disk (independent package).
+ * Reuses one warm WebView and hot-swaps plugins (same pattern as Wi‑Fi flyout kind).
  */
 export default function PluginPopupHost() {
-  const pluginId = resolvePluginId();
-  const [boot, setBoot] = useState<Boot | null>(null);
+  const [pluginId, setPluginId] = useState(() => resolvePluginId());
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"enter" | "in">("enter");
-  const injectedRef = useRef(false);
+  const activeIdRef = useRef(pluginId);
+  const loadSeqRef = useRef(0);
   const glassReady = useRef(false);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  activeIdRef.current = pluginId;
 
-  /** Snap opaque — soft fade-from-0 while HWND is shown = empty mica flash. */
-  function fadeIn() {
-    if (phaseRef.current === "in") return;
-    const root = document.querySelector(".plugin-popup-root") as HTMLElement | null;
-    if (root) {
-      root.style.transition = "none";
-      root.classList.remove("is-enter");
-      root.classList.add("is-in");
-      window.requestAnimationFrame(() => {
-        root.style.transition = "";
-      });
-    }
-    phaseRef.current = "in";
-    setPhase("in");
-  }
+  const activatePlugin = async (nextId: string) => {
+    if (!nextId) return;
+    const seq = ++loadSeqRef.current;
+    setError(null);
 
-  useEffect(() => {
-    if (!pluginId) {
-      setError("缺少插件 ID");
+    // Same plugin already painted — just reveal (Wi‑Fi reopen path).
+    // Do NOT set opacity 0 first — that paints empty mica if HWND is/gets shown.
+    if (activeIdRef.current === nextId && document.querySelector("[data-wh-popup-js]")) {
+      snapOpaque();
+      phaseRef.current = "in";
+      setPhase("in");
+      void invoke("reveal_plugin_popup").catch(() => undefined);
       return;
     }
-    ensureHub(pluginId);
 
-    // CSS vars only — Rust already applied DWM material on window create.
-    // Re-calling apply_window_effect here causes a second visible flash.
+    clearInjectedDom();
+    activeIdRef.current = nextId;
+    setPluginId(nextId);
+    ensureHub(nextId);
+
+    try {
+      const boot = await readPopupAssets(nextId);
+      if (seq !== loadSeqRef.current) return;
+      injectBoot(nextId, boot);
+      snapOpaque();
+      phaseRef.current = "in";
+      setPhase("in");
+      void invoke("reveal_plugin_popup").catch(() => undefined);
+    } catch (err) {
+      if (seq !== loadSeqRef.current) return;
+      setError(String(err));
+      snapOpaque();
+      phaseRef.current = "in";
+      setPhase("in");
+      // Show error UI rather than leaving a hidden/zombie shell.
+      void invoke("reveal_plugin_popup").catch(() => undefined);
+    }
+  };
+
+  // Glass + lifecycle listeners (once).
+  useEffect(() => {
     void (async () => {
       if (glassReady.current) return;
       try {
@@ -279,15 +355,10 @@ export default function PluginPopupHost() {
       glassReady.current = true;
     })();
 
-    let cancelled = false;
-    let unGlass: (() => void) | undefined;
+    const unsubs: Array<() => void> = [];
     void listen<GlassPrefs>("material-prefs", (ev) => {
       void syncGlassCss({ ...ev.payload, kind: normalizeGlassKind(ev.payload.kind) });
-      // Prefer CSS vars only; DWM reapply on every prefs event flashes popups.
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unGlass = fn;
-    });
+    }).then((fn) => unsubs.push(fn));
 
     const unSystem = subscribeSystemDark(() => {
       void (async () => {
@@ -301,100 +372,111 @@ export default function PluginPopupHost() {
       })();
     });
 
-    let unOpened: (() => void) | undefined;
-    let unClosed: (() => void) | undefined;
     void listen<string>("plugin-popup-opened", (ev) => {
-      if (ev.payload && ev.payload !== pluginId) return;
-      fadeIn();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unOpened = fn;
-    });
-    void listen("plugin-popup-closed", () => {
-      // Stay transparent while hidden so the next show() isn't an opaque flash.
-      phaseRef.current = "enter";
-      setPhase("enter");
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unClosed = fn;
-    });
-
-    void (async () => {
-      try {
-        const cached = popupAssetCache.get(pluginId);
-        if (cached) {
-          if (!cancelled) setBoot(cached);
-          return;
-        }
-        // 约定：entry.popup 为 popup.html（或同目录），直接读兄弟 css/js，跳过 list_installed_plugins
-        const [css, js] = await Promise.all([
-          invoke<string>("hub_plugin_read_text", {
-            pluginId,
-            relativePath: "popup.css",
-          }).catch(() => ""),
-          invoke<string>("hub_plugin_read_text", {
-            pluginId,
-            relativePath: "popup.js",
-          }),
-        ]);
-        if (cancelled) return;
-        const next = { css, js };
-        popupAssetCache.set(pluginId, next);
-        setBoot(next);
-        // Fade waits for inject + reveal_plugin_popup → plugin-popup-opened.
-      } catch (err) {
-        if (!cancelled) setError(String(err));
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      unGlass?.();
-      unOpened?.();
-      unClosed?.();
-      unSystem();
-    };
-  }, [pluginId]);
-
-  useEffect(() => {
-    if (!boot || injectedRef.current) return;
-    ensureHub(pluginId);
-    injectedRef.current = true;
-
-    if (boot.css) {
-      const style = document.createElement("style");
-      style.textContent = boot.css;
-      document.head.appendChild(style);
-    }
-
-    // Defer so #app from this render is in the DOM, then reveal HWND once painted.
-    const t = window.setTimeout(() => {
-      if (!document.getElementById("app")) {
-        setError("插件挂载点 #app 缺失");
-        return;
-      }
-      const script = document.createElement("script");
-      script.textContent = boot.js;
-      document.body.appendChild(script);
-      // Opaque while still hidden, then show — avoids empty mica → content flash.
-      const root = document.querySelector(".plugin-popup-root") as HTMLElement | null;
-      if (root) {
-        root.style.transition = "none";
-        root.classList.remove("is-enter");
-        root.classList.add("is-in");
-      }
+      if (ev.payload && ev.payload !== activeIdRef.current) return;
+      snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
-      void invoke("reveal_plugin_popup").catch(() => undefined);
-      if (root) {
-        window.requestAnimationFrame(() => {
-          root.style.transition = "";
-        });
-      }
-    }, 0);
+    }).then((fn) => unsubs.push(fn));
 
-    return () => window.clearTimeout(t);
-  }, [boot, pluginId]);
+    void listen("plugin-popup-closed", () => {
+      // HWND is hidden — keep content opaque for next show (never opacity 0 + mica).
+      phaseRef.current = "in";
+      setPhase("in");
+    }).then((fn) => unsubs.push(fn));
+
+    return () => {
+      unsubs.forEach((fn) => fn());
+      unSystem();
+    };
+  }, []);
+
+  // Warm shell: prefetch popup.css/js so first open injects from memory.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await invoke<InstalledRow[]>("list_installed_plugins");
+        if (cancelled) return;
+        await Promise.all(
+          list
+            .filter((p) => p.enabled && p.manifest?.entry?.popup)
+            .map(async (p) => {
+              if (popupAssetCache.has(p.id)) return;
+              try {
+                await readPopupAssets(p.id);
+              } catch {
+                /* skip broken plugins */
+              }
+            }),
+        );
+      } catch {
+        /* noop */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Hot-swap from Rust (CustomEvent + Tauri event), like flyout kind push.
+  useEffect(() => {
+    let lastId = "";
+    let lastAt = 0;
+    const requestActivate = (id: string) => {
+      const now = Date.now();
+      // eval CustomEvent + emit arrive together — activate once.
+      if (id === lastId && now - lastAt < 120) return;
+      lastId = id;
+      lastAt = now;
+      void activatePlugin(id);
+    };
+
+    const onCustom = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ pluginId?: string; preferGroupId?: string | null }>)
+        .detail;
+      const id = detail?.pluginId?.trim();
+      if (!id) return;
+      requestActivate(id);
+    };
+    window.addEventListener("wh-plugin-popup-load", onCustom);
+
+    let unListen: (() => void) | undefined;
+    void listen<{ pluginId?: string; preferGroupId?: string | null }>(
+      "plugin-popup-load",
+      (ev) => {
+        const id = ev.payload?.pluginId?.trim();
+        if (!id) return;
+        requestActivate(id);
+      },
+    ).then((fn) => {
+      unListen = fn;
+    });
+
+    return () => {
+      window.removeEventListener("wh-plugin-popup-load", onCustom);
+      unListen?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cold start with ?plugin= in URL (no warm shell yet).
+  useEffect(() => {
+    const initial = resolvePluginId();
+    if (!initial) return;
+    void activatePlugin(initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      void invoke("close_plugin_popup").catch(() => undefined);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   /** Explorer → 弹窗：走 Tauri paths（HTML5 File.path 经常为空） */
   useEffect(() => {
@@ -406,7 +488,6 @@ export default function PluginPopupHost() {
         if (p.type !== "drop") return;
         const paths = p.paths ?? [];
         if (!paths.length) return;
-        // 无 staging 能力的弹窗会失败，静默忽略
         void invoke("hub_staging_add_paths", { pluginId, paths }).catch(() => undefined);
       })
       .then((fn) => {
@@ -429,11 +510,13 @@ export default function PluginPopupHost() {
             关闭
           </button>
         </div>
+        {/* Keep mount for next hot-swap */}
+        <main id="app" className="wg-shell" hidden />
       </div>
     );
   }
 
-  // Always keep #app mounted — swapping "加载中" ↔ shell remounts and flashes.
+  // Always keep #app mounted — warm shell + hot-swap inject into it.
   return (
     <div className={`plugin-popup-root is-${phase}`}>
       <main id="app" className="wg-shell" />

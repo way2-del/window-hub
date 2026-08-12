@@ -42,6 +42,18 @@ body.is-tray-popup #root {
   overflow: hidden;
 }
 
+/* Win10 opaque compat: never leave transparent body over opaque HWND. */
+html[data-glass-compat="1"] body.is-tray-popup,
+html[data-glass-compat="1"] body.is-tray-popup #root,
+html[data-glass-compat="1"] body.is-status-menu-popup,
+html[data-glass-compat="1"] body.is-status-menu-popup #root,
+html[data-glass-compat="1"] body.is-settings,
+html[data-glass-compat="1"] body.is-settings #root,
+html[data-glass-compat="1"] body.is-plugin-popup,
+html[data-glass-compat="1"] body.is-plugin-popup #root {
+  background: var(--glass-panel-bg, rgb(28, 28, 30)) !important;
+}
+
 body.is-status-menu-popup,
 body.is-status-menu-popup #root {
   background: transparent !important;
@@ -1203,7 +1215,7 @@ button {
   overflow: auto;
   padding: 12px 10px;
   box-sizing: border-box;
-  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.92));
   /* Match plugin popup: no CSS border/radius — DWM owns the single outer edge. */
   border: none;
   border-radius: 0;
@@ -1211,15 +1223,13 @@ button {
   user-select: none;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  opacity: 0;
-  transition: opacity 160ms ease;
+  /* Keep opaque while hidden — opacity:0 + visible mica = stuck frosted slab. */
+  opacity: 1;
+  transition: none;
 }
 
 .tray-popup-shell.is-enter,
-.tray-popup-shell.is-leave {
-  opacity: 0;
-}
-
+.tray-popup-shell.is-leave,
 .tray-popup-shell.is-in {
   opacity: 1;
 }

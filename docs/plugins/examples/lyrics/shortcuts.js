@@ -4,7 +4,10 @@
  */
 (function () {
   const CACHE_KEY = "cache";
-  const POLL_MS = 500;
+  const POLL_MS = 1600;
+
+  let settingsCache = null;
+  let lastBarKey = "";
 
   function hub() {
     if (!window.hub) throw new Error("window.hub missing");
@@ -19,13 +22,15 @@
     return chars.slice(0, n - 1).join("") + "…";
   }
 
-  async function loadSettings() {
+  async function loadSettings(force) {
+    if (!force && settingsCache) return settingsCache;
     const h = hub();
     const all = (await h.settings.getAll().catch(function () { return {}; })) || {};
-    return {
+    settingsCache = {
       showWhenIdle: !!all.showWhenIdle,
       preferLyric: all.preferLyric !== false,
     };
+    return settingsCache;
   }
 
   function barFrom(now, settings) {
@@ -58,6 +63,9 @@
   }
 
   async function applyBar(payload) {
+    const key = payload ? payload.text + "\0" + (payload.title || "") : "";
+    if (key === lastBarKey) return;
+    lastBarKey = key;
     const h = hub();
     if (!h.island) return;
     try {
@@ -73,7 +81,7 @@
 
   async function tick() {
     const h = hub();
-    const settings = await loadSettings();
+    const settings = await loadSettings(false);
     let now = null;
     try {
       if (h.media && h.media.neteaseNowPlaying) {
@@ -83,7 +91,11 @@
       console.warn("[lyrics] poll", err);
     }
     const payload = barFrom(now, settings);
-    await h.storage.set(CACHE_KEY, { now: now, savedAt: Date.now() }).catch(function () {});
+    // Avoid hammering SQLite every tick — only when lyric/title changes.
+    const cacheKey = payload ? payload.text : "";
+    if (cacheKey !== lastBarKey) {
+      await h.storage.set(CACHE_KEY, { now: now, savedAt: Date.now() }).catch(function () {});
+    }
     await applyBar(payload);
   }
 
@@ -100,6 +112,7 @@
     }, POLL_MS);
     if (h.settings && h.settings.subscribe) {
       h.settings.subscribe(function () {
+        settingsCache = null;
         void tick();
       });
     }

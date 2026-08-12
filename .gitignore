@@ -18,6 +18,9 @@ dist-ssr
 dist-installer
 dist-portable
 
+# Rust build artifacts (src-tauri, trayhook, tools/*)
+**/target/
+
 # Env secrets (commit *.example if needed)
 .env
 .env.*

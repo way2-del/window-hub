@@ -4,26 +4,33 @@
 //! - **Blur** → `ACCENT_ENABLE_BLURBEHIND`
 //! - **Aero** → `ACCENT_ENABLE_ACRYLICBLURBEHIND` with light tint
 //! - **Acrylic** → Win11 `DWMSBT_TRANSIENTWINDOW`, else SWCA acrylic
-//! - **Mica** (prefs id `mica-alt` for compat) → system `DWMSBT_MAINWINDOW`
-//!   (same Start-menu backdrop — not MicaAlt/tabbed)
+//! - **Mica** (prefs id `mica-alt` for compat) → SWCA, with **opaque solid
+//!   fallback** on Win10 / slim builds where acrylic hangs DWM.
 
 #![cfg(windows)]
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 use tauri::WebviewWindow;
 use windows::core::s;
 use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
-    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DWMWCP_ROUND, DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
+    DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR,
+    DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWM_SYSTEMBACKDROP_TYPE,
+    DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 use super::material::WindowMaterial;
 
-/// DWMBlurGlass AccentBlur uses nFlags ≈ 3584 for full-client blur regions.
+/// Sticky compat mode: opaque solid popups (no SWCA acrylic).
+/// Auto-on for Win10 (build < 22000) and after any SWCA failure — slim Win10
+/// acrylic often freezes DWM into a white/dead shell.
+static HARD_SAFE: AtomicBool = AtomicBool::new(false);
+static HARD_SAFE_INIT: Once = Once::new();
+
 const ACCENT_FLAGS_BLUR_FULL: u32 = 3584;
 
 #[repr(C)]
@@ -48,6 +55,108 @@ const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 type SetWindowCompositionAttributeFn =
     unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> BOOL;
+
+fn os_build() -> u32 {
+    #[repr(C)]
+    struct OsVersionInfo {
+        dw_os_version_info_size: u32,
+        dw_major_version: u32,
+        dw_minor_version: u32,
+        dw_build_number: u32,
+        dw_platform_id: u32,
+        sz_csd_version: [u16; 128],
+    }
+    type RtlGetVersionFn = unsafe extern "system" fn(*mut OsVersionInfo) -> i32;
+    unsafe {
+        let Ok(lib) = LoadLibraryA(s!("ntdll.dll")) else {
+            return 0;
+        };
+        let Some(proc) = GetProcAddress(lib, s!("RtlGetVersion")) else {
+            return 0;
+        };
+        let rtl: RtlGetVersionFn = std::mem::transmute(proc);
+        let mut info = OsVersionInfo {
+            dw_os_version_info_size: std::mem::size_of::<OsVersionInfo>() as u32,
+            dw_major_version: 0,
+            dw_minor_version: 0,
+            dw_build_number: 0,
+            dw_platform_id: 0,
+            sz_csd_version: [0; 128],
+        };
+        if rtl(&mut info) != 0 {
+            return 0;
+        }
+        info.dw_build_number
+    }
+}
+
+fn ensure_hard_safe_detected() {
+    HARD_SAFE_INIT.call_once(|| {
+        let build = os_build();
+        // Win11 starts at 22000. Win10 (including 精简版) → opaque by default.
+        if build > 0 && build < 22000 {
+            HARD_SAFE.store(true, Ordering::SeqCst);
+            eprintln!(
+                "[glass] Win10 build {build} — opaque HWND popups (no transparent WebView2)"
+            );
+        }
+        // User turned off Settings → Personalization → Transparency effects.
+        // Transparent WebView2 + acrylic is unusable in that state.
+        if !windows_transparency_enabled() {
+            HARD_SAFE.store(true, Ordering::SeqCst);
+            eprintln!(
+                "[glass] EnableTransparency=0 — forcing opaque popups (system transparency off)"
+            );
+        }
+    });
+}
+
+fn windows_transparency_enabled() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(key) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+    else {
+        return true;
+    };
+    match key.get_value::<u32, _>("EnableTransparency") {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(_) => true,
+    }
+}
+
+/// Whether popups use solid opaque fill (no transparent WebView fill / acrylic).
+pub fn is_hard_safe() -> bool {
+    ensure_hard_safe_detected();
+    HARD_SAFE.load(Ordering::SeqCst)
+}
+
+/// Win10 hard-safe: **never** create transparent HWNDs (EnableTransparency=0 +
+/// transparent WebView2 = white freeze). Win11 keeps layered glass.
+pub fn popup_is_transparent() -> bool {
+    !is_hard_safe()
+}
+
+/// Background for popup builders — opaque RGB on Win10, clear on Win11 glass.
+pub fn popup_background_color() -> tauri::utils::config::Color {
+    use tauri::utils::config::Color;
+    if is_hard_safe() {
+        if super::material::system_apps_dark() {
+            Color(28, 28, 30, 255)
+        } else {
+            Color(245, 245, 247, 255)
+        }
+    } else {
+        Color(0, 0, 0, 0)
+    }
+}
+
+fn arm_hard_safe(reason: &str) {
+    if !HARD_SAFE.swap(true, Ordering::SeqCst) {
+        eprintln!("[glass] enabling opaque compat mode: {reason}");
+    }
+}
 
 fn hwnd_of(window: &WebviewWindow) -> Result<HWND, String> {
     let raw = window
@@ -101,7 +210,6 @@ fn disable_system_backdrop(hwnd: HWND) {
     set_system_backdrop(hwnd, DWMSBT_NONE);
 }
 
-/// Pack `(r,g,b,a)` → SWCA GradientColor (`R | G<<8 | B<<16 | A<<24`).
 fn pack_gradient(r: u8, g: u8, b: u8, a: u8) -> u32 {
     u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16) | (u32::from(a) << 24)
 }
@@ -122,9 +230,44 @@ pub fn clear(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-/// `WS_EX_TOOLWINDOW` blocks SYSTEMBACKDROP on many Win11 builds — drop it and
-/// use ITaskbarList::DeleteTab so popups stay off the taskbar.
+/// Solid opaque fill — safe on slim Win10 where transparent+acrylic freezes DWM.
+pub fn apply_opaque_solid(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    use tauri::utils::config::Color;
+    // Skip clear_vibrancy thrash — on Win10 it can white-flash even for already-opaque HWNDs.
+    let hwnd = hwnd_of(window)?;
+    let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
+    disable_system_backdrop(hwnd);
+    let is_dark = dark.unwrap_or(true);
+    let fill = if is_dark {
+        Color(28, 28, 30, 255)
+    } else {
+        Color(245, 245, 247, 255)
+    };
+    let _ = window.set_background_color(Some(fill));
+    unsafe {
+        let v: u32 = u32::from(is_dark);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &v as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+    }
+    Ok(())
+}
+
 fn prepare_hwnd_for_system_backdrop(hwnd: HWND) {
+    // Skip COM thrash in compat mode (rapid open/close was CoInitialize storm).
+    if is_hard_safe() {
+        return;
+    }
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
@@ -172,7 +315,11 @@ fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
                 std::mem::size_of::<u32>() as u32,
             );
         }
-        let corner = DWMWCP_ROUND;
+        let corner = if is_hard_safe() {
+            DWMWCP_DONOTROUND
+        } else {
+            DWMWCP_ROUND
+        };
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -189,58 +336,62 @@ fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
     }
 }
 
-/// Ensure WebView2 / window clear pixels so SYSTEMBACKDROP (or CSS blur) can show through.
 fn clear_webview_fill(window: &WebviewWindow) {
     use tauri::utils::config::Color;
-    // Alpha must be 0 — any non-zero A becomes 255 on Win8+ WebView2.
     let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
 }
 
-/// Thin always-on-top / popup glass: SYSTEMBACKDROP often paints a dead
-/// charcoal slab under WebView2. SWCA acrylic samples the desktop reliably.
 fn apply_swca_acrylic(hwnd: HWND, dark: Option<bool>) -> Result<(), String> {
     disable_system_backdrop(hwnd);
     let tint = if dark == Some(false) {
         pack_gradient(245, 245, 250, 120)
     } else {
-        // Keep tint lighter than CSS wash so wallpaper still bleeds through.
         pack_gradient(28, 28, 30, 110)
     };
-    if !set_window_composition_attribute(
+    // Prefer blurbehind — acrylic (state 4) is the hang risk on slim Win10.
+    if set_window_composition_attribute(
+        hwnd,
+        ACCENT_ENABLE_BLURBEHIND,
+        ACCENT_FLAGS_BLUR_FULL,
+        tint,
+    ) {
+        return Ok(());
+    }
+    if set_window_composition_attribute(
         hwnd,
         ACCENT_ENABLE_ACRYLICBLURBEHIND,
         ACCENT_FLAGS_BLUR_FULL,
         tint,
     ) {
-        if !set_window_composition_attribute(
-            hwnd,
-            ACCENT_ENABLE_BLURBEHIND,
-            ACCENT_FLAGS_BLUR_FULL,
-            tint,
-        ) {
-            return Err("apply SWCA acrylic failed".into());
-        }
+        return Ok(());
     }
-    Ok(())
+    Err("apply SWCA acrylic failed".into())
 }
 
-/// Frosted system backdrop — Acrylic blurs desktop more like Start/flyouts;
-/// Mica alone often reads as a flat slab under WebView2.
+/// Frosted system backdrop — or opaque solid in hard-safe / Win10 compat mode.
 pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    ensure_hard_safe_detected();
+    if is_hard_safe() {
+        return apply_opaque_solid(window, dark);
+    }
+
     let hwnd = hwnd_of(window)?;
     prepare_hwnd_for_system_backdrop(hwnd);
-    clear_webview_fill(window);
 
-    // Unified SWCA acrylic for dock + popups. Mixing SYSTEMBACKDROP on one HWND
-    // with SWCA on another can wipe blur when a sibling window opens.
-    apply_swca_acrylic(hwnd, dark)?;
-    apply_mica_chrome(hwnd, dark);
-    clear_webview_fill(window);
-    Ok(())
+    match apply_swca_acrylic(hwnd, dark) {
+        Ok(()) => {
+            // Only clear WebView fill AFTER composition succeeds.
+            clear_webview_fill(window);
+            apply_mica_chrome(hwnd, dark);
+            Ok(())
+        }
+        Err(e) => {
+            arm_hard_safe(&e);
+            apply_opaque_solid(window, dark)
+        }
+    }
 }
 
-/// Dock icons layer: no SWCA — a sibling `dock-glass` window owns the material
-/// on the 60px strip so magnification headroom stays fully clear.
 pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
     clear_vibrancy(window);
     let hwnd = hwnd_of(window)?;
@@ -270,26 +421,33 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
             std::mem::size_of::<u32>() as u32,
         );
     }
-    clear_webview_fill(window);
+    if is_hard_safe() {
+        let _ = apply_opaque_solid(window, dark);
+    } else {
+        clear_webview_fill(window);
+    }
     Ok(())
 }
 
-/// Apply one README-aligned effect to the window.
 pub fn apply_effect(
     window: &WebviewWindow,
     kind: WindowMaterial,
     dark: Option<bool>,
     alpha: u8,
 ) -> Result<(), String> {
-    // Icons layer must stay fully clear above the bar; glass is `dock-glass`.
+    ensure_hard_safe_detected();
     if window.label() == "dock" {
         return apply_dock_icons_layer(window, dark);
+    }
+
+    if is_hard_safe() {
+        return apply_opaque_solid(window, dark);
     }
 
     let hwnd = hwnd_of(window)?;
     let a = alpha.max(1);
 
-    match kind {
+    let result = match kind {
         WindowMaterial::Blur => {
             clear_vibrancy(window);
             disable_system_backdrop(hwnd);
@@ -300,7 +458,9 @@ pub fn apply_effect(
                 ACCENT_FLAGS_BLUR_FULL,
                 color,
             ) {
-                return Err("apply Blur (SWCA blurbehind) failed".into());
+                Err("apply Blur (SWCA blurbehind) failed".into())
+            } else {
+                Ok(())
             }
         }
         WindowMaterial::Aero => {
@@ -309,18 +469,13 @@ pub fn apply_effect(
             let color = pack_gradient(200, 210, 230, a.min(140).max(40));
             if !set_window_composition_attribute(
                 hwnd,
-                ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                ACCENT_ENABLE_BLURBEHIND,
                 ACCENT_FLAGS_BLUR_FULL,
                 color,
             ) {
-                if !set_window_composition_attribute(
-                    hwnd,
-                    ACCENT_ENABLE_BLURBEHIND,
-                    ACCENT_FLAGS_BLUR_FULL,
-                    color,
-                ) {
-                    return Err("apply Aero failed".into());
-                }
+                Err("apply Aero failed".into())
+            } else {
+                Ok(())
             }
         }
         WindowMaterial::Acrylic => {
@@ -332,19 +487,26 @@ pub fn apply_effect(
                 let color = pack_gradient(18, 18, 20, a);
                 if !set_window_composition_attribute(
                     hwnd,
-                    ACCENT_ENABLE_ACRYLICBLURBEHIND,
+                    ACCENT_ENABLE_BLURBEHIND,
                     ACCENT_FLAGS_BLUR_FULL,
                     color,
                 ) {
-                    return Err("apply Acrylic failed".into());
+                    Err("apply Acrylic failed".into())
+                } else {
+                    Ok(())
                 }
+            } else {
+                Ok(())
             }
         }
-        // Prefs still say "mica-alt" for storage compat; visuals are system glass.
-        // Do NOT clear_vibrancy first — deferred/open retries would flash “blur deleted”.
-        WindowMaterial::MicaAlt => {
-            apply_system_mica(window, dark)?;
+        WindowMaterial::MicaAlt => apply_system_mica(window, dark),
+    };
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            arm_hard_safe(&e);
+            apply_opaque_solid(window, dark)
         }
     }
-    Ok(())
 }

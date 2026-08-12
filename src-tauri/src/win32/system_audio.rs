@@ -1,6 +1,8 @@
 //! Default render endpoint volume + output device switching for island flyout.
 
 #![cfg(windows)]
+// IPolicyConfig COM vtable must keep Windows PascalCase method names.
+#![allow(non_snake_case)]
 
 use std::ffi::c_void;
 

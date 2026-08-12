@@ -81,13 +81,33 @@ function PluginIcon({ icon }: { icon?: string }) {
   );
 }
 
-async function popupAnchor(el: HTMLElement) {
+/** Cached window metrics — avoids 2 IPC awaits on every plugin open. */
+let cachedScale = 0;
+let cachedOuterX = 0;
+let cachedOuterY = 0;
+let cacheAt = 0;
+
+async function refreshWindowCache() {
   const win = getCurrentWindow();
   const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
+  cachedScale = factor;
+  cachedOuterX = outer.x;
+  cachedOuterY = outer.y;
+  cacheAt = Date.now();
+}
+
+async function popupAnchor(el: HTMLElement) {
   const rect = el.getBoundingClientRect();
+  const fresh = Date.now() - cacheAt < 2500 && cachedScale > 0;
+  if (!fresh) {
+    await refreshWindowCache();
+  } else {
+    void refreshWindowCache();
+  }
+  const factor = cachedScale || 1;
   return {
-    x: Math.max(8, outer.x / factor + rect.left),
-    y: outer.y / factor + rect.bottom + POPUP_GAP,
+    x: Math.max(8, cachedOuterX / factor + rect.left),
+    y: cachedOuterY / factor + rect.bottom + POPUP_GAP,
   };
 }
 
@@ -245,18 +265,9 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
         void invoke("close_plugin_popup").catch(() => undefined);
         return;
       }
-      if (opts?.forceOpen) {
-        const openId = await invoke<string | null>("get_plugin_popup_id").catch(
-          () => null,
-        );
-        if (openId === pluginId) return;
-      }
       openingRef.current = true;
       try {
-        // 拖放中开窗：多压制一会儿 blur，避免弹窗立刻被关掉
-        await invoke("suppress_plugin_popup_blur", {
-          ms: opts?.forceOpen ? 1200 : 500,
-        }).catch(() => undefined);
+        // Single IPC — Rust suppresses blur (longer when forceOpen) and toggles.
         const { x, y } = await popupAnchor(el);
         await invoke("open_plugin_popup", {
           pluginId,

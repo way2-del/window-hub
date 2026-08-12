@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  mergeTrayIcons,
   trayLabel,
   type TrayIconInfo,
   type TrayPrefs,
@@ -38,18 +39,22 @@ async function clickTray(icon: TrayIconInfo, action: "left" | "right") {
   }
 }
 
-function fadeIn(setPhase: (p: "enter" | "in" | "leave") => void) {
-  setPhase("enter");
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => setPhase("in"));
-  });
+function snapIn(setPhase: (p: "enter" | "in" | "leave") => void) {
+  const root = document.querySelector(".tray-popup-shell") as HTMLElement | null;
+  if (root) {
+    root.style.transition = "none";
+    root.style.opacity = "1";
+    root.classList.remove("is-enter", "is-leave");
+    root.classList.add("is-in");
+  }
+  setPhase("in");
 }
 
 export default function TrayPopupApp() {
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
-  // Stay at enter (opacity 0) while hidden / warming — never auto-fade-in on mount.
-  const [phase, setPhase] = useState<"enter" | "in" | "leave">("enter");
+  // Always opaque — hide/show HWND only (opacity:0 + mica = stuck frosted slab).
+  const [phase, setPhase] = useState<"enter" | "in" | "leave">("in");
 
   useEffect(() => {
     const syncGlass = (prefs: GlassPrefs) => {
@@ -59,20 +64,6 @@ export default function TrayPopupApp() {
         acrylicAlpha: prefs.acrylicAlpha,
       });
     };
-
-    void (async () => {
-      try {
-        const prefs = await invoke<GlassPrefs>("get_material_prefs");
-        await syncGlassCss({
-          kind: "mica-alt",
-          dark: prefs.dark ?? null,
-          acrylicAlpha: prefs.acrylicAlpha,
-        });
-      } catch {
-        await syncGlassCss({ kind: "mica-alt", dark: true });
-      }
-      // Rust already applied DWM on create/warm — do not re-invoke apply_window_effect.
-    })();
 
     let cancelled = false;
     const unsubs: Array<() => void> = [];
@@ -100,6 +91,20 @@ export default function TrayPopupApp() {
     );
 
     void (async () => {
+      // CSS first, then reveal — syncGlass after show causes a second paint flash.
+      try {
+        const prefs = await invoke<GlassPrefs>("get_material_prefs");
+        await syncGlassCss({
+          kind: "mica-alt",
+          dark: prefs.dark ?? null,
+          acrylicAlpha: prefs.acrylicAlpha,
+        });
+      } catch {
+        await syncGlassCss({ kind: "mica-alt", dark: true });
+      }
+      // Don't wait for list_tray_icons (late reveal raced Focused hide → double flash).
+      void invoke("reveal_tray_popup").catch(() => undefined);
+
       try {
         const [list, prefs] = await Promise.all([
           invoke<TrayIconInfo[]>("list_tray_icons"),
@@ -116,7 +121,7 @@ export default function TrayPopupApp() {
       try {
         unsubs.push(
           await listen<TrayIconInfo[]>("tray-icons", (ev) => {
-            setIcons(ev.payload);
+            setIcons((prev) => mergeTrayIcons(prev, ev.payload ?? []));
           }),
         );
       } catch {
@@ -135,7 +140,7 @@ export default function TrayPopupApp() {
         unsubs.push(
           await listen("tray-popup-opened", () => {
             closing = false;
-            fadeIn(setPhase);
+            snapIn(setPhase);
           }),
         );
       } catch {
@@ -144,8 +149,8 @@ export default function TrayPopupApp() {
       try {
         unsubs.push(
           await listen("tray-popup-closed", () => {
-            // Keep opacity 0 while hidden so the next show() isn't an opaque flash.
-            setPhase("enter");
+            // HWND hidden — keep opaque for next show.
+            setPhase("in");
           }),
         );
       } catch {
@@ -153,28 +158,19 @@ export default function TrayPopupApp() {
       }
     })();
 
-    const poll = window.setInterval(() => {
-      void invoke<TrayIconInfo[]>("list_tray_icons")
-        .then((list) => {
-          if (!cancelled) setIcons(list);
-        })
-        .catch(() => undefined);
-    }, 5000);
+    // Event-driven only — avoid 5s list_tray_icons polls on the UI thread.
 
     // Blur close is owned by Rust (hide + suppress). Keep Escape here.
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || closing) return;
       closing = true;
-      setPhase("leave");
-      window.setTimeout(() => {
-        void invoke("close_tray_popup").catch(() => undefined);
-      }, 160);
+      setPhase("in");
+      void invoke("close_tray_popup").catch(() => undefined);
     };
     document.addEventListener("keydown", onKey);
 
     return () => {
       cancelled = true;
-      window.clearInterval(poll);
       document.removeEventListener("keydown", onKey);
       unsubs.forEach((fn) => fn());
     };

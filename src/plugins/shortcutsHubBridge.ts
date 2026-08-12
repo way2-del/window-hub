@@ -209,6 +209,10 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
     return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
   };
   window.hub.notify = notifyFn;
+  // Suppress blur-close before chip click steals focus from plugin-popup.
+  document.addEventListener("pointerdown", function () {
+    try { hostCmd("suppress_plugin_popup_blur", { ms: 900 }); } catch (_) {}
+  }, true);
   window.addEventListener("wh-shortcuts-evt", function (ev) {
     var d = ev && ev.detail;
     if (!d || d.type !== "refresh") return;

@@ -5,6 +5,7 @@ pub const EVENT_NAME: &str = "Local\\WindowHubTrayHookEventV2";
 pub const MAGIC: u32 = 0x5748_5452;
 pub const SLOT_COUNT: usize = 256;
 pub const ICON_PIXELS: usize = 48 * 48;
+/// Buffer capacity 48×48; live capture writes 32×32 at the start (`icon_w`/`icon_h`).
 pub const ICON_BYTES: usize = ICON_PIXELS * 4;
 pub const TOOLTIP_LEN: usize = 128;
 

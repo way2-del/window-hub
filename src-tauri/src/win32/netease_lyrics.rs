@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, MAX_PATH};
@@ -467,7 +468,24 @@ fn read_memory_lyric(pid: u32) -> Option<String> {
 }
 
 /// Snapshot current NetEase Cloud Music playback / lyric line.
+/// Cached ~800ms so lyrics plugin ticks don't EnumWindows/RPM every call.
 pub fn snapshot() -> NeteaseNowPlaying {
+    static CACHE: Mutex<Option<(Instant, NeteaseNowPlaying)>> = Mutex::new(None);
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, snap)) = guard.as_ref() {
+            if at.elapsed() < Duration::from_millis(800) {
+                return snap.clone();
+            }
+        }
+    }
+    let snap = snapshot_uncached();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), snap.clone()));
+    }
+    snap
+}
+
+fn snapshot_uncached() -> NeteaseNowPlaying {
     let (main, lyric_hwnd) = find_netease_hwnds();
     let mut out = NeteaseNowPlaying::default();
 

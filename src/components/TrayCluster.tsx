@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, memo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -82,7 +82,24 @@ export function trayLabel(icon: TrayIconInfo) {
   return icon.tooltip || icon.process || "未知应用";
 }
 
-function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
+/** Host may omit unchanged PNG (empty base64) — keep previous glyph. */
+export function mergeTrayIcons(
+  prev: TrayIconInfo[],
+  next: TrayIconInfo[],
+): TrayIconInfo[] {
+  if (!prev.length) return next;
+  const prevMap = new Map(prev.map((i) => [i.id, i]));
+  return next.map((n) => {
+    if (n.icon_png_base64) return n;
+    const old = prevMap.get(n.id);
+    if (old?.icon_png_base64) {
+      return { ...n, icon_png_base64: old.icon_png_base64 };
+    }
+    return n;
+  });
+}
+
+const TrayGlyph = memo(function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
   if (icon.icon_png_base64) {
     return (
       <img
@@ -95,6 +112,37 @@ function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
   }
   const letter = trayLabel(icon).charAt(0).toUpperCase();
   return <span className="tray-glyph tray-glyph-fallback">{letter}</span>;
+});
+
+function TrayClockButton({
+  open,
+  onToggle,
+}: {
+  open: boolean;
+  onToggle: (el: HTMLElement | null) => void;
+}) {
+  const [now, setNow] = useState(() => new Date());
+  const clockRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  return (
+    <button
+      ref={clockRef}
+      type="button"
+      className={`tray-clock${open ? " is-open" : ""}`}
+      title="日历"
+      aria-expanded={open}
+      onMouseDown={(e) => {
+        e.preventDefault();
+        void invoke("suppress_system_flyout_blur", { ms: 350 });
+      }}
+      onClick={() => onToggle(clockRef.current)}
+    >
+      <time dateTime={now.toISOString()}>{formatMenuClock(now)}</time>
+    </button>
+  );
 }
 
 function WifiGlyph({ on }: { on: boolean }) {
@@ -338,15 +386,36 @@ async function clickTray(icon: TrayIconInfo, action: "left" | "right") {
   }
 }
 
-async function popupAnchor(el: HTMLElement, width: number) {
+/** Cached window metrics — avoids 2 IPC awaits on every tray/flyout open. */
+let cachedScale = 0;
+let cachedOuterX = 0;
+let cachedOuterY = 0;
+let cacheAt = 0;
+
+async function refreshWindowCache() {
   const win = getCurrentWindow();
   const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
+  cachedScale = factor;
+  cachedOuterX = outer.x;
+  cachedOuterY = outer.y;
+  cacheAt = Date.now();
+}
+
+async function popupAnchor(el: HTMLElement, width: number) {
   const rect = el.getBoundingClientRect();
-  const logicalX = outer.x / factor;
-  const logicalY = outer.y / factor;
-  const x = logicalX + rect.right - width;
-  const y = logicalY + rect.bottom + TRAY_POPUP_GAP;
-  return { x, y };
+  const fresh = Date.now() - cacheAt < 2500 && cachedScale > 0;
+  if (!fresh) {
+    await refreshWindowCache();
+  } else {
+    void refreshWindowCache();
+  }
+  const factor = cachedScale || 1;
+  const logicalX = cachedOuterX / factor;
+  const logicalY = cachedOuterY / factor;
+  return {
+    x: logicalX + rect.right - width,
+    y: logicalY + rect.bottom + TRAY_POPUP_GAP,
+  };
 }
 
 export default function TrayCluster({
@@ -363,7 +432,6 @@ export default function TrayCluster({
   const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
   const [radio, setRadio] = useState<SystemRadioSnapshot | null>(null);
   const [flyoutKind, setFlyoutKind] = useState<string | null>(null);
-  const [now, setNow] = useState(() => new Date());
   const rootRef = useRef<HTMLDivElement>(null);
   const chevronRef = useRef<HTMLButtonElement>(null);
   const wifiRef = useRef<HTMLButtonElement>(null);
@@ -371,13 +439,8 @@ export default function TrayCluster({
   const volRef = useRef<HTMLButtonElement>(null);
   const powerRef = useRef<HTMLButtonElement>(null);
   const imeRef = useRef<HTMLButtonElement>(null);
-  const clockRef = useRef<HTMLButtonElement>(null);
   const togglingRef = useRef(false);
-
-  useEffect(() => {
-    const t = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(t);
-  }, []);
+  const radioSigRef = useRef("");
 
   useEffect(() => {
     let cancelled = false;
@@ -397,6 +460,15 @@ export default function TrayCluster({
           setMutedProcesses(prefs.muted_processes ?? []);
           setSystemChips(normalizeSystemChips(prefs.system_chips));
           setRadio(snap);
+          radioSigRef.current = JSON.stringify({
+            w: snap?.wifi?.connectedSsid,
+            b: snap?.bluetooth?.radioOn,
+            v: snap?.volume?.level,
+            m: snap?.volume?.muted,
+            p: snap?.power?.percent,
+            i: snap?.ime?.mark,
+            c: snap?.perf?.cpuPercent,
+          });
         }
       } catch {
         /* noop */
@@ -405,7 +477,7 @@ export default function TrayCluster({
       try {
         unsubs.push(
           await listen<TrayIconInfo[]>("tray-icons", (ev) => {
-            setIcons(ev.payload);
+            setIcons((prev) => mergeTrayIcons(prev, ev.payload ?? []));
           }),
         );
       } catch {
@@ -462,7 +534,20 @@ export default function TrayCluster({
       try {
         unsubs.push(
           await listen<SystemRadioSnapshot>("system-status-updated", (ev) => {
-            if (!cancelled && ev.payload) setRadio(ev.payload);
+            if (cancelled || !ev.payload) return;
+            const snap = ev.payload;
+            const sig = JSON.stringify({
+              w: snap.wifi?.connectedSsid,
+              b: snap.bluetooth?.radioOn,
+              v: snap.volume?.level,
+              m: snap.volume?.muted,
+              p: snap.power?.percent,
+              i: snap.ime?.mark,
+              c: snap.perf?.cpuPercent,
+            });
+            if (sig === radioSigRef.current) return;
+            radioSigRef.current = sig;
+            setRadio(snap);
           }),
         );
       } catch {
@@ -470,18 +555,8 @@ export default function TrayCluster({
       }
     })();
 
-    const poll = window.setInterval(() => {
-      // Cache-only — background SystemMonitor owns collectors / TTLs.
-      void invoke<SystemRadioSnapshot>("get_system_radio_snapshot", { force: false })
-        .then((snap) => {
-          if (!cancelled) setRadio(snap);
-        })
-        .catch(() => undefined);
-    }, 5000);
-
     return () => {
       cancelled = true;
-      window.clearInterval(poll);
       unsubs.forEach((fn) => fn());
     };
   }, [onOpenChange]);
@@ -509,29 +584,43 @@ export default function TrayCluster({
     return [...pinnedIcons, ...extra];
   }, [icons, pinnedIcons, muted, mutedProcesses]);
 
+  const openOnDownRef = useRef(false);
+
   async function togglePopup() {
     if (togglingRef.current) return;
     togglingRef.current = true;
     try {
-      await invoke("suppress_tray_popup_blur", { ms: 500 });
-      const visible = await invoke<boolean>("is_tray_popup_open");
-      if (visible || open) {
-        await invoke("close_tray_popup");
+      // Prefer HWND truth over React `open` — blur-close can desync and make "close" reopen.
+      let hwndOpen = open;
+      try {
+        hwndOpen = await invoke<boolean>("is_tray_popup_open");
+      } catch {
+        /* use React open */
+      }
+      if (hwndOpen) {
         onOpenChange(false);
+        void invoke("close_tray_popup").catch(() => undefined);
         return;
       }
       const el = chevronRef.current;
       if (!el) return;
+      // Suppress before any await — popupAnchor IPC used to outlive the short mousedown suppress.
+      void invoke("suppress_tray_popup_blur", { ms: 900 });
+      onOpenChange(true);
       const { x, y } = await popupAnchor(el, TRAY_POPUP_W);
       await invoke("open_tray_popup", { x, y });
-      onOpenChange(true);
     } catch (e) {
+      onOpenChange(false);
       console.error(e);
     } finally {
-      window.setTimeout(() => {
-        togglingRef.current = false;
-      }, 280);
+      togglingRef.current = false;
     }
+  }
+
+  /** Instant close without toggle race — used by mousedown when already open. */
+  function closePopupFast() {
+    onOpenChange(false);
+    void invoke("close_tray_popup").catch(() => undefined);
   }
 
   async function toggleFlyout(
@@ -541,22 +630,23 @@ export default function TrayCluster({
     if (!anchor || togglingRef.current) return;
     togglingRef.current = true;
     try {
-      await invoke("suppress_system_flyout_blur", { ms: 350 });
-      const visible = await invoke<boolean>("is_system_flyout_open");
-      if (visible && flyoutKind === kind) {
-        await invoke("close_system_flyout");
+      // Closing same kind: optimistic, no round-trip before hide.
+      if (flyoutKind === kind) {
         setFlyoutKind(null);
+        void invoke("close_system_flyout").catch(() => undefined);
         return;
       }
+      void invoke("suppress_system_flyout_blur", { ms: 900 });
       const { x, y } = await popupAnchor(anchor, SYSTEM_FLYOUT_W);
       setFlyoutKind(kind);
       await invoke("open_system_flyout", { kind, x, y });
     } catch (e) {
       console.error(e);
+      setFlyoutKind(null);
     } finally {
       window.setTimeout(() => {
         togglingRef.current = false;
-      }, 160);
+      }, 80);
     }
   }
 
@@ -729,20 +819,10 @@ export default function TrayCluster({
         ))}
 
         {systemChips.clock ? (
-          <button
-            ref={clockRef}
-            type="button"
-            className={`tray-clock${flyoutKind === "calendar" ? " is-open" : ""}`}
-            title="日历"
-            aria-expanded={flyoutKind === "calendar"}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              void invoke("suppress_system_flyout_blur", { ms: 350 });
-            }}
-            onClick={() => void toggleFlyout("calendar", clockRef.current)}
-          >
-            <time dateTime={now.toISOString()}>{formatMenuClock(now)}</time>
-          </button>
+          <TrayClockButton
+            open={flyoutKind === "calendar"}
+            onToggle={(el) => void toggleFlyout("calendar", el)}
+          />
         ) : null}
 
         <button
@@ -753,9 +833,27 @@ export default function TrayCluster({
           aria-expanded={open}
           onMouseDown={(e) => {
             e.preventDefault();
-            void invoke("suppress_tray_popup_blur", { ms: 500 });
+            // Always swallow the following click — setting false on close made click re-open.
+            openOnDownRef.current = true;
+            if (open) {
+              void invoke("suppress_tray_popup_blur", { ms: 900 });
+              closePopupFast();
+              return;
+            }
+            void invoke("suppress_tray_popup_blur", { ms: 900 });
+            void refreshWindowCache();
+            if (!togglingRef.current) {
+              void togglePopup();
+            }
           }}
-          onClick={() => void togglePopup()}
+          onClick={() => {
+            // Swallow click after mousedown; keyboard activation has no prior mousedown flag.
+            if (openOnDownRef.current) {
+              openOnDownRef.current = false;
+              return;
+            }
+            void togglePopup();
+          }}
         >
           <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden>
             <path

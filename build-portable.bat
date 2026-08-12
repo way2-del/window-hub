@@ -4,8 +4,8 @@ cd /d "%~dp0"
 
 REM ============================================================
 REM  Window Hub portable package (folder + zip)
-REM  Note: app has DLL/plugins, not a true single-file exe.
-REM        For a single distributable file, use build-installer.bat
+REM  Env: SKIP_VERSION_PROMPT=1 | BUILD_VERSION=x.y.z | SKIP_BUILD=1
+REM       BUILD_NO_PAUSE=1 | BUILD_NO_OPEN=1
 REM ============================================================
 
 call :check_tools
@@ -13,6 +13,12 @@ if errorlevel 1 exit /b 1
 
 call :ensure_deps
 if errorlevel 1 exit /b 1
+
+call "%~dp0scripts\prompt-version.bat"
+if errorlevel 1 (
+  call :maybe_pause
+  exit /b 1
+)
 
 if /i "%SKIP_BUILD%"=="1" goto :after_build
 
@@ -81,7 +87,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [OK] Portable package ready.
+echo [OK] Portable package ready. version=%APP_VER%
 echo.
 echo Directory:
 echo   %OUT_DIR%
@@ -101,7 +107,7 @@ exit /b 0
 
 :read_app_version
 set "APP_VER="
-for /f "usebackq delims=" %%V in (`node -p "require('./src-tauri/tauri.conf.json').version"`) do set "APP_VER=%%V"
+for /f "usebackq delims=" %%V in (`node "scripts\set-version.mjs" --get`) do set "APP_VER=%%V"
 goto :eof
 
 :check_tools

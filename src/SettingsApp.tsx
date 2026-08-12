@@ -22,6 +22,7 @@ import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginSettingsForm from "./components/PluginSettingsForm";
 import {
   DEFAULT_SYSTEM_CHIPS,
+  mergeTrayIcons,
   normalizeSystemChips,
   type SystemChipVisibility,
   type TrayIconInfo as SharedTrayIconInfo,
@@ -594,7 +595,7 @@ export default function SettingsApp() {
       setAmbient(ev.payload);
     }).then((fn) => unsubs.push(fn));
     void listen<TrayIconInfo[]>("tray-icons", (ev) => {
-      setTrays(ev.payload);
+      setTrays((prev) => mergeTrayIcons(prev, ev.payload ?? []));
     }).then((fn) => unsubs.push(fn));
     void listen<TrayPrefs>("tray-prefs", (ev) => {
       setPinned(ev.payload.pinned ?? []);
@@ -630,15 +631,9 @@ export default function SettingsApp() {
       void refreshLaunchers();
     }).then((fn) => unsubs.push(fn));
 
-    // Event-driven updates are primary; light poll only covers missed emits.
-    const poll = window.setInterval(() => {
-      void invoke<TrayIconInfo[]>("list_tray_icons")
-        .then((list) => setTrays(list))
-        .catch(() => undefined);
-    }, 8000);
+    // Event-driven tray list — no periodic list_tray_icons.
 
     return () => {
-      window.clearInterval(poll);
       unsubs.forEach((fn) => fn());
     };
   }, []);

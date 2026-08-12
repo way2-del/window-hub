@@ -182,6 +182,18 @@ mod win {
 
     /// Signature of last `tray-icons` payload — skip identical emits.
     static LAST_PUBLISH_SIG: Mutex<u64> = Mutex::new(0);
+    /// Last emitted PNG content hash per icon id — omit base64 when unchanged.
+    static LAST_EMITTED_ICON_HASH: LazyLock<Mutex<HashMap<String, u64>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static PUBLISH_PENDING: AtomicBool = AtomicBool::new(false);
+
+    fn png_hash(s: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    }
 
     pub fn get_prefs() -> TrayPrefs {
         PREFS.lock().clone()
@@ -265,7 +277,7 @@ mod win {
     }
 
     pub fn list_icons() -> Vec<TrayIconInfo> {
-        let _ = sweep_icons();
+        // Do not sweep here — reconcile owns liveness; IsWindow under lock stalls IPC.
         let mut v: Vec<_> = ICONS
             .lock()
             .values()
@@ -770,8 +782,8 @@ mod win {
             }
             icons.insert(id, info);
         }
-        let _ = sweep_icons();
-        publish();
+        // Do not sweep on every MODIFY — reconcile owns liveness; IsWindow storms freeze.
+        request_publish();
         if let Some(att) = armed_attention {
             if let Some(emit) = ATTENTION.get() {
                 emit(att);
@@ -911,8 +923,36 @@ mod win {
         h.finish()
     }
 
+    fn request_publish() {
+        // Coalesce high-frequency tray MODIFY into one emit (~16ms).
+        if PUBLISH_PENDING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(48));
+            PUBLISH_PENDING.store(false, Ordering::SeqCst);
+            publish();
+        });
+    }
+
     fn publish() {
-        let list = list_icons();
+        let mut list = list_icons();
+        // Strip unchanged glyphs so WebView doesn't re-decode giant PNG payloads.
+        {
+            let mut hashes = LAST_EMITTED_ICON_HASH.lock();
+            let mut keep: HashMap<String, u64> = HashMap::with_capacity(list.len());
+            for icon in &mut list {
+                let h = png_hash(&icon.icon_png_base64);
+                keep.insert(icon.id.clone(), h);
+                if icon.icon_png_base64.is_empty() {
+                    continue;
+                }
+                if hashes.get(&icon.id).copied() == Some(h) {
+                    icon.icon_png_base64.clear();
+                }
+            }
+            *hashes = keep;
+        }
         let sig = list_signature(&list);
         {
             let mut last = LAST_PUBLISH_SIG.lock();
@@ -1206,10 +1246,11 @@ mod win {
         let fingerprint = if blank_frame {
             "__blank__".to_string()
         } else if !os_png.is_empty() {
-            os_png.clone()
+            // Hash only — storing full PNG as fingerprint blew CPU/RAM on every MODIFY.
+            format!("{:x}", png_hash(&os_png))
         } else {
             prev.as_ref()
-                .map(|p| p.icon_png_base64.clone())
+                .map(|p| format!("{:x}", png_hash(&p.icon_png_base64)))
                 .unwrap_or_default()
         };
 
@@ -1723,6 +1764,31 @@ mod win {
         t == "微信" || t == "QQ" || t.starts_with("微信")
     }
 
+    /// Apps whose left-click tray action only works if we also restore their main window.
+    /// Default is off — focusing every tray app fights MyDockFinder / feels like a crash.
+    fn needs_focus_main_on_left(process: &str, tip: &str) -> bool {
+        let p = process.trim().to_ascii_lowercase();
+        let stem = p
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(&p)
+            .trim_end_matches(".exe");
+        matches!(
+            stem,
+            "clash" | "clash-verge" | "clash verge" | "clash_verge" | "verge-mihomo"
+                | "clashverge" | "cfw" | "clash for windows"
+        ) || stem.contains("clash")
+            || stem.contains("verge")
+            || tip.to_ascii_lowercase().contains("clash")
+    }
+
+    fn is_menu_class(name: &str) -> bool {
+        name == "#32768"
+            || name.eq_ignore_ascii_case("TrayNotifyWnd")
+            || name.contains("ContextMenu")
+            || name.contains("PopupMenu")
+    }
+
     fn process_stem_for_pid(pid: u32) -> String {
         use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::System::Threading::{
@@ -1815,9 +1881,10 @@ mod win {
             let h = rc.bottom - rc.top;
             let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
             let popup = (style & WS_POPUP.0) != 0;
-            let menu_class = name == "#32768";
+            let menu_class = is_menu_class(&name);
+            // Prefer real menu classes; only keep generic popups in a tight size band.
             let size_ok = (80..720).contains(&w) && (40..900).contains(&h);
-            if menu_class || (popup && size_ok) {
+            if menu_class || (popup && size_ok && w < 480 && h < 640) {
                 ctx.list.push(hwnd.0 as isize);
             }
             BOOL(1)
@@ -1849,6 +1916,7 @@ mod win {
 
         struct Ctx {
             before: Vec<isize>,
+            tencent: bool,
             cands: Vec<Cand>,
         }
 
@@ -1884,8 +1952,15 @@ mod win {
 
             let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
             let popup = (style & WS_POPUP.0) != 0;
-            let menu_class = name == "#32768";
-            if !(menu_class || popup) {
+            let menu_class = name == "#32768"
+                || name.eq_ignore_ascii_case("TrayNotifyWnd")
+                || name.contains("ContextMenu")
+                || name.contains("PopupMenu");
+            if menu_class {
+                // always accept
+            } else if popup && ctx.tencent {
+                // Tencent IM custom / Electron menus
+            } else {
                 return BOOL(1);
             }
 
@@ -1902,6 +1977,7 @@ mod win {
 
         let mut ctx = Ctx {
             before: before.to_vec(),
+            tencent,
             cands: Vec::new(),
         };
         unsafe {
@@ -1910,8 +1986,9 @@ mod win {
 
         let mut best: Option<(i32, isize)> = None;
         for c in ctx.cands {
+            let menu_class = is_menu_class(&c.class);
             let mut score = 0i32;
-            if c.class == "#32768" {
+            if menu_class {
                 score += 100;
             }
             if c.popup {
@@ -1953,7 +2030,7 @@ mod win {
     fn reposition_popup_menu(menu: isize, anchor: (i32, i32)) -> Option<i32> {
         use windows::Win32::Foundation::{HWND, RECT};
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics, GetWindowRect, SetWindowPos, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
+            GetSystemMetrics, GetWindowRect, SetWindowPos, HWND_TOP, SM_CXSCREEN, SM_CYSCREEN,
             SWP_NOACTIVATE, SWP_NOSIZE,
         };
 
@@ -1986,7 +2063,7 @@ mod win {
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
-                HWND_TOPMOST,
+                HWND_TOP,
                 x,
                 y,
                 0,
@@ -2205,10 +2282,14 @@ mod win {
             }
         }
 
-        crate::win32::topmost::yield_for(1_800);
+        // Only yield island TOPMOST for right-click menus — left click must not
+        // fight MyDockFinder / the 2s topmost watchdog (feels like lag/crash).
+        let adapt_menu = matches!(click, TrayClick::Right);
+        if adapt_menu {
+            crate::win32::topmost::yield_for(700);
+        }
 
         let click_pt = cursor_pos();
-        let adapt_menu = matches!(click, TrayClick::Right);
         let tencent = is_tencent_im(process, tip);
 
         let est_h = if adapt_menu {
@@ -2273,8 +2354,11 @@ mod win {
             (msg_x, msg_y),
         )?;
 
-        // Left click: also restore the process main window (Clash Verge / Mechrevo etc.).
-        if matches!(click, TrayClick::Left) && owner_pid != 0 {
+        // Left click: only restore main window for apps that need it (Clash etc.).
+        if matches!(click, TrayClick::Left)
+            && owner_pid != 0
+            && needs_focus_main_on_left(process, tip)
+        {
             let _ = crate::win32::enum_windows::focus_main_for_pid(owner_pid);
         }
 
@@ -2282,7 +2366,7 @@ mod win {
             let id_key = icon_id.to_string();
             std::thread::spawn(move || {
                 let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_millis(1_200);
+                    std::time::Instant::now() + std::time::Duration::from_millis(800);
                 let mut last_menu = 0isize;
                 while std::time::Instant::now() < deadline {
                     if let Some(menu) =
@@ -2294,8 +2378,9 @@ mod win {
                         {
                             remember_menu_height(&id_key, h);
                         }
-                        // Keep fighting TrackPopupMenu / Electron layout for a bit.
-                        for _ in 0..16 {
+                        // Brief settle against TrackPopupMenu / Electron — avoid
+                        // long SetWindowPos wars with MyDockFinder.
+                        for _ in 0..4 {
                             std::thread::sleep(std::time::Duration::from_millis(16));
                             let _ = reposition_popup_menu(menu, (place_x, place_top));
                         }

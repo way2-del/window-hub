@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
@@ -224,8 +224,8 @@ pub async fn open_settings_window(
     .minimizable(true)
     .closable(true)
     .decorations(true)
-    .transparent(true)
-    .background_color(Color(0, 0, 0, 0))
+    .transparent(crate::win32::blur_glass::popup_is_transparent())
+    .background_color(crate::win32::blur_glass::popup_background_color())
     .always_on_top(false)
     .skip_taskbar(false)
     .center()
@@ -281,6 +281,39 @@ pub fn plugin_popup_blur_suppressed() -> bool {
     now_ms() < PLUGIN_POPUP_BLUR_SUPPRESS_UNTIL.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// After Focused(main/popup) auto-hides plugin-popup, the chip click still calls open.
+/// Absorb that reopen for a short window so second click stays closed.
+static PLUGIN_FOCUS_CLOSE_UNTIL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PLUGIN_FOCUS_CLOSE_ID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn note_plugin_popup_focus_close(plugin_id: Option<&str>) {
+    PLUGIN_FOCUS_CLOSE_UNTIL.store(
+        now_ms().saturating_add(480),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    if let Some(id) = plugin_id.filter(|s| !s.is_empty()) {
+        if let Ok(mut g) = PLUGIN_FOCUS_CLOSE_ID.lock() {
+            *g = id.to_string();
+        }
+    }
+}
+
+fn should_absorb_plugin_popup_reopen(plugin_id: &str) -> bool {
+    if now_ms() >= PLUGIN_FOCUS_CLOSE_UNTIL.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    PLUGIN_FOCUS_CLOSE_ID
+        .lock()
+        .ok()
+        .map(|g| g.as_str() == plugin_id)
+        .unwrap_or(false)
+}
+
+fn clear_plugin_popup_focus_close() {
+    PLUGIN_FOCUS_CLOSE_UNTIL.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[tauri::command]
 pub fn suppress_tray_popup_blur(ms: Option<u64>) {
     let until = now_ms().saturating_add(ms.unwrap_or(450));
@@ -299,7 +332,35 @@ pub fn suppress_plugin_popup_blur(ms: Option<u64>) {
     PLUGIN_POPUP_BLUR_SUPPRESS_UNTIL.store(until, std::sync::atomic::Ordering::SeqCst);
 }
 
+
+/// Serialize popup open/close/reveal — rapid clicks were racing Focused hide/show.
+static POPUP_OPS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_popup_ops<R>(f: impl FnOnce() -> R) -> R {
+    let _g = POPUP_OPS.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
+/// Non-blocking: skip if another popup op is in flight (Focused close path).
+pub fn try_with_popup_ops<R>(f: impl FnOnce() -> R) -> Option<R> {
+    match POPUP_OPS.try_lock() {
+        Ok(_g) => Some(f()),
+        Err(_) => None,
+    }
+}
+
+/// Cold-built tray popup waits for frontend reveal (avoids white empty flash).
+static TRAY_AWAIT_REVEAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static FLYOUT_AWAIT_REVEAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn hide_popup_label(app: &AppHandle, label: &str, closed_event: &str) {
+    if label == "tray-popup" {
+        TRAY_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+    } else if label == "system-flyout" {
+        FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.hide();
     }
@@ -314,32 +375,36 @@ pub async fn open_tray_popup(
     x: f64,
     y: f64,
 ) -> Result<(), String> {
-    suppress_tray_popup_blur(Some(500));
-    if let Some(wg) = app.get_webview_window("plugin-popup") {
-        let _ = wg.hide();
-        let _ = app.emit("plugin-popup-closed", ());
-    }
-    if let Some(status) = app.get_webview_window("status-menu-popup") {
-        let _ = status.close();
-        let _ = app.emit("status-menu-popup-closed", ());
-    }
-    hide_popup_label(&app, "system-flyout", "system-flyout-closed");
+    with_popup_ops(|| {
+        // Long enough to cover cold WebView2 boot + chevron focus churn.
+        suppress_tray_popup_blur(Some(900));
+        if let Some(wg) = app.get_webview_window("plugin-popup") {
+            let _ = wg.hide();
+            let _ = app.emit("plugin-popup-closed", ());
+        }
+        if let Some(status) = app.get_webview_window("status-menu-popup") {
+            let _ = status.hide();
+            let _ = app.emit("status-menu-popup-closed", ());
+        }
+        hide_popup_label(&app, "system-flyout", "system-flyout-closed");
 
-    if let Some(existing) = app.get_webview_window("tray-popup") {
-        let _ = existing.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
-        let _ = existing.set_position(LogicalPosition::new(x, y));
-        let _ = existing.unminimize();
-        // Force opacity 0 before show — avoids one opaque frame then fade (double flash).
-        let _ = existing.eval(
-            r#"(function(){var el=document.querySelector('.tray-popup-shell');if(!el)return;el.classList.remove('is-in','is-leave');el.classList.add('is-enter');})();"#,
-        );
-        let _ = existing.show();
-        let _ = existing.set_focus();
-        let _ = app.emit("tray-popup-opened", ());
-        return Ok(());
-    }
+        if let Some(existing) = app.get_webview_window("tray-popup") {
+            TRAY_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+            // Warm path: move + single show. No set_size (resize flash), no material redo.
+            let _ = existing.set_position(LogicalPosition::new(x, y));
+            let _ = existing.unminimize();
+            if existing.is_visible().unwrap_or(false) {
+                // Already open — do not re-emit / re-show (looks like flash+reopen).
+                let _ = existing.set_focus();
+                return Ok(());
+            }
+            let _ = app.emit("tray-popup-opened", ());
+            let _ = existing.show();
+            let _ = existing.set_focus();
+            return Ok(());
+        }
 
-    let init = r#"
+        let init = r#"
       window.__WH_IS_TRAY_POPUP__ = true;
       document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape') {
@@ -348,46 +413,68 @@ pub async fn open_tray_popup(
       });
     "#;
 
-    let win = WebviewWindowBuilder::new(
-        &app,
-        "tray-popup",
-        WebviewUrl::App("index.html?window=tray".into()),
-    )
-    .title("已收纳")
-    .inner_size(TRAY_POPUP_W, TRAY_POPUP_H)
-    .resizable(false)
-    .maximizable(false)
-    .minimizable(false)
-    .closable(true)
-    .decorations(false)
-    .transparent(true)
-    .background_color(Color(0, 0, 0, 0))
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(true)
-    .visible(false)
-    .initialization_script(init)
-    .build()
-    .map_err(|e| format!("open tray popup failed: {e}"))?;
+        let win = WebviewWindowBuilder::new(
+            &app,
+            "tray-popup",
+            WebviewUrl::App("index.html?window=tray".into()),
+        )
+        .title("已收纳")
+        .inner_size(TRAY_POPUP_W, TRAY_POPUP_H)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .closable(true)
+        .decorations(false)
+        .transparent(crate::win32::blur_glass::popup_is_transparent())
+        .background_color(crate::win32::blur_glass::popup_background_color())
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false)
+        .initialization_script(init)
+        .build()
+        .map_err(|e| format!("open tray popup failed: {e}"))?;
 
-    let _ = win.set_position(LogicalPosition::new(x, y));
-    apply_saved_material(&win, &state);
-    if let Ok(hwnd) = win.hwnd() {
-        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
-    }
-    let _ = win.show();
-    let _ = win.set_focus();
-    let _ = app.emit("tray-popup-opened", ());
-    Ok(())
+        let _ = win.set_position(LogicalPosition::new(x, y));
+        apply_saved_material_once(&win, &state);
+        if let Ok(hwnd) = win.hwnd() {
+            crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+        }
+        // Cold: stay hidden until frontend reveal_tray_popup (content ready).
+        // Showing empty WebView2 here is the white double-flash.
+        TRAY_AWAIT_REVEAL.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub async fn close_tray_popup(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("tray-popup") {
-        let _ = w.hide();
-    }
-    let _ = app.emit("tray-popup-closed", ());
-    Ok(())
+    with_popup_ops(|| {
+        TRAY_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(w) = app.get_webview_window("tray-popup") {
+            let _ = w.hide();
+        }
+        let _ = app.emit("tray-popup-closed", ());
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub async fn reveal_tray_popup(app: AppHandle) -> Result<(), String> {
+    with_popup_ops(|| {
+        if !TRAY_AWAIT_REVEAL.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            // Warm reopen already showed — ignore frontend mount reveal.
+            return Ok(());
+        }
+        let Some(w) = app.get_webview_window("tray-popup") else {
+            return Ok(());
+        };
+        suppress_tray_popup_blur(Some(900));
+        let _ = app.emit("tray-popup-opened", ());
+        let _ = w.show();
+        let _ = w.set_focus();
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -445,7 +532,9 @@ pub async fn open_system_flyout(
         return Err(format!("unknown system flyout kind: {kind}"));
     }
     set_system_flyout_kind(&kind);
-    suppress_system_flyout_blur(Some(350));
+
+    with_popup_ops(|| {
+    suppress_system_flyout_blur(Some(900));
 
     hide_popup_label(&app, "tray-popup", "tray-popup-closed");
     if let Some(wg) = app.get_webview_window("plugin-popup") {
@@ -460,12 +549,29 @@ pub async fn open_system_flyout(
     let h = system_flyout_height(&kind);
 
     if let Some(existing) = app.get_webview_window("system-flyout") {
+        FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
         // Kind first so UI paints before show — avoids wifi flash / lag.
         push_flyout_kind_to_webview(&existing, &kind);
         let _ = app.emit("system-flyout-opened", &kind);
-        let _ = existing.set_size(LogicalSize::new(SYSTEM_FLYOUT_W, h));
         let _ = existing.set_position(LogicalPosition::new(x, y));
+        // Resize only when height changes — set_size every open flashes white on Win10.
+        let need_resize = existing
+            .inner_size()
+            .ok()
+            .map(|s| {
+                let scale = existing.scale_factor().unwrap_or(1.0);
+                let cur_h = (s.height as f64 / scale).round() as u32;
+                cur_h != h as u32
+            })
+            .unwrap_or(true);
+        if need_resize {
+            let _ = existing.set_size(LogicalSize::new(SYSTEM_FLYOUT_W, h));
+        }
         let _ = existing.unminimize();
+        if existing.is_visible().unwrap_or(false) {
+            let _ = existing.set_focus();
+            return Ok(());
+        }
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
@@ -496,26 +602,26 @@ pub async fn open_system_flyout(
     .minimizable(false)
     .closable(true)
     .decorations(false)
-    .transparent(true)
-    .background_color(Color(0, 0, 0, 0))
+    .transparent(crate::win32::blur_glass::popup_is_transparent())
+    .background_color(crate::win32::blur_glass::popup_background_color())
     .always_on_top(true)
     .skip_taskbar(true)
-    .focused(true)
+    .focused(false)
     .visible(false)
     .initialization_script(init)
     .build()
     .map_err(|e| format!("open system flyout failed: {e}"))?;
 
     let _ = win.set_position(LogicalPosition::new(x, y));
-    apply_saved_material(&win, &state);
+    apply_saved_material_once(&win, &state);
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
     push_flyout_kind_to_webview(&win, &kind);
-    let _ = win.show();
-    let _ = win.set_focus();
-    let _ = app.emit("system-flyout-opened", &kind);
+    // Cold: stay hidden until reveal_system_flyout (avoids empty white flash).
+    FLYOUT_AWAIT_REVEAL.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
+    })
 }
 
 #[tauri::command]
@@ -530,12 +636,34 @@ pub fn get_system_flyout_kind() -> String {
 
 #[tauri::command]
 pub async fn close_system_flyout(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("system-flyout") {
-        let _ = w.hide();
-    }
-    let _ = app.emit("system-flyout-closed", ());
-    Ok(())
+    with_popup_ops(|| {
+        FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(w) = app.get_webview_window("system-flyout") {
+            let _ = w.hide();
+        }
+        let _ = app.emit("system-flyout-closed", ());
+        Ok(())
+    })
 }
+
+#[tauri::command]
+pub async fn reveal_system_flyout(app: AppHandle) -> Result<(), String> {
+    with_popup_ops(|| {
+        if !FLYOUT_AWAIT_REVEAL.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let Some(w) = app.get_webview_window("system-flyout") else {
+            return Ok(());
+        };
+        suppress_system_flyout_blur(Some(900));
+        let kind = get_system_flyout_kind();
+        let _ = app.emit("system-flyout-opened", &kind);
+        let _ = w.show();
+        let _ = w.set_focus();
+        Ok(())
+    })
+}
+
 
 #[tauri::command]
 pub fn is_system_flyout_open(app: AppHandle) -> bool {
@@ -549,6 +677,11 @@ pub fn warm_popup_windows(app: AppHandle) {
     std::thread::Builder::new()
         .name("popup-warm".into())
         .spawn(move || {
+            #[cfg(windows)]
+            if crate::win32::blur_glass::is_hard_safe() {
+                eprintln!("[popup] hard-safe: skip warm_popup_windows");
+                return;
+            }
             std::thread::sleep(std::time::Duration::from_millis(1200));
             let state = app.state::<MaterialState>();
             if app.get_webview_window("tray-popup").is_none() {
@@ -565,8 +698,8 @@ pub fn warm_popup_windows(app: AppHandle) {
                 .minimizable(false)
                 .closable(true)
                 .decorations(false)
-                .transparent(true)
-                .background_color(Color(0, 0, 0, 0))
+                .transparent(crate::win32::blur_glass::popup_is_transparent())
+                .background_color(crate::win32::blur_glass::popup_background_color())
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .focused(false)
@@ -595,8 +728,8 @@ pub fn warm_popup_windows(app: AppHandle) {
                 .minimizable(false)
                 .closable(true)
                 .decorations(false)
-                .transparent(true)
-                .background_color(Color(0, 0, 0, 0))
+                .transparent(crate::win32::blur_glass::popup_is_transparent())
+                .background_color(crate::win32::blur_glass::popup_background_color())
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .focused(false)
@@ -625,8 +758,8 @@ pub fn warm_popup_windows(app: AppHandle) {
                 .minimizable(false)
                 .closable(true)
                 .decorations(false)
-                .transparent(true)
-                .background_color(Color(0, 0, 0, 0))
+                .transparent(crate::win32::blur_glass::popup_is_transparent())
+                .background_color(crate::win32::blur_glass::popup_background_color())
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .focused(false)
@@ -937,8 +1070,8 @@ pub async fn open_status_menu_popup(
     .minimizable(false)
     .closable(true)
     .decorations(false)
-    .transparent(true)
-    .background_color(Color(0, 0, 0, 0))
+    .transparent(crate::win32::blur_glass::popup_is_transparent())
+    .background_color(crate::win32::blur_glass::popup_background_color())
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(true)
@@ -991,6 +1124,11 @@ fn popup_plugin_id_of(win: &WebviewWindow) -> Option<String> {
     None
 }
 
+/// Public helper for focus-close path (lib.rs).
+pub fn peek_plugin_popup_id(win: &WebviewWindow) -> Option<String> {
+    popup_plugin_id_of(win)
+}
+
 fn urlencoding_minimal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -1031,7 +1169,7 @@ pub async fn open_plugin_popup(
     prefer_group_id: Option<String>,
     force_open: Option<bool>,
 ) -> Result<(), String> {
-    suppress_plugin_popup_blur(Some(500));
+    suppress_plugin_popup_blur(Some(900));
     if let Some(tray) = app.get_webview_window("tray-popup") {
         let _ = tray.hide();
         let _ = app.emit("tray-popup-closed", ());
@@ -1040,6 +1178,7 @@ pub async fn open_plugin_popup(
         let _ = status.hide();
         let _ = app.emit("status-menu-popup-closed", ());
     }
+    hide_popup_label(&app, "system-flyout", "system-flyout-closed");
 
     let record = crate::plugin_install::find_installed_plugin(&plugin_id)
         .ok_or_else(|| "plugin not installed".to_string())?;
@@ -1065,8 +1204,15 @@ pub async fn open_plugin_popup(
             let prefer = prefer_group_id.as_ref().filter(|s| !s.is_empty());
             // 二次点击同一插件入口（无 preferGroup）→ 关闭；拖入 force_open 禁止关掉
             if was_visible && prefer.is_none() && !force_open {
+                clear_plugin_popup_focus_close();
                 let _ = existing.hide();
                 let _ = app.emit("plugin-popup-closed", ());
+                return Ok(());
+            }
+            // Focus raced ahead: HWND already hidden by Focused(main), chip still "opens".
+            if !was_visible && prefer.is_none() && !force_open && should_absorb_plugin_popup_reopen(&plugin_id)
+            {
+                clear_plugin_popup_focus_close();
                 return Ok(());
             }
             if let Some(gid) = prefer {
@@ -1080,6 +1226,7 @@ pub async fn open_plugin_popup(
                 return Ok(());
             }
             // Was hidden: paint opaque *before* show so DWM doesn't flash an empty shell.
+            clear_plugin_popup_focus_close();
             let _ = existing.eval(
                 r#"(function(){var el=document.querySelector('.plugin-popup-root');if(!el)return;el.style.transition='none';el.classList.remove('is-enter');el.classList.add('is-in');})();"#,
             );
@@ -1094,6 +1241,7 @@ pub async fn open_plugin_popup(
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
 
+    clear_plugin_popup_focus_close();
     let mut url_s = format!("index.html?window=plugin-popup&plugin={plugin_id}");
     if let Some(gid) = prefer_group_id.as_ref().filter(|s| !s.is_empty()) {
         url_s.push_str("&preferGroup=");
@@ -1116,18 +1264,18 @@ pub async fn open_plugin_popup(
         .minimizable(false)
         .closable(true)
         .decorations(false)
-        .transparent(true)
-        .background_color(Color(0, 0, 0, 0))
+        .transparent(crate::win32::blur_glass::popup_is_transparent())
+        .background_color(crate::win32::blur_glass::popup_background_color())
         .always_on_top(true)
         .skip_taskbar(true)
-        .focused(true)
+        .focused(false)
         .visible(false)
         .initialization_script(init)
         .build()
         .map_err(|e| format!("open plugin popup failed: {e}"))?;
 
     let _ = win.set_position(LogicalPosition::new(x, y));
-    apply_saved_material(&win, &state);
+    apply_saved_material_once(&win, &state);
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
@@ -1223,6 +1371,12 @@ fn apply_saved_material(window: &tauri::WebviewWindow, state: &MaterialState) {
     crate::win32::material::apply_prefs_deferred(window, &prefs);
 }
 
+/// Single apply — popup open path (no deferred DWM retries on Win10).
+fn apply_saved_material_once(window: &tauri::WebviewWindow, state: &MaterialState) {
+    let prefs = read_material_prefs(state);
+    let _ = crate::win32::material::apply_prefs(window, &prefs);
+}
+
 pub fn apply_saved_material_pub(window: &tauri::WebviewWindow, state: &MaterialState) {
     apply_saved_material(window, state);
 }
@@ -1247,6 +1401,19 @@ fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::M
 pub fn get_material_prefs(state: State<'_, MaterialState>) -> crate::win32::material::MaterialPrefs {
     read_material_prefs(&state).normalize()
 }
+
+#[tauri::command]
+pub fn is_glass_compat_mode() -> bool {
+    #[cfg(windows)]
+    {
+        crate::win32::blur_glass::is_hard_safe()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 
 /// Concrete Windows Apps dark/light (used when material prefs `dark` is null / 跟随系统).
 #[tauri::command]

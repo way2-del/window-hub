@@ -18,6 +18,36 @@ import {
 const POPUP_GAP = 8;
 const ICON_STRIP_FALLBACK = 22;
 
+/** Cached window metrics — avoids 2 IPC awaits on every plugin open. */
+let cachedScale = 0;
+let cachedOuterX = 0;
+let cachedOuterY = 0;
+let cacheAt = 0;
+
+async function refreshWindowCache() {
+  const win = getCurrentWindow();
+  const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
+  cachedScale = factor;
+  cachedOuterX = outer.x;
+  cachedOuterY = outer.y;
+  cacheAt = Date.now();
+}
+
+async function popupAnchorFromEl(el: HTMLElement) {
+  const rect = el.getBoundingClientRect();
+  const fresh = Date.now() - cacheAt < 2500 && cachedScale > 0;
+  if (!fresh) {
+    await refreshWindowCache();
+  } else {
+    void refreshWindowCache();
+  }
+  const factor = cachedScale || 1;
+  return {
+    x: Math.max(8, cachedOuterX / factor + rect.left + Math.min(rect.width, 28) / 2),
+    y: cachedOuterY / factor + rect.bottom + POPUP_GAP,
+  };
+}
+
 type Props = {
   pluginId: string;
   entryPath: string;
@@ -27,17 +57,6 @@ type Props = {
   action?: string;
   onRequestWidth: (pluginId: string, width: number) => void;
 };
-
-
-async function popupAnchorFromEl(el: HTMLElement) {
-  const win = getCurrentWindow();
-  const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
-  const rect = el.getBoundingClientRect();
-  return {
-    x: Math.max(8, outer.x / factor + rect.left + Math.min(rect.width, 28) / 2),
-    y: outer.y / factor + rect.bottom + POPUP_GAP,
-  };
-}
 
 /**
  * Host shell: one short transparent iframe for a shortcuts plugin strip.
@@ -67,16 +86,21 @@ export default function ShortcutsPluginStrip({
         return;
       }
       if (action !== "popup.open") return;
-      const openId = await invoke<string | null>("get_plugin_popup_id").catch(() => null);
-      if (openId === pluginId) {
-        // 拖入只保证打开，勿 toggle 关掉
-        if (opts?.forceOpen) return;
-        await invoke("close_plugin_popup").catch(() => undefined);
-        return;
+      if (opts?.forceOpen !== true) {
+        try {
+          const [isOpen, curId] = await Promise.all([
+            invoke<boolean>("is_plugin_popup_open"),
+            invoke<string | null>("get_plugin_popup_id"),
+          ]);
+          if (isOpen && curId === pluginId) {
+            await invoke("close_plugin_popup");
+            return;
+          }
+        } catch {
+          /* open */
+        }
       }
-      await invoke("suppress_plugin_popup_blur", {
-        ms: opts?.forceOpen ? 1200 : 500,
-      }).catch(() => undefined);
+      void invoke("suppress_plugin_popup_blur", { ms: 900 }).catch(() => undefined);
       const { x, y } = await popupAnchorFromEl(wrapRef.current);
       await invoke("open_plugin_popup", {
         pluginId,
@@ -146,6 +170,15 @@ export default function ShortcutsPluginStrip({
     }
   };
 
+  const measureTimerRef = useRef<number | null>(null);
+  const scheduleMeasure = () => {
+    if (measureTimerRef.current != null) return;
+    measureTimerRef.current = window.setTimeout(() => {
+      measureTimerRef.current = null;
+      measureAndReport();
+    }, 80);
+  };
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -174,18 +207,19 @@ export default function ShortcutsPluginStrip({
     let mo: MutationObserver | null = null;
 
     const attach = () => {
-      measureAndReport();
+      scheduleMeasure();
       try {
         const doc = iframe.contentDocument;
         const bar = doc?.getElementById("bar") ?? doc?.body;
         if (!bar) return;
         if (typeof ResizeObserver !== "undefined") {
-          ro = new ResizeObserver(() => measureAndReport());
+          ro = new ResizeObserver(() => scheduleMeasure());
           ro.observe(bar);
         }
         if (typeof MutationObserver !== "undefined") {
-          mo = new MutationObserver(() => measureAndReport());
-          mo.observe(bar, { childList: true, subtree: true, characterData: true });
+          // childList only — characterData storms from lyrics text thrash measure.
+          mo = new MutationObserver(() => scheduleMeasure());
+          mo.observe(bar, { childList: true, subtree: true });
         }
       } catch {
         /* noop */
@@ -195,13 +229,17 @@ export default function ShortcutsPluginStrip({
     iframe.addEventListener("load", attach);
     // srcdoc may already be loaded
     window.setTimeout(attach, 0);
-    window.setTimeout(measureAndReport, 50);
-    window.setTimeout(measureAndReport, 200);
+    window.setTimeout(scheduleMeasure, 50);
+    window.setTimeout(scheduleMeasure, 200);
 
     return () => {
       iframe.removeEventListener("load", attach);
       ro?.disconnect();
       mo?.disconnect();
+      if (measureTimerRef.current != null) {
+        window.clearTimeout(measureTimerRef.current);
+        measureTimerRef.current = null;
+      }
     };
   }, [pluginId, srcdoc]);
 
@@ -252,13 +290,22 @@ export default function ShortcutsPluginStrip({
               typeof d.args?.preferGroupId === "string" && d.args.preferGroupId
                 ? d.args.preferGroupId
                 : null;
-            const openId = await invoke<string | null>("get_plugin_popup_id").catch(() => null);
-            // 无 preferGroup：二次点击同插件 → 关闭（随心记/中转站/窗口组管理）
-            if (openId === pluginId && !preferGroupId) {
-              await invoke("close_plugin_popup").catch(() => undefined);
-              return;
+            // Toggle close when same plugin popup already open (no preferGroup).
+            if (!preferGroupId) {
+              try {
+                const [isOpen, curId] = await Promise.all([
+                  invoke<boolean>("is_plugin_popup_open"),
+                  invoke<string | null>("get_plugin_popup_id"),
+                ]);
+                if (isOpen && curId === pluginId) {
+                  await invoke("close_plugin_popup");
+                  return;
+                }
+              } catch {
+                /* fall through to open */
+              }
             }
-            await invoke("suppress_plugin_popup_blur", { ms: 500 }).catch(() => undefined);
+            void invoke("suppress_plugin_popup_blur", { ms: 900 }).catch(() => undefined);
             const { x, y } = await popupAnchorFromEl(wrapRef.current);
             await invoke("open_plugin_popup", {
               pluginId,
@@ -273,6 +320,11 @@ export default function ShortcutsPluginStrip({
             openingRef.current = false;
           }
         })();
+        return;
+      }
+      if (d.cmd === "suppress_plugin_popup_blur") {
+        const ms = Number(d.args?.ms) || 900;
+        void invoke("suppress_plugin_popup_blur", { ms }).catch(() => undefined);
         return;
       }
       if (!d.cmd || !d.id) return;
@@ -319,7 +371,7 @@ export default function ShortcutsPluginStrip({
               },
               "*",
             );
-            window.setTimeout(measureAndReport, 0);
+            window.setTimeout(scheduleMeasure, 0);
           }),
         );
         unsubs.push(
@@ -335,7 +387,7 @@ export default function ShortcutsPluginStrip({
           await listen("plugin-popup-closed", () => {
             frame()?.postMessage({ channel: WH_SHORTCUTS_EVT, type: "popup-closed" }, "*");
             frame()?.postMessage({ channel: WH_SHORTCUTS_EVT, type: "refresh" }, "*");
-            window.setTimeout(measureAndReport, 80);
+            window.setTimeout(scheduleMeasure, 80);
           }),
         );
         unsubs.push(
