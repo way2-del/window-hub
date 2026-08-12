@@ -621,17 +621,22 @@ export default function SystemFlyoutApp() {
         },
       };
     });
+    void invoke("suppress_system_flyout_blur", { ms: 1200 }).catch(() => undefined);
     try {
       await invoke("set_bluetooth_device", { id, connect });
-      requestSoftRefresh(["bluetooth"]);
-      void refresh(false);
       setMsg("");
+      requestSoftRefresh(["bluetooth"]);
+      // Deferred re-read — don't await here (keeps mica shell painting).
+      window.setTimeout(() => {
+        void refresh(false);
+      }, 700);
     } catch (e) {
       setMsg(String(e));
       requestSoftRefresh(["bluetooth"]);
       void refresh(false);
+    } finally {
+      setBusy(null);
     }
-    setBusy(null);
   }
 
   useEffect(() => {
@@ -667,6 +672,10 @@ export default function SystemFlyoutApp() {
     const onCustom = (ev: Event) => {
       const detail = (ev as CustomEvent<string>).detail;
       applyKind(parseKind(detail));
+      // Warm reopen arms FLYOUT_AWAIT — reveal after kind paints (avoids wifi→X flash).
+      requestAnimationFrame(() => {
+        void invoke("reveal_system_flyout").catch(() => undefined);
+      });
       void refresh(false);
       requestSoftRefresh(["audio", "power", "perf", "ime", "wifi", "bluetooth"]);
     };

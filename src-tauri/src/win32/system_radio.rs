@@ -577,14 +577,43 @@ fn bt_service_state_ok(rc: u32) -> bool {
     rc == 0 || rc == 0x8007_0057 || rc == 87
 }
 
+/// Prefer A2DP / Handsfree / HID for reconnect nudge — toggling every installed
+/// service DISABLE→ENABLE causes multi-second PnP storms (flyout goes white).
+fn bt_nudge_services(services: &[windows::core::GUID]) -> Vec<windows::core::GUID> {
+    use windows::core::GUID;
+    const PRIORITY: [u128; 4] = [
+        0x0000110B_0000_1000_8000_00805F9B34FB, // AudioSink
+        0x0000111E_0000_1000_8000_00805F9B34FB, // Handsfree
+        0x00001108_0000_1000_8000_00805F9B34FB, // Headset
+        0x00001124_0000_1000_8000_00805F9B34FB, // HID
+    ];
+    let mut out = Vec::new();
+    for p in PRIORITY {
+        let want = GUID::from_u128(p);
+        if let Some(g) = services.iter().find(|s| **s == want) {
+            out.push(*g);
+            if out.len() >= 2 {
+                break;
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(first) = services.first() {
+            out.push(*first);
+        }
+    }
+    out
+}
+
 /// Connect or disconnect a remembered Bluetooth device via common service GUIDs.
 pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String> {
     use windows::core::GUID;
     use windows::Win32::Devices::Bluetooth::{
-        BluetoothFindDeviceClose, BluetoothFindFirstDevice, BluetoothFindFirstRadio,
-        BluetoothFindNextDevice, BluetoothFindRadioClose, BluetoothSetServiceState,
-        BLUETOOTH_DEVICE_INFO, BLUETOOTH_DEVICE_SEARCH_PARAMS, BLUETOOTH_FIND_RADIO_PARAMS,
-        BLUETOOTH_SERVICE_DISABLE, BLUETOOTH_SERVICE_ENABLE,
+        BluetoothEnumerateInstalledServices, BluetoothFindDeviceClose, BluetoothFindFirstDevice,
+        BluetoothFindFirstRadio, BluetoothFindNextDevice, BluetoothFindRadioClose,
+        BluetoothGetDeviceInfo, BluetoothSetServiceState, BLUETOOTH_DEVICE_INFO,
+        BLUETOOTH_DEVICE_SEARCH_PARAMS, BLUETOOTH_FIND_RADIO_PARAMS, BLUETOOTH_SERVICE_DISABLE,
+        BLUETOOTH_SERVICE_ENABLE,
     };
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
@@ -611,11 +640,13 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
         };
         let mut radio = HANDLE::default();
         let radio_find = BluetoothFindFirstRadio(&radio_params, &mut radio).ok();
-        let radio_handle = if radio.is_invalid() {
-            HANDLE::default()
-        } else {
-            radio
-        };
+        if radio.is_invalid() {
+            if let Some(rf) = radio_find {
+                let _ = BluetoothFindRadioClose(rf);
+            }
+            return Err("未找到蓝牙适配器".into());
+        }
+        let radio_handle = radio;
 
         let params = BLUETOOTH_DEVICE_SEARCH_PARAMS {
             dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_SEARCH_PARAMS>() as u32,
@@ -637,9 +668,7 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
                 if let Some(rf) = radio_find {
                     let _ = BluetoothFindRadioClose(rf);
                 }
-                if !radio_handle.is_invalid() {
-                    let _ = CloseHandle(radio_handle);
-                }
+                let _ = CloseHandle(radio_handle);
                 return Err(format!("BluetoothFindFirstDevice: {e}"));
             }
         };
@@ -660,54 +689,99 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
         }
         let _ = BluetoothFindDeviceClose(find);
 
-        let Some(dev) = found_info else {
+        let Some(mut dev) = found_info else {
             if let Some(rf) = radio_find {
                 let _ = BluetoothFindRadioClose(rf);
             }
-            if !radio_handle.is_invalid() {
-                let _ = CloseHandle(radio_handle);
-            }
+            let _ = CloseHandle(radio_handle);
             return Err("未找到该蓝牙设备".into());
         };
 
-        let mut touched = false;
-        for svc in SERVICES {
-            if connect {
-                // Prefer ENABLE-only first (faster). DISABLE→ENABLE is a reconnect nudge.
-                let rc = BluetoothSetServiceState(
+        // Refresh cached fields — SetServiceState is picky about a full DEVICE_INFO.
+        let _ = BluetoothGetDeviceInfo(radio_handle, &mut dev);
+
+        // Prefer services Windows already mapped for this device; fall back to common profiles.
+        let mut services: Vec<GUID> = {
+            let mut count: u32 = 0;
+            let rc = BluetoothEnumerateInstalledServices(
+                radio_handle,
+                &dev,
+                &mut count,
+                None,
+            );
+            if (rc == 0 || rc == 234 /* ERROR_MORE_DATA */) && count > 0 && count < 64 {
+                let mut buf = vec![GUID::default(); count as usize];
+                let mut n = count;
+                let rc2 = BluetoothEnumerateInstalledServices(
                     radio_handle,
                     &dev,
-                    &svc,
-                    BLUETOOTH_SERVICE_ENABLE,
+                    &mut n,
+                    Some(buf.as_mut_ptr()),
                 );
-                if bt_service_state_ok(rc) {
-                    touched = true;
+                if rc2 == 0 || rc2 == 234 {
+                    buf.truncate(n as usize);
+                    buf
+                } else {
+                    Vec::new()
                 }
             } else {
+                Vec::new()
+            }
+        };
+        if services.is_empty() {
+            services.extend_from_slice(&SERVICES);
+        }
+
+        let mut touched = false;
+        if connect {
+            // Fast path: ENABLE only (no driver tear-down).
+            for svc in &services {
                 let rc = BluetoothSetServiceState(
                     radio_handle,
                     &dev,
-                    &svc,
-                    BLUETOOTH_SERVICE_DISABLE,
+                    svc,
+                    BLUETOOTH_SERVICE_ENABLE,
                 );
                 if bt_service_state_ok(rc) {
                     touched = true;
                 }
             }
-        }
-        if connect && !touched {
-            for svc in SERVICES {
-                let _ = BluetoothSetServiceState(
-                    radio_handle,
-                    &dev,
-                    &svc,
-                    BLUETOOTH_SERVICE_DISABLE,
-                );
+            // Already-enabled-but-disconnected: nudge at most 2 primary profiles.
+            // Full-list DISABLE→ENABLE freezes DWM / turns the mica flyout white.
+            let need_nudge = bt_device_connected(&target) != Some(true);
+            if need_nudge {
+                for svc in bt_nudge_services(&services) {
+                    let _ = BluetoothSetServiceState(
+                        radio_handle,
+                        &dev,
+                        &svc,
+                        BLUETOOTH_SERVICE_DISABLE,
+                    );
+                    let rc = BluetoothSetServiceState(
+                        radio_handle,
+                        &dev,
+                        &svc,
+                        BLUETOOTH_SERVICE_ENABLE,
+                    );
+                    if bt_service_state_ok(rc) {
+                        touched = true;
+                    }
+                }
+            }
+        } else {
+            // Disconnect: disable mapped services only; if we fell back to the full
+            // profile list, only touch the primary ones to avoid PnP white-out.
+            let to_disable = if services.len() > 4 {
+                bt_nudge_services(&services)
+            } else {
+                services.clone()
+            };
+            for svc in &to_disable {
                 let rc = BluetoothSetServiceState(
                     radio_handle,
                     &dev,
-                    &svc,
-                    BLUETOOTH_SERVICE_ENABLE,
+                    svc,
+                    BLUETOOTH_SERVICE_DISABLE,
                 );
                 if bt_service_state_ok(rc) {
                     touched = true;
@@ -718,9 +792,7 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
         if let Some(rf) = radio_find {
             let _ = BluetoothFindRadioClose(rf);
         }
-        if !radio_handle.is_invalid() {
-            let _ = CloseHandle(radio_handle);
-        }
+        let _ = CloseHandle(radio_handle);
 
         crate::win32::system_monitor::invalidate_bluetooth();
         if touched {

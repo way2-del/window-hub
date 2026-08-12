@@ -570,6 +570,33 @@ export default function TrayCluster({
       .catch(() => undefined);
   }, [open]);
 
+  // Island / chrome clicks often never transfer HWND focus to the flyout (deferred
+  // reveal). Close explicitly when pointer lands outside the flyout triggers.
+  useEffect(() => {
+    if (!flyoutKind) return;
+    const onPtr = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest?.(".tray-sys-btn, .tray-clock, .tray-ime-btn")) return;
+      setFlyoutKind(null);
+      void invoke("close_system_flyout").catch(() => undefined);
+    };
+    window.addEventListener("pointerdown", onPtr, true);
+    return () => window.removeEventListener("pointerdown", onPtr, true);
+  }, [flyoutKind]);
+
+  // Same for the chevron tray popup — warm show often leaves main focused.
+  useEffect(() => {
+    if (!open) return;
+    const onPtr = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest?.(".tray-chevron")) return;
+      onOpenChange(false);
+      void invoke("close_tray_popup").catch(() => undefined);
+    };
+    window.addEventListener("pointerdown", onPtr, true);
+    return () => window.removeEventListener("pointerdown", onPtr, true);
+  }, [open, onOpenChange]);
+
   const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
   const pinnedIcons = useMemo(
     () => icons.filter((i) => pinnedSet.has(i.id)),
@@ -605,7 +632,7 @@ export default function TrayCluster({
       const el = chevronRef.current;
       if (!el) return;
       // Suppress before any await — popupAnchor IPC used to outlive the short mousedown suppress.
-      void invoke("suppress_tray_popup_blur", { ms: 900 });
+      void invoke("suppress_tray_popup_blur", { ms: 400 });
       onOpenChange(true);
       const { x, y } = await popupAnchor(el, TRAY_POPUP_W);
       await invoke("open_tray_popup", { x, y });
@@ -630,7 +657,7 @@ export default function TrayCluster({
     if (!anchor || togglingRef.current) return;
     togglingRef.current = true;
     // 先 suppress：点其它芯片时避免失焦先关窗，再热切换 kind
-    void invoke("suppress_system_flyout_blur", { ms: 900 });
+    void invoke("suppress_system_flyout_blur", { ms: 400 });
     try {
       // Closing same kind: optimistic, no round-trip before hide.
       if (flyoutKind === kind) {
@@ -687,7 +714,7 @@ export default function TrayCluster({
             aria-expanded={flyoutKind === "wifi"}
             onMouseDown={(e) => {
               e.preventDefault();
-              void invoke("suppress_system_flyout_blur", { ms: 900 });
+              void invoke("suppress_system_flyout_blur", { ms: 400 });
             }}
             onClick={() => void toggleFlyout("wifi", wifiRef.current)}
           >
@@ -705,7 +732,7 @@ export default function TrayCluster({
             aria-expanded={flyoutKind === "bluetooth"}
             onMouseDown={(e) => {
               e.preventDefault();
-              void invoke("suppress_system_flyout_blur", { ms: 900 });
+              void invoke("suppress_system_flyout_blur", { ms: 400 });
             }}
             onClick={() => void toggleFlyout("bluetooth", btRef.current)}
           >
@@ -837,11 +864,11 @@ export default function TrayCluster({
             // Always swallow the following click — setting false on close made click re-open.
             openOnDownRef.current = true;
             if (open) {
-              void invoke("suppress_tray_popup_blur", { ms: 900 });
+              void invoke("suppress_tray_popup_blur", { ms: 400 });
               closePopupFast();
               return;
             }
-            void invoke("suppress_tray_popup_blur", { ms: 900 });
+            void invoke("suppress_tray_popup_blur", { ms: 400 });
             void refreshWindowCache();
             if (!togglingRef.current) {
               void togglePopup();

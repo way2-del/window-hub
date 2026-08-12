@@ -286,6 +286,7 @@ pub fn run() {
                                     }
                                 }
                                 if !crate::commands::system_flyout_blur_suppressed() {
+                                    crate::commands::cancel_system_flyout_reveal_fallback();
                                     if let Some(w) = app.get_webview_window("system-flyout") {
                                         if w.is_visible().unwrap_or(false) {
                                             let _ = w.hide();

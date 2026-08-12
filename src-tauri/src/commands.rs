@@ -345,25 +345,20 @@ pub fn with_popup_ops_pub<R>(f: impl FnOnce() -> R) -> R {
     with_popup_ops(f)
 }
 
-/// Non-blocking: skip if another popup op is in flight (Focused close path).
-pub fn try_with_popup_ops<R>(f: impl FnOnce() -> R) -> Option<R> {
-    match POPUP_OPS.try_lock() {
-        Ok(_g) => Some(f()),
-        Err(_) => None,
-    }
-}
-
 /// Cold-built tray popup waits for frontend reveal (avoids white empty flash).
 static TRAY_AWAIT_REVEAL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static FLYOUT_AWAIT_REVEAL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static FLYOUT_FALLBACK_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 fn hide_popup_label(app: &AppHandle, label: &str, closed_event: &str) {
     if label == "tray-popup" {
         TRAY_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
     } else if label == "system-flyout" {
         FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+        FLYOUT_FALLBACK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.hide();
@@ -380,8 +375,8 @@ pub async fn open_tray_popup(
     y: f64,
 ) -> Result<(), String> {
     with_popup_ops(|| {
-        // Long enough to cover cold WebView2 boot + chevron focus churn.
-        suppress_tray_popup_blur(Some(900));
+        // Brief — long suppress left tray open without focus (island clicks never close).
+        suppress_tray_popup_blur(Some(400));
         if let Some(wg) = app.get_webview_window("plugin-popup") {
             clear_plugin_popup_reveal_fallback();
             let _ = wg.hide();
@@ -406,6 +401,12 @@ pub async fn open_tray_popup(
             let _ = app.emit("tray-popup-opened", ());
             let _ = existing.show();
             let _ = existing.set_focus();
+            let win = existing.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                suppress_tray_popup_blur(Some(180));
+                let _ = win.set_focus();
+            });
             return Ok(());
         }
 
@@ -474,10 +475,16 @@ pub async fn reveal_tray_popup(app: AppHandle) -> Result<(), String> {
         let Some(w) = app.get_webview_window("tray-popup") else {
             return Ok(());
         };
-        suppress_tray_popup_blur(Some(900));
+        suppress_tray_popup_blur(Some(280));
         let _ = app.emit("tray-popup-opened", ());
         let _ = w.show();
         let _ = w.set_focus();
+        let win = w.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            suppress_tray_popup_blur(Some(180));
+            let _ = win.set_focus();
+        });
         Ok(())
     })
 }
@@ -539,7 +546,8 @@ pub async fn open_system_flyout(
     set_system_flyout_kind(&kind);
 
     with_popup_ops(|| {
-    suppress_system_flyout_blur(Some(900));
+    // Brief — long suppress left the flyout open without focus (island clicks never close).
+    suppress_system_flyout_blur(Some(400));
 
     hide_popup_label(&app, "tray-popup", "tray-popup-closed");
     if let Some(wg) = app.get_webview_window("plugin-popup") {
@@ -555,10 +563,8 @@ pub async fn open_system_flyout(
     let h = system_flyout_height(&kind);
 
     if let Some(existing) = app.get_webview_window("system-flyout") {
-        FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
-        // Kind first so UI paints before show — avoids wifi flash / lag.
+        // Kind + geometry while still deciding show path.
         push_flyout_kind_to_webview(&existing, &kind);
-        let _ = app.emit("system-flyout-opened", &kind);
         let _ = existing.set_position(LogicalPosition::new(x, y));
         // Resize only when height changes — set_size every open flashes white on Win10.
         let need_resize = existing
@@ -575,11 +581,15 @@ pub async fn open_system_flyout(
         }
         let _ = existing.unminimize();
         if existing.is_visible().unwrap_or(false) {
+            // Hot-switch kind while open — no hide/show (looks like double-open).
+            FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = app.emit("system-flyout-opened", &kind);
             let _ = existing.set_focus();
             return Ok(());
         }
-        let _ = existing.show();
-        let _ = existing.set_focus();
+        // Warm/hidden shell: wait for frontend kind paint + reveal (avoids wifi→X flash).
+        FLYOUT_AWAIT_REVEAL.store(true, std::sync::atomic::Ordering::SeqCst);
+        schedule_system_flyout_reveal_fallback(existing.clone(), app.clone());
         return Ok(());
     }
 
@@ -626,6 +636,7 @@ pub async fn open_system_flyout(
     push_flyout_kind_to_webview(&win, &kind);
     // Cold: stay hidden until reveal_system_flyout (avoids empty white flash).
     FLYOUT_AWAIT_REVEAL.store(true, std::sync::atomic::Ordering::SeqCst);
+    schedule_system_flyout_reveal_fallback(win.clone(), app.clone());
     Ok(())
     })
 }
@@ -644,6 +655,7 @@ pub fn get_system_flyout_kind() -> String {
 pub async fn close_system_flyout(app: AppHandle) -> Result<(), String> {
     with_popup_ops(|| {
         FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+        FLYOUT_FALLBACK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(w) = app.get_webview_window("system-flyout") {
             let _ = w.hide();
         }
@@ -658,16 +670,58 @@ pub async fn reveal_system_flyout(app: AppHandle) -> Result<(), String> {
         if !FLYOUT_AWAIT_REVEAL.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
+        // Invalidate in-flight fallback show.
+        FLYOUT_FALLBACK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let Some(w) = app.get_webview_window("system-flyout") else {
             return Ok(());
         };
-        suppress_system_flyout_blur(Some(900));
+        suppress_system_flyout_blur(Some(280));
         let kind = get_system_flyout_kind();
         let _ = app.emit("system-flyout-opened", &kind);
         let _ = w.show();
         let _ = w.set_focus();
+        // Opening click can reclaim main focus after show; re-assert so outside-click blur works.
+        let win = w.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            suppress_system_flyout_blur(Some(180));
+            let _ = win.set_focus();
+        });
         Ok(())
     })
+}
+
+fn schedule_system_flyout_reveal_fallback(win: WebviewWindow, app: AppHandle) {
+    let gen = FLYOUT_FALLBACK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if FLYOUT_FALLBACK_GEN.load(std::sync::atomic::Ordering::SeqCst) != gen {
+            return;
+        }
+        if !FLYOUT_AWAIT_REVEAL.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if win.is_visible().unwrap_or(false) {
+            return;
+        }
+        suppress_system_flyout_blur(Some(280));
+        let kind = get_system_flyout_kind();
+        let _ = app.emit("system-flyout-opened", &kind);
+        let _ = win.show();
+        let _ = win.set_focus();
+        let w2 = win.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            suppress_system_flyout_blur(Some(180));
+            let _ = w2.set_focus();
+        });
+    });
+}
+
+/// Cancel pending warm/cold reveal (main focus / other popup open).
+pub fn cancel_system_flyout_reveal_fallback() {
+    FLYOUT_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+    FLYOUT_FALLBACK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 
@@ -892,10 +946,16 @@ pub fn open_bluetooth_settings() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn set_bluetooth_device(id: String, connect: bool) -> Result<(), String> {
+pub async fn set_bluetooth_device(id: String, connect: bool) -> Result<(), String> {
+    // Short suppress only — long windows blocked outside-click close of the flyout.
+    suppress_system_flyout_blur(Some(1_200));
     #[cfg(windows)]
     {
-        crate::win32::system_radio::set_bluetooth_device(&id, connect)
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::win32::system_radio::set_bluetooth_device(&id, connect)
+        })
+        .await
+        .map_err(|e| format!("bluetooth task: {e}"))?
     }
     #[cfg(not(windows))]
     {
