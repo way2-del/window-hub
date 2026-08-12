@@ -1,4 +1,4 @@
-﻿import React from "react";
+import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
@@ -12,6 +12,7 @@ import WifiAuthPopupApp from "./WifiAuthPopupApp";
 import PluginPopupHost from "./components/PluginPopupHost";
 import DockApp from "./DockApp";
 import DockGlassApp from "./DockGlassApp";
+import GenieOverlayApp from "./GenieOverlayApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
@@ -30,6 +31,7 @@ declare global {
     __WH_IS_PLUGIN_POPUP__?: boolean;
     __WH_IS_DOCK__?: boolean;
     __WH_IS_DOCK_GLASS__?: boolean;
+    __WH_IS_GENIE_OVERLAY__?: boolean;
     __WH_PLUGIN_ID__?: string;
   }
 }
@@ -45,9 +47,11 @@ type WindowKind =
   | "wifi-auth"
   | "plugin-popup"
   | "dock"
-  | "dock-glass";
+  | "dock-glass"
+  | "genie-overlay";
 
 function resolveWindowKind(): WindowKind {
+  if (window.__WH_IS_GENIE_OVERLAY__ === true) return "genie-overlay";
   if (window.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
   if (window.__WH_IS_DOCK__ === true) return "dock";
   if (window.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
@@ -60,6 +64,7 @@ function resolveWindowKind(): WindowKind {
   if (window.__WH_IS_SETTINGS__ === true) return "settings";
   try {
     const label = getCurrentWindow().label;
+    if (label === "genie-overlay") return "genie-overlay";
     if (label === "dock-glass") return "dock-glass";
     if (label === "dock") return "dock";
     if (label === "plugin-popup") return "plugin-popup";
@@ -74,6 +79,7 @@ function resolveWindowKind(): WindowKind {
     /* ignore */
   }
   const q = new URLSearchParams(window.location.search).get("window");
+  if (q === "genie-overlay") return "genie-overlay";
   if (q === "dock-glass") return "dock-glass";
   if (q === "dock") return "dock";
   if (q === "plugin-popup") return "plugin-popup";
@@ -108,7 +114,9 @@ document.body.classList.add(
                   ? "is-plugin-popup"
                   : kind === "dock" || kind === "dock-glass"
                     ? "is-dock"
-                    : "is-island",
+                    : kind === "genie-overlay"
+                      ? "is-genie-overlay"
+                      : "is-island",
 );
 document.body.style.background = "transparent";
 document.title =
@@ -132,7 +140,9 @@ document.title =
                     ? "Dock Glass"
                     : kind === "dock"
                       ? "Dock"
-                      : "灵动岛";
+                      : kind === "genie-overlay"
+                        ? "Genie"
+                        : "灵动岛";
 
 const root = document.getElementById("root") as HTMLElement;
 if (kind === "settings") {
@@ -173,6 +183,8 @@ ReactDOM.createRoot(root).render(
       <DockApp />
     ) : kind === "dock-glass" ? (
       <DockGlassApp />
+    ) : kind === "genie-overlay" ? (
+      <GenieOverlayApp />
     ) : (
       <App />
     )}

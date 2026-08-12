@@ -1,4 +1,4 @@
-# Plugin SDK（当前约定）
+﻿# Plugin SDK（当前约定）
 
 插件包是静态资源（HTML/CSS/JS）。**禁止**未审核原生 DLL。系统能力只经 Host 注入的 `window.hub`。
 

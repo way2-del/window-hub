@@ -59,9 +59,15 @@ fn reassert_window(window: &tauri::WebviewWindow) {
     if let Some(hwnd) = hwnd_of(window) {
         // 持续排除 Alt+Tab / Win+Tab，防止样式被重置后又出现在窗口切换里
         crate::win32::switcher::exclude_from_switcher(hwnd);
+        crate::win32::topmost::set_main_hwnd(hwnd);
     }
-    // AppBar 已预留顶栏工作区；勿再抢 TOPMOST（与其它壳争 Z 序无益）。
-    let _ = window.set_always_on_top(false);
+    // 三指下滑「显示桌面」会最小化岛窗 —— 非全屏隐藏时立刻拉回
+    let _ = crate::win32::topmost::ensure_main_visible();
+    let _ = window.unminimize();
+    let _ = window.show();
+    // 桌面态始终 TOPMOST，避免壁纸软件 / Show Desktop 把顶栏埋掉
+    crate::win32::topmost::reassert_main_zorder();
+    let _ = window.set_always_on_top(true);
     pin_top_bar(window);
 }
 
@@ -79,7 +85,8 @@ fn spawn_watchdog(app: tauri::AppHandle) {
 
         let mut ticks: u32 = 0;
         loop {
-            std::thread::sleep(Duration::from_millis(2000));
+            // 比 2s 更密：显示桌面后尽快把岛拉回
+            std::thread::sleep(Duration::from_millis(500));
             if HIDDEN_FOR_FULLSCREEN.load(Ordering::SeqCst) {
                 continue;
             }
@@ -88,7 +95,7 @@ fn spawn_watchdog(app: tauri::AppHandle) {
             };
             reassert_window(&window);
             ticks = ticks.wrapping_add(1);
-            if ticks % 5 == 0 {
+            if ticks % 10 == 0 {
                 if let Some(hwnd) = hwnd_of(&window) {
                     appbar::sync(hwnd);
                 }
@@ -221,6 +228,11 @@ pub fn run() {
             app.manage(initial_material_state());
             app.manage(WindowsService::start(app.handle().clone()));
             app.manage(crate::dock::DockVisibility::new());
+            app.manage(crate::dock::genie::GenieState::default());
+            crate::dock::genie::spawn_foreground_tracker(app.handle().clone());
+            crate::dock::genie::prewarm_overlay(app.handle());
+            #[cfg(windows)]
+            crate::win32::minimize_hook::spawn_minimize_interceptor(app.handle().clone());
             let pins = ShortcutsPinStore::new();
             pins.load_all_from_db();
             app.manage(pins);
@@ -343,6 +355,7 @@ pub fn run() {
             commands::self_hwnd,
             commands::dock_set_visual_height,
             commands::float_overlay,
+            commands::settle_overlay,
             commands::open_settings_window,
             commands::close_settings_window,
             commands::open_tray_popup,
@@ -453,6 +466,17 @@ pub fn run() {
             dock::get_dock_hidden_count,
             dock::get_dock_visibility,
             dock::ensure_dock_window,
+            dock::genie::genie_is_parked,
+            dock::genie::genie_item_is_foreground,
+            dock::genie::genie_arm_minimize_intent,
+            dock::genie::genie_overlay_done,
+            dock::genie::genie_overlay_painted,
+            dock::genie::genie_minimize_app,
+            dock::genie::dock_report_icon_rects,
+            dock::genie::genie_restore_app,
+            dock::genie::genie_hide_popup,
+            dock::genie::genie_show_popup,
+            dock::genie::genie_forget,
             commands::show_desktop,
             commands::restart_app,
             commands::exit_app,
@@ -472,6 +496,7 @@ pub fn run() {
             commands::hub_island_clear_bar,
             commands::hub_panel_open_session,
             commands::hub_panel_close_session,
+            commands::hub_media_send_key,
             commands::hub_notify,
             commands::hub_fetch,
             plugin_install::preview_plugin_from_path,

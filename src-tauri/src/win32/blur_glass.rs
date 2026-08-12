@@ -278,6 +278,75 @@ pub fn apply_dock_glass_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
     Ok(())
 }
 
+/// Kill Win11 DWM 1px frame border + drop shadow on fully transparent overlays
+/// (e.g. Genie suck animation). Without this, a hairline rectangle flashes around
+/// the overlay while the mesh plays.
+pub fn strip_transparent_overlay_chrome(window: &WebviewWindow) {
+    let Ok(hwnd) = hwnd_of(window) else {
+        return;
+    };
+    let _ = window.set_shadow(false);
+    strip_class_drop_shadow(hwnd);
+    unsafe {
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const _ as *const c_void,
+            std::mem::size_of_val(&corner) as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let thickness: u32 = 0;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            &thickness as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let backdrop = DWMSBT_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop as *const _ as *const c_void,
+            std::mem::size_of_val(&backdrop) as u32,
+        );
+    }
+    // DWM sometimes reapplies chrome on first show — poke again shortly.
+    // IMPORTANT: only touch Win32 HWND attrs off-thread. Never call Tauri
+    // `set_shadow` / `set_size` here — that races softbuffer on the UI thread
+    // and can panic with `assertion failed: !bitmap.is_null()`.
+    let hwnd_raw = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        for ms in [30_u64, 80, 160] {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let h = HWND(hwnd_raw as *mut _);
+            strip_class_drop_shadow(h);
+            unsafe {
+                let border = DWMWA_COLOR_NONE;
+                let _ = DwmSetWindowAttribute(
+                    h,
+                    DWMWA_BORDER_COLOR,
+                    &border as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+                let thickness: u32 = 0;
+                let _ = DwmSetWindowAttribute(
+                    h,
+                    DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+                    &thickness as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+            }
+        }
+    });
+}
+
 fn apply_dock_glass_chrome(hwnd: HWND, dark: Option<bool>, corner_radius_logical: u32) {
     unsafe {
         if let Some(d) = dark {

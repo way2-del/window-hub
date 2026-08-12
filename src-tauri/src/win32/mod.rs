@@ -10,6 +10,8 @@ pub mod fullscreen;
 pub mod input;
 pub mod material;
 pub mod park;
+#[cfg(windows)]
+pub mod minimize_hook;
 pub mod status_menu;
 pub mod switcher;
 pub mod topmost;

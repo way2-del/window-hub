@@ -101,13 +101,16 @@ export function clampStagingPanelH(h: number): number {
   return Math.max(STAGING_PANEL_H_MIN, Math.min(STAGING_PANEL_H_MAX, nearest));
 }
 
-function parsePullContent(raw: string | null): PullContent {
-  if (!raw) return DEFAULTS.pullContent;
+function parsePullContent(raw: string | null | undefined): PullContent {
+  // null/undefined = missing field → default; "" / none / off = explicit「无」
+  if (raw == null) return DEFAULTS.pullContent;
+  const t = String(raw).trim();
+  if (!t || t === "none" || t === "off") return "";
   // Legacy Host builtins → official plugins
-  if (raw === "weather") return "plugin:com.window-hub.weather";
-  if (raw === "mirror") return "plugin:com.window-hub.mirror";
-  if (raw.startsWith("plugin:")) return raw;
-  return DEFAULTS.pullContent;
+  if (t === "weather") return "plugin:com.window-hub.weather";
+  if (t === "mirror") return "plugin:com.window-hub.mirror";
+  if (t.startsWith("plugin:")) return t;
+  return "";
 }
 
 function parseBarResident(raw: string | null | undefined): string {

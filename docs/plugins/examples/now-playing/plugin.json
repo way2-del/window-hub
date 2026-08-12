@@ -1,0 +1,74 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.now-playing",
+  "name": "正在播放",
+  "version": "1.0.1",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "对接本机 Now Playing 服务：岛栏滚动歌词，下拉迷你播放器（封面 / 进度 / 媒体键）。设置在本插件页配置 API 地址。",
+  "homepage": "https://github.com/Widdit/now-playing-service",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "panel": "panel.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "正在播放",
+      "order": 8,
+      "action": "command",
+      "manage": "none"
+    },
+    "island.bar": {
+      "order": 10
+    },
+    "island.panel": {
+      "defaultSize": { "w": 380, "h": 200 },
+      "excludeFromPullContent": false
+    }
+  },
+  "settings": [
+    {
+      "key": "apiBase",
+      "type": "string",
+      "label": "Now Playing API 地址",
+      "description": "本机服务根地址（默认 http://127.0.0.1:9863，见软件「API 接口」页）",
+      "default": "http://127.0.0.1:9863",
+      "maxLength": 128
+    },
+    {
+      "key": "pollMs",
+      "type": "select",
+      "label": "刷新间隔",
+      "default": 1200,
+      "options": [
+        { "value": 500, "label": "0.5 秒" },
+        { "value": 800, "label": "0.8 秒" },
+        { "value": 1200, "label": "1.2 秒" },
+        { "value": 2000, "label": "2 秒" }
+      ]
+    },
+    {
+      "key": "barMode",
+      "type": "select",
+      "label": "岛栏显示",
+      "default": "lyric",
+      "options": [
+        { "value": "lyric", "label": "当前歌词" },
+        { "value": "title", "label": "歌名 · 歌手" },
+        { "value": "both", "label": "歌词优先，无则歌名" }
+      ]
+    }
+  ],
+  "capabilities": [
+    "storage",
+    "network",
+    "island.panel",
+    "island.bar",
+    "shortcuts",
+    "media.keys"
+  ],
+  "permissions": {
+    "network": ["127.0.0.1", "localhost"]
+  }
+}

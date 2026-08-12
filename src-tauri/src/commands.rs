@@ -173,13 +173,34 @@ pub fn dock_set_visual_height(_window: WebviewWindow, _height: i32) -> Result<()
     Ok(())
 }
 
-/// 弹窗/岛展开时保持壳标志；AppBar 已占位，不再强制 TOPMOST 争 Z 序。
+/// 岛展开 / 拉高：面板伸进工作区，保持 TOPMOST。
 #[tauri::command]
 pub fn float_overlay(window: WebviewWindow) -> Result<(), String> {
-    let _ = window.set_always_on_top(false);
     let _ = window.set_skip_taskbar(true);
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    let raw = hwnd.0 as isize;
+    crate::win32::switcher::exclude_from_switcher(raw);
+    crate::win32::topmost::set_main_hwnd(raw);
+    crate::win32::topmost::set_overlay_raised(true);
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    Ok(())
+}
+
+/// 岛收回折叠条：仍保持 TOPMOST（防壁纸软件 / 显示桌面埋掉顶栏）。
+#[tauri::command]
+pub fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
+    let _ = window.set_skip_taskbar(true);
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
+    crate::win32::switcher::exclude_from_switcher(raw);
+    crate::win32::topmost::set_main_hwnd(raw);
+    crate::win32::topmost::set_overlay_raised(false);
+    let _ = crate::win32::topmost::ensure_main_visible();
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_always_on_top(true);
     Ok(())
 }
 
@@ -350,8 +371,9 @@ pub async fn close_tray_popup(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn is_tray_popup_open(app: AppHandle) -> bool {
-    // Window may be hidden while frontend fits height before show().
-    app.get_webview_window("tray-popup").is_some()
+    app.get_webview_window("tray-popup")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false)
 }
 
 const STATUS_MENU_POPUP_W: f64 = 200.0;
@@ -431,8 +453,9 @@ pub async fn close_status_menu_popup(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn is_status_menu_popup_open(app: AppHandle) -> bool {
-    // Window may be hidden while frontend fits height before show().
-    app.get_webview_window("status-menu-popup").is_some()
+    app.get_webview_window("status-menu-popup")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false)
 }
 
 const PLUGIN_POPUP_W: f64 = 320.0;
@@ -1003,6 +1026,9 @@ pub fn is_input_lang_popup_open(app: AppHandle) -> bool {
 }
 
 static CHROME_HOVER_TIP: Mutex<Option<ChromeHoverTipPayload>> = Mutex::new(None);
+/// Backend-owned generation. Any show/close bumps this so in-flight work can detect supersession.
+/// Do NOT trust per-webview JS counters — main/dock/tray each have their own tipEpoch and
+/// desync permanently rejects shows (tip works once, then never again).
 static CHROME_HOVER_TIP_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Chrome hover tip payload (status-bar tip must be a separate window — main is ~28px tall).
@@ -1017,6 +1043,107 @@ pub struct ChromeHoverTipPayload {
 const CHROME_HOVER_TIP_W: f64 = 160.0;
 const CHROME_HOVER_TIP_H: f64 = 48.0;
 
+/// Windows that may own chrome tips — cursor must stay over one of these or tip auto-hides.
+const CHROME_TIP_HOST_LABELS: &[&str] = &[
+    "main",
+    "dock",
+    "tray-popup",
+    "status-menu-popup",
+];
+
+#[cfg(windows)]
+fn chrome_tip_cursor_pos() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    unsafe {
+        if GetCursorPos(&mut pt).is_err() {
+            return None;
+        }
+    }
+    Some((pt.x, pt.y))
+}
+
+#[cfg(not(windows))]
+fn chrome_tip_cursor_pos() -> Option<(i32, i32)> {
+    None
+}
+
+fn chrome_tip_cursor_over_host(app: &AppHandle) -> bool {
+    let Some((cx, cy)) = chrome_tip_cursor_pos() else {
+        // Unknown cursor — keep tip (avoid flicker on transient API failure).
+        return true;
+    };
+    // Thin bars: small pad so edge slips don't false-dismiss.
+    const PAD: i32 = 6;
+    for label in CHROME_TIP_HOST_LABELS {
+        let Some(w) = app.get_webview_window(label) else {
+            continue;
+        };
+        let Ok(visible) = w.is_visible() else {
+            continue;
+        };
+        if !visible {
+            continue;
+        }
+        let Ok(pos) = w.outer_position() else {
+            continue;
+        };
+        let Ok(size) = w.outer_size() else {
+            continue;
+        };
+        let left = pos.x.saturating_sub(PAD);
+        let top = pos.y.saturating_sub(PAD);
+        let right = pos.x.saturating_add(size.width as i32).saturating_add(PAD);
+        let bottom = pos.y.saturating_add(size.height as i32).saturating_add(PAD);
+        if cx >= left && cx < right && cy >= top && cy < bottom {
+            return true;
+        }
+    }
+    false
+}
+
+fn hide_chrome_hover_tip_sync(app: &AppHandle) {
+    CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
+        *g = None;
+    }
+    if let Some(w) = app.get_webview_window("chrome-hover-tip") {
+        let _ = w.hide();
+    }
+    let _ = app.emit("chrome-hover-tip-hide", ());
+}
+
+/// When tip is visible but the pointer already left Host (no more DOM events), poll cursor and hide.
+fn spawn_chrome_tip_leave_watch(app: AppHandle, seq: u64) {
+    std::thread::spawn(move || {
+        let mut misses = 0u32;
+        // ~12s max; normal hover dismisses much sooner via FE or leave watch.
+        for _ in 0..120 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != seq {
+                return;
+            }
+            if chrome_tip_cursor_over_host(&app) {
+                misses = 0;
+                continue;
+            }
+            misses = misses.saturating_add(1);
+            // Two samples (~200ms) outside Host → dismiss (covers fast flick to desktop).
+            if misses >= 2 {
+                if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != seq {
+                    return;
+                }
+                hide_chrome_hover_tip_sync(&app);
+                return;
+            }
+        }
+        if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) == seq {
+            hide_chrome_hover_tip_sync(&app);
+        }
+    });
+}
+
 #[tauri::command]
 pub fn get_chrome_hover_tip() -> Option<ChromeHoverTipPayload> {
     CHROME_HOVER_TIP.lock().ok().and_then(|g| g.clone())
@@ -1029,7 +1156,7 @@ pub async fn show_chrome_hover_tip(
     lines: Vec<String>,
     x: f64,
     y: f64,
-    epoch: Option<u64>,
+    #[allow(unused_variables)] epoch: Option<u64>,
 ) -> Result<(), String> {
     let lines: Vec<String> = lines
         .into_iter()
@@ -1038,38 +1165,37 @@ pub async fn show_chrome_hover_tip(
         .take(8)
         .collect();
     if lines.is_empty() {
-        return close_chrome_hover_tip(app, epoch).await;
+        return close_chrome_hover_tip(app, None).await;
     }
 
-    let ep = match epoch {
-        Some(e) => {
-            let cur = CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
-            // Stale show that lost to a newer hide/show — do not revive tip.
-            if e < cur {
-                return Ok(());
-            }
-            CHROME_HOVER_TIP_EPOCH.store(e, std::sync::atomic::Ordering::SeqCst);
-            e
-        }
-        None => CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
-    };
+    // Claim a generation for this show; close/newer show will bump past it.
+    let seq = CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
     let payload = ChromeHoverTipPayload { lines, x, y };
     if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
         *g = Some(payload.clone());
     }
 
+    let still_current =
+        || CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) == seq;
+
     if let Some(existing) = app.get_webview_window("chrome-hover-tip") {
-        if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != ep {
+        if !still_current() {
             return Ok(());
         }
         apply_saved_material(&existing, &state);
         let _ = existing.set_size(LogicalSize::new(CHROME_HOVER_TIP_W, CHROME_HOVER_TIP_H));
         let _ = existing.set_position(LogicalPosition::new(x, y));
+        let _ = existing.set_always_on_top(true);
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_ignore_cursor_events(true);
+        if !still_current() {
+            let _ = existing.hide();
+            return Ok(());
+        }
         let _ = app.emit("chrome-hover-tip-show", &payload);
+        spawn_chrome_tip_leave_watch(app.clone(), seq);
         return Ok(());
     }
 
@@ -1099,7 +1225,7 @@ pub async fn show_chrome_hover_tip(
     .build()
     .map_err(|e| format!("open chrome hover tip failed: {e}"))?;
 
-    if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != ep {
+    if !still_current() {
         let _ = win.close();
         return Ok(());
     }
@@ -1110,14 +1236,19 @@ pub async fn show_chrome_hover_tip(
     }
     apply_saved_material(&win, &state);
     let _ = win.set_ignore_cursor_events(true);
+    let _ = win.set_always_on_top(true);
     let _ = win.show();
     apply_saved_material(&win, &state);
+    if !still_current() {
+        let _ = win.hide();
+        return Ok(());
+    }
     let _ = app.emit("chrome-hover-tip-show", &payload);
     let app2 = app.clone();
     let payload2 = payload.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != ep {
+        if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != seq {
             return;
         }
         if CHROME_HOVER_TIP
@@ -1130,28 +1261,16 @@ pub async fn show_chrome_hover_tip(
         }
         let _ = app2.emit("chrome-hover-tip-show", &payload2);
     });
+    spawn_chrome_tip_leave_watch(app.clone(), seq);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn close_chrome_hover_tip(app: AppHandle, epoch: Option<u64>) -> Result<(), String> {
-    let cur = CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
-    if let Some(e) = epoch {
-        if e > cur {
-            CHROME_HOVER_TIP_EPOCH.store(e, std::sync::atomic::Ordering::SeqCst);
-        } else {
-            CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    } else {
-        CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-    if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
-        *g = None;
-    }
-    if let Some(w) = app.get_webview_window("chrome-hover-tip") {
-        let _ = w.hide();
-    }
-    let _ = app.emit("chrome-hover-tip-hide", ());
+pub async fn close_chrome_hover_tip(
+    app: AppHandle,
+    #[allow(unused_variables)] epoch: Option<u64>,
+) -> Result<(), String> {
+    hide_chrome_hover_tip_sync(&app);
     Ok(())
 }
 
@@ -1928,10 +2047,12 @@ impl From<&IslandPrefsDto> for crate::db::IslandPrefsRow {
 
 fn normalize_pull_content(raw: &str) -> String {
     match raw.trim() {
+        "" | "none" | "off" => String::new(),
         "weather" => "plugin:com.window-hub.weather".into(),
         "mirror" => "plugin:com.window-hub.mirror".into(),
         s if s.starts_with("plugin:") && s.len() > "plugin:".len() => s.to_string(),
-        _ => "plugin:com.window-hub.weather".into(),
+        // Do not force-default to weather — Host must not keep a disabled plugin as pull target.
+        _ => String::new(),
     }
 }
 
@@ -1984,6 +2105,60 @@ pub fn set_island_prefs(app: AppHandle, prefs: IslandPrefsDto) -> Result<IslandP
     crate::db::with_conn(|c| crate::db::island_set(c, &row))?;
     let _ = app.emit("island-prefs", &next);
     Ok(next)
+}
+
+/// When a plugin is disabled/uninstalled, drop it from island pull + bar resident.
+pub fn detach_plugin_from_island_prefs(app: &AppHandle, plugin_id: &str) {
+    let cur = get_island_prefs();
+    let pull_id = format!("plugin:{plugin_id}");
+    let mut next = cur;
+    let mut changed = false;
+    if next.pull_content == pull_id {
+        next.pull_content.clear();
+        changed = true;
+    }
+    if next.bar_resident == plugin_id {
+        next.bar_resident.clear();
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    let _ = set_island_prefs(app.clone(), next);
+}
+
+#[cfg(windows)]
+fn send_media_virtual_key(vk: u16) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        keybd_event, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    };
+    unsafe {
+        keybd_event(vk as u8, 0, KEYEVENTF_EXTENDEDKEY, 0);
+        keybd_event(vk as u8, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn send_media_virtual_key(_vk: u16) -> Result<(), String> {
+    Err("media.keys only available on Windows".into())
+}
+
+/// Send a system media key. Requires `media.keys`.
+/// `action`: play_pause | next | previous | stop
+#[tauri::command]
+pub fn hub_media_send_key(plugin_id: String, action: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "media.keys")?;
+    let act = action.trim().to_ascii_lowercase().replace('-', "_");
+    // VK_MEDIA_* 
+    let vk: u16 = match act.as_str() {
+        "next" | "next_track" => 0xB0,
+        "previous" | "prev" | "previous_track" => 0xB1,
+        "stop" => 0xB2,
+        "play_pause" | "playpause" | "toggle" => 0xB3,
+        _ => return Err(format!("unknown media action: {action}")),
+    };
+    send_media_virtual_key(vk)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

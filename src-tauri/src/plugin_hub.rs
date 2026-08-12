@@ -667,6 +667,10 @@ pub fn hub_init_script(plugin_id: &str) -> String {
           opts: opts || null,
         }}),
       ),
+    media: {{
+      sendKey: (action) =>
+        invoke("hub_media_send_key", withPlugin({{ action: action }})),
+    }},
     panel: {{
       close: () => invoke("close_plugin_popup"),
       openSession: () => invoke("hub_panel_open_session", withPlugin()),

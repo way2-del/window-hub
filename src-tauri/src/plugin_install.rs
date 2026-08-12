@@ -14,6 +14,7 @@ const WEATHER_EXAMPLE_ID: &str = "com.window-hub.weather";
 const MIRROR_EXAMPLE_ID: &str = "com.window-hub.mirror";
 const APP_LIBRARY_EXAMPLE_ID: &str = "com.window-hub.app-library";
 const IDIOM_EXAMPLE_ID: &str = "com.window-hub.idiom";
+const NOW_PLAYING_EXAMPLE_ID: &str = "com.window-hub.now-playing";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +209,7 @@ pub fn ensure_official_plugins(app: &AppHandle) {
         ("mirror", MIRROR_EXAMPLE_ID),
         ("transfer-station", TRANSFER_EXAMPLE_ID),
         ("idiom", IDIOM_EXAMPLE_ID),
+        ("now-playing", NOW_PLAYING_EXAMPLE_ID),
     ] {
         let reg = load_registry();
         let bundled = match resolve_example_plugin_dir(app, folder) {
@@ -375,6 +377,7 @@ pub fn uninstall_plugin(
     close_plugin_popup(&app);
     let _ = crate::db::with_conn(|c| crate::db::plugin_clear_all(c, &id));
     pins.inner_remove(&id);
+    crate::commands::detach_plugin_from_island_prefs(&app, &id);
     let _ = app.emit("shortcuts-pins-changed", pins.all_flat());
     emit_plugins(&app, &reg);
     Ok(())
@@ -449,6 +452,8 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("app-library")
     } else if id == "idiom" || id == IDIOM_EXAMPLE_ID {
         Ok("idiom")
+    } else if id == "now-playing" || id == NOW_PLAYING_EXAMPLE_ID {
+        Ok("now-playing")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

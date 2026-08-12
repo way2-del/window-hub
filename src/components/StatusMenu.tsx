@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { hostTipPointerProps } from "../chromeHoverTip";
+import { elementScreenRect } from "../genieAnchor";
 import "./StatusMenu.css";
 
 type ForegroundApp = {
@@ -57,6 +58,7 @@ export default function StatusMenu({
         if (cancelled) return;
         if (app.isSelf) return;
         const next = truncateLabel(app.label || app.title || "桌面");
+        if (next === lastLabel.current) return;
         lastLabel.current = next;
         setLabel(next);
       } catch {
@@ -64,7 +66,7 @@ export default function StatusMenu({
       }
     };
     void tick();
-    const id = window.setInterval(() => void tick(), 700);
+    const id = window.setInterval(() => void tick(), 1500);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -104,15 +106,34 @@ export default function StatusMenu({
   async function toggleMenu() {
     try {
       const visible = await invoke<boolean>("is_status_menu_popup_open");
+      const el = btnRef.current ?? anchorRef.current;
       if (visible || menuOpen) {
-        await invoke("close_status_menu_popup");
+        if (el) {
+          const anchor = await elementScreenRect(el);
+          await invoke("genie_hide_popup", {
+            slotId: "status-menu",
+            windowLabel: "status-menu-popup",
+            anchor,
+          }).catch(() => invoke("close_status_menu_popup"));
+        } else {
+          await invoke("close_status_menu_popup");
+        }
         onMenuOpenChange(false);
         return;
       }
-      const el = btnRef.current ?? anchorRef.current;
       if (!el) return;
       const { x, y } = await popupAnchor(el);
-      await invoke("open_status_menu_popup", { x, y });
+      const anchor = await elementScreenRect(el);
+      const shown = await invoke<boolean>("genie_show_popup", {
+        slotId: "status-menu",
+        windowLabel: "status-menu-popup",
+        anchor,
+        x,
+        y,
+      }).catch(() => false);
+      if (!shown) {
+        await invoke("open_status_menu_popup", { x, y });
+      }
       onMenuOpenChange(true);
     } catch (e) {
       console.error(e);

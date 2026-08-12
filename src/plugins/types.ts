@@ -10,6 +10,7 @@ export type PluginCapability =
   | "island.drop"
   | "windows.read"
   | "windows.focus"
+  | "media.keys"
   | "clipboard.read"
   | "clipboard.write"
   | "network"

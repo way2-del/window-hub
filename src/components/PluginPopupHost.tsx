@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { normalizeGlassKind, subscribeSystemDark, syncGlassCss, type GlassPrefs } from "../glassPrefs";
@@ -36,6 +36,7 @@ declare global {
         ) => () => void;
       };
       fetch: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
+      media: { sendKey: (action: string) => Promise<unknown> };
       popup: { close: () => Promise<unknown> };
       applyEffect: (material?: string) => Promise<unknown>;
     };
@@ -131,6 +132,10 @@ function ensureHub(pluginId: string) {
     notify: notifyFn,
     fetch: (url: string, opts?: Record<string, unknown>) =>
       invoke("hub_fetch", withPlugin({ url, opts: opts ?? null })),
+    media: {
+      sendKey: (action: string) =>
+        invoke("hub_media_send_key", withPlugin({ action })),
+    },
     popup: {
       close: () => invoke("close_plugin_popup"),
     },

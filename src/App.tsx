@@ -7,6 +7,7 @@ import {
   LogicalSize,
 } from "@tauri-apps/api/window";
 import { BorderBeam } from "border-beam";
+import { dominantColorFromPngBase64 } from "./iconDominantColor";
 import TrayCluster from "./components/TrayCluster";
 import ShortcutsHost from "./components/ShortcutsHost";
 import StatusMenu from "./components/StatusMenu";
@@ -15,6 +16,7 @@ import {
   applyIslandPrefsSnapshot,
   getIslandPrefs,
   hydrateIslandPrefs,
+  setIslandPrefs,
   subscribeIslandPrefs,
   clampStagingPanelH,
   clampStagingPanelW,
@@ -27,7 +29,7 @@ import {
   normalizeNotifyActions,
   type NotifyAction,
 } from "./plugins/notifyActions";
-import { bootstrapPlugins, subscribeInstalledPlugins } from "./plugins/bootstrap";
+import { bootstrapPlugins, subscribeInstalledPlugins, arePluginsReady } from "./plugins/bootstrap";
 import { normalizeStagingChanged } from "./stagingApi";
 import {
   formatStagingBarText,
@@ -150,6 +152,49 @@ function islandPath(width: number, height: number, topSquare = 0): string {
     `L ${fmt(x0)} ${fmt(sideTop)}`,
     `C ${fmt(x0)} ${fmt(y0 + rTop - rkTop)}, ${fmt(x0 + rTop - rkTop)} ${fmt(y0)}, ${fmt(x0 + rTop)} ${fmt(y0)}`,
     `Z`,
+  ].join(" ");
+}
+
+/**
+ * 通知内描边：与 islandPath 同几何（左右底），开口路径、不画顶边，避免贴屏突兀。
+ * 仍用全岛 clip，只留内侧半笔，路径不整体内缩偏移。
+ */
+function islandNotifyInnerStrokePath(width: number, height: number, topSquare = 0): string {
+  const w = Math.max(28, width);
+  const h = Math.max(28, height);
+  const x0 = 0;
+  const x1 = w;
+  const rBot = islandBottomRadius(w, h);
+  const flat = clamp01(topSquare);
+  const squareTop = flat >= 0.999;
+  const rTop = squareTop ? 0 : Math.max(0.05, rBot * (1 - flat));
+  const k = 0.5522847498;
+  const rkBot = rBot * k;
+  const y0 = 0;
+  const y1 = h;
+  const sideBot = y1 - rBot;
+
+  if (squareTop) {
+    return [
+      `M ${fmt(x0)} ${fmt(y0)}`,
+      `L ${fmt(x0)} ${fmt(sideBot)}`,
+      `C ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0 + rBot)} ${fmt(y1)}`,
+      `L ${fmt(x1 - rBot)} ${fmt(y1)}`,
+      `C ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1)} ${fmt(sideBot)}`,
+      `L ${fmt(x1)} ${fmt(y0)}`,
+    ].join(" ");
+  }
+
+  const rkTop = rTop * k;
+  const sideTop = y0 + rTop;
+  // 顶有圆角时也不描顶边：从左侧竖边起点画到底再回到右侧竖边终点
+  return [
+    `M ${fmt(x0)} ${fmt(sideTop)}`,
+    `L ${fmt(x0)} ${fmt(sideBot)}`,
+    `C ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0 + rBot)} ${fmt(y1)}`,
+    `L ${fmt(x1 - rBot)} ${fmt(y1)}`,
+    `C ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1)} ${fmt(sideBot)}`,
+    `L ${fmt(x1)} ${fmt(sideTop)}`,
   ].join(" ");
 }
 
@@ -292,6 +337,9 @@ type TrayAttention = {
   version: number;
 };
 
+/** 暂时关掉 BorderBeam 炫彩外框，改用图标主色左边 1px */
+const USE_NOTIFY_BORDER_BEAM = false;
+
 type MsgBanner = {
   key: string;
   text: string;
@@ -308,6 +356,10 @@ type MsgBanner = {
   notifyId: string;
   actions: NotifyAction[];
   data?: unknown;
+  /** 托盘/通知图标面积最大色，用于左侧描边 */
+  accentColor?: string;
+  /** 调试：取色摘要（控制台 + 岛上色块） */
+  accentDebug?: string;
 };
 
 function bannerFromBus(b: IslandNotifyBanner): MsgBanner {
@@ -343,8 +395,10 @@ async function setBarHeight(islandH: number) {
   if (cachedScreenW == null) cachedScreenW = await screenLogicalWidth();
   const width = cachedScreenW;
   await getCurrentWindow().setSize(new LogicalSize(width, winHeight(islandH)));
+  // 展开面板伸进桌面工作区 → TOPMOST；折叠条交回 AppBar 常规层级
+  const raised = islandH > ISLAND_COLLAPSED.height + 2;
   try {
-    await invoke("float_overlay");
+    await invoke(raised ? "float_overlay" : "settle_overlay");
   } catch {
     /* noop outside tauri */
   }
@@ -378,6 +432,10 @@ function App() {
   /** 临时层：中转站等；有内容时盖住常驻 */
   const [overlayBar, setOverlayBar] = useState<IslandBarState | null>(null);
   const islandBar = overlayBar ?? residentBar;
+  const residentBarRef = useRef(residentBar);
+  const overlayBarRef = useRef(overlayBar);
+  residentBarRef.current = residentBar;
+  overlayBarRef.current = overlayBar;
   const [dropTarget, setDropTarget] = useState(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
   const [dropPluginId, setDropPluginId] = useState<string | null>(() =>
@@ -415,6 +473,8 @@ function App() {
   const islandRef = useRef<HTMLDivElement>(null);
   const settingsAnchorRef = useRef<HTMLDivElement>(null);
   const pathRef = useRef<SVGPathElement>(null);
+  const pathClipRef = useRef<SVGPathElement>(null);
+  const pathStrokeRef = useRef<SVGPathElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const shapeLayerRef = useRef<HTMLDivElement>(null);
   const islandUiRef = useRef<HTMLDivElement>(null);
@@ -467,6 +527,22 @@ function App() {
         const pid = prev.slice("plugin:".length);
         return pluginRegistry.get(pid)?.enabled ? prev : null;
       });
+      // Drop cached pull / bar targets only after plugins are loaded.
+      // Before bootstrap, registry is empty — treating that as "disabled" wiped prefs on every restart.
+      if (arePluginsReady()) {
+        const pull = islandPrefsRef.current.pullContent;
+        if (pull.startsWith("plugin:")) {
+          const pid = pull.slice("plugin:".length);
+          // Only clear if uninstalled — disabled plugins keep preference for re-enable.
+          if (pid && !pluginRegistry.get(pid)) {
+            void setIslandPrefs({ pullContent: "" }).catch(() => undefined);
+          }
+        }
+        const wantBar = islandPrefsRef.current.barResident;
+        if (wantBar && !pluginRegistry.get(wantBar)) {
+          void setIslandPrefs({ barResident: "" }).catch(() => undefined);
+        }
+      }
     };
     sync();
     return pluginRegistry.subscribe(sync);
@@ -495,6 +571,34 @@ function App() {
     }
   }
 
+  function pluginEnabled(id: string | null | undefined): boolean {
+    if (!id) return false;
+    return Boolean(pluginRegistry.get(id)?.enabled);
+  }
+
+  /** 用户配置了可用的下拉插件面板 */
+  function hasConfiguredPullContent(): boolean {
+    const prefId = parsePluginPanelId(islandPrefsRef.current.pullContent);
+    if (!prefId) return false;
+    return pluginEnabled(prefId);
+  }
+
+  /** 用户配置了可用的岛栏常驻 */
+  function hasConfiguredBarResident(): boolean {
+    const pref = islandPrefsRef.current.barResident?.trim();
+    if (!pref) return false;
+    return pluginEnabled(pref);
+  }
+
+  /** 常驻+下拉皆「无」，且当前无摘要/通知 → 空黑岛，沉浸不等待 */
+  function shouldImmerseWithoutDelay(): boolean {
+    if (hasConfiguredPullContent() || hasConfiguredBarResident()) return false;
+    if (msgBannerRef.current) return false;
+    if (residentBarRef.current?.text?.trim()) return false;
+    if (overlayBarRef.current?.text?.trim()) return false;
+    return true;
+  }
+
   /** 有交互时退出沉浸，并重新计时 */
   function bumpIslandActivity() {
     clearIdleTimer();
@@ -511,11 +615,20 @@ function App() {
       el.style.transform = "";
       el.style.opacity = "";
     }
-    const id = msgBannerRef.current?.notifyId;
+    const banner = msgBannerRef.current;
+    const id = banner?.notifyId;
     msgBannerRef.current = null;
     setMsgBanner(null);
     if (id) islandNotifyBus.dismiss(id);
     else islandNotifyBus.dismiss();
+    // 划掉/关闭也要复位 flashing，否则托盘一直闪却不再发 tray-attention 上升沿
+    if (banner?.source === "tray") {
+      void invoke("clear_tray_attention", {
+        id: banner.trayIconId,
+        hwnd: banner.hwnd ?? 0,
+        uid: banner.uid ?? 0,
+      }).catch(() => undefined);
+    }
     scheduleImmerse();
   }
 
@@ -535,17 +648,58 @@ function App() {
     dismissMsgBanner();
   }
 
+  function applyMsgBannerFromBus(b: IslandNotifyBanner) {
+    bumpIslandActivity();
+    clearIdleTimer();
+    const next = bannerFromBus(b);
+    msgBannerRef.current = next;
+    setMsgBanner(next);
+    const key = next.key;
+    const png = next.iconPng;
+    void dominantColorFromPngBase64(png).then((dbg) => {
+      console.info("[notify-accent]", {
+        key,
+        source: next.source,
+        title: next.title,
+        ...dbg,
+      });
+      if (msgBannerRef.current?.key !== key) return;
+      const patched = {
+        ...msgBannerRef.current,
+        accentColor: dbg.color,
+        accentDebug: `${dbg.reason} · ${dbg.color} · top=${dbg.top.map((t) => `${t.color}×${t.n}`).join(" | ") || "∅"}`,
+      };
+      msgBannerRef.current = patched;
+      setMsgBanner(patched);
+    });
+  }
+
   /** 托盘闪动 → 通知总线（常驻，ttl=0） */
   function showMsgBanner(att: TrayAttention) {
     const prefs = islandPrefsRef.current;
-    if (!prefs.msgNotify) return;
-    if (expandedRef.current || revealRef.current > 0.05) return;
+    if (!prefs.msgNotify) {
+      console.info("[tray-attention] skipped: msgNotify off", att.id);
+      return;
+    }
+    if (expandedRef.current || revealRef.current > 0.05) {
+      console.info("[tray-attention] deferred: island busy", {
+        id: att.id,
+        expanded: expandedRef.current,
+        reveal: revealRef.current,
+      });
+      return;
+    }
 
     bumpIslandActivity();
     clearIdleTimer();
 
     const text = (prefs.msgNotifyText || "收到一条消息").trim() || "收到一条消息";
     const title = (att.tooltip || att.process || "").trim();
+    console.info("[tray-attention] show", {
+      id: att.id,
+      title,
+      iconBytes: (att.icon_png_base64 || "").length,
+    });
     islandNotifyBus.push({
       source: "tray",
       title: title || text,
@@ -563,6 +717,47 @@ function App() {
     });
   }
 
+  /**
+   * 补弹：HMR / 划掉未清 flashing / 错过上升沿时，tray-icons 里仍 flashing 则再推一次。
+   * 也会把 bus 已有、UI 未挂上的横幅补上。
+   */
+  function syncFlashingTrayBanner(
+    icons: Array<{
+      id: string;
+      tooltip: string;
+      process: string;
+      icon_png_base64: string;
+      hwnd: number;
+      uid: number;
+      callback_msg: number;
+      version?: number;
+      flashing?: boolean;
+    }>,
+  ) {
+    if (expandedRef.current || revealRef.current > 0.05) return;
+    if (!islandPrefsRef.current.msgNotify) return;
+
+    const pending = islandNotifyBus.getCurrent();
+    if (pending && !msgBannerRef.current) {
+      applyMsgBannerFromBus(pending);
+      return;
+    }
+    if (msgBannerRef.current) return;
+
+    const flashing = icons.find((i) => i.flashing);
+    if (!flashing) return;
+    showMsgBanner({
+      id: flashing.id,
+      tooltip: flashing.tooltip,
+      process: flashing.process,
+      icon_png_base64: flashing.icon_png_base64,
+      hwnd: flashing.hwnd,
+      uid: flashing.uid,
+      callback_msg: flashing.callback_msg,
+      version: flashing.version ?? 0,
+    });
+  }
+
   function scheduleImmerse() {
     clearIdleTimer();
     const prefs = islandPrefsRef.current;
@@ -571,8 +766,8 @@ function App() {
     if (revealRef.current > 0.02) return;
     if (busy.current) return;
     if (msgBannerRef.current) return;
-    // 中转站不阻断沉浸：只跟设置「自动沉浸」
-    // 独立托盘/状态菜单弹窗会抢焦点，但不应打断岛的常驻透底外观
+    // 常驻+下拉皆无且岛上空：立刻沉浸，勿留黑色空岛等 idle
+    const delayMs = shouldImmerseWithoutDelay() ? 0 : prefs.immerseIdleSec * 1000;
     idleTimer.current = window.setTimeout(() => {
       idleTimer.current = null;
       const latest = islandPrefsRef.current;
@@ -582,7 +777,12 @@ function App() {
       if (msgBannerRef.current) return;
       immersedRef.current = true;
       setImmersed(true);
-    }, prefs.immerseIdleSec * 1000);
+    }, delayMs);
+  }
+
+  /** 用户配置了可用的下拉插件面板时，才允许点击/手势下拉。 */
+  function canDefaultPullExpand(): boolean {
+    return hasConfiguredPullContent();
   }
 
   /** 直接改 DOM；动画中不走 React，避免 ambient 等重渲染把路径打回旧值 */
@@ -614,9 +814,10 @@ function App() {
       svg.setAttribute("height", String(h));
     }
     const path = pathRef.current;
-    if (path) {
-      path.setAttribute("d", islandPath(w, h, topSquare));
-    }
+    const d = islandPath(w, h, topSquare);
+    if (path) path.setAttribute("d", d);
+    pathClipRef.current?.setAttribute("d", d);
+    pathStrokeRef.current?.setAttribute("d", islandNotifyInnerStrokePath(w, h, topSquare));
     const ui = islandUiRef.current;
     if (ui) {
       ui.style.width = `${w}px`;
@@ -724,9 +925,10 @@ function App() {
     });
   }
 
-  /** 点击展开：宽高交错长大，不经过宽扁中间态 */
-  async function expand() {
+  /** 点击展开：宽高交错长大，不经过宽扁中间态。force = 岛栏/拖入/通知打开会话。 */
+  async function expand(opts?: { force?: boolean }) {
     if (busy.current || expandedRef.current) return;
+    if (!opts?.force && !canDefaultPullExpand()) return;
     bumpIslandActivity();
     const token = ++gen.current;
     busy.current = true;
@@ -823,6 +1025,8 @@ function App() {
       bumpIslandActivity();
       return;
     }
+    // 未配置下拉内容：不进入下拉手势（岛栏 chip / 拖入仍走 openPluginSession）
+    if (!canDefaultPullExpand()) return;
     bumpIslandActivity();
     e.currentTarget.setPointerCapture(e.pointerId);
     const needRaise = lastWinH.current < winHeight(liveExpanded.height);
@@ -885,6 +1089,9 @@ function App() {
     drag.current = null;
     pullingRef.current = false;
     setPulling(false);
+    if (open && !canDefaultPullExpand()) {
+      open = false;
+    }
     if (open) {
       setSpringing(false);
       void (async () => {
@@ -1016,7 +1223,7 @@ function App() {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       if (expandedRef.current) void collapse();
-      else void expand();
+      else if (canDefaultPullExpand()) void expand();
     }
   }
 
@@ -1167,15 +1374,15 @@ function App() {
         setMsgBanner(null);
         return;
       }
-      if (expandedRef.current || revealRef.current > 0.05) return;
-      bumpIslandActivity();
-      clearIdleTimer();
-      const next = bannerFromBus(b);
-      msgBannerRef.current = next;
-      setMsgBanner(next);
+      if (expandedRef.current || revealRef.current > 0.05) {
+        console.info("[notify-bus] banner held (island busy)", b.id);
+        return;
+      }
+      applyMsgBannerFromBus(b);
     });
     let unlistenPrefs: (() => void) | undefined;
     let unlistenAttn: (() => void) | undefined;
+    let unlistenTrayIcons: (() => void) | undefined;
     let unlistenPluginNotify: (() => void) | undefined;
     let unlistenStaging: (() => void) | undefined;
     let unlistenBar: (() => void) | undefined;
@@ -1203,15 +1410,34 @@ function App() {
         return;
       }
       if (summary.total <= 0) {
-        setOverlayBar((prev) => (prev?.pluginId === pluginId ? null : prev));
-        setPanelOverride((prev) => (prev === `plugin:${pluginId}` ? null : prev));
+        setOverlayBar((prev) => {
+          if (prev?.pluginId !== pluginId) return prev;
+          overlayBarRef.current = null;
+          return null;
+        });
+        setPanelOverride((prev) => {
+          if (prev !== `plugin:${pluginId}`) return prev;
+          // 下拉为「无」：清空后直接收起，勿落回空面板
+          if (!hasConfiguredPullContent() && expandedRef.current) {
+            queueMicrotask(() => {
+              if (expandedRef.current) void collapse();
+            });
+          }
+          return null;
+        });
+        // 常驻+下拉皆无：清空后立刻沉浸，勿留黑色空岛
+        queueMicrotask(() => {
+          if (!expandedRef.current) scheduleImmerse();
+        });
         return;
       }
-      setOverlayBar({
+      const nextBar = {
         pluginId,
         text: formatStagingBarText(rec.manifest.name || pluginId, summary),
         title: rec.manifest.name || pluginId,
-      });
+      };
+      overlayBarRef.current = nextBar;
+      setOverlayBar(nextBar);
     };
     const dropId = resolveIslandDropPluginId();
     if (dropId) {
@@ -1264,7 +1490,7 @@ function App() {
       const pluginId = ev.payload?.pluginId;
       if (action === "open" && pluginId) {
         armPluginSession(pluginId);
-        if (!expandedRef.current) void expand();
+        if (!expandedRef.current) void expand({ force: true });
       } else if (action === "close") {
         setPanelOverride(null);
         if (expandedRef.current) void collapse();
@@ -1273,10 +1499,30 @@ function App() {
       unlistenSession = fn;
     });
     void listen<TrayAttention>("tray-attention", (ev) => {
+      console.info("[tray-attention] event", ev.payload?.id, ev.payload?.tooltip);
       showMsgBanner(ev.payload);
     }).then((fn) => {
       unlistenAttn = fn;
     });
+    type TrayIconFlash = {
+      id: string;
+      tooltip: string;
+      process: string;
+      icon_png_base64: string;
+      hwnd: number;
+      uid: number;
+      callback_msg: number;
+      version?: number;
+      flashing?: boolean;
+    };
+    void listen<TrayIconFlash[]>("tray-icons", (ev) => {
+      syncFlashingTrayBanner(ev.payload ?? []);
+    }).then((fn) => {
+      unlistenTrayIcons = fn;
+    });
+    void invoke<TrayIconFlash[]>("list_tray_icons")
+      .then((icons) => syncFlashingTrayBanner(icons ?? []))
+      .catch(() => undefined);
     void listen<{
       pluginId: string;
       maxPerMinute?: number;
@@ -1313,6 +1559,7 @@ function App() {
       unsubPlugins();
       unlistenPrefs?.();
       unlistenAttn?.();
+      unlistenTrayIcons?.();
       unlistenPluginNotify?.();
       unlistenStaging?.();
       unlistenBar?.();
@@ -1320,6 +1567,32 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    // 收起后：补挂 bus 上已有、或仍在 flashing 的托盘通知
+    if (expanded || reveal > 0.05) return;
+    const pending = islandNotifyBus.getCurrent();
+    if (pending && !msgBannerRef.current) {
+      applyMsgBannerFromBus(pending);
+      return;
+    }
+    void invoke<
+      Array<{
+        id: string;
+        tooltip: string;
+        process: string;
+        icon_png_base64: string;
+        hwnd: number;
+        uid: number;
+        callback_msg: number;
+        version?: number;
+        flashing?: boolean;
+      }>
+    >("list_tray_icons")
+      .then((icons) => syncFlashingTrayBanner(icons ?? []))
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, reveal]);
 
   useEffect(() => {
     // 展开 / 拖放高亮 / 通知：暂停沉浸。中转站有内容不阻断。
@@ -1350,14 +1623,43 @@ function App() {
     reveal,
     msgBanner,
     dropTarget,
+    // 只看「有谁占栏」，勿依赖文案：歌词 setBar 每秒变 text 会反复清/排 immerse 定时器 → 整机卡
+    overlayBar?.pluginId,
+    residentBar?.pluginId,
     islandPrefs.autoImmerse,
     islandPrefs.immerseIdleSec,
+    islandPrefs.pullContent,
+    islandPrefs.barResident,
     immersed,
   ]);
 
-  const effectivePullContent = panelOverride ?? islandPrefs.pullContent;
+  const effectivePullContent = (() => {
+    const raw = panelOverride ?? islandPrefs.pullContent;
+    const pid = parsePluginPanelId(raw);
+    if (!pid) return raw || "";
+    return pluginRegistry.get(pid)?.enabled ? raw : "";
+  })();
   const activePanelPluginId = parsePluginPanelId(effectivePullContent);
   const stagingBar = islandBar?.text ?? "";
+  const dropPluginName = dropPluginId
+    ? pluginRegistry.get(dropPluginId)?.manifest.name?.trim() || "中转站"
+    : "";
+  /** 拖入时临时占满岛栏文案（无常驻时也能看见「松开存入」提示） */
+  const barText =
+    dropTarget && dropPluginId ? `${dropPluginName}|松开存入` : stagingBar;
+  const barPluginId = dropTarget && dropPluginId ? dropPluginId : islandBar?.pluginId;
+  const barTitle =
+    dropTarget && dropPluginId
+      ? `${dropPluginName} · 松开存入`
+      : islandBar?.title || stagingBar || "打开面板";
+  /** 绿点仅中转站等临时摘要 / 拖放提示；歌词·天气等常驻摘要不要点 */
+  const showBarStagingDot =
+    dropTarget ||
+    Boolean(
+      barPluginId &&
+        pluginRegistry.get(barPluginId)?.manifest.slots?.["island.bar"]
+          ?.excludeFromBarResident,
+    );
   const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
   const viewH = activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT;
   const pluginStagingShell =
@@ -1403,6 +1705,11 @@ function App() {
     liveExpanded.height = viewH;
     if (!expanded) return;
     if (busy.current || morphingRef.current) return;
+    // 无会话、也无可用下拉内容 → 收起，避免空壳面板
+    if (!activePanelPluginId) {
+      void collapse();
+      return;
+    }
     morphExpandedSize({ width: viewW, height: viewH });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePanelPluginId, viewW, viewH, expanded]);
@@ -1426,7 +1733,7 @@ function App() {
     if (!pluginId || !pluginRegistry.get(pluginId)?.enabled) return;
     armPluginSession(pluginId);
     if (!expandedRef.current) {
-      void expand();
+      void expand({ force: true });
     }
   }
 
@@ -1464,6 +1771,7 @@ function App() {
     e.stopPropagation();
     bumpIslandActivity();
     setDropTarget(true);
+    void invoke("float_overlay").catch(() => undefined);
   }
 
   function onIslandDragOver(e: ReactDragEvent) {
@@ -1480,6 +1788,9 @@ function App() {
     const related = e.relatedTarget as Node | null;
     if (related && e.currentTarget.contains(related)) return;
     setDropTarget(false);
+    if (!expandedRef.current) {
+      void invoke("settle_overlay").catch(() => undefined);
+    }
   }
 
   async function onIslandDrop(e: ReactDragEvent) {
@@ -1489,6 +1800,7 @@ function App() {
     e.stopPropagation();
     setDropTarget(false);
     bumpIslandActivity();
+    void invoke("float_overlay").catch(() => undefined);
     await ingestDrop(e.dataTransfer);
     await openPluginSession(pluginId);
   }
@@ -1507,11 +1819,16 @@ function App() {
         if (p.type === "enter" || p.type === "over") {
           bumpIslandActivity();
           setDropTarget(true);
+          void invoke("float_overlay").catch(() => undefined);
         } else if (p.type === "leave") {
           setDropTarget(false);
+          if (!expandedRef.current) {
+            void invoke("settle_overlay").catch(() => undefined);
+          }
         } else if (p.type === "drop") {
           setDropTarget(false);
           bumpIslandActivity();
+          void invoke("float_overlay").catch(() => undefined);
           const pluginId = dropPluginIdRef.current;
           const paths = p.paths ?? [];
           if (pluginId && paths.length) {
@@ -1617,7 +1934,7 @@ function App() {
         colorVariant="colorful"
         strength={0.7}
         borderRadius={Math.round(islandBottomRadius(size.width, size.height))}
-        active={!!msgBanner}
+        active={USE_NOTIFY_BORDER_BEAM && !!msgBanner}
         className="island-beam"
         style={
           {
@@ -1627,14 +1944,21 @@ function App() {
         }
       >
         <div
-          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${msgBanner ? " is-notifying" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar ? " has-staging" : ""}`}
+          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${msgBanner ? " is-notifying" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar || dropTarget ? " has-staging" : ""}`}
           role="button"
           tabIndex={0}
           aria-expanded={expanded}
-          aria-label={expanded ? "收起灵动岛" : "下拉或点击展开灵动岛"}
+          aria-label={
+            expanded
+              ? "收起灵动岛"
+              : canDefaultPullExpand()
+                ? "下拉或点击展开灵动岛"
+                : "灵动岛"
+          }
           data-chrome={
             dropTarget ? "dark" : immersed ? chromeCenter.scheme : "dark"
           }
+          data-notify-accent={msgBanner?.accentColor || undefined}
           onDragEnter={onIslandDragEnter}
           onDragOver={onIslandDragOver}
           onDragLeave={onIslandDragLeave}
@@ -1645,6 +1969,7 @@ function App() {
           onPointerCancel={onIslandPointerCancel}
           onPointerEnter={() => {
             // 悬停时预拉高窗口，按下拖动即可立刻跟手
+            if (!canDefaultPullExpand()) return;
             if (!expandedRef.current && !busy.current) void ensureExpandedWindow();
           }}
           onPointerLeave={() => {
@@ -1725,10 +2050,29 @@ function App() {
               width={size.width}
               height={size.height}
             >
+              <defs>
+                <clipPath id="wh-island-inner-clip" clipPathUnits="userSpaceOnUse">
+                  <path ref={pathClipRef} />
+                </clipPath>
+              </defs>
               <path
                 ref={pathRef}
                 className="island-path"
                 style={{ transition: "fill-opacity 240ms ease" } as CSSProperties}
+              />
+              <path
+                ref={pathStrokeRef}
+                className="island-notify-inner-stroke"
+                clipPath="url(#wh-island-inner-clip)"
+                style={
+                  {
+                    stroke: msgBanner
+                      ? msgBanner.accentColor || "#ff2d55"
+                      : "transparent",
+                    // 中心线落在轮廓上，clip 后只留内侧 ≈ 1px
+                    strokeWidth: msgBanner ? 2 : 0,
+                  } as CSSProperties
+                }
               />
             </svg>
           </div>
@@ -1740,17 +2084,18 @@ function App() {
           >
             <div className={`island-bar${msgBanner ? " is-notifying" : ""}`}>
               <div className={`bar-weather${msgBanner ? " is-exiting" : ""}`}>
-                {stagingBar ? (
+                {barText ? (
                   <div
-                    className="bar-staging"
+                    className={`bar-staging${dropTarget ? " is-drop-hint" : ""}`}
                     role="button"
                     tabIndex={0}
-                    {...hostTipPointerProps(islandBar?.title || stagingBar || "打开面板")}
+                    {...hostTipPointerProps(barTitle)}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (dropTarget) return;
                       void hideChromeHoverTip();
-                      const pid = islandBar?.pluginId;
+                      const pid = barPluginId;
                       if (!pid) return;
                       void emit("island-bar-click", { pluginId: pid }).catch(console.error);
                       const rec = pluginRegistry.get(pid);
@@ -1763,8 +2108,9 @@ function App() {
                       if (e.key !== "Enter" && e.key !== " ") return;
                       e.preventDefault();
                       e.stopPropagation();
+                      if (dropTarget) return;
                       void hideChromeHoverTip();
-                      const pid = islandBar?.pluginId;
+                      const pid = barPluginId;
                       if (!pid) return;
                       void emit("island-bar-click", { pluginId: pid }).catch(console.error);
                       const rec = pluginRegistry.get(pid);
@@ -1774,8 +2120,10 @@ function App() {
                       if (hasPanel) void openPluginSession(pid);
                     }}
                   >
-                    <span className="bar-staging-dot" aria-hidden />
-                    <span className="bar-staging-text">{stagingBar}</span>
+                    {showBarStagingDot ? (
+                      <span className="bar-staging-dot" aria-hidden />
+                    ) : null}
+                    <span className="bar-staging-text">{barText}</span>
                   </div>
                 ) : null}
               </div>
@@ -1867,13 +2215,15 @@ function App() {
               className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}`}
               onClick={(e) => e.stopPropagation()}
             >
-              <IslandPanelHost
-                pullContent={effectivePullContent}
-                active={panelActive}
-                onPanelClose={() => {
-                  if (expandedRef.current) void collapse();
-                }}
-              />
+              {effectivePullContent || panelOverride ? (
+                <IslandPanelHost
+                  pullContent={effectivePullContent}
+                  active={panelActive}
+                  onPanelClose={() => {
+                    if (expandedRef.current) void collapse();
+                  }}
+                />
+              ) : null}
             </div>
           </div>
         </div>

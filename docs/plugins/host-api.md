@@ -16,11 +16,13 @@
 | `staging` | `hub.staging.*` 按插件隔离暂存 | ✅ |
 | `windows.read` | list / get / subscribe | ✅ |
 | `windows.focus` | focus（敏感，安装须明示） | ✅ |
+| `media.keys` | 系统媒体键 play_pause/next/previous/stop（敏感） | ✅ |
 | `notify` | `hub.notify`（需 slot `island.notify`） | ✅ Popup / Panel / Shortcuts |
 | `clipboard.read` / `clipboard.write` | 剪贴板 | ❌ schema 占位，无 API |
 | `network` | `hub.fetch` + `permissions.network` 白名单 | ✅ |
 
-**槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。
+**槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。  
+设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。
 
 ## 共享 WindowsService
 
@@ -119,3 +121,6 @@ hub.fetch(url: string, opts?: {
 
 Hub 未提供的能力 → 独立进程脚本 + 本地 HTTP，设置页登记自启。见 [companion-scripts.md](./companion-scripts.md)。  
 **禁止**未审核原生二进制进主进程。
+
+
+

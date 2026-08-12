@@ -178,7 +178,7 @@
     const h = hub();
     try {
       if (h.shortcuts && h.shortcuts.requestSize) {
-        await h.shortcuts.requestSize({ width: 1 });
+        await h.shortcuts.requestSize({ width: 0 });
       }
     } catch (_) {}
     await applyBar(emptyInfo());
@@ -198,6 +198,14 @@
         void tick().then(schedule);
       });
     }
+    // 常驻 prefs 变化：先推缓存再后台刷新
+    window.addEventListener("wh-shortcuts-evt", function (ev) {
+      var d = ev && ev.detail;
+      if (!d || d.type !== "island-prefs") return;
+      void bootFromCache().then(function () {
+        void tick();
+      });
+    });
   }
 
   if (document.readyState === "loading") {

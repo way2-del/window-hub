@@ -272,6 +272,7 @@ button {
   /* width/height 由 paintDom / 内联跟随当前岛尺寸，与 path 同坐标 */
   pointer-events: none;
   z-index: 0;
+  overflow: hidden;
 }
 
 .island-svg {
@@ -285,6 +286,14 @@ button {
   fill: #000000;
   fill-opacity: 1;
   transition: fill-opacity 320ms ease;
+}
+
+/* 消息通知：内描边（clip 后只保留路径内侧；路径本身不含顶边） */
+.island-notify-inner-stroke {
+  fill: none;
+  stroke-linejoin: round;
+  stroke-linecap: butt;
+  pointer-events: none;
 }
 
 .island-root.is-immersed .island-path {
@@ -407,9 +416,16 @@ button {
 }
 
 .island-root.is-drop-target .bar-staging-text::after {
-  content: " · 松开以暂存";
-  font-weight: 500;
-  opacity: 0.85;
+  content: none;
+}
+
+.island-root.is-drop-target .bar-staging.is-drop-hint .bar-staging-text {
+  letter-spacing: 0.02em;
+}
+
+.island-root.is-drop-target .bar-staging.is-drop-hint .bar-staging-dot {
+  background: #7dffa8;
+  box-shadow: 0 0 6px rgba(125, 255, 168, 0.55);
 }
 
 .bar-notify {
@@ -418,6 +434,7 @@ button {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
+  justify-items: stretch;
   gap: 6px;
   padding: 0 8px;
   color: #fff;
@@ -425,6 +442,7 @@ button {
   font-weight: 600;
   letter-spacing: 0.01em;
   white-space: nowrap;
+  line-height: 1;
   pointer-events: none;
   will-change: transform, opacity;
   animation: notify-drop-in 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -438,7 +456,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100%;
+  align-self: center;
   min-width: 0;
   pointer-events: none;
 }
@@ -447,13 +465,64 @@ button {
   pointer-events: auto;
 }
 
+/* 图标+文案同一行盒，互相垂直居中（禁止 baseline 底对齐） */
 .bar-notify-main {
-  display: flex;
+  display: inline-flex;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
+  align-self: center;
+  justify-self: center;
   gap: 8px;
+  height: 16px;
+  max-width: 100%;
   min-width: 0;
+  margin: 0;
+  /* 顶平底圆光学中心略偏上 */
+  translate: 0 -2px;
+  line-height: 0;
   pointer-events: none;
+}
+
+.bar-notify-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+  align-self: center;
+}
+
+.bar-notify-fallback {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+  line-height: 1;
+  align-self: center;
+}
+
+.bar-notify-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  align-self: center;
+  /* 抵消中文字体视觉偏下 */
+  transform: translateY(-0.5px);
 }
 
 /* 通知按钮：仅 start/end 槽；垂直居中；大圆角矩形；字号=岛栏 12px；内容 2 字或 icon */
@@ -490,32 +559,6 @@ button {
   height: 14px;
   object-fit: contain;
   display: block;
-}
-
-.bar-notify-icon {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  object-fit: contain;
-  flex-shrink: 0;
-}
-
-.bar-notify-fallback {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  display: inline-grid;
-  place-items: center;
-  background: rgba(255, 255, 255, 0.16);
-  font-size: 10px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.bar-notify-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 200px;
 }
 
 @keyframes notify-drop-in {

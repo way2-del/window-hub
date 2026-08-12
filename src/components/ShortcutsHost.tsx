@@ -15,6 +15,7 @@ import {
   hostTipPointerProps,
   showChromeHoverTip,
 } from "../chromeHoverTip";
+import { elementScreenRect } from "../genieAnchor";
 import {
   moveIdInOrder,
   pickDropTarget,
@@ -31,6 +32,7 @@ import type { ShortcutsPluginRuntime } from "../plugins/types";
 import ShortcutsPluginStrip, {
   type ShortcutsHoverTip,
 } from "./ShortcutsPluginStrip";
+import { WH_SHORTCUTS_EVT } from "../plugins/shortcutsHubBridge";
 import "./ShortcutsHost.css";
 
 const POPUP_GAP = 8;
@@ -87,6 +89,20 @@ function hasShortcutsEntry(p: ShortcutsPluginRuntime): string | null {
 /** Host 仅在 manage=settings 时画 2×2；custom 由插件自画，none/缺省不画 */
 function shouldShowHostSettingsChip(p: ShortcutsPluginRuntime): boolean {
   return (p.manifest.slots?.shortcuts?.manage ?? "none") === "settings";
+}
+
+/**
+ * 岛栏 worker：有 island.bar + shortcuts 入口，且 manage 不为 custom/settings。
+ * 只跑轮询/setBar，不得占用快捷区横向空间（否则左侧标题↔首个 chip 间距会跟着变）。
+ */
+function isIslandBarWorker(p: ShortcutsPluginRuntime): boolean {
+  const manage = p.manifest.slots?.shortcuts?.manage ?? "none";
+  if (manage === "custom" || manage === "settings") return false;
+  return Boolean(
+    p.manifest.slots?.["island.bar"] &&
+      hasShortcutsEntry(p) &&
+      (p.manifest.capabilities ?? []).includes("island.bar"),
+  );
 }
 
 function ManageIcon() {
@@ -284,6 +300,78 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     });
   }, [hoverTip, ctrlHeld]);
 
+  // 全 Host 共用一次前台轮询，广播到各插件 iframe（含非 worker）
+  useEffect(() => {
+    let cancelled = false;
+    let lastWid: string | null | undefined = undefined;
+    const broadcast = (msg: Record<string, unknown>) => {
+      const root = hostRef.current;
+      if (!root) return;
+      root.querySelectorAll("iframe").forEach((el) => {
+        (el as HTMLIFrameElement).contentWindow?.postMessage(msg, "*");
+      });
+    };
+    const tick = async () => {
+      try {
+        const fg = await invoke<{
+          isSelf?: boolean;
+          windowId?: string | null;
+        }>("get_foreground_app");
+        if (cancelled) return;
+        if (fg.isSelf) return;
+        const wid = fg.windowId ?? null;
+        if (wid === lastWid) return;
+        lastWid = wid;
+        broadcast({
+          channel: WH_SHORTCUTS_EVT,
+          type: "foreground-changed",
+          windowId: wid,
+        });
+      } catch {
+        /* noop */
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  // island-prefs：Host 只 listen 一次，广播到各 iframe
+  useEffect(() => {
+    let cancelled = false;
+    const unsubs: Array<() => void> = [];
+    const broadcast = (msg: Record<string, unknown>) => {
+      const root = hostRef.current;
+      if (!root) return;
+      root.querySelectorAll("iframe").forEach((el) => {
+        (el as HTMLIFrameElement).contentWindow?.postMessage(msg, "*");
+      });
+    };
+    void (async () => {
+      try {
+        unsubs.push(
+          await listen<Record<string, unknown>>("island-prefs", (ev) => {
+            if (cancelled) return;
+            broadcast({
+              channel: WH_SHORTCUTS_EVT,
+              type: "island-prefs",
+              prefs: ev.payload ?? {},
+            });
+          }),
+        );
+      } catch {
+        /* noop */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unsubs.forEach((fn) => fn());
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const unsubs: Array<() => void> = [];
@@ -334,11 +422,39 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     openingRef.current = true;
     try {
       const { x, y } = await popupAnchor(el);
-      await invoke("open_plugin_popup", { pluginId, x, y });
+      const anchor = await elementScreenRect(el);
+      const slotId = `plugin:${pluginId}`;
+      const shown = await invoke<boolean>("genie_show_popup", {
+        slotId,
+        windowLabel: "plugin-popup",
+        anchor,
+        x,
+        y,
+      }).catch(() => false);
+      if (!shown) {
+        await invoke("open_plugin_popup", { pluginId, x, y });
+      }
     } catch (err) {
       console.error("[ShortcutsHost] open popup failed", err);
     } finally {
       openingRef.current = false;
+    }
+  }, []);
+
+  const closePopupWithGenie = useCallback(async (pluginId: string | null, anchorKey?: string) => {
+    const el = anchorKey ? anchorRefs.current.get(anchorKey) : null;
+    const anchor = el
+      ? await elementScreenRect(el).catch(() => ({ x: 0, y: 0, w: 12, h: 12 }))
+      : { x: 0, y: 0, w: 12, h: 12 };
+    const slotId = pluginId ? `plugin:${pluginId}` : "plugin:unknown";
+    try {
+      await invoke("genie_hide_popup", {
+        slotId,
+        windowLabel: "plugin-popup",
+        anchor,
+      });
+    } catch {
+      await invoke("close_plugin_popup").catch(() => undefined);
     }
   }, []);
 
@@ -363,7 +479,9 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
 
   const onRequestWidth = useCallback((pluginId: string, width: number) => {
     const raw = Math.round(width || 0);
-    const next = raw <= 0 ? 0 : Math.max(MIN_STRIP_W, raw);
+    const rec = pluginRegistry.get(pluginId);
+    // 岛栏 worker 永不占位；其它条仍受 MIN_STRIP_W 约束
+    const next = rec && isIslandBarWorker(rec) ? 0 : raw <= 0 ? 0 : Math.max(MIN_STRIP_W, raw);
     setStripWidths((prev) => {
       if (prev[pluginId] === next) return prev;
       return { ...prev, [pluginId]: next };
@@ -392,7 +510,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       dragIdRef.current = null;
       if (!hint) return;
       const visible = Array.from(
-        hostRef.current?.querySelectorAll<HTMLElement>("[data-plugin-id]") ?? [],
+        hostRef.current?.querySelectorAll<HTMLElement>("[data-plugin-id]:not([data-bar-worker])") ?? [],
       )
         .map((el) => el.dataset.pluginId || "")
         .filter(Boolean);
@@ -427,7 +545,9 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
         if (!dragIdRef.current) return;
         const root = hostRef.current?.querySelector(".shortcuts-collapsed");
         if (!root) return;
-        const units = Array.from(root.querySelectorAll<HTMLElement>("[data-plugin-id]"))
+        const units = Array.from(
+          root.querySelectorAll<HTMLElement>("[data-plugin-id]:not([data-bar-worker])"),
+        )
           .map((el) => {
             const r = el.getBoundingClientRect();
             return { id: el.dataset.pluginId || "", left: r.left, width: r.width };
@@ -520,12 +640,15 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
             .join(" ");
 
           if (entry) {
-            const requested = stripWidths[p.pluginId] ?? DEFAULT_STRIP_W;
+            const worker = isIslandBarWorker(p);
+            const requested = worker ? 0 : stripWidths[p.pluginId] ?? DEFAULT_STRIP_W;
             return (
               <div
                 key={p.pluginId}
-                className={unitClass}
+                className={`${unitClass}${worker ? " is-bar-worker" : ""}`}
                 data-plugin-id={p.pluginId}
+                {...(worker ? { "data-bar-worker": "" } : {})}
+                aria-hidden={worker || undefined}
               >
                 {showSettingsChip ? (
                   <button
@@ -550,12 +673,13 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
                 <ShortcutsPluginStrip
                   pluginId={p.pluginId}
                   entryPath={entry}
-                  width={requested}
+                  width={worker ? 1 : requested}
                   maxWidth={bounds.maxExpandWidth}
                   onRequestWidth={onRequestWidth}
-                  onHoverTip={onHoverTipSafe}
+                  onHoverTip={worker ? undefined : onHoverTipSafe}
+                  barWorker={worker}
                 />
-                {reorderMode ? (
+                {reorderMode && !worker ? (
                   <div
                     className="shortcuts-reorder-hit"
                     aria-hidden
@@ -629,7 +753,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
                   if (reorderMode) return;
                   clearHoverTimer();
                   if (popupOpenRef.current && popupPluginId === p.pluginId) {
-                    void invoke("close_plugin_popup").catch(() => undefined);
+                    void closePopupWithGenie(p.pluginId, chipKey);
                     return;
                   }
                   void openPopupAt(p.pluginId, chipKey);

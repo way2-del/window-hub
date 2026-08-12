@@ -3,7 +3,11 @@
   "$id": "https://window-hub.local/schemas/plugin.schema.json",
   "title": "Window Hub plugin.json",
   "type": "object",
-  "required": ["id", "name", "version"],
+  "required": [
+    "id",
+    "name",
+    "version"
+  ],
   "additionalProperties": false,
   "properties": {
     "id": {
@@ -11,13 +15,20 @@
       "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$",
       "description": "Reverse-domain plugin id, e.g. com.example.todo"
     },
-    "name": { "type": "string", "minLength": 1 },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
     "version": {
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z]+)*$"
     },
-    "logo": { "type": "string" },
-    "description": { "type": "string" },
+    "logo": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
     "official": {
       "type": "boolean",
       "description": "Official catalog plugin (seed / reinstall row)"
@@ -35,8 +46,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "panel": { "type": "string" },
-        "popup": { "type": "string" },
+        "panel": {
+          "type": "string"
+        },
+        "popup": {
+          "type": "string"
+        },
         "shortcuts": {
           "type": "string",
           "description": "Shortcuts strip HTML; Host loads in a short iframe"
@@ -45,9 +60,18 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "panel": { "type": "string", "format": "uri" },
-            "popup": { "type": "string", "format": "uri" },
-            "shortcuts": { "type": "string", "format": "uri" }
+            "panel": {
+              "type": "string",
+              "format": "uri"
+            },
+            "popup": {
+              "type": "string",
+              "format": "uri"
+            },
+            "shortcuts": {
+              "type": "string",
+              "format": "uri"
+            }
           }
         }
       }
@@ -58,19 +82,39 @@
       "properties": {
         "shortcuts": {
           "type": "object",
-          "required": ["icon"],
+          "required": [
+            "icon"
+          ],
           "additionalProperties": false,
           "properties": {
-            "icon": { "type": "string" },
-            "label": { "type": "string", "maxLength": 8 },
-            "order": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "icon": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string",
+              "maxLength": 8
+            },
+            "order": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
             "action": {
               "type": "string",
-              "enum": ["expand", "popup.open", "panel.open", "command"]
+              "enum": [
+                "expand",
+                "popup.open",
+                "panel.open",
+                "command"
+              ]
             },
             "manage": {
               "type": "string",
-              "enum": ["custom", "none", "settings"],
+              "enum": [
+                "custom",
+                "none",
+                "settings"
+              ],
               "description": "Shortcuts 2x2 manage/settings chip: custom=plugin-drawn popup; none=hidden; settings=Host chip opens Settings for this plugin"
             }
           }
@@ -81,7 +125,11 @@
           "properties": {
             "priority": {
               "type": "string",
-              "enum": ["passive", "active", "critical"]
+              "enum": [
+                "passive",
+                "active",
+                "critical"
+              ]
             },
             "maxPerMinute": {
               "type": "integer",
@@ -95,7 +143,11 @@
           "additionalProperties": false,
           "description": "Collapsed island bar summary slot",
           "properties": {
-            "order": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "order": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
             "excludeFromBarResident": {
               "type": "boolean",
               "description": "If true, omit from Settings 岛栏常驻 list; may still setBar temporarily"
@@ -107,16 +159,26 @@
           "additionalProperties": false,
           "description": "Receive drag-drop on the island chrome",
           "properties": {
-            "order": { "type": "integer", "minimum": 0, "maximum": 1000 }
+            "order": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            }
           }
         },
         "island.panel": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "defaultSize": { "$ref": "#/definitions/size" },
-            "minSize": { "$ref": "#/definitions/size" },
-            "maxSize": { "$ref": "#/definitions/size" },
+            "defaultSize": {
+              "$ref": "#/definitions/size"
+            },
+            "minSize": {
+              "$ref": "#/definitions/size"
+            },
+            "maxSize": {
+              "$ref": "#/definitions/size"
+            },
             "excludeFromPullContent": {
               "type": "boolean",
               "description": "If true, omit from Settings pull-content list; open via session/drop/bar only"
@@ -139,6 +201,7 @@
           "island.drop",
           "windows.read",
           "windows.focus",
+          "media.keys",
           "clipboard.read",
           "clipboard.write",
           "network",
@@ -153,7 +216,9 @@
       "properties": {
         "network": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Allowed origin patterns for hub.fetch"
         }
       }
@@ -161,33 +226,60 @@
     "settings": {
       "type": "array",
       "description": "Plugin settings shown in Host Settings; values in plugin_kv __settings",
-      "items": { "$ref": "#/definitions/settingField" }
+      "items": {
+        "$ref": "#/definitions/settingField"
+      }
     }
   },
   "definitions": {
     "size": {
       "type": "object",
-      "required": ["w", "h"],
+      "required": [
+        "w",
+        "h"
+      ],
       "additionalProperties": false,
       "properties": {
-        "w": { "type": "number", "minimum": 1, "maximum": 720 },
-        "h": { "type": "number", "minimum": 1, "maximum": 220 }
+        "w": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 720
+        },
+        "h": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 220
+        }
       }
     },
     "settingOption": {
       "type": "object",
-      "required": ["value", "label"],
+      "required": [
+        "value",
+        "label"
+      ],
       "additionalProperties": false,
       "properties": {
         "value": {
-          "type": ["string", "number", "boolean"]
+          "type": [
+            "string",
+            "number",
+            "boolean"
+          ]
         },
-        "label": { "type": "string", "minLength": 1 }
+        "label": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "settingField": {
       "type": "object",
-      "required": ["key", "type", "label"],
+      "required": [
+        "key",
+        "type",
+        "label"
+      ],
       "additionalProperties": false,
       "properties": {
         "key": {
@@ -197,20 +289,44 @@
         },
         "type": {
           "type": "string",
-          "enum": ["boolean", "string", "number", "select", "radio", "multiSelect"]
+          "enum": [
+            "boolean",
+            "string",
+            "number",
+            "select",
+            "radio",
+            "multiSelect"
+          ]
         },
-        "label": { "type": "string", "minLength": 1 },
-        "description": { "type": "string" },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
         "default": {},
         "options": {
           "type": "array",
-          "items": { "$ref": "#/definitions/settingOption" },
+          "items": {
+            "$ref": "#/definitions/settingOption"
+          },
           "minItems": 1
         },
-        "min": { "type": "number" },
-        "max": { "type": "number" },
-        "step": { "type": "number" },
-        "maxLength": { "type": "integer", "minimum": 1, "maximum": 4096 }
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "step": {
+          "type": "number"
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        }
       }
     }
   }

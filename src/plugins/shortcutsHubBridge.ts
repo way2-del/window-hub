@@ -21,6 +21,7 @@ const ALLOWED_CMDS = new Set([
   "get_foreground_app",
   "hub_notify",
   "hub_fetch",
+  "hub_media_send_key",
   "hub_island_set_bar",
   "hub_island_clear_bar",
 ]);
@@ -167,6 +168,11 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
     },
     fetch: function (url, opts) {
       return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));
+    },
+    media: {
+      sendKey: function (action) {
+        return invoke("hub_media_send_key", withPlugin({ action: action }));
+      }
     },
     foreground: {
       get: function () { return invoke("get_foreground_app", {}); },

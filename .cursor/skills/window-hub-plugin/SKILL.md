@@ -1,4 +1,4 @@
----
+﻿---
 name: window-hub-plugin
 description: >-
   Window Hub 插件开发完整流程 — plugin.json slots/capabilities、三种入口
@@ -117,6 +117,7 @@ my-plugin/
 | `staging` | `hub.staging.*` | 是 |
 | `windows.read` | `hub.windows.list/get/subscribe` | 否 |
 | `windows.focus` | `hub.windows.focus` | **是** |
+| `media.keys` | `hub.media.sendKey(action)` | **是** |
 | `notify` | `hub.notify`（需 slot `island.notify`） | 是 |
 | `network` | `hub.fetch(url, opts?)` + `permissions.network` 白名单 | 是 |
 | `clipboard.*` | **仅 schema 占位，无实现** — 勿调用 | 是（若声明） |
@@ -206,7 +207,6 @@ API：`docs/plugins/host-api.md` · SDK：`docs/plugins/sdk.md`
       "action": "popup.open"
     }
   },
-  "capabilities": ["shortcuts", "storage", "popup", "windows.read", "windows.focus"]
 }
 ```
 
@@ -258,3 +258,4 @@ API：`docs/plugins/host-api.md` · SDK：`docs/plugins/sdk.md`
 - [window-hub-island-immerse](../window-hub-island-immerse/SKILL.md)
 - [window-hub-window-groups](../window-hub-window-groups/SKILL.md)
 - [window-hub-transfer-station](../window-hub-transfer-station/SKILL.md)
+

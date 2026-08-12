@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, typ
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { hideChromeHoverTip, hostTipPointerProps } from "../chromeHoverTip";
+import { hideChromeHoverTip, hostTipPointerProps, installChromeHoverTipGlobalDismiss } from "../chromeHoverTip";
+import { elementScreenRect } from "../genieAnchor";
 import {
   moveIdInOrder,
   pickDropTarget,
@@ -292,6 +293,8 @@ export default function TrayCluster({
   dropHintRef.current = dropHint;
   pinnedRef.current = pinned;
   menuHeightsRef.current = menuHeights;
+
+  useEffect(() => installChromeHoverTipGlobalDismiss(), []);
 
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 1000);
@@ -650,15 +653,34 @@ export default function TrayCluster({
   async function togglePopup() {
     try {
       const visible = await invoke<boolean>("is_tray_popup_open");
+      const el = chevronRef.current;
       if (visible || open) {
-        await invoke("close_tray_popup");
+        if (el) {
+          const anchor = await elementScreenRect(el);
+          await invoke("genie_hide_popup", {
+            slotId: "tray-popup",
+            windowLabel: "tray-popup",
+            anchor,
+          }).catch(() => invoke("close_tray_popup"));
+        } else {
+          await invoke("close_tray_popup");
+        }
         onOpenChange(false);
         return;
       }
-      const el = chevronRef.current;
       if (!el) return;
       const { x, y } = await popupAnchor(el, TRAY_POPUP_W);
-      await invoke("open_tray_popup", { x, y });
+      const anchor = await elementScreenRect(el);
+      const shown = await invoke<boolean>("genie_show_popup", {
+        slotId: "tray-popup",
+        windowLabel: "tray-popup",
+        anchor,
+        x,
+        y,
+      }).catch(() => false);
+      if (!shown) {
+        await invoke("open_tray_popup", { x, y });
+      }
       onOpenChange(true);
     } catch (e) {
       console.error(e);

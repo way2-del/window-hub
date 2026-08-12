@@ -38,15 +38,19 @@ export default function IslandPanelHost({ pullContent, active, onPanelClose }: P
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
+  const [registryEpoch, setRegistryEpoch] = useState(0);
   const activeRef = useRef(active);
   activeRef.current = active;
 
   const pluginId = parsePluginPanelId(pullContent);
+  const enabled = pluginId ? Boolean(pluginRegistry.get(pluginId)?.enabled) : false;
+
+  useEffect(() => pluginRegistry.subscribe(() => setRegistryEpoch((n) => n + 1)), []);
 
   useEffect(() => {
-    if (!pluginId) {
+    if (!pluginId || !enabled) {
       setSrcdoc(null);
-      setPanelError(null);
+      setPanelError(pluginId && !enabled ? "插件已禁用" : null);
       return;
     }
     let cancelled = false;
@@ -121,10 +125,10 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
     return () => {
       cancelled = true;
     };
-  }, [pluginId, pullContent]);
+  }, [pluginId, pullContent, enabled, registryEpoch]);
 
   useEffect(() => {
-    if (!pluginId) return;
+    if (!pluginId || !enabled) return;
     const onMessage = (ev: MessageEvent) => {
       const d = ev.data as {
         channel?: string;
@@ -162,10 +166,10 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [pluginId, onPanelClose]);
+  }, [pluginId, enabled, onPanelClose]);
 
   useEffect(() => {
-    if (!pluginId) return;
+    if (!pluginId || !enabled) return;
     let un: (() => void) | undefined;
     void listen("staging-changed", (ev) => {
       const { pluginId: pid, summary } = normalizeStagingChanged(
@@ -181,10 +185,10 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
       un = fn;
     });
     return () => un?.();
-  }, [pluginId]);
+  }, [pluginId, enabled]);
 
   useEffect(() => {
-    if (!pluginId) return;
+    if (!pluginId || !enabled) return;
     let un: (() => void) | undefined;
     void listen<{ pluginId?: string; settings?: Record<string, unknown> }>(
       "plugin-settings-changed",
@@ -204,10 +208,10 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
       un = fn;
     });
     return () => un?.();
-  }, [pluginId]);
+  }, [pluginId, enabled]);
 
   useEffect(() => {
-    if (!pluginId) return;
+    if (!pluginId || !enabled) return;
     let un: (() => void) | undefined;
     void listen<{
       pluginId?: string;
@@ -231,10 +235,23 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
       un = fn;
     });
     return () => un?.();
-  }, [pluginId]);
+  }, [pluginId, enabled]);
 
-  if (!pluginId) {
-    return <div className="panel-plugin-empty">未知面板</div>;
+  useEffect(() => {
+    if (!pluginId || !srcdoc || !enabled) return;
+    postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, active);
+  }, [active, pluginId, srcdoc, enabled]);
+
+  if (!pullContent || !pluginId) {
+    return <div className="panel-plugin-empty">未选择下拉内容</div>;
+  }
+  if (!enabled) {
+    return (
+      <div className="panel-plugin-empty">
+        插件已禁用
+        <span>请在设置中启用，或改选其它下拉内容</span>
+      </div>
+    );
   }
   if (panelError) {
     return (
@@ -244,11 +261,6 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
       </div>
     );
   }
-  useEffect(() => {
-    if (!pluginId || !srcdoc) return;
-    postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, active);
-  }, [active, pluginId, srcdoc]);
-
   if (!srcdoc) {
     return <div className="panel-plugin-empty">加载面板…</div>;
   }

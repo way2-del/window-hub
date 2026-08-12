@@ -10,6 +10,7 @@ const CAP_LABELS: Record<PluginCapability, string> = {
   "island.drop": "可接收拖到灵动岛上的文件/文字",
   "windows.read": "可枚举窗口标题与进程",
   "windows.focus": "可切换其它窗口焦点",
+  "media.keys": "可发送系统媒体键（播放/暂停/切歌）",
   "clipboard.read": "可读剪贴板",
   "clipboard.write": "可写剪贴板",
   network: "可访问网络（受白名单限制）",
@@ -36,6 +37,7 @@ export function describeCapabilities(caps: PluginCapability[]): string[] {
 export function isSensitiveCapability(cap: PluginCapability): boolean {
   return (
     cap === "windows.focus" ||
+    cap === "media.keys" ||
     cap === "clipboard.read" ||
     cap === "clipboard.write" ||
     cap === "staging" ||

@@ -11,7 +11,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { applyGlassCss, type GlassPrefs } from "./glassPrefs";
-import { hideChromeHoverTip, hostTipPointerProps } from "./chromeHoverTip";
+import {
+  hideChromeHoverTip,
+  hostTipPointerProps,
+  installChromeHoverTipGlobalDismiss,
+} from "./chromeHoverTip";
 import "./DockApp.css";
 
 type DockItem = {
@@ -193,6 +197,8 @@ export default function DockApp() {
       });
   };
 
+  useEffect(() => installChromeHoverTipGlobalDismiss(), []);
+
   useEffect(() => {
     let cancelled = false;
     const applyMaterial = async () => {
@@ -361,6 +367,43 @@ export default function DockApp() {
     return map;
   }, [displayItems, localX, maxScale, centers]);
 
+  // Keep Rust icon-rect cache fresh for OS title-bar minimize → genie.
+  useEffect(() => {
+    let cancelled = false;
+    const report = async () => {
+      try {
+        const win = getCurrentWindow();
+        const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
+        if (cancelled) return;
+        const rects: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
+        document.querySelectorAll<HTMLElement>("[data-dock-item-id]").forEach((el) => {
+          const id = el.dataset.dockItemId;
+          if (!id) return;
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return;
+          rects.push({
+            id,
+            x: outer.x / factor + r.left,
+            y: outer.y / factor + r.top,
+            w: Math.max(8, r.width),
+            h: Math.max(8, r.height),
+          });
+        });
+        if (rects.length) {
+          await invoke("dock_report_icon_rects", { rects });
+        }
+      } catch {
+        /* noop */
+      }
+    };
+    void report();
+    const t = window.setInterval(() => void report(), 400);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [displayItems, scales]);
+
   // AutoHide / hide snap must clear fan + collapse HWND pad.
   useEffect(() => {
     let unsub: (() => void) | undefined;
@@ -402,14 +445,52 @@ export default function DockApp() {
     setExpanded(false);
   };
 
-  async function onItemClick(item: DockItem) {
+  /** Sampled on pointerdown — click steals focus to Dock, so FG must be read before that. */
+  const fgIntentRef = useRef<Record<string, Promise<boolean>>>({});
+
+  async function iconScreenRect(el: HTMLElement): Promise<{ x: number; y: number; w: number; h: number }> {
+    const win = getCurrentWindow();
+    const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
+    const r = el.getBoundingClientRect();
+    return {
+      x: outer.x / factor + r.left,
+      y: outer.y / factor + r.top,
+      w: Math.max(8, r.width),
+      h: Math.max(8, r.height),
+    };
+  }
+
+  async function onItemClick(item: DockItem, el: HTMLElement | null) {
     if (item.kind === "separator") return;
     setLocalX(null);
     setExpanded(false);
     try {
+      const icon = el
+        ? await iconScreenRect(el)
+        : { x: 0, y: 0, w: ICON_SLOT, h: ICON_SLOT };
+
+      if (item.kind === "app") {
+        const parked = await invoke<boolean>("genie_is_parked", { itemId: item.id });
+        if (parked) {
+          await invoke("genie_restore_app", { itemId: item.id, icon });
+          return;
+        }
+        // Prefer pointerdown sample; fall back to live check (usually false after focus steal).
+        const wasFg = await (fgIntentRef.current[item.id] ??
+          invoke<boolean>("genie_arm_minimize_intent", { itemId: item.id }).catch(() => false));
+        console.info("[DockApp] genie intent", item.id, "wasFg=", wasFg);
+        if (wasFg) {
+          try {
+            await invoke("genie_minimize_app", { itemId: item.id, icon });
+            return;
+          } catch (err) {
+            console.error("[DockApp] genie minimize failed", err);
+          }
+        }
+      }
+
+      // Do NOT steal focus back to Dock after launch — that breaks genie FG tracking.
       await invoke("dock_launch_item", { itemId: item.id });
-      const win = getCurrentWindow();
-      void win.setFocus().catch(() => undefined);
     } catch (e) {
       console.error(e);
     }
@@ -475,9 +556,20 @@ export default function DockApp() {
                 key={item.id}
                 type="button"
                 className={`dock-item${running ? " is-running" : ""}${scale > 1.02 ? " is-magnified" : ""}`}
+                data-dock-item-id={item.kind === "app" ? item.id : undefined}
                 {...hostTipPointerProps(label)}
                 style={style}
-                onClick={() => { void hideChromeHoverTip(); void onItemClick(item); }}
+                onPointerDown={() => {
+                  if (item.kind !== "app") return;
+                  // Must sample before click steals foreground to the Dock.
+                  fgIntentRef.current[item.id] = invoke<boolean>("genie_arm_minimize_intent", {
+                    itemId: item.id,
+                  }).catch(() => false);
+                }}
+                onClick={(e) => {
+                  void hideChromeHoverTip();
+                  void onItemClick(item, e.currentTarget);
+                }}
                 onContextMenu={(e) => e.preventDefault()}
               >
                 <span className="dock-hit">

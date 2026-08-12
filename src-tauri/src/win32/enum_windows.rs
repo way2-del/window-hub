@@ -21,7 +21,7 @@ fn window_id(hwnd: isize) -> String {
 }
 
 #[cfg(windows)]
-fn process_exe(pid: u32) -> (Option<String>, Option<String>) {
+pub fn process_exe(pid: u32) -> (Option<String>, Option<String>) {
     use std::path::Path;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -70,22 +70,29 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
 
     /// Task Manager "应用" / taskbar-button windows — not tray-only background processes.
     unsafe fn is_app_window(hwnd: HWND) -> bool {
-        if !IsWindowVisible(hwnd).as_bool() {
+        use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+        // Minimized apps are not "visible" but must still show in Dock / Task View matching.
+        let visible = IsWindowVisible(hwnd).as_bool();
+        let iconic = IsIconic(hwnd).as_bool();
+        if !visible && !iconic {
             return false;
         }
 
         // UWP hosts often stay "visible" while cloaked — those are not foreground apps.
-        let mut cloaked: u32 = 0;
-        if DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_CLOAKED,
-            &mut cloaked as *mut _ as *mut _,
-            std::mem::size_of::<u32>() as u32,
-        )
-        .is_ok()
-            && cloaked != 0
-        {
-            return false;
+        // Skip cloaked unless iconic (some shells cloak while minimized).
+        if !iconic {
+            let mut cloaked: u32 = 0;
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut _ as *mut _,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .is_ok()
+                && cloaked != 0
+            {
+                return false;
+            }
         }
 
         let mut class_buf = [0u16; 256];

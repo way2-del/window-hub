@@ -14,11 +14,17 @@ export type ChromeHoverTipShowOpts = {
   gap?: number;
 };
 
-/** Bumped on every show/hide so in-flight show cannot revive a dismissed tip. */
-let tipEpoch = 0;
+/**
+ * Local cancel token only (per webview). Backend owns the real show/hide generation —
+ * main/dock/tray must NOT share a JS epoch with Rust or tips permanently stop working.
+ */
+let tipToken = 0;
 /** Last intended visibility (hide wins over a slow show). */
 let tipWanted = false;
 let globalDismissInstalled = false;
+/** Debounce show so a fast flick off the 28px bar never opens a stuck tip. */
+let showDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const SHOW_DEBOUNCE_MS = 70;
 
 function normalizeLines(opts: ChromeHoverTipShowOpts): string[] {
   if (Array.isArray(opts.lines) && opts.lines.length) {
@@ -33,6 +39,13 @@ function normalizeLines(opts: ChromeHoverTipShowOpts): string[] {
     .slice(0, 8);
 }
 
+function clearShowDebounce() {
+  if (showDebounceTimer != null) {
+    clearTimeout(showDebounceTimer);
+    showDebounceTimer = null;
+  }
+}
+
 /**
  * When the pointer leaves the Host webview (quick flick off the 28px bar),
  * element pointerleave can miss — dismiss tip at the document edge / blur.
@@ -45,16 +58,26 @@ export function installChromeHoverTipGlobalDismiss(): () => void {
   const hide = () => {
     void hideChromeHoverTip();
   };
+  /** relatedTarget null / outside document = left the webview HWND. */
+  const onMouseOut = (ev: MouseEvent) => {
+    const to = ev.relatedTarget as Node | null;
+    if (to && document.documentElement.contains(to)) return;
+    hide();
+  };
   const onDocLeave = (ev: MouseEvent) => {
     const to = ev.relatedTarget as Node | null;
     if (to && document.documentElement.contains(to)) return;
     hide();
   };
   document.documentElement.addEventListener("mouseleave", onDocLeave);
+  document.addEventListener("mouseout", onMouseOut, true);
+  window.addEventListener("pointerleave", hide);
   window.addEventListener("blur", hide);
   return () => {
     globalDismissInstalled = false;
     document.documentElement.removeEventListener("mouseleave", onDocLeave);
+    document.removeEventListener("mouseout", onMouseOut, true);
+    window.removeEventListener("pointerleave", hide);
     window.removeEventListener("blur", hide);
   };
 }
@@ -70,22 +93,31 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
     return;
   }
   tipWanted = true;
-  const epoch = ++tipEpoch;
+  const token = ++tipToken;
   const gap = typeof opts.gap === "number" ? opts.gap : 6;
+
+  clearShowDebounce();
+  await new Promise<void>((resolve) => {
+    showDebounceTimer = setTimeout(() => {
+      showDebounceTimer = null;
+      resolve();
+    }, SHOW_DEBOUNCE_MS);
+  });
+  if (!tipWanted || token !== tipToken) return;
+
   try {
     const win = getCurrentWindow();
     const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
-    if (!tipWanted || epoch !== tipEpoch) return;
+    if (!tipWanted || token !== tipToken) return;
     await invoke("show_chrome_hover_tip", {
       lines,
       x: outer.x / factor + opts.x,
       y: outer.y / factor + opts.y + gap,
-      epoch,
     });
-    // Slow show finished after a hide (or newer show): force closed if no longer wanted.
-    if (!tipWanted || epoch !== tipEpoch) {
+    // Slow show finished after a hide: force closed.
+    if (!tipWanted || token !== tipToken) {
       if (!tipWanted) {
-        await invoke("close_chrome_hover_tip", { epoch }).catch(() => undefined);
+        await invoke("close_chrome_hover_tip", {}).catch(() => undefined);
       }
     }
   } catch (err) {
@@ -95,9 +127,10 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
 
 export async function hideChromeHoverTip(): Promise<void> {
   tipWanted = false;
-  const epoch = ++tipEpoch;
+  tipToken += 1;
+  clearShowDebounce();
   try {
-    await invoke("close_chrome_hover_tip", { epoch });
+    await invoke("close_chrome_hover_tip", {});
   } catch {
     /* noop */
   }

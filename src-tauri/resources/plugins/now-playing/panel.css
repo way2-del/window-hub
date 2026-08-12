@@ -1,0 +1,212 @@
+:root {
+  color-scheme: dark;
+  --np-fg: #ffffff;
+  --np-muted: rgba(255, 255, 255, 0.55);
+  --np-dim: rgba(255, 255, 255, 0.22);
+  --np-track: rgba(255, 255, 255, 0.18);
+  --np-fill: rgba(255, 255, 255, 0.72);
+  --np-accent: #5ac8fa;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: var(--np-fg);
+  font: 13px/1.3 -apple-system, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI",
+    system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.np-panel {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 4px 4px 2px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.np-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 0;
+}
+
+.np-cover {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  object-fit: cover;
+  background: #1c1c1e;
+  flex: 0 0 auto;
+}
+
+.np-cover.is-empty {
+  display: grid;
+  place-items: center;
+  color: var(--np-dim);
+  font-size: 20px;
+}
+
+.np-meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+
+.np-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.np-artist {
+  color: var(--np-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.np-eq {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding-right: 2px;
+}
+
+.np-eq span {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--np-accent);
+  opacity: 0.95;
+  transform-origin: bottom;
+}
+
+.np-eq.is-playing span:nth-child(1) {
+  height: 40%;
+  animation: np-eq 0.9s ease-in-out infinite;
+}
+.np-eq.is-playing span:nth-child(2) {
+  height: 90%;
+  animation: np-eq 0.75s ease-in-out 0.1s infinite;
+}
+.np-eq.is-playing span:nth-child(3) {
+  height: 55%;
+  animation: np-eq 0.85s ease-in-out 0.2s infinite;
+}
+.np-eq.is-playing span:nth-child(4) {
+  height: 70%;
+  animation: np-eq 0.7s ease-in-out 0.05s infinite;
+}
+
+.np-eq:not(.is-playing) span {
+  height: 28%;
+  opacity: 0.45;
+}
+
+@keyframes np-eq {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.np-progress {
+  display: grid;
+  grid-template-columns: 34px 1fr 40px;
+  gap: 8px;
+  align-items: center;
+}
+
+.np-time {
+  color: var(--np-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.np-time.is-end {
+  text-align: right;
+}
+
+.np-bar {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--np-track);
+  overflow: hidden;
+}
+
+.np-bar > i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--np-fill);
+  border-radius: inherit;
+}
+
+.np-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 2px 0 4px;
+}
+
+.np-btn {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--np-fg);
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  opacity: 0.95;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.np-btn:hover {
+  opacity: 1;
+}
+
+.np-btn:active {
+  transform: scale(0.94);
+}
+
+.np-btn.is-main {
+  width: 40px;
+  height: 40px;
+}
+
+.np-btn svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
+.np-btn.is-main svg {
+  width: 26px;
+  height: 26px;
+}

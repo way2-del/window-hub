@@ -1,4 +1,4 @@
-﻿---
+---
 name: window-hub-window-groups
 description: >-
   Official Window Groups example plugin — store.pins, shortcuts.html iframe
@@ -75,3 +75,5 @@ type WindowGroupStore = {
   "capabilities": ["shortcuts", "storage", "popup", "windows.read", "windows.focus"]
 }
 ```
+
+

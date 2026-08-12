@@ -35,7 +35,9 @@
         "enable": true,
         "scope": [
           "$APPDATA/window-hub/plugins/**",
-          "$APPDATA\\window-hub\\plugins\\**"
+          "$APPDATA\\window-hub\\plugins\\**",
+          "$LOCALAPPDATA/window-hub/cache/genie/**",
+          "$LOCALAPPDATA\\window-hub\\cache\\genie\\**"
         ]
       }
     }

@@ -28,6 +28,8 @@ type Props = {
   maxWidth: number;
   onRequestWidth: (pluginId: string, width: number) => void;
   onHoverTip?: (tip: ShortcutsHoverTip | null) => void;
+  /** 岛栏隐形 worker：不轮询前台，避免多插件 × 450ms IPC 拖垮主线程 */
+  barWorker?: boolean;
 };
 
 async function popupAnchorFromEl(el: HTMLElement) {
@@ -50,7 +52,9 @@ export default function ShortcutsPluginStrip({
   maxWidth,
   onRequestWidth,
   onHoverTip,
+  barWorker: _barWorker = false,
 }: Props) {
+  void _barWorker;
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const openingRef = useRef(false);
@@ -297,7 +301,6 @@ export default function ShortcutsPluginStrip({
   }, [pluginId, onRequestWidth]);
 
   useEffect(() => {
-    let cancelled = false;
     const unsubs: Array<() => void> = [];
     const frame = () => iframeRef.current?.contentWindow;
 
@@ -374,37 +377,14 @@ export default function ShortcutsPluginStrip({
             frame()?.postMessage({ channel: WH_SHORTCUTS_EVT, type: "bar-click" }, "*");
           }),
         );
+        // island-prefs：改由 ShortcutsHost 统一广播
       } catch {
         /* noop */
       }
     })();
 
-    const tick = async () => {
-      try {
-        const fg = await invoke<{
-          isSelf?: boolean;
-          windowId?: string | null;
-        }>("get_foreground_app");
-        if (cancelled) return;
-        if (fg.isSelf) return;
-        frame()?.postMessage(
-          {
-            channel: WH_SHORTCUTS_EVT,
-            type: "foreground-changed",
-            windowId: fg.windowId ?? null,
-          },
-          "*",
-        );
-      } catch {
-        /* noop */
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => void tick(), 450);
-
+    // 前台轮询改由 ShortcutsHost 统一广播，避免 N 条 × get_foreground_app
     return () => {
-      cancelled = true;
-      window.clearInterval(id);
       unsubs.forEach((fn) => fn());
     };
   }, [pluginId, srcdoc]);

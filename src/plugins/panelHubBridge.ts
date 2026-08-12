@@ -30,6 +30,7 @@ const ALLOWED_CMDS = new Set([
   "hub_windows_list",
   "hub_windows_get",
   "hub_windows_focus",
+  "hub_media_send_key",
   "hub_notify",
   "hub_fetch",
 ]);
@@ -130,6 +131,11 @@ export function panelHubBootstrapScript(pluginId: string): string {
     },
     fetch: function (url, opts) {
       return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));
+    },
+    media: {
+      sendKey: function (action) {
+        return invoke("hub_media_send_key", withPlugin({ action: action }));
+      }
     },
     panel: {
       close: function () {

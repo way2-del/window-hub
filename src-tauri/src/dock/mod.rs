@@ -4,6 +4,7 @@ mod icon;
 mod ini;
 mod launch;
 mod visibility;
+pub mod genie;
 
 pub use ini::parse_dockico_ini;
 pub use launch::launch_or_focus;
@@ -104,6 +105,9 @@ pub struct DockPrefs {
     /// so Win11 DWM rounded-shadow chrome is not involved.
     #[serde(default = "default_corner_radius_px")]
     pub corner_radius_px: u32,
+    /// Genie suck/expand duration in milliseconds (200–1500).
+    #[serde(default = "default_genie_duration_ms")]
+    pub genie_duration_ms: u32,
     /// Pinned item ids temporarily omitted when the dock overflows the monitor.
     /// Running matches still show; restore via status-menu right-click.
     #[serde(default)]
@@ -132,6 +136,10 @@ fn default_magnification() -> f64 {
 
 fn default_corner_radius_px() -> u32 {
     12
+}
+
+fn default_genie_duration_ms() -> u32 {
+    560
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +180,7 @@ impl Default for DockPrefs {
             hide_linger_ms: default_hide_linger_ms(),
             magnification: default_magnification(),
             corner_radius_px: default_corner_radius_px(),
+            genie_duration_ms: default_genie_duration_ms(),
             hidden_item_ids: Vec::new(),
         }
     }
@@ -194,6 +203,7 @@ impl DockPrefs {
         self.hide_linger_ms = self.hide_linger_ms.clamp(200, 10_000);
         self.magnification = clamp_magnification(self.magnification);
         self.corner_radius_px = self.corner_radius_px.min(28);
+        self.genie_duration_ms = self.genie_duration_ms.clamp(200, 1500);
         self
     }
 }
@@ -282,7 +292,7 @@ fn item_is_overflow_hidden(
     !item_is_running(item, windows)
 }
 
-fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<DockItem> {
+pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<DockItem> {
     use std::collections::HashSet;
 
     let items = &prefs.items;

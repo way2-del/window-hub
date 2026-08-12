@@ -40,6 +40,21 @@
   position: relative;
 }
 
+/* 岛栏 worker（如天气）：iframe 仍跑逻辑，但不参与快捷区横向排版 */
+.shortcuts-strip-unit.is-bar-worker {
+  position: absolute;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  height: 0;
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  left: 0;
+  top: 0;
+}
+
 .shortcuts-host.is-reorder .shortcuts-strip-unit {
   cursor: grab;
 }
