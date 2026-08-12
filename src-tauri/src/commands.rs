@@ -4,7 +4,6 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
-use tauri::window::Color;
 
 use crate::ecs::components::CaptureRoi;
 use crate::ecs::resources::{HubCommand, KeyKindDto, PointerKindDto};
@@ -341,6 +340,11 @@ fn with_popup_ops<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Blocking popup op lock — for Focused close so we never skip hide when open just finished.
+pub fn with_popup_ops_pub<R>(f: impl FnOnce() -> R) -> R {
+    with_popup_ops(f)
+}
+
 /// Non-blocking: skip if another popup op is in flight (Focused close path).
 pub fn try_with_popup_ops<R>(f: impl FnOnce() -> R) -> Option<R> {
     match POPUP_OPS.try_lock() {
@@ -379,6 +383,7 @@ pub async fn open_tray_popup(
         // Long enough to cover cold WebView2 boot + chevron focus churn.
         suppress_tray_popup_blur(Some(900));
         if let Some(wg) = app.get_webview_window("plugin-popup") {
+            clear_plugin_popup_reveal_fallback();
             let _ = wg.hide();
             let _ = app.emit("plugin-popup-closed", ());
         }
@@ -538,6 +543,7 @@ pub async fn open_system_flyout(
 
     hide_popup_label(&app, "tray-popup", "tray-popup-closed");
     if let Some(wg) = app.get_webview_window("plugin-popup") {
+        clear_plugin_popup_reveal_fallback();
         let _ = wg.hide();
         let _ = app.emit("plugin-popup-closed", ());
     }
@@ -1035,6 +1041,7 @@ pub async fn open_status_menu_popup(
         let _ = app.emit("system-flyout-closed", ());
     }
     if let Some(plugin) = app.get_webview_window("plugin-popup") {
+        clear_plugin_popup_reveal_fallback();
         let _ = plugin.hide();
         let _ = app.emit("plugin-popup-closed", ());
     }
@@ -1110,7 +1117,70 @@ pub fn is_status_menu_popup_open(app: AppHandle) -> bool {
 const PLUGIN_POPUP_W: f64 = 320.0;
 const PLUGIN_POPUP_H: f64 = 480.0;
 
-fn popup_plugin_id_of(win: &WebviewWindow) -> Option<String> {
+/// Cold/warm shell waits for frontend `reveal_plugin_popup`. Fallback must not
+/// re-show after the user already closed (was: sleep 900 → is_visible false → show again).
+static PLUGIN_AWAIT_REVEAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static PLUGIN_FALLBACK_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn arm_plugin_popup_reveal_fallback() -> u64 {
+    let gen = PLUGIN_FALLBACK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    PLUGIN_AWAIT_REVEAL.store(true, std::sync::atomic::Ordering::SeqCst);
+    gen
+}
+
+fn clear_plugin_popup_reveal_fallback() {
+    PLUGIN_AWAIT_REVEAL.store(false, std::sync::atomic::Ordering::SeqCst);
+    PLUGIN_FALLBACK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Call whenever plugin-popup is hidden outside `close_plugin_popup` (focus blur etc.).
+pub fn cancel_plugin_popup_reveal_fallback() {
+    clear_plugin_popup_reveal_fallback();
+}
+
+fn schedule_plugin_popup_reveal_fallback(
+    win: WebviewWindow,
+    app: AppHandle,
+    plugin_id: String,
+) {
+    let gen = arm_plugin_popup_reveal_fallback();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        if PLUGIN_FALLBACK_GEN.load(std::sync::atomic::Ordering::SeqCst) != gen {
+            return;
+        }
+        if !PLUGIN_AWAIT_REVEAL.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if win.is_visible().unwrap_or(false) {
+            return;
+        }
+        let _ = win.show();
+        let _ = win.set_focus();
+        let _ = app.emit("plugin-popup-opened", &plugin_id);
+    });
+}
+
+/// Runtime plugin id for the reused plugin-popup WebView (hot-swap; URL may stay first cold id).
+static ACTIVE_PLUGIN_POPUP_ID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn set_active_plugin_popup_id(id: &str) {
+    if let Ok(mut g) = ACTIVE_PLUGIN_POPUP_ID.lock() {
+        *g = id.to_string();
+    }
+}
+
+fn active_plugin_popup_id() -> Option<String> {
+    ACTIVE_PLUGIN_POPUP_ID
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .filter(|s| !s.is_empty())
+}
+
+fn popup_plugin_id_from_url(win: &WebviewWindow) -> Option<String> {
     let url = win.url().ok()?;
     let s = url.as_str();
     for part in s.split(['?', '&']) {
@@ -1124,9 +1194,26 @@ fn popup_plugin_id_of(win: &WebviewWindow) -> Option<String> {
     None
 }
 
+fn popup_plugin_id_of(win: &WebviewWindow) -> Option<String> {
+    active_plugin_popup_id().or_else(|| popup_plugin_id_from_url(win))
+}
+
 /// Public helper for focus-close path (lib.rs).
 pub fn peek_plugin_popup_id(win: &WebviewWindow) -> Option<String> {
     popup_plugin_id_of(win)
+}
+
+fn push_plugin_popup_load(win: &WebviewWindow, plugin_id: &str, prefer_group_id: Option<&str>) {
+    let gid_js = prefer_group_id
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("{s:?}"))
+        .unwrap_or_else(|| "null".into());
+    let script = format!(
+        r#"window.__WH_PLUGIN_ID__={pid:?};window.dispatchEvent(new CustomEvent("wh-plugin-popup-load",{{detail:{{pluginId:{pid:?},preferGroupId:{gid}}}}}));"#,
+        pid = plugin_id,
+        gid = gid_js
+    );
+    let _ = win.eval(&script);
 }
 
 fn urlencoding_minimal(s: &str) -> String {
@@ -1159,6 +1246,7 @@ fn plugin_popup_path(
 }
 
 /// 通用插件弹窗：宿主 App 壳（有 Tauri IPC）+ 注入 window.hub，再由前端加载插件静态资源。
+/// 同一 WebView 热切换插件（对齐 system-flyout kind），避免 close+rebuild 竞态导致「关了旧的开不出新的」。
 #[tauri::command]
 pub async fn open_plugin_popup(
     app: AppHandle,
@@ -1169,149 +1257,182 @@ pub async fn open_plugin_popup(
     prefer_group_id: Option<String>,
     force_open: Option<bool>,
 ) -> Result<(), String> {
-    suppress_plugin_popup_blur(Some(900));
-    if let Some(tray) = app.get_webview_window("tray-popup") {
-        let _ = tray.hide();
-        let _ = app.emit("tray-popup-closed", ());
-    }
-    if let Some(status) = app.get_webview_window("status-menu-popup") {
-        let _ = status.hide();
-        let _ = app.emit("status-menu-popup-closed", ());
-    }
-    hide_popup_label(&app, "system-flyout", "system-flyout-closed");
+    with_popup_ops(|| {
+        suppress_plugin_popup_blur(Some(280));
+        if let Some(tray) = app.get_webview_window("tray-popup") {
+            let _ = tray.hide();
+            let _ = app.emit("tray-popup-closed", ());
+        }
+        if let Some(status) = app.get_webview_window("status-menu-popup") {
+            let _ = status.hide();
+            let _ = app.emit("status-menu-popup-closed", ());
+        }
+        hide_popup_label(&app, "system-flyout", "system-flyout-closed");
 
-    let record = crate::plugin_install::find_installed_plugin(&plugin_id)
-        .ok_or_else(|| "plugin not installed".to_string())?;
-    if !record.enabled {
-        return Err("plugin disabled".into());
-    }
-    crate::plugin_hub::assert_capability(&plugin_id, "popup")?;
+        let record = crate::plugin_install::find_installed_plugin(&plugin_id)
+            .ok_or_else(|| "plugin not installed".to_string())?;
+        if !record.enabled {
+            return Err("plugin disabled".into());
+        }
+        crate::plugin_hub::assert_capability(&plugin_id, "popup")?;
 
-    // Ensure popup entry exists (and asset scope for any future direct loads)
-    let popup = plugin_popup_path(&record)?;
-    let parent = popup
-        .parent()
-        .ok_or_else(|| "plugin popup has no parent directory".to_string())?;
-    let _ = app.asset_protocol_scope().allow_directory(parent, true);
+        // Ensure popup entry exists (and asset scope for any future direct loads)
+        let popup = plugin_popup_path(&record)?;
+        let parent = popup
+            .parent()
+            .ok_or_else(|| "plugin popup has no parent directory".to_string())?;
+        let _ = app.asset_protocol_scope().allow_directory(parent, true);
 
-    let force_open = force_open.unwrap_or(false);
+        let force_open = force_open.unwrap_or(false);
+        let prefer = prefer_group_id.as_ref().filter(|s| !s.is_empty());
+        let title = record
+            .manifest
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("插件")
+            .to_string();
 
-    // Idempotent: same plugin already loaded (visible or hidden).
-    // Avoids cold create + DWM material thrash that looks like double-flash.
-    if let Some(existing) = app.get_webview_window("plugin-popup") {
-        if popup_plugin_id_of(&existing) == Some(plugin_id.clone()) {
+        // Warm shell: reuse HWND — same plugin toggle / different plugin hot-swap.
+        if let Some(existing) = app.get_webview_window("plugin-popup") {
+            let cur = popup_plugin_id_of(&existing);
             let was_visible = existing.is_visible().unwrap_or(false);
-            let prefer = prefer_group_id.as_ref().filter(|s| !s.is_empty());
-            // 二次点击同一插件入口（无 preferGroup）→ 关闭；拖入 force_open 禁止关掉
-            if was_visible && prefer.is_none() && !force_open {
+
+            if cur.as_deref() == Some(plugin_id.as_str()) {
+                // 二次点击同一插件入口（无 preferGroup）→ 关闭；拖入 force_open 禁止关掉
+                if was_visible && prefer.is_none() && !force_open {
+                    clear_plugin_popup_focus_close();
+                    clear_plugin_popup_reveal_fallback();
+                    let _ = existing.hide();
+                    let _ = app.emit("plugin-popup-closed", ());
+                    return Ok(());
+                }
+                // Focus raced ahead: HWND already hidden by Focused(main), chip still "opens".
+                if !was_visible
+                    && prefer.is_none()
+                    && !force_open
+                    && should_absorb_plugin_popup_reopen(&plugin_id)
+                {
+                    clear_plugin_popup_focus_close();
+                    return Ok(());
+                }
                 clear_plugin_popup_focus_close();
-                let _ = existing.hide();
-                let _ = app.emit("plugin-popup-closed", ());
+                clear_plugin_popup_reveal_fallback();
+                set_active_plugin_popup_id(&plugin_id);
+                if let Some(gid) = prefer {
+                    let _ = app.emit("plugin-popup-prefer-group", gid);
+                }
+                let _ = existing.set_position(LogicalPosition::new(x, y));
+                let _ = existing.unminimize();
+                if was_visible {
+                    let _ = existing.set_focus();
+                    return Ok(());
+                }
+                let _ = existing.eval(
+                    r#"(function(){var el=document.querySelector('.plugin-popup-root');if(!el)return;el.style.transition='none';el.classList.remove('is-enter');el.classList.add('is-in');})();"#,
+                );
+                let _ = existing.show();
+                let _ = existing.set_focus();
+                let _ = app.emit("plugin-popup-opened", &plugin_id);
                 return Ok(());
             }
-            // Focus raced ahead: HWND already hidden by Focused(main), chip still "opens".
-            if !was_visible && prefer.is_none() && !force_open && should_absorb_plugin_popup_reopen(&plugin_id)
-            {
-                clear_plugin_popup_focus_close();
-                return Ok(());
-            }
+
+            // Different plugin: hot-swap content in place (do not close/rebuild).
+            clear_plugin_popup_focus_close();
+            set_active_plugin_popup_id(&plugin_id);
+            let _ = existing.set_title(&title);
+            let _ = existing.set_position(LogicalPosition::new(x, y));
+            let _ = existing.unminimize();
+            push_plugin_popup_load(
+                &existing,
+                &plugin_id,
+                prefer.map(|s| s.as_str()),
+            );
+            let _ = app.emit(
+                "plugin-popup-load",
+                serde_json::json!({
+                    "pluginId": plugin_id,
+                    "preferGroupId": prefer,
+                }),
+            );
             if let Some(gid) = prefer {
                 let _ = app.emit("plugin-popup-prefer-group", gid);
             }
-            let _ = existing.set_position(LogicalPosition::new(x, y));
-            let _ = existing.unminimize();
+            // Host reveal_plugin_popup after inject; keep visible window focused during swap.
             if was_visible {
-                // Already painted — don't force opacity 0 / re-emit fade (content flash).
+                clear_plugin_popup_reveal_fallback();
                 let _ = existing.set_focus();
-                return Ok(());
+                let _ = app.emit("plugin-popup-opened", &plugin_id);
+            } else {
+                // Hidden warm shell: frontend reveal after inject; fallback if Host stalls.
+                schedule_plugin_popup_reveal_fallback(
+                    existing.clone(),
+                    app.clone(),
+                    plugin_id.clone(),
+                );
             }
-            // Was hidden: paint opaque *before* show so DWM doesn't flash an empty shell.
-            clear_plugin_popup_focus_close();
-            let _ = existing.eval(
-                r#"(function(){var el=document.querySelector('.plugin-popup-root');if(!el)return;el.style.transition='none';el.classList.remove('is-enter');el.classList.add('is-in');})();"#,
-            );
-            let _ = existing.show();
-            let _ = existing.set_focus();
-            let _ = app.emit("plugin-popup-opened", &plugin_id);
             return Ok(());
         }
-        let _ = existing.close();
-        let _ = app.emit("plugin-popup-closed", ());
-        // Yield briefly so WebView2 can tear down before rebuild.
-        std::thread::sleep(std::time::Duration::from_millis(16));
-    }
 
-    clear_plugin_popup_focus_close();
-    let mut url_s = format!("index.html?window=plugin-popup&plugin={plugin_id}");
-    if let Some(gid) = prefer_group_id.as_ref().filter(|s| !s.is_empty()) {
-        url_s.push_str("&preferGroup=");
-        url_s.push_str(&urlencoding_minimal(gid));
-    }
-    let url = WebviewUrl::App(url_s.into());
-    let init = hub_init_script(&plugin_id);
-
-    let win = WebviewWindowBuilder::new(&app, "plugin-popup", url)
-        .title(
-            record
-                .manifest
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("插件"),
-        )
-        .inner_size(PLUGIN_POPUP_W, PLUGIN_POPUP_H)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .closable(true)
-        .decorations(false)
-        .transparent(crate::win32::blur_glass::popup_is_transparent())
-        .background_color(crate::win32::blur_glass::popup_background_color())
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focused(false)
-        .visible(false)
-        .initialization_script(init)
-        .build()
-        .map_err(|e| format!("open plugin popup failed: {e}"))?;
-
-    let _ = win.set_position(LogicalPosition::new(x, y));
-    apply_saved_material_once(&win, &state);
-    if let Ok(hwnd) = win.hwnd() {
-        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
-    }
-    // Stay hidden until frontend injects popup.js — early show = empty mica flash.
-    // Fallback if Host never calls reveal (crash / old frontend).
-    let win_fallback = win.clone();
-    let app_fallback = app.clone();
-    let pid_fallback = plugin_id.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(900));
-        if win_fallback.is_visible().unwrap_or(false) {
-            return;
+        clear_plugin_popup_focus_close();
+        set_active_plugin_popup_id(&plugin_id);
+        let mut url_s = format!("index.html?window=plugin-popup&plugin={plugin_id}");
+        if let Some(gid) = prefer {
+            url_s.push_str("&preferGroup=");
+            url_s.push_str(&urlencoding_minimal(gid));
         }
-        let _ = win_fallback.show();
-        let _ = win_fallback.set_focus();
-        let _ = app_fallback.emit("plugin-popup-opened", &pid_fallback);
-    });
-    Ok(())
+        let url = WebviewUrl::App(url_s.into());
+        let init = hub_init_script(&plugin_id);
+
+        let win = WebviewWindowBuilder::new(&app, "plugin-popup", url)
+            .title(title)
+            .inner_size(PLUGIN_POPUP_W, PLUGIN_POPUP_H)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .closable(true)
+            .decorations(false)
+            .transparent(crate::win32::blur_glass::popup_is_transparent())
+            .background_color(crate::win32::blur_glass::popup_background_color())
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .visible(false)
+            .initialization_script(init)
+            .build()
+            .map_err(|e| format!("open plugin popup failed: {e}"))?;
+
+        let _ = win.set_position(LogicalPosition::new(x, y));
+        apply_saved_material_once(&win, &state);
+        if let Ok(hwnd) = win.hwnd() {
+            crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+        }
+        // Stay hidden until frontend injects popup.js — early show = empty mica flash.
+        // Fallback if Host never calls reveal (crash / old frontend).
+        schedule_plugin_popup_reveal_fallback(win.clone(), app.clone(), plugin_id.clone());
+        Ok(())
+    })
 }
 
 /// Show plugin popup after Host has injected CSS/JS (avoids empty-shell flash).
 #[tauri::command]
 pub async fn reveal_plugin_popup(app: AppHandle) -> Result<(), String> {
-    let Some(w) = app.get_webview_window("plugin-popup") else {
-        return Ok(());
-    };
-    let _ = w.show();
-    let _ = w.set_focus();
-    if let Some(id) = popup_plugin_id_of(&w) {
-        let _ = app.emit("plugin-popup-opened", &id);
-    }
-    Ok(())
+    with_popup_ops(|| {
+        clear_plugin_popup_reveal_fallback();
+        let Some(w) = app.get_webview_window("plugin-popup") else {
+            return Ok(());
+        };
+        let _ = w.show();
+        let _ = w.set_focus();
+        if let Some(id) = popup_plugin_id_of(&w) {
+            let _ = app.emit("plugin-popup-opened", &id);
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub async fn close_plugin_popup(app: AppHandle) -> Result<(), String> {
+    clear_plugin_popup_reveal_fallback();
     if let Some(w) = app.get_webview_window("plugin-popup") {
         let _ = w.hide();
     }
@@ -1936,6 +2057,12 @@ pub fn hub_netease_now_playing(plugin_id: String) -> Result<serde_json::Value, S
 #[tauri::command]
 pub fn hub_panel_open_session(app: AppHandle, plugin_id: String) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "island.panel")?;
+    // 开岛面板时关掉托管弹窗（窗口组等），避免 blur-suppress 导致 always-on-top 残留
+    if let Some(wg) = app.get_webview_window("plugin-popup") {
+        clear_plugin_popup_reveal_fallback();
+        let _ = wg.hide();
+        let _ = app.emit("plugin-popup-closed", ());
+    }
     let _ = app.emit(
         "island-session",
         serde_json::json!({ "action": "open", "pluginId": plugin_id }),

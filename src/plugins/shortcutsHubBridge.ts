@@ -33,7 +33,11 @@ export function isAllowedShortcutsHubCmd(cmd: string): boolean {
 }
 
 /** Injected into shortcuts HTML so `window.hub` works without Tauri in the iframe. */
-export function shortcutsHubBootstrapScript(pluginId: string): string {
+export function shortcutsHubBootstrapScript(
+  pluginId: string,
+  opts?: { suppressBlurOnPointerDown?: boolean },
+): string {
+  const suppressBlur = opts?.suppressBlurOnPointerDown === true;
   return `
 (function () {
   const PLUGIN_ID = ${JSON.stringify(pluginId)};
@@ -209,10 +213,15 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
     return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
   };
   window.hub.notify = notifyFn;
-  // Suppress blur-close before chip click steals focus from plugin-popup.
-  document.addEventListener("pointerdown", function () {
-    try { hostCmd("suppress_plugin_popup_blur", { ms: 900 }); } catch (_) {}
-  }, true);
+  // 仅 popup 入口插件：点条内芯片时 suppress，避免失焦先关弹窗再竞态。
+  // command / panel 插件禁止 suppress，否则窗口组会 always-on-top 残留。
+  ${
+    suppressBlur
+      ? `document.addEventListener("pointerdown", function () {
+    try { hostCmd("suppress_plugin_popup_blur", { ms: 280 }); } catch (_) {}
+  }, true);`
+      : ""
+  }
   window.addEventListener("wh-shortcuts-evt", function (ev) {
     var d = ev && ev.detail;
     if (!d || d.type !== "refresh") return;
@@ -224,7 +233,11 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
 `;
 }
 
-export async function buildShortcutsSrcdoc(pluginId: string, entryPath: string): Promise<string> {
+export async function buildShortcutsSrcdoc(
+  pluginId: string,
+  entryPath: string,
+  opts?: { suppressBlurOnPointerDown?: boolean },
+): Promise<string> {
   let html = await invoke<string>("hub_plugin_read_text", {
     pluginId,
     relativePath: entryPath,
@@ -269,7 +282,9 @@ button{border:none!important;background:transparent!important;outline:none!impor
 .wg-chip.is-manage .wg-chip-icon{position:absolute!important;left:50%!important;top:50%!important;width:13px!important;height:13px!important;margin:0!important;padding:0!important;transform:translate(-50%,-50%)!important;display:block!important;overflow:visible!important;text-shadow:none!important;filter:none!important;pointer-events:none!important}
 ::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}
 </style>`;
-  const boot = `${shellCss}<script>${shortcutsHubBootstrapScript(pluginId)}</script>`;
+  const boot = `${shellCss}<script>${shortcutsHubBootstrapScript(pluginId, {
+    suppressBlurOnPointerDown: opts?.suppressBlurOnPointerDown,
+  })}</script>`;
   const bodyJs = js ? `<script>${js}</script>` : "";
   html = html.replace(
     new RegExp(

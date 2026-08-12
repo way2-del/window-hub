@@ -1,6 +1,9 @@
 /**
  * 中转站 — 弹窗（挂 #app.wg-shell）
  * 添加文件 / 拖入 / 右键菜单 / 复制路径·文件
+ *
+ * 文件拖入：WebView2 上 HTML5 File.path 常为空，必须走 Tauri onDragDropEvent。
+ * HTML5 drop 仅可靠处理 text/plain 与无 path 的图片 bytes。
  */
 (function () {
   const KIND_FALLBACK = { file: "文件", text: "文字", image: "图片", folder: "文件夹" };
@@ -15,8 +18,26 @@
   let footerEl = null;
   let ctxMenu = null;
   let ctxItemId = null;
+  let disposed = false;
+  const disposers = [];
+
+  function onDispose() {
+    if (disposed) return;
+    disposed = true;
+    while (disposers.length) {
+      const fn = disposers.pop();
+      try {
+        fn?.();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  window.addEventListener("wh-plugin-popup-dispose", onDispose, { once: true });
 
   function hub() {
+    if (disposed) return null;
     return window.hub;
   }
 
@@ -265,8 +286,61 @@
     dropZone.addEventListener("drop", function (e) {
       e.preventDefault();
       dropZone.classList.remove("is-over");
+      // 文字 / 无 path 图片；文件路径优先靠 bindTauriFileDrop
       void ingestDataTransfer(e.dataTransfer).then(refresh).catch(console.error);
     });
+  }
+
+  /** OS 文件拖入真源：Tauri paths（与 Host PluginPopupHost 双通道，互为兜底） */
+  function bindTauriFileDrop() {
+    const api =
+      window.__TAURI__ &&
+      (window.__TAURI__.webview || window.__TAURI__.window);
+    if (!api) return;
+    const getCurrent =
+      (window.__TAURI__.webview && window.__TAURI__.webview.getCurrentWebview) ||
+      (window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow);
+    if (typeof getCurrent !== "function") return;
+    let target;
+    try {
+      target = getCurrent();
+    } catch (_) {
+      return;
+    }
+    if (!target || typeof target.onDragDropEvent !== "function") return;
+    void target
+      .onDragDropEvent(function (ev) {
+        if (disposed) return;
+        const p = ev && ev.payload;
+        if (!p) return;
+        if (p.type === "enter" || p.type === "over") {
+          if (dropZone) dropZone.classList.add("is-over");
+          return;
+        }
+        if (p.type === "leave" || p.type === "cancel") {
+          if (dropZone) dropZone.classList.remove("is-over");
+          return;
+        }
+        if (p.type !== "drop") return;
+        if (dropZone) dropZone.classList.remove("is-over");
+        const paths = p.paths || [];
+        if (!paths.length) return;
+        const h = hub();
+        if (!h || !h.staging || !h.staging.addPaths) return;
+        void h.staging
+          .addPaths(paths)
+          .then(function () {
+            return refresh();
+          })
+          .catch(console.error);
+      })
+      .then(function (un) {
+        if (typeof un === "function") {
+          if (disposed) un();
+          else disposers.push(un);
+        }
+      })
+      .catch(console.error);
   }
 
   function mount() {
@@ -391,9 +465,11 @@
     });
 
     bindDrop();
+    bindTauriFileDrop();
   }
 
   function boot(attempt) {
+    if (disposed) return;
     const h = hub();
     if (!h || !h.staging) {
       if ((attempt || 0) < 30) {
@@ -405,9 +481,10 @@
     }
     mount();
     if (h.staging.subscribe) {
-      h.staging.subscribe(function () {
-        refresh();
+      const un = h.staging.subscribe(function () {
+        if (!disposed) refresh();
       });
+      if (typeof un === "function") disposers.push(un);
     } else {
       refresh();
     }

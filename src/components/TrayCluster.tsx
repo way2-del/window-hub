@@ -629,6 +629,8 @@ export default function TrayCluster({
   ) {
     if (!anchor || togglingRef.current) return;
     togglingRef.current = true;
+    // 先 suppress：点其它芯片时避免失焦先关窗，再热切换 kind
+    void invoke("suppress_system_flyout_blur", { ms: 900 });
     try {
       // Closing same kind: optimistic, no round-trip before hide.
       if (flyoutKind === kind) {
@@ -636,7 +638,6 @@ export default function TrayCluster({
         void invoke("close_system_flyout").catch(() => undefined);
         return;
       }
-      void invoke("suppress_system_flyout_blur", { ms: 900 });
       const { x, y } = await popupAnchor(anchor, SYSTEM_FLYOUT_W);
       setFlyoutKind(kind);
       await invoke("open_system_flyout", { kind, x, y });
@@ -686,7 +687,7 @@ export default function TrayCluster({
             aria-expanded={flyoutKind === "wifi"}
             onMouseDown={(e) => {
               e.preventDefault();
-              void invoke("suppress_system_flyout_blur", { ms: 500 });
+              void invoke("suppress_system_flyout_blur", { ms: 900 });
             }}
             onClick={() => void toggleFlyout("wifi", wifiRef.current)}
           >
@@ -704,7 +705,7 @@ export default function TrayCluster({
             aria-expanded={flyoutKind === "bluetooth"}
             onMouseDown={(e) => {
               e.preventDefault();
-              void invoke("suppress_system_flyout_blur", { ms: 500 });
+              void invoke("suppress_system_flyout_blur", { ms: 900 });
             }}
             onClick={() => void toggleFlyout("bluetooth", btRef.current)}
           >

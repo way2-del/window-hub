@@ -44,9 +44,29 @@ const state = {
   aliasDraft: "",
   /** In-app confirm; never use window.confirm / alert (WebView 原生弹窗常点不到). */
   confirm: null,
+  /** Host hot-swap 会 dispatch wh-plugin-popup-dispose；之后禁止再写 DOM。 */
+  disposed: false,
 };
 
+const disposers = [];
+
+function onDispose() {
+  if (state.disposed) return;
+  state.disposed = true;
+  while (disposers.length) {
+    const fn = disposers.pop();
+    try {
+      fn?.();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+window.addEventListener("wh-plugin-popup-dispose", onDispose, { once: true });
+
 function getAppEl() {
+  if (state.disposed) return null;
   return document.getElementById("app");
 }
 
@@ -292,6 +312,7 @@ function rebind(items) {
 }
 
 function onWindows(list) {
+  if (state.disposed) return;
   state.windows = list || [];
   if (state.store.groups.length) {
     const next = {
@@ -310,6 +331,7 @@ function onWindows(list) {
 }
 
 function render() {
+  if (state.disposed) return;
   const app = getAppEl();
   if (!app) {
     console.error("[window-groups] #app missing");
@@ -635,6 +657,7 @@ void (async () => {
   };
 
   async function boot() {
+    if (state.disposed) return;
     // Host already applies Mica Alt (settings sidebar). Do not re-apply mica here —
     // a second DWM backdrop looks like an extra frosted overlay.
     const prefer =
@@ -649,7 +672,8 @@ void (async () => {
         return null;
       });
     try {
-      hub().windows.subscribe(onWindows);
+      const unWin = hub().windows.subscribe(onWindows);
+      if (typeof unWin === "function") disposers.push(unWin);
     } catch (err) {
       console.error(err);
       void hub()
@@ -660,20 +684,24 @@ void (async () => {
 
     try {
       const raw = await storeP;
+      if (state.disposed) return;
       state.store = normalize(raw);
     } catch (err) {
       console.error(err);
     }
+    if (state.disposed) return;
     if (prefer) applyPreferGroup(prefer);
     render();
 
     try {
       const listen = window.__TAURI__?.event?.listen;
       if (typeof listen === "function") {
-        await listen("plugin-popup-prefer-group", (ev) => {
+        const unPref = await listen("plugin-popup-prefer-group", (ev) => {
+          if (state.disposed) return;
           const id = typeof ev?.payload === "string" ? ev.payload : null;
           if (id) applyPreferGroup(id);
         });
+        if (typeof unPref === "function") disposers.push(unPref);
       }
     } catch (err) {
       console.error(err);

@@ -254,7 +254,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     };
   }, []);
 
-  /** 点击：同插件已开则关闭；拖入：只保证打开，禁止 toggle 关掉 */
+  /** 点击：同插件已开则关闭；其它插件已开则热切换；拖入：只保证打开，禁止 toggle 关掉 */
   const openPopupFromEl = useCallback(
     async (pluginId: string, el: HTMLElement, opts?: { forceOpen?: boolean }) => {
       if (openingRef.current) return;
@@ -266,8 +266,10 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
         return;
       }
       openingRef.current = true;
+      // 仅挡住开窗瞬间的失焦竞态；过长会导致点外部关不掉
+      void invoke("suppress_plugin_popup_blur", { ms: 280 }).catch(() => undefined);
       try {
-        // Single IPC — Rust suppresses blur (longer when forceOpen) and toggles.
+        // Single IPC — Rust suppresses blur and toggles / hot-swaps.
         const { x, y } = await popupAnchor(el);
         await invoke("open_plugin_popup", {
           pluginId,
@@ -293,16 +295,17 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     [openPopupFromEl],
   );
 
-  /** 从资源管理器拖到「中转站」芯片：开弹窗；在芯片上松开则直接入库 */
+  /** 从资源管理器拖到「中转站」芯片：在芯片上松开入库并打开弹窗。
+   * 禁止在 enter/over 时开弹窗——新 HWND 插入拖拽会话会导致目标区出现禁止光标、无法放下。 */
   useEffect(() => {
+    let cancelled = false;
     let un: (() => void) | undefined;
-    let lastOpenAt = 0;
     void getCurrentWindow()
       .onDragDropEvent((ev) => {
         const host = hostRef.current;
         if (!host) return;
         const p = ev.payload;
-        if (p.type === "leave") return;
+        if (p.type !== "drop") return;
 
         void (async () => {
           const win = getCurrentWindow();
@@ -314,31 +317,28 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
           const hit = hitDragOpenStrip(host, lx, ly);
           if (!hit) return;
 
-          if (p.type === "enter" || p.type === "over") {
-            const now = Date.now();
-            if (now - lastOpenAt < 200) return;
-            lastOpenAt = now;
-            void openPopupFromEl(hit.pluginId, hit.el, { forceOpen: true });
-            return;
+          const paths = p.paths ?? [];
+          if (paths.length) {
+            void invoke("hub_staging_add_paths", {
+              pluginId: hit.pluginId,
+              paths,
+            }).catch(console.error);
           }
-
-          if (p.type === "drop") {
-            const paths = p.paths ?? [];
-            if (paths.length) {
-              void invoke("hub_staging_add_paths", {
-                pluginId: hit.pluginId,
-                paths,
-              }).catch(console.error);
-            }
-            void openPopupFromEl(hit.pluginId, hit.el, { forceOpen: true });
-          }
+          void openPopupFromEl(hit.pluginId, hit.el, { forceOpen: true });
         })();
       })
       .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
         un = fn;
       })
       .catch(() => undefined);
-    return () => un?.();
+    return () => {
+      cancelled = true;
+      un?.();
+    };
   }, [openPopupFromEl]);
 
   const onRequestWidth = useCallback((pluginId: string, width: number) => {
@@ -426,6 +426,9 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
                 const key = `chip:${p.pluginId}`;
                 if (el) anchorRefs.current.set(key, el);
                 else anchorRefs.current.delete(key);
+              }}
+              onMouseDown={() => {
+                void invoke("suppress_plugin_popup_blur", { ms: 280 }).catch(() => undefined);
               }}
               onClick={() => {
                 if (popupOpenRef.current && popupPluginId === p.pluginId) {

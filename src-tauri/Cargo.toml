@@ -1,6 +1,6 @@
 [package]
 name = "window-hub"
-version = "0.1.1"
+version = "0.1.2"
 description = "Windows window mosaic hub with ECS capture and input forwarding"
 authors = ["you"]
 edition = "2021"

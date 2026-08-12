@@ -262,11 +262,13 @@ pub fn run() {
                         let app = window.app_handle().clone();
                         std::thread::spawn(move || {
                             std::thread::sleep(Duration::from_millis(8));
-                            let _ = crate::commands::try_with_popup_ops(|| {
+                            // 阻塞锁：避免 open 刚结束 try_lock 失败导致弹窗关不掉
+                            crate::commands::with_popup_ops_pub(|| {
                                 if !crate::commands::plugin_popup_blur_suppressed() {
                                     if let Some(w) = app.get_webview_window("plugin-popup") {
                                         if w.is_visible().unwrap_or(false) {
                                             let id = crate::commands::peek_plugin_popup_id(&w);
+                                            crate::commands::cancel_plugin_popup_reveal_fallback();
                                             let _ = w.hide();
                                             crate::commands::note_plugin_popup_focus_close(
                                                 id.as_deref(),
@@ -326,7 +328,7 @@ pub fn run() {
                             {
                                 return;
                             }
-                            let _ = crate::commands::try_with_popup_ops(|| {
+                            crate::commands::with_popup_ops_pub(|| {
                                 if let Some(w) = app.get_webview_window(&label) {
                                     if w.is_focused().unwrap_or(false) {
                                         return;
@@ -336,6 +338,9 @@ pub fn run() {
                                     } else {
                                         None
                                     };
+                                    if label == "plugin-popup" {
+                                        crate::commands::cancel_plugin_popup_reveal_fallback();
+                                    }
                                     let _ = w.hide();
                                     match label.as_str() {
                                         "tray-popup" => {

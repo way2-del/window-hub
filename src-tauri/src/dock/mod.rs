@@ -12,7 +12,6 @@ pub use visibility::DockVisibility;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::utils::config::Color;
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };

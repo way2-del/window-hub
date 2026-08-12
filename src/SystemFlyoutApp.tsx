@@ -457,6 +457,7 @@ export default function SystemFlyoutApp() {
   const [wifiMenu, setWifiMenu] = useState<{ ssid: string; x: number; y: number } | null>(null);
   const [showMenuPw, setShowMenuPw] = useState(false);
   const [pwLoading, setPwLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const draggingRef = useRef(false);
   const previewTimer = useRef(0);
   const wheelCommitTimer = useRef(0);
@@ -558,6 +559,25 @@ export default function SystemFlyoutApp() {
 
   function requestSoftRefresh(domains?: string[]) {
     void invoke("refresh_system_status", { domains: domains ?? ["all"] }).catch(() => undefined);
+  }
+
+  async function manualRefresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setMsg("");
+    const domains =
+      kind === "wifi" ? ["wifi"] : kind === "bluetooth" ? ["bluetooth"] : ["all"];
+    requestSoftRefresh(domains);
+    try {
+      await refresh(true);
+      // 扫描结果稍后进缓存，再读一次
+      await new Promise((r) => window.setTimeout(r, 700));
+      await refresh(false);
+      setMsg("已刷新");
+      window.setTimeout(() => setMsg((m) => (m === "已刷新" ? "" : m)), 1600);
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   async function ensureWifiPassword(ssid: string): Promise<string | null> {
@@ -927,9 +947,22 @@ export default function SystemFlyoutApp() {
     >
       <header className="system-flyout-head">
         <h1>{title}</h1>
-        <button type="button" className="system-flyout-link" onClick={() => void closeSelf()}>
-          关闭
-        </button>
+        <div className="system-flyout-head-actions">
+          {(kind === "wifi" || kind === "bluetooth") && (
+            <button
+              type="button"
+              className="system-flyout-link"
+              disabled={refreshing}
+              title={kind === "wifi" ? "重新扫描无线网络" : "刷新蓝牙设备"}
+              onClick={() => void manualRefresh()}
+            >
+              {refreshing ? "刷新中…" : "刷新"}
+            </button>
+          )}
+          <button type="button" className="system-flyout-link" onClick={() => void closeSelf()}>
+            关闭
+          </button>
+        </div>
       </header>
 
       {kind === "wifi" && (

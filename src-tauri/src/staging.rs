@@ -390,9 +390,7 @@ pub fn add_paths(
         )?;
         out.push(item);
     }
-    if out.is_empty() {
-        return Err("no items added".into());
-    }
+    // 全部已在库 / 路径无效：拖放 UX 视为成功空操作，避免双通道监听重复报错
     Ok(out)
 }
 

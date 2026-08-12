@@ -82,10 +82,14 @@ export default function ShortcutsPluginStrip({
     openingRef.current = true;
     try {
       if (action === "panel.open") {
+        // 开岛面板：关掉当前托管弹窗（勿 suppress，否则失焦关会被挡住）
+        void invoke("close_plugin_popup").catch(() => undefined);
         await invoke("hub_panel_open_session", { pluginId }).catch(() => undefined);
         return;
       }
       if (action !== "popup.open") return;
+      // 仅弹窗热切换需要 suppress，避免 Focused(main) 先把旧弹窗关掉再竞态吞掉新开
+      void invoke("suppress_plugin_popup_blur", { ms: 280 }).catch(() => undefined);
       if (opts?.forceOpen !== true) {
         try {
           const [isOpen, curId] = await Promise.all([
@@ -100,7 +104,6 @@ export default function ShortcutsPluginStrip({
           /* open */
         }
       }
-      void invoke("suppress_plugin_popup_blur", { ms: 900 }).catch(() => undefined);
       const { x, y } = await popupAnchorFromEl(wrapRef.current);
       await invoke("open_plugin_popup", {
         pluginId,
@@ -183,7 +186,9 @@ export default function ShortcutsPluginStrip({
     let cancelled = false;
     void (async () => {
       try {
-        const doc = await buildShortcutsSrcdoc(pluginId, entryPath);
+        const doc = await buildShortcutsSrcdoc(pluginId, entryPath, {
+          suppressBlurOnPointerDown: action === "popup.open",
+        });
         if (!cancelled) {
           setSrcdoc(doc);
           setError(null);
@@ -198,7 +203,7 @@ export default function ShortcutsPluginStrip({
     return () => {
       cancelled = true;
     };
-  }, [pluginId, entryPath]);
+  }, [pluginId, entryPath, action]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -285,12 +290,14 @@ export default function ShortcutsPluginStrip({
         void (async () => {
           if (openingRef.current || !wrapRef.current) return;
           openingRef.current = true;
+          void invoke("suppress_plugin_popup_blur", { ms: 280 }).catch(() => undefined);
           try {
             const preferGroupId =
               typeof d.args?.preferGroupId === "string" && d.args.preferGroupId
                 ? d.args.preferGroupId
                 : null;
             // Toggle close when same plugin popup already open (no preferGroup).
+            // 其它插件已开时不关，交给 open_plugin_popup 热切换。
             if (!preferGroupId) {
               try {
                 const [isOpen, curId] = await Promise.all([
@@ -305,7 +312,6 @@ export default function ShortcutsPluginStrip({
                 /* fall through to open */
               }
             }
-            void invoke("suppress_plugin_popup_blur", { ms: 900 }).catch(() => undefined);
             const { x, y } = await popupAnchorFromEl(wrapRef.current);
             await invoke("open_plugin_popup", {
               pluginId,
@@ -323,7 +329,7 @@ export default function ShortcutsPluginStrip({
         return;
       }
       if (d.cmd === "suppress_plugin_popup_blur") {
-        const ms = Number(d.args?.ms) || 900;
+        const ms = Number(d.args?.ms) || 280;
         void invoke("suppress_plugin_popup_blur", { ms }).catch(() => undefined);
         return;
       }
@@ -477,12 +483,14 @@ export default function ShortcutsPluginStrip({
       className="shortcuts-plugin-strip"
       style={{ width: w, minWidth: w, height: SHORTCUTS_HEIGHT, flexShrink: 0 }}
       data-plugin={pluginId}
-      onDragEnter={(e) => {
-        if (!shortcutsAllowsDragOpen(pluginId)) return;
-        e.preventDefault();
-        void openSurface({ forceOpen: true });
+      onPointerDown={() => {
+        // 仅弹窗入口需要 suppress；点 command/panel 插件时让失焦正常关掉窗口组
+        if (action === "popup.open") {
+          void invoke("suppress_plugin_popup_blur", { ms: 280 }).catch(() => undefined);
+        }
       }}
       onDragOver={(e) => {
+        // 芯片上允许放下（copy 光标）；勿在 dragenter 时开弹窗（会插入新 HWND → 禁止光标）
         if (!shortcutsAllowsDragOpen(pluginId)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "copy";

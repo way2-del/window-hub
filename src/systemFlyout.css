@@ -49,6 +49,13 @@ html[data-glass-compat="1"] body.is-system-flyout #root {
   min-height: 22px;
 }
 
+.system-flyout-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .system-flyout-head h1 {
   margin: 0;
   font-size: 12px;
@@ -67,9 +74,14 @@ html[data-glass-compat="1"] body.is-system-flyout #root {
   border-radius: 6px;
 }
 
-.system-flyout-link:hover {
+.system-flyout-link:hover:not(:disabled) {
   color: var(--glass-fg, #f4f4f5);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.system-flyout-link:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .system-flyout-card {

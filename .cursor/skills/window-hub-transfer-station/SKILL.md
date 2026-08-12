@@ -32,6 +32,12 @@ description: >-
 - 索引：`hub.staging.*` → `plugin_kv.__staging_items`
 - 载荷：`%APPDATA%/window-hub/plugins/<id>/staging/`
 
+## 拖入文件
+
+- **拖到快捷区图标上松开**：Host 入库并打开弹窗（正确用法）
+- **禁止**在拖拽过程中悬停即开弹窗：新 HWND 插入拖拽会话会导致目标区禁止光标、无法放下
+- 弹窗已打开时，可再往弹窗虚线区拖入（Tauri `onDragDropEvent`）
+
 ## Manifest（要点）
 
 ```json

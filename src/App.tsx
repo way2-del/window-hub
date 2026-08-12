@@ -727,6 +727,8 @@ function App() {
   async function expand() {
     if (busy.current || expandedRef.current) return;
     bumpIslandActivity();
+    // 展开下拉面板前先关窗口组等托管弹窗（快捷区 click 常带 blur suppress，失焦关会失效）
+    dismissPluginPopup();
     const token = ++gen.current;
     busy.current = true;
     trayOpenRef.current = false;
@@ -885,6 +887,7 @@ function App() {
     pullingRef.current = false;
     setPulling(false);
     if (open) {
+      dismissPluginPopup();
       setSpringing(false);
       void (async () => {
         busy.current = true;
@@ -1066,6 +1069,11 @@ function App() {
     const unsubs: Array<() => void> = [];
     void listen("plugin-popup-opened", () => {
       pluginPopupOpenRef.current = true;
+      // 弹窗与岛面板互斥：开窗口组等弹窗时收起下拉面板
+      if (expandedRef.current) {
+        setPanelOverride(null);
+        void collapse();
+      }
     }).then((fn) => unsubs.push(fn));
     void listen("plugin-popup-closed", () => {
       pluginPopupOpenRef.current = false;
@@ -1076,7 +1084,14 @@ function App() {
       })
       .catch(() => undefined);
     return () => unsubs.forEach((fn) => fn());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** 打开岛面板 / 展开岛时关掉托管弹窗（窗口组等），避免 always-on-top 残留。 */
+  function dismissPluginPopup() {
+    pluginPopupOpenRef.current = false;
+    void invoke("close_plugin_popup").catch(() => undefined);
+  }
 
   function closePluginPopupFromIsland(e?: { target?: EventTarget | null }) {
     if (!pluginPopupOpenRef.current) return;
@@ -1089,8 +1104,7 @@ function App() {
     ) {
       return;
     }
-    pluginPopupOpenRef.current = false;
-    void invoke("close_plugin_popup").catch(() => undefined);
+    dismissPluginPopup();
   }
 
   useEffect(() => {
@@ -1338,6 +1352,8 @@ function App() {
           void collapse();
           return;
         }
+        // 开岛面板时关掉窗口组等弹窗（与 expand 双保险；已展开时 expand 会 early-return）
+        dismissPluginPopup();
         armPluginSession(pluginId);
         if (!expandedRef.current) void expand();
       } else if (action === "close") {
@@ -1499,6 +1515,7 @@ function App() {
 
   async function openPluginSession(pluginId: string | null | undefined) {
     if (!pluginId || !pluginRegistry.get(pluginId)?.enabled) return;
+    dismissPluginPopup();
     armPluginSession(pluginId);
     if (!expandedRef.current) {
       void expand();

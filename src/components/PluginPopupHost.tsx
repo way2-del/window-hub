@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { normalizeGlassKind, subscribeSystemDark, syncGlassCss, type GlassPrefs } from "../glassPrefs";
 import {
   normalizeStagingChanged,
@@ -91,6 +91,10 @@ function ensureHub(pluginId: string) {
     ...(args ?? {}),
   });
 
+  const trackListen = (un: () => void) => {
+    popupHubUnsubs.push(un);
+  };
+
   type NotifyFn = NonNullable<Window["hub"]>["notify"];
 
   const notifyFn = ((opts: {
@@ -130,6 +134,7 @@ function ensureHub(pluginId: string) {
       });
     }).then((fn) => {
       un = fn;
+      trackListen(fn);
     });
     return () => un();
   };
@@ -141,16 +146,30 @@ function ensureHub(pluginId: string) {
       get: (id) => invoke("hub_windows_get", withPlugin({ id })),
       focus: (id) => invoke("hub_windows_focus", withPlugin({ id })),
       subscribe: (cb) => {
+        let alive = true;
         let un = () => {};
+        const wrapped = (windows: unknown) => {
+          if (!alive) return;
+          cb(windows);
+        };
         void listen<{ windows: unknown }>("hub-windows-changed", (ev) => {
-          if (ev.payload?.windows) cb(ev.payload.windows);
+          if (ev.payload?.windows) wrapped(ev.payload.windows);
         }).then((fn) => {
           un = fn;
         });
         void invoke("hub_windows_list", withPlugin())
-          .then((wins) => cb(wins))
+          .then((wins) => wrapped(wins))
           .catch(() => undefined);
-        return () => un();
+        const kill = () => {
+          alive = false;
+          try {
+            un();
+          } catch {
+            /* noop */
+          }
+        };
+        trackListen(kill);
+        return kill;
       },
     },
     storage: {
@@ -159,7 +178,12 @@ function ensureHub(pluginId: string) {
       remove: (key) => invoke("hub_storage_remove", withPlugin({ key })),
       listKeys: () => invoke("hub_storage_list_keys", withPlugin()),
       subscribe: (cb) => {
+        let alive = true;
         let un = () => {};
+        const wrapped = (ev: { key: string; value: unknown; removed: boolean }) => {
+          if (!alive) return;
+          cb(ev);
+        };
         void listen<{
           pluginId?: string;
           key?: string;
@@ -168,7 +192,7 @@ function ensureHub(pluginId: string) {
         }>("plugin-storage-changed", (ev) => {
           if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
           if (!ev.payload?.key) return;
-          cb({
+          wrapped({
             key: ev.payload.key,
             value: ev.payload.removed ? null : ev.payload.value,
             removed: !!ev.payload.removed,
@@ -176,7 +200,16 @@ function ensureHub(pluginId: string) {
         }).then((fn) => {
           un = fn;
         });
-        return () => un();
+        const kill = () => {
+          alive = false;
+          try {
+            un();
+          } catch {
+            /* noop */
+          }
+        };
+        trackListen(kill);
+        return kill;
       },
     },
     shortcuts: {
@@ -197,21 +230,35 @@ function ensureHub(pluginId: string) {
       thumb: (id) => invoke("hub_staging_thumb", withPlugin({ id })),
       reveal: (id) => invoke("hub_staging_reveal", withPlugin({ id })),
       startDrag: (ids) => invoke("hub_staging_start_drag", withPlugin({ ids })),
-        pickFiles: () => invoke("hub_staging_pick_files", withPlugin()),
-        pickFolders: () => invoke("hub_staging_pick_folders", withPlugin()),
-        subscribe: (cb) => {
+      pickFiles: () => invoke("hub_staging_pick_files", withPlugin()),
+      pickFolders: () => invoke("hub_staging_pick_folders", withPlugin()),
+      subscribe: (cb) => {
+        let alive = true;
         let un = () => {};
+        const wrapped = (summary: StagingSummary) => {
+          if (!alive) return;
+          cb(summary);
+        };
         void listen<StagingChangedPayload>("staging-changed", (ev) => {
           const { pluginId: pid, summary } = normalizeStagingChanged(ev.payload);
           if (pid && pid !== pluginId) return;
-          cb(summary);
+          wrapped(summary);
         }).then((fn) => {
           un = fn;
         });
         void invoke<StagingSummary>("hub_staging_summary", withPlugin())
-          .then(cb)
+          .then(wrapped)
           .catch(() => undefined);
-        return () => un();
+        const kill = () => {
+          alive = false;
+          try {
+            un();
+          } catch {
+            /* noop */
+          }
+        };
+        trackListen(kill);
+        return kill;
       },
     },
     notify: notifyFn,
@@ -235,12 +282,48 @@ type InstalledRow = {
   manifest?: { entry?: { popup?: string } };
 };
 
+/** Host-owned Tauri listens created via window.hub.* — must unlisten on hot-swap. */
+const popupHubUnsubs: Array<() => void> = [];
+
+function bumpPopupGen(): number {
+  const w = window as Window & { __WH_POPUP_GEN__?: number };
+  const next = (w.__WH_POPUP_GEN__ ?? 0) + 1;
+  w.__WH_POPUP_GEN__ = next;
+  return next;
+}
+
 function clearInjectedDom() {
+  bumpPopupGen();
+  try {
+    window.dispatchEvent(new CustomEvent("wh-plugin-popup-dispose"));
+  } catch {
+    /* noop */
+  }
+  while (popupHubUnsubs.length) {
+    const un = popupHubUnsubs.pop();
+    try {
+      un?.();
+    } catch {
+      /* noop */
+    }
+  }
   document.querySelectorAll("[data-wh-popup-css]").forEach((el) => el.remove());
   document.querySelectorAll("[data-wh-popup-js]").forEach((el) => el.remove());
   const app = document.getElementById("app");
   if (app) app.innerHTML = "";
   window.hub = undefined;
+}
+
+function popupScriptAttrSelector(pluginId: string): string {
+  const safe = pluginId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `[data-wh-popup-js="${safe}"]`;
+}
+
+/** 已绘制且 #app 有内容（仅有 script 标签不够，否则会 early-return 出白屏） */
+function isPluginPainted(pluginId: string): boolean {
+  if (!document.querySelector(popupScriptAttrSelector(pluginId))) return false;
+  const app = document.getElementById("app");
+  return !!app && app.childElementCount > 0;
 }
 
 async function readPopupAssets(pluginId: string): Promise<Boot> {
@@ -270,9 +353,11 @@ function injectBoot(pluginId: string, boot: Boot) {
   }
   const mount = document.getElementById("app");
   if (!mount) throw new Error("插件挂载点 #app 缺失");
+  const gen =
+    (window as Window & { __WH_POPUP_GEN__?: number }).__WH_POPUP_GEN__ ?? 0;
   const script = document.createElement("script");
   script.setAttribute("data-wh-popup-js", pluginId);
-  script.textContent = boot.js;
+  script.textContent = `window.__WH_POPUP_SCRIPT_GEN__=${gen};\n${boot.js}`;
   document.body.appendChild(script);
 }
 
@@ -301,16 +386,15 @@ export default function PluginPopupHost() {
   const glassReady = useRef(false);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
-  activeIdRef.current = pluginId;
+  // 勿每帧用 React state 覆盖 activeIdRef：activate 异步间隙会被打回旧 id，导致误判/白屏
 
   const activatePlugin = async (nextId: string) => {
     if (!nextId) return;
     const seq = ++loadSeqRef.current;
-    setError(null);
 
-    // Same plugin already painted — just reveal (Wi‑Fi reopen path).
-    // Do NOT set opacity 0 first — that paints empty mica if HWND is/gets shown.
-    if (activeIdRef.current === nextId && document.querySelector("[data-wh-popup-js]")) {
+    // 同插件且 #app 仍有内容 → 只 reveal（避免「有 script、无 DOM」early-return 白屏）
+    if (activeIdRef.current === nextId && isPluginPainted(nextId)) {
+      setError(null);
       snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
@@ -318,15 +402,37 @@ export default function PluginPopupHost() {
       return;
     }
 
+    // 先读资源，再清 DOM：旧请求若在 await 后 abort，不会留下空壳白屏
+    let boot: Boot;
+    try {
+      boot = await readPopupAssets(nextId);
+    } catch (err) {
+      if (seq !== loadSeqRef.current) return;
+      setError(String(err));
+      activeIdRef.current = nextId;
+      setPluginId(nextId);
+      snapOpaque();
+      phaseRef.current = "in";
+      setPhase("in");
+      void invoke("reveal_plugin_popup").catch(() => undefined);
+      return;
+    }
+    if (seq !== loadSeqRef.current) return;
+
+    setError(null);
     clearInjectedDom();
     activeIdRef.current = nextId;
     setPluginId(nextId);
     ensureHub(nextId);
 
     try {
-      const boot = await readPopupAssets(nextId);
+      // 若 clear 后 React 尚未提交 #app（极少），下一帧再注入
+      if (!document.getElementById("app")) {
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      }
       if (seq !== loadSeqRef.current) return;
       injectBoot(nextId, boot);
+      // 注入后仍空：脚本异步 mount 失败时再等一帧（boot 同步 render 通常已写入）
       snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
@@ -337,7 +443,6 @@ export default function PluginPopupHost() {
       snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
-      // Show error UI rather than leaving a hidden/zombie shell.
       void invoke("reveal_plugin_popup").catch(() => undefined);
     }
   };
@@ -372,8 +477,8 @@ export default function PluginPopupHost() {
       })();
     });
 
-    void listen<string>("plugin-popup-opened", (ev) => {
-      if (ev.payload && ev.payload !== activeIdRef.current) return;
+    void listen<string>("plugin-popup-opened", () => {
+      // 勿在此写入 activeIdRef：hot-swap 时 opened 早于 inject，会让 activatePlugin 误 early-return。
       snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
@@ -425,8 +530,8 @@ export default function PluginPopupHost() {
     let lastAt = 0;
     const requestActivate = (id: string) => {
       const now = Date.now();
-      // eval CustomEvent + emit arrive together — activate once.
-      if (id === lastId && now - lastAt < 120) return;
+      // 同 id 短时去重；若当前其实是白屏（无内容），允许重入修复
+      if (id === lastId && now - lastAt < 120 && isPluginPainted(id)) return;
       lastId = id;
       lastAt = now;
       void activatePlugin(id);
@@ -478,24 +583,62 @@ export default function PluginPopupHost() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  /** Explorer → 弹窗：走 Tauri paths（HTML5 File.path 经常为空） */
+  /** Explorer → 弹窗：走 Tauri paths（HTML5 File.path 在 WebView2 上经常为空） */
   useEffect(() => {
-    if (!pluginId) return;
+    let cancelled = false;
     let un: (() => void) | undefined;
-    void getCurrentWindow()
+    void getCurrentWebview()
       .onDragDropEvent((ev) => {
         const p = ev.payload;
+        if (p.type === "enter" || p.type === "over") {
+          document.documentElement.classList.add("is-file-drag");
+          return;
+        }
+        if (p.type === "leave" || p.type === "drop") {
+          document.documentElement.classList.remove("is-file-drag");
+        }
         if (p.type !== "drop") return;
         const paths = p.paths ?? [];
         if (!paths.length) return;
-        void invoke("hub_staging_add_paths", { pluginId, paths }).catch(() => undefined);
+        // 用 activeIdRef：热切换后 React pluginId 可能尚未提交，闭包旧 id 会 assert staging 失败
+        const pid = activeIdRef.current || pluginId;
+        if (!pid) return;
+        void invoke("hub_staging_add_paths", { pluginId: pid, paths }).catch((err) => {
+          console.error("[PluginPopupHost] staging drop failed", pid, err);
+        });
       })
       .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
         un = fn;
       })
-      .catch(() => undefined);
-    return () => un?.();
-  }, [pluginId]);
+      .catch((err) => {
+        console.error("[PluginPopupHost] onDragDropEvent unavailable", err);
+      });
+    return () => {
+      cancelled = true;
+      document.documentElement.classList.remove("is-file-drag");
+      un?.();
+    };
+    // 只挂一次；目标插件读 activeIdRef
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** HTML5 兜底：整窗 dragover 必须 preventDefault，否则系统显示禁止光标 */
+  useEffect(() => {
+    const allow = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    };
+    document.addEventListener("dragenter", allow);
+    document.addEventListener("dragover", allow);
+    return () => {
+      document.removeEventListener("dragenter", allow);
+      document.removeEventListener("dragover", allow);
+    };
+  }, []);
 
   if (error) {
     return (

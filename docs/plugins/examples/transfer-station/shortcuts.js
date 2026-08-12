@@ -1,7 +1,6 @@
 /**
- * 中转站 — 快捷区图标：点击 / 拖入打开弹窗（不悬停即开）。
- * OS 文件拖入主要由 Host ShortcutsHost 的 onDragDropEvent 命中打开；
- * 此处保留 HTML5 兜底。
+ * 中转站 — 快捷区图标：点击打开；拖入在图标上松开入库（Host Tauri 为主）。
+ * 禁止 dragenter/over 时开弹窗——新 HWND 插入拖拽会话会出现禁止光标。
  */
 (function () {
   function hub() {
@@ -23,7 +22,7 @@
   function paint() {
     const bar = document.getElementById("bar");
     if (!bar) return;
-    bar.title = "打开中转站（可拖入文件）";
+    bar.title = "打开中转站（拖到图标上松开即可入库）";
     bar.innerHTML = tsIcon();
     bar.classList.remove("is-loading");
     bar.classList.add("is-ready");
@@ -62,12 +61,10 @@
     });
     bar.addEventListener("dragenter", function (e) {
       e.preventDefault();
-      openPopup();
     });
     bar.addEventListener("dragover", function (e) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
-      openPopup();
     });
   }
 
