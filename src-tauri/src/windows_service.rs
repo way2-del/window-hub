@@ -3,12 +3,16 @@
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::win32::enum_windows::{get_window, list_windows, parse_window_id, WindowInfo};
 
-const POLL_MS: u64 = 700;
+/// Base poll — was 700ms and thrashed plugins on every title blink.
+const POLL_MS: u64 = 1100;
+const POLL_MS_PRESSURE: u64 = 2200;
+/// Title-only changes (Chrome tab text…) — coalesce emits.
+const TITLE_EMIT_MIN: Duration = Duration::from_millis(2500);
 
 #[derive(Clone)]
 pub struct WindowsService {
@@ -18,6 +22,9 @@ pub struct WindowsService {
 struct Inner {
     snapshot: Mutex<Vec<WindowInfo>>,
     exclude: Mutex<Option<isize>>,
+    last_struct_fp: Mutex<String>,
+    last_title_fp: Mutex<String>,
+    last_title_emit: Mutex<Instant>,
 }
 
 #[derive(Clone, Serialize)]
@@ -26,12 +33,47 @@ pub struct WindowsChangedPayload {
     pub windows: Vec<WindowInfo>,
 }
 
+fn structural_fp(wins: &[WindowInfo]) -> String {
+    // id + exe — ignore title flicker (browsers / editors).
+    let mut parts: Vec<String> = wins
+        .iter()
+        .map(|w| format!("{}:{}", w.id, w.exe_name.as_deref().unwrap_or("")))
+        .collect();
+    parts.sort();
+    parts.join("|")
+}
+
+fn title_fp(wins: &[WindowInfo]) -> String {
+    wins.iter()
+        .map(|w| w.title.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn under_mem_pressure() -> bool {
+    #[cfg(windows)]
+    {
+        crate::win32::system_memory::physical_mem_percent() >= 88
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 impl WindowsService {
     pub fn start(app: AppHandle) -> Self {
         let svc = Self {
             inner: Arc::new(Inner {
                 snapshot: Mutex::new(Vec::new()),
                 exclude: Mutex::new(None),
+                last_struct_fp: Mutex::new(String::new()),
+                last_title_fp: Mutex::new(String::new()),
+                last_title_emit: Mutex::new(
+                    Instant::now()
+                        .checked_sub(Duration::from_secs(60))
+                        .unwrap_or_else(Instant::now),
+                ),
             }),
         };
         let poller = svc.clone();
@@ -51,25 +93,47 @@ impl WindowsService {
                         next.retain(|w| w.hwnd != dh);
                     }
                 }
-                let changed = {
+
+                let struct_fp = structural_fp(&next);
+                let titles = title_fp(&next);
+                let emit = {
                     let mut snap = poller.inner.snapshot.lock();
-                    let key = |w: &WindowInfo| format!("{}:{}", w.id, w.title);
-                    let prev_key: String = snap.iter().map(key).collect::<Vec<_>>().join("|");
-                    let next_key: String = next.iter().map(key).collect::<Vec<_>>().join("|");
-                    if prev_key != next_key {
-                        *snap = next.clone();
+                    let mut last_s = poller.inner.last_struct_fp.lock();
+                    let mut last_t = poller.inner.last_title_fp.lock();
+                    let mut last_te = poller.inner.last_title_emit.lock();
+
+                    let struct_changed = *last_s != struct_fp;
+                    let title_changed = *last_t != titles;
+                    let should = if struct_changed {
                         true
+                    } else if title_changed {
+                        last_te.elapsed() >= TITLE_EMIT_MIN
                     } else {
                         false
+                    };
+                    if should {
+                        *snap = next.clone();
+                        *last_s = struct_fp;
+                        *last_t = titles;
+                        *last_te = Instant::now();
+                    } else if !next.is_empty() {
+                        // Keep cache fresh for list() even when not emitting.
+                        *snap = next.clone();
                     }
+                    should
                 };
-                if changed {
+                if emit {
                     let _ = app.emit(
                         "hub-windows-changed",
                         WindowsChangedPayload { windows: next },
                     );
                 }
-                std::thread::sleep(Duration::from_millis(POLL_MS));
+                let ms = if under_mem_pressure() {
+                    POLL_MS_PRESSURE
+                } else {
+                    POLL_MS
+                };
+                std::thread::sleep(Duration::from_millis(ms));
             }
         });
         svc
@@ -96,6 +160,8 @@ impl WindowsService {
         *self.inner.exclude.lock() = exclude;
         let next = list_windows(exclude);
         *self.inner.snapshot.lock() = next.clone();
+        *self.inner.last_struct_fp.lock() = structural_fp(&next);
+        *self.inner.last_title_fp.lock() = title_fp(&next);
         next
     }
 }

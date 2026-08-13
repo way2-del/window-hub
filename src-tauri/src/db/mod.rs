@@ -21,7 +21,7 @@ pub use migrate::migrate_legacy_files;
 /// Official weather plugin id (settings / storage live in `plugin_kv`).
 pub const WEATHER_PLUGIN_ID: &str = "com.window-hub.weather";
 
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 11;
 const PLUGIN_KEY_MAX_BYTES: usize = 512 * 1024;
 const PLUGIN_TOTAL_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SYSTEM_KEY_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -169,6 +169,14 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
 
     if ver < 9 {
         add_prefs_island_volume_preview(conn)?;
+    }
+
+    if ver < 10 {
+        add_prefs_island_topbar_frost(conn)?;
+    }
+
+    if ver < 11 {
+        add_prefs_island_bar_priority(conn)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| e.to_string())?;
     }
@@ -347,6 +355,102 @@ fn add_prefs_island_volume_preview(conn: &Connection) -> Result<(), String> {
         r#"
         ALTER TABLE prefs_island ADD COLUMN volume_preview_sound INTEGER NOT NULL DEFAULT 1;
         "#,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn add_prefs_island_topbar_frost(conn: &Connection) -> Result<(), String> {
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='prefs_island'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has == 0 {
+        return Ok(());
+    }
+    let has_col: i64 = conn
+        .prepare("PRAGMA table_info(prefs_island)")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            let mut n = 0i64;
+            for row in rows {
+                if row.ok().as_deref() == Some("topbar_frost") {
+                    n = 1;
+                    break;
+                }
+            }
+            Ok(n)
+        })
+        .unwrap_or(0);
+    if has_col != 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        ALTER TABLE prefs_island ADD COLUMN topbar_frost INTEGER NOT NULL DEFAULT 0;
+        "#,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn add_prefs_island_bar_priority(conn: &Connection) -> Result<(), String> {
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='prefs_island'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has == 0 {
+        return Ok(());
+    }
+    let has_col: i64 = conn
+        .prepare("PRAGMA table_info(prefs_island)")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            let mut n = 0i64;
+            for row in rows {
+                if row.ok().as_deref() == Some("bar_priority") {
+                    n = 1;
+                    break;
+                }
+            }
+            Ok(n)
+        })
+        .unwrap_or(0);
+    if has_col != 0 {
+        return Ok(());
+    }
+    // Seed from legacy single bar_resident when present.
+    conn.execute_batch(
+        r#"
+        ALTER TABLE prefs_island ADD COLUMN bar_priority TEXT NOT NULL DEFAULT '[]';
+        "#,
+    )
+    .map_err(|e| e.to_string())?;
+    // Avoid json_array() dependency — build a one-element JSON array in Rust-friendly form.
+    let resident: String = conn
+        .query_row(
+            "SELECT COALESCE(bar_resident, '') FROM prefs_island WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+    let seed = {
+        let t = resident.trim();
+        if t.is_empty() {
+            "[]".to_string()
+        } else {
+            serde_json::to_string(&vec![t]).unwrap_or_else(|_| "[]".into())
+        }
+    };
+    conn.execute(
+        "UPDATE prefs_island SET bar_priority = ?1 WHERE id = 1",
+        params![seed],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

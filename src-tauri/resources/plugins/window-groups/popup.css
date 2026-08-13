@@ -10,7 +10,7 @@ body {
   height: 100%;
   overflow: hidden;
   background: transparent;
-  color: #f4f4f5;
+  color: var(--glass-fg, #f4f4f5);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   user-select: none;
 }
@@ -287,7 +287,8 @@ button {
 
 /* Light MicaAlt: match host plugin-popup tokens */
 html[data-theme="light"] body,
-html[data-theme="light"] .wg-root {
+html[data-theme="light"] .wg-root,
+html[data-theme="light"] .wg-shell {
   color: #1c1c1e;
 }
 

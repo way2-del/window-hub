@@ -42,6 +42,36 @@ export type PerfSnapshot = {
   gpuMemPercent?: number | null;
 };
 
+export type MemProcessRow = {
+  pid: number;
+  name: string;
+  workingSetMb: number;
+  iconPng?: string | null;
+};
+
+export type MemTopSnapshot = {
+  memPercent: number;
+  usedMb: number;
+  totalMb: number;
+  availMb: number;
+  commitUsedMb: number;
+  commitTotalMb: number;
+  commitPercent: number;
+  processes: MemProcessRow[];
+};
+
+export type MemPurgeResult = {
+  beforePercent: number;
+  afterPercent: number;
+  beforeAvailMb: number;
+  afterAvailMb: number;
+  freedMb: number;
+  beforeCommitUsedMb: number;
+  afterCommitUsedMb: number;
+  commitFreedMb: number;
+  trimmed: number;
+};
+
 export type SystemRadioSnapshot = {
   wifi: {
     radioOn: boolean;
@@ -67,7 +97,14 @@ export type SystemRadioSnapshot = {
   peripherals: Array<{ id: string; kind: string; name: string }>;
 };
 
-export type FlyoutKind = "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar";
+export type FlyoutKind =
+  | "wifi"
+  | "bluetooth"
+  | "volume"
+  | "ime"
+  | "power"
+  | "calendar"
+  | "memory";
 
 function parseKind(raw: string | null | undefined): FlyoutKind {
   const v = (raw || "").toLowerCase();
@@ -76,7 +113,8 @@ function parseKind(raw: string | null | undefined): FlyoutKind {
     v === "volume" ||
     v === "ime" ||
     v === "power" ||
-    v === "calendar"
+    v === "calendar" ||
+    v === "memory"
   ) {
     return v;
   }
@@ -99,9 +137,67 @@ declare global {
   }
 }
 
+function signalLevel(signal: number): 0 | 1 | 2 | 3 | 4 {
+  if (!Number.isFinite(signal) || signal <= 0) return 0;
+  if (signal >= 80) return 4;
+  if (signal >= 55) return 3;
+  if (signal >= 30) return 2;
+  return 1;
+}
+
+/** Wi‑Fi arcs by quality (0–100). Connected row used to hardcode 2 arcs. */
+function WifiSignalGlyph({
+  signal,
+  size = 14,
+  dimmed = false,
+}: {
+  signal: number;
+  size?: number;
+  dimmed?: boolean;
+}) {
+  const level = signalLevel(signal);
+  const on = level > 0 && !dimmed;
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 18.5a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Z"
+        fill="currentColor"
+        opacity={on ? 1 : 0.28}
+      />
+      <path
+        d="M8.5 14.2a6.5 6.5 0 0 1 7 0"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        opacity={level >= 1 ? (on ? 0.95 : 0.28) : 0.14}
+      />
+      <path
+        d="M5.4 11a11 11 0 0 1 13.2 0"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        opacity={level >= 2 ? (on ? 0.85 : 0.24) : 0.12}
+      />
+      <path
+        d="M3.4 8.2a14.2 14.2 0 0 1 17.2 0"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        opacity={level >= 3 ? (on ? 0.7 : 0.2) : 0.1}
+      />
+      <path
+        d="M1.6 5.4a17.8 17.8 0 0 1 20.8 0"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        opacity={level >= 4 ? (on ? 0.55 : 0.16) : 0.08}
+      />
+    </svg>
+  );
+}
+
 function signalBars(signal: number) {
-  const n = signal >= 75 ? 4 : signal >= 50 ? 3 : signal >= 25 ? 2 : 1;
-  return "▂".repeat(n) + "▁".repeat(4 - n);
+  return <WifiSignalGlyph signal={signal} size={16} />;
 }
 
 function btKindLabel(kind: string) {
@@ -458,6 +554,8 @@ export default function SystemFlyoutApp() {
   const [showMenuPw, setShowMenuPw] = useState(false);
   const [pwLoading, setPwLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [memTop, setMemTop] = useState<MemTopSnapshot | null>(null);
+  const [memBusy, setMemBusy] = useState(false);
   const draggingRef = useRef(false);
   const previewTimer = useRef(0);
   const wheelCommitTimer = useRef(0);
@@ -487,6 +585,47 @@ export default function SystemFlyoutApp() {
     setMsg("");
     setWifiMenu(null);
     setShowMenuPw(false);
+    if (next === "memory") {
+      void loadMemTop();
+    }
+  }
+
+  async function loadMemTop() {
+    try {
+      const top = await invoke<MemTopSnapshot>("list_memory_top", { limit: 15 });
+      setMemTop(top);
+    } catch (e) {
+      console.error(e);
+      setMsg(String(e));
+    }
+  }
+
+  async function purgeMemory() {
+    if (memBusy) return;
+    setMemBusy(true);
+    setMsg("正在清理…");
+    try {
+      const r = await invoke<MemPurgeResult>("purge_system_memory");
+      const freed = Math.max(0, r.freedMb ?? r.afterAvailMb - r.beforeAvailMb);
+      const commitFreed = Math.max(0, r.commitFreedMb ?? 0);
+      const parts = [
+        freed > 0 ? `物理约 ${freed} MB` : null,
+        commitFreed > 0 ? `提交约 ${commitFreed} MB` : null,
+        r.trimmed > 0 ? `${r.trimmed} 个进程` : null,
+      ].filter(Boolean);
+      setMsg(
+        parts.length
+          ? `本次清理 ${parts.join(" · ")}（${r.beforePercent}% → ${r.afterPercent}%）`
+          : `已尝试收缩工作集（${r.beforePercent}% → ${r.afterPercent}%）`,
+      );
+      await loadMemTop();
+      requestSoftRefresh(["perf"]);
+      void refresh(false);
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setMemBusy(false);
+    }
   }
 
   async function copyText(text: string, ok = "已复制") {
@@ -621,7 +760,7 @@ export default function SystemFlyoutApp() {
         },
       };
     });
-    void invoke("suppress_system_flyout_blur", { ms: 1200 }).catch(() => undefined);
+    void invoke("suppress_system_flyout_blur", { ms: 1800 }).catch(() => undefined);
     try {
       await invoke("set_bluetooth_device", { id, connect });
       setMsg("");
@@ -917,7 +1056,9 @@ export default function SystemFlyoutApp() {
             ? "电源"
             : kind === "calendar"
               ? "日历"
-              : "Wi‑Fi";
+              : kind === "memory"
+                ? "内存"
+                : "Wi‑Fi";
 
   const volLevel = volLocal ?? snap?.volume.level ?? 0;
   const volMuted = Boolean(snap?.volume.muted);
@@ -957,15 +1098,27 @@ export default function SystemFlyoutApp() {
       <header className="system-flyout-head">
         <h1>{title}</h1>
         <div className="system-flyout-head-actions">
-          {(kind === "wifi" || kind === "bluetooth") && (
+          {(kind === "wifi" || kind === "bluetooth" || kind === "memory") && (
             <button
               type="button"
               className="system-flyout-link"
-              disabled={refreshing}
-              title={kind === "wifi" ? "重新扫描无线网络" : "刷新蓝牙设备"}
-              onClick={() => void manualRefresh()}
+              disabled={refreshing || memBusy}
+              title={
+                kind === "wifi"
+                  ? "重新扫描无线网络"
+                  : kind === "bluetooth"
+                    ? "刷新蓝牙设备"
+                    : "刷新内存排行"
+              }
+              onClick={() => {
+                if (kind === "memory") {
+                  void loadMemTop();
+                  return;
+                }
+                void manualRefresh();
+              }}
             >
-              {refreshing ? "刷新中…" : "刷新"}
+              {refreshing || (kind === "memory" && memBusy) ? "刷新中…" : "刷新"}
             </button>
           )}
           <button type="button" className="system-flyout-link" onClick={() => void closeSelf()}>
@@ -994,18 +1147,7 @@ export default function SystemFlyoutApp() {
               title="右键查看详情 / 复制密码"
             >
               <span className="sf-wifi-badge" aria-hidden>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                  <path
-                    d="M12 18.5a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4Z"
-                    fill="currentColor"
-                  />
-                  <path
-                    d="M8.6 14.3a6.2 6.2 0 0 1 6.8 0M5.8 11.2a10 10 0 0 1 12.4 0"
-                    stroke="currentColor"
-                    strokeWidth="1.7"
-                    strokeLinecap="round"
-                  />
-                </svg>
+                <WifiSignalGlyph signal={wifiConnected?.signal ?? 0} size={14} />
               </span>
               <span className="system-flyout-item-main">
                 <span className="system-flyout-item-title">
@@ -1400,6 +1542,87 @@ export default function SystemFlyoutApp() {
         </>
       )}
 
+      {kind === "memory" && (
+        <>
+          <button
+            type="button"
+            className="sf-pref-link"
+            onClick={() =>
+              void invoke("open_task_manager")
+                .then(() => closeSelf())
+                .catch(console.error)
+            }
+          >
+            打开任务管理器
+          </button>
+          <section className="system-flyout-card compact">
+            <div className="sf-mem-hero">
+              <span className="sf-mem-pct">{memTop?.memPercent ?? snap?.perf.memPercent ?? "—"}%</span>
+              <span className="sf-mem-state">
+                {memTop
+                  ? `物理 ${memTop.usedMb} / ${memTop.totalMb} MB`
+                  : "物理内存"}
+              </span>
+              <span className="sf-mem-state">
+                {memTop
+                  ? `虚拟/提交 ${memTop.commitUsedMb} / ${memTop.commitTotalMb} MB（${memTop.commitPercent}%）`
+                  : "虚拟内存"}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="system-flyout-primary"
+              disabled={memBusy}
+              onClick={() => void purgeMemory()}
+            >
+              {memBusy ? "清理中…" : "清理内存"}
+            </button>
+            {msg && kind === "memory" ? (
+              <div className="sf-mem-purge-msg" role="status">
+                {msg}
+              </div>
+            ) : null}
+          </section>
+          <div className="system-flyout-label">占用排行</div>
+          <div className="system-flyout-list sf-mem-list">
+            {!memTop?.processes?.length ? (
+              <div className="system-flyout-empty">暂无进程数据</div>
+            ) : (
+              memTop.processes.map((p, i) => {
+                const maxMb = memTop.processes[0]?.workingSetMb || 1;
+                const bar = Math.max(4, Math.round((p.workingSetMb / maxMb) * 100));
+                const icon = p.iconPng?.trim();
+                return (
+                  <div key={`${p.name}-${p.pid}-${i}`} className="system-flyout-item static sf-mem-row">
+                    {icon ? (
+                      <img
+                        className="sf-mem-icon"
+                        src={`data:image/png;base64,${icon}`}
+                        alt=""
+                        draggable={false}
+                      />
+                    ) : (
+                      <span className="sf-mem-icon sf-mem-icon-fallback" aria-hidden>
+                        {p.name.slice(0, 1).toUpperCase()}
+                      </span>
+                    )}
+                    <span className="sf-mem-meta">
+                      <span className="sf-mem-name" title={p.name}>
+                        {p.name}
+                      </span>
+                      <span className="sf-mem-bar" aria-hidden>
+                        <span className="sf-mem-fill" style={{ width: `${bar}%` }} />
+                      </span>
+                    </span>
+                    <span className="sf-mem-mb">{p.workingSetMb} MB</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </>
+      )}
+
       {kind === "ime" && (
         <>
           <section className="system-flyout-card system-flyout-ime compact">
@@ -1527,7 +1750,7 @@ export default function SystemFlyoutApp() {
         </>
       )}
 
-      {msg ? <p className="system-flyout-msg">{msg}</p> : null}
+      {msg && kind !== "memory" ? <p className="system-flyout-msg">{msg}</p> : null}
     </div>
   );
 }

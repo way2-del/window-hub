@@ -734,8 +734,10 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
 
         let mut touched = false;
         if connect {
-            // Fast path: ENABLE only (no driver tear-down).
-            for svc in &services {
+            // Prefer a tiny service set. Enabling *every* installed profile (or
+            // full DISABLE→ENABLE) storms PnP and turns the mica flyout white.
+            let primary = bt_nudge_services(&services);
+            for svc in &primary {
                 let rc = BluetoothSetServiceState(
                     radio_handle,
                     &dev,
@@ -746,21 +748,51 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
                     touched = true;
                 }
             }
-            // Already-enabled-but-disconnected: nudge at most 2 primary profiles.
-            // Full-list DISABLE→ENABLE freezes DWM / turns the mica flyout white.
-            let need_nudge = bt_device_connected(&target) != Some(true);
-            if need_nudge {
-                for svc in bt_nudge_services(&services) {
-                    let _ = BluetoothSetServiceState(
-                        radio_handle,
-                        &dev,
-                        &svc,
-                        BLUETOOTH_SERVICE_DISABLE,
-                    );
+
+            // Give the stack a moment without hammering more profiles.
+            let mut connected_now = false;
+            for _ in 0..4 {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                if bt_device_connected(&target) == Some(true) {
+                    connected_now = true;
+                    break;
+                }
+            }
+
+            if !connected_now {
+                // ENABLE remaining installed services once — still no DISABLE.
+                for svc in &services {
+                    if primary.iter().any(|p| p == svc) {
+                        continue;
+                    }
                     let rc = BluetoothSetServiceState(
                         radio_handle,
                         &dev,
-                        &svc,
+                        svc,
+                        BLUETOOTH_SERVICE_ENABLE,
+                    );
+                    if bt_service_state_ok(rc) {
+                        touched = true;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                connected_now = bt_device_connected(&target) == Some(true);
+            }
+
+            // Last resort: single-profile DISABLE→ENABLE (not the full list).
+            if !connected_now {
+                if let Some(svc) = primary.first() {
+                    let _ = BluetoothSetServiceState(
+                        radio_handle,
+                        &dev,
+                        svc,
+                        BLUETOOTH_SERVICE_DISABLE,
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    let rc = BluetoothSetServiceState(
+                        radio_handle,
+                        &dev,
+                        svc,
                         BLUETOOTH_SERVICE_ENABLE,
                     );
                     if bt_service_state_ok(rc) {

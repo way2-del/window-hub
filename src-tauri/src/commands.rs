@@ -230,7 +230,7 @@ pub async fn open_settings_window(
     .center()
     .focused(true)
     .visible(false)
-    .initialization_script(init)
+    .initialization_script(popup_init_script(init))
     .build()
     .map_err(|e| format!("open settings failed: {e}"))?;
 
@@ -437,7 +437,7 @@ pub async fn open_tray_popup(
         .skip_taskbar(true)
         .focused(false)
         .visible(false)
-        .initialization_script(init)
+        .initialization_script(popup_init_script(init))
         .build()
         .map_err(|e| format!("open tray popup failed: {e}"))?;
 
@@ -506,6 +506,7 @@ fn system_flyout_height(kind: &str) -> f64 {
         "calendar" => 320.0,
         "wifi" => 420.0,
         "bluetooth" => 360.0,
+        "memory" => 460.0,
         _ => 380.0,
     }
 }
@@ -527,7 +528,7 @@ fn push_flyout_kind_to_webview(win: &WebviewWindow, kind: &str) {
     let _ = win.eval(&script);
 }
 
-/// kind: wifi | bluetooth | volume | ime | power | calendar
+/// kind: wifi | bluetooth | volume | ime | power | calendar | memory
 #[tauri::command]
 pub async fn open_system_flyout(
     app: AppHandle,
@@ -539,7 +540,7 @@ pub async fn open_system_flyout(
     let kind = kind.trim().to_ascii_lowercase();
     if !matches!(
         kind.as_str(),
-        "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar"
+        "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar" | "memory"
     ) {
         return Err(format!("unknown system flyout kind: {kind}"));
     }
@@ -624,7 +625,7 @@ pub async fn open_system_flyout(
     .skip_taskbar(true)
     .focused(false)
     .visible(false)
-    .initialization_script(init)
+    .initialization_script(popup_init_script(init))
     .build()
     .map_err(|e| format!("open system flyout failed: {e}"))?;
 
@@ -764,7 +765,7 @@ pub fn warm_popup_windows(app: AppHandle) {
                 .skip_taskbar(true)
                 .focused(false)
                 .visible(false)
-                .initialization_script(init)
+                .initialization_script(popup_init_script(init))
                 .build()
                 {
                     apply_saved_material(&win, &state);
@@ -794,7 +795,7 @@ pub fn warm_popup_windows(app: AppHandle) {
                 .skip_taskbar(true)
                 .focused(false)
                 .visible(false)
-                .initialization_script(init)
+                .initialization_script(popup_init_script(init))
                 .build()
                 {
                     apply_saved_material(&win, &state);
@@ -824,7 +825,7 @@ pub fn warm_popup_windows(app: AppHandle) {
                 .skip_taskbar(true)
                 .focused(false)
                 .visible(false)
-                .initialization_script(init)
+                .initialization_script(popup_init_script(init))
                 .build()
                 {
                     apply_saved_material(&win, &state);
@@ -1081,6 +1082,51 @@ pub fn open_power_settings() -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+pub async fn list_memory_top(
+    limit: Option<u32>,
+) -> Result<crate::win32::system_memory::MemTopSnapshot, String> {
+    #[cfg(windows)]
+    {
+        let lim = limit.unwrap_or(15) as usize;
+        tauri::async_runtime::spawn_blocking(move || crate::win32::system_memory::list_top(lim))
+            .await
+            .map_err(|e| format!("memory list task: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = limit;
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub async fn purge_system_memory() -> Result<crate::win32::system_memory::MemPurgeResult, String> {
+    #[cfg(windows)]
+    {
+        // Off main / IPC path — EnumProcesses + EmptyWorkingSet can hitch the UI.
+        tauri::async_runtime::spawn_blocking(crate::win32::system_memory::purge)
+            .await
+            .map_err(|e| format!("memory purge task: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub fn open_task_manager() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_memory::open_task_manager()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
 const STATUS_MENU_POPUP_W: f64 = 200.0;
 const STATUS_MENU_POPUP_H: f64 = 248.0;
 
@@ -1143,7 +1189,7 @@ pub async fn open_status_menu_popup(
     .skip_taskbar(true)
     .focused(true)
     .visible(false)
-    .initialization_script(init)
+    .initialization_script(popup_init_script(init))
     .build()
     .map_err(|e| format!("open status menu popup failed: {e}"))?;
 
@@ -1376,23 +1422,57 @@ pub async fn open_plugin_popup(
                     return Ok(());
                 }
                 clear_plugin_popup_focus_close();
-                clear_plugin_popup_reveal_fallback();
                 set_active_plugin_popup_id(&plugin_id);
-                if let Some(gid) = prefer {
-                    let _ = app.emit("plugin-popup-prefer-group", gid);
-                }
                 let _ = existing.set_position(LogicalPosition::new(x, y));
                 let _ = existing.unminimize();
                 if was_visible {
+                    if prefer.is_some() {
+                        // 切换组：push load 可自愈空壳；已有内容则 Host early-return + prefer。
+                        clear_plugin_popup_reveal_fallback();
+                        push_plugin_popup_load(
+                            &existing,
+                            &plugin_id,
+                            prefer.map(|s| s.as_str()),
+                        );
+                        let _ = app.emit(
+                            "plugin-popup-load",
+                            serde_json::json!({
+                                "pluginId": plugin_id,
+                                "preferGroupId": prefer,
+                            }),
+                        );
+                        if let Some(gid) = prefer {
+                            let _ = app.emit("plugin-popup-prefer-group", gid);
+                        }
+                        let _ = existing.set_focus();
+                        let _ = app.emit("plugin-popup-opened", &plugin_id);
+                        return Ok(());
+                    }
                     let _ = existing.set_focus();
                     return Ok(());
                 }
-                let _ = existing.eval(
-                    r#"(function(){var el=document.querySelector('.plugin-popup-root');if(!el)return;el.style.transition='none';el.classList.remove('is-enter');el.classList.add('is-in');})();"#,
+                // Hidden → show: always re-inject. Stale/empty #app after dispose 会变成灰白空壳。
+                clear_plugin_popup_reveal_fallback();
+                push_plugin_popup_load(
+                    &existing,
+                    &plugin_id,
+                    prefer.map(|s| s.as_str()),
                 );
-                let _ = existing.show();
-                let _ = existing.set_focus();
-                let _ = app.emit("plugin-popup-opened", &plugin_id);
+                let _ = app.emit(
+                    "plugin-popup-load",
+                    serde_json::json!({
+                        "pluginId": plugin_id,
+                        "preferGroupId": prefer,
+                    }),
+                );
+                if let Some(gid) = prefer {
+                    let _ = app.emit("plugin-popup-prefer-group", gid);
+                }
+                schedule_plugin_popup_reveal_fallback(
+                    existing.clone(),
+                    app.clone(),
+                    plugin_id.clone(),
+                );
                 return Ok(());
             }
 
@@ -1457,7 +1537,7 @@ pub async fn open_plugin_popup(
             .skip_taskbar(true)
             .focused(false)
             .visible(false)
-            .initialization_script(init)
+            .initialization_script(popup_init_script(init))
             .build()
             .map_err(|e| format!("open plugin popup failed: {e}"))?;
 
@@ -1536,6 +1616,17 @@ pub struct MaterialState(pub std::sync::Mutex<crate::win32::material::MaterialPr
 
 pub fn initial_material_state() -> MaterialState {
     MaterialState(std::sync::Mutex::new(load_material_prefs()))
+}
+
+fn popup_init_script(js: impl AsRef<str>) -> String {
+    #[cfg(windows)]
+    {
+        crate::win32::blur_glass::prepend_glass_compat_boot(js.as_ref())
+    }
+    #[cfg(not(windows))]
+    {
+        js.as_ref().to_string()
+    }
 }
 
 fn read_material_prefs(state: &MaterialState) -> crate::win32::material::MaterialPrefs {
@@ -1991,6 +2082,12 @@ pub fn hub_staging_reveal(plugin_id: String, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn hub_staging_open(plugin_id: String, id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
+    crate::staging::open_item(&plugin_id, &id)
+}
+
+#[tauri::command]
 pub fn hub_staging_start_drag(
     window: tauri::WebviewWindow,
     plugin_id: String,
@@ -2109,7 +2206,8 @@ pub fn hub_netease_now_playing(plugin_id: String) -> Result<serde_json::Value, S
             "title": null,
             "artist": null,
             "lyric": null,
-            "source": null
+            "source": null,
+            "desktopLyrics": false
         }))
     }
 }
@@ -2317,11 +2415,17 @@ pub struct IslandPrefsDto {
     pub pull_content: String,
     #[serde(default = "default_bar_resident_pref")]
     pub bar_resident: String,
+    /// Island bar content priority (plugin ids, high → low). Empty = Host fills by slot.order.
+    #[serde(default)]
+    pub bar_priority: Vec<String>,
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
     #[serde(default = "default_volume_preview_pref")]
     pub volume_preview_sound: bool,
+    /// Frosted translucent top bar (MyDockFinder-like). Default off.
+    #[serde(default)]
+    pub topbar_frost: bool,
 }
 
 fn default_bar_resident_pref() -> String {
@@ -2339,10 +2443,12 @@ impl Default for IslandPrefsDto {
             immerse_idle_sec: 8,
             pull_content: "plugin:com.window-hub.weather".into(),
             bar_resident: default_bar_resident_pref(),
+            bar_priority: Vec::new(),
             msg_notify: true,
             msg_notify_text: "收到一条消息".into(),
             msg_notify_sec: 4,
             volume_preview_sound: true,
+            topbar_frost: false,
         }
     }
 }
@@ -2354,10 +2460,12 @@ impl From<crate::db::IslandPrefsRow> for IslandPrefsDto {
             immerse_idle_sec: p.immerse_idle_sec,
             pull_content: p.pull_content,
             bar_resident: p.bar_resident,
+            bar_priority: parse_bar_priority_json(&p.bar_priority),
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text,
             msg_notify_sec: p.msg_notify_sec,
             volume_preview_sound: p.volume_preview_sound,
+            topbar_frost: p.topbar_frost,
         }
     }
 }
@@ -2369,10 +2477,12 @@ impl From<&IslandPrefsDto> for crate::db::IslandPrefsRow {
             immerse_idle_sec: p.immerse_idle_sec,
             pull_content: p.pull_content.clone(),
             bar_resident: p.bar_resident.clone(),
+            bar_priority: encode_bar_priority_json(&p.bar_priority),
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text.clone(),
             msg_notify_sec: p.msg_notify_sec,
             volume_preview_sound: p.volume_preview_sound,
+            topbar_frost: p.topbar_frost,
         }
     }
 }
@@ -2397,11 +2507,61 @@ fn normalize_bar_resident(raw: &str) -> String {
     t.to_string()
 }
 
+
+fn parse_bar_priority_json(raw: &str) -> Vec<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Vec::new();
+    }
+    match serde_json::from_str::<Vec<String>>(t) {
+        Ok(list) => {
+            let mut out = Vec::new();
+            for id in list {
+                let id = id.trim().to_string();
+                if id.is_empty() || out.iter().any(|x| x == &id) {
+                    continue;
+                }
+                out.push(id);
+            }
+            out
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn encode_bar_priority_json(ids: &[String]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
+}
+
+fn normalize_bar_priority(list: Vec<String>, legacy_resident: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in list {
+        let id = id.trim().to_string();
+        if id.is_empty() || out.iter().any(|x| x == &id) {
+            continue;
+        }
+        out.push(id);
+    }
+    if out.is_empty() {
+        let r = normalize_bar_resident(legacy_resident);
+        if !r.is_empty() {
+            out.push(r);
+        }
+    }
+    out
+}
+
 fn normalize_island_prefs(mut p: IslandPrefsDto) -> IslandPrefsDto {
     p.immerse_idle_sec = p.immerse_idle_sec.clamp(2, 300);
     p.msg_notify_sec = p.msg_notify_sec.clamp(2, 30);
     p.pull_content = normalize_pull_content(&p.pull_content);
-    p.bar_resident = normalize_bar_resident(&p.bar_resident);
+    p.bar_priority = normalize_bar_priority(p.bar_priority, &p.bar_resident);
+    // Keep legacy single field in sync with priority head (settings UI uses barPriority).
+    p.bar_resident = p
+        .bar_priority
+        .first()
+        .cloned()
+        .unwrap_or_else(|| normalize_bar_resident(&p.bar_resident));
     p.msg_notify_text = {
         let t = p.msg_notify_text.trim().to_string();
         if t.is_empty() {
@@ -2433,6 +2593,10 @@ pub fn set_island_prefs(app: AppHandle, prefs: IslandPrefsDto) -> Result<IslandP
     let next = normalize_island_prefs(prefs);
     let row = crate::db::IslandPrefsRow::from(&next);
     crate::db::with_conn(|c| crate::db::island_set(c, &row))?;
+    crate::win32::material::set_topbar_frost_enabled(next.topbar_frost);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = crate::win32::material::sync_topbar_frost(&window);
+    }
     let _ = app.emit("island-prefs", &next);
     Ok(next)
 }

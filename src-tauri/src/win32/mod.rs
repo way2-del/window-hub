@@ -23,6 +23,8 @@ pub mod system_monitor;
 #[cfg(windows)]
 pub mod system_perf;
 #[cfg(windows)]
+pub mod system_memory;
+#[cfg(windows)]
 pub mod system_power;
 #[cfg(windows)]
 pub mod system_radio;

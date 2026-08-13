@@ -1,9 +1,12 @@
 //! Ambient strip color.
 //! - Maximized / fullscreen window:
-//!   - **edge**: full-width horizontal PNG strip from visible top 1–2 px
+//!   - **edge**: full-width horizontal PNG strip from visible title chrome
 //!   - **center**: solid color from window mid band
+//! - Electron / GPU titles often paint top 1–2 px as uniform near-black —
+//!   try deeper Y rows, then wallpaper if still failed.
 //! - Windowed → desktop wallpaper (edge may use wallpaper top-row strip).
 //! - After a target switch: sample ~3s then lock until next switch.
+//! - Soft polish lifts pure black so frosted top-bar glass never looks dead.
 
 use serde::{Deserialize, Serialize};
 
@@ -52,13 +55,13 @@ pub struct AmbientStrip {
 impl AmbientStrip {
     pub fn fallback() -> Self {
         Self {
-            r: 32,
-            g: 32,
-            b: 34,
+            r: 42,
+            g: 42,
+            b: 46,
             width: 1,
             offset_x: 0,
             span_width: 0,
-            png_base64: solid_png_b64(32, 32, 34),
+            png_base64: solid_png_b64(42, 42, 46),
             hwnd: 0,
             mode: SampleMode::Edge,
         }
@@ -134,8 +137,10 @@ mod win {
 
     /// How long to keep sampling after a window/desktop target switch.
     const SETTLE_MS: u64 = 2000;
-    /// Top rows to average from the target window (window-local Y).
-    const TOP_ROWS: i32 = 2;
+    /// Rows to average at each Y probe (window-local).
+    const TOP_ROWS: i32 = 3;
+    /// Soft charcoal used when a capture collapses to pure black.
+    const SOFT_FLOOR: (u8, u8, u8) = (42, 42, 46);
 
     /// Last live sample — used when focus is on the island (no external target).
     static LAST_STRIP: Mutex<Option<AmbientStrip>> = Mutex::new(None);
@@ -572,7 +577,7 @@ mod win {
                 sb += chunk[2] as u64;
             }
             let n = (rgb.len() / 3).max(1) as u64;
-            ((sr / n) as u8, (sg / n) as u8, (sb / n) as u8)
+            polish_avg((sr / n) as u8, (sg / n) as u8, (sb / n) as u8)
         };
 
         if mode == SampleMode::Center || width <= 1 {
@@ -617,6 +622,7 @@ mod win {
             let dst = (i as usize) * 3;
             slice[dst..dst + 3].copy_from_slice(&rgb[src..src + 3]);
         }
+        polish_rgb_row(&mut slice);
 
         Some(AmbientStrip {
             r: avg_r,
@@ -660,7 +666,7 @@ mod win {
         }
 
         let strip = if let Some(t) = target {
-            capture_edge_ribbon(self_hwnd, Some(t))
+            capture_edge_ribbon(self_hwnd, Some(t)).or_else(|| sample_wallpaper(self_hwnd))
         } else {
             sample_wallpaper(self_hwnd)
         };
@@ -706,7 +712,9 @@ mod win {
         }
 
         if let Some(t) = target {
-            if let Some(strip) = capture_edge_ribbon(self_hwnd, Some(t)) {
+            if let Some(strip) = capture_edge_ribbon(self_hwnd, Some(t))
+                .or_else(|| sample_wallpaper(self_hwnd))
+            {
                 remember(strip.clone());
                 if let Ok(mut gate) = GATE.lock() {
                     gate.last_avg = Some((strip.r, strip.g, strip.b));
@@ -727,18 +735,18 @@ mod win {
 
     fn encode_rgb_row(rgb: &[u8], width: u32) -> String {
         if width == 0 || rgb.len() < (width as usize) * 3 {
-            return solid_png_b64(32, 32, 34);
+            return solid_png_b64(SOFT_FLOOR.0, SOFT_FLOOR.1, SOFT_FLOOR.2);
         }
         let img = match image::RgbImage::from_raw(width, 1, rgb.to_vec()) {
             Some(i) => i,
-            None => return solid_png_b64(32, 32, 34),
+            None => return solid_png_b64(SOFT_FLOOR.0, SOFT_FLOOR.1, SOFT_FLOOR.2),
         };
         let mut buf = Vec::new();
         if image::DynamicImage::ImageRgb8(img)
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .is_err()
         {
-            return solid_png_b64(32, 32, 34);
+            return solid_png_b64(SOFT_FLOOR.0, SOFT_FLOOR.1, SOFT_FLOOR.2);
         }
         base64::engine::general_purpose::STANDARD.encode(buf)
     }
@@ -774,7 +782,7 @@ mod win {
         }
     }
 
-    /// Window-local top 1–2 **visible** px (skip invisible DWM borders).
+    /// Window-local visible chrome row (skip invisible DWM borders).
     /// Prefer GetWindowDC BitBlt; PrintWindow fallback only if the blit is empty.
     unsafe fn capture_top_pixel_row(
         target: HWND,
@@ -794,7 +802,6 @@ mod win {
 
         if let Some(bgra) = blit_window_rows(target, x0, y0, ribbon_w, rows) {
             let avg = average_bgra_rows(&bgra, ribbon_w, rows);
-            // Only treat *failed* empty blits as miss — dark title bars are valid.
             if !is_all_zero(&avg) {
                 return Some(avg);
             }
@@ -802,6 +809,104 @@ mod win {
         printwindow_top_rows(target, win_w, win_h, x0, ribbon_w, y0, rows)
             .map(|bgra| average_bgra_rows(&bgra, ribbon_w, rows))
             .filter(|b| !is_all_zero(b))
+    }
+
+    /// Electron/GPU titles often leave the first px as uniform near-black while the
+    /// real title chrome sits a few rows deeper. Probe several Y offsets.
+    unsafe fn capture_best_top_row(
+        target: HWND,
+        win_w: i32,
+        win_h: i32,
+        x0: i32,
+        ribbon_w: i32,
+        top_inset: i32,
+    ) -> Option<Vec<u8>> {
+        let probes = [
+            top_inset + 1,
+            top_inset + 8,
+            top_inset + 16,
+            top_inset + 28,
+            top_inset + 40,
+        ];
+        let mut best: Option<(Vec<u8>, f32, f32)> = None;
+        for y in probes {
+            if y >= win_h - 1 {
+                continue;
+            }
+            let Some(row) = capture_top_pixel_row(target, win_w, win_h, x0, ribbon_w, y) else {
+                continue;
+            };
+            let (luma, var) = row_luma_stats(&row);
+            if is_failed_dark_capture(luma, var) {
+                continue;
+            }
+            // Prefer brighter, more varied chrome (real title bars beat black stubs).
+            let score = luma + var * 0.15;
+            let replace = match &best {
+                None => true,
+                Some((_, _, prev)) => score > *prev + 1.5,
+            };
+            if replace {
+                best = Some((row, luma, score));
+            }
+        }
+        best.map(|(row, _, _)| row)
+    }
+
+    fn row_luma_stats(bgra: &[u8]) -> (f32, f32) {
+        let n = (bgra.len() / 4).max(1) as f32;
+        let mut sum = 0f32;
+        let mut sum_sq = 0f32;
+        for c in bgra.chunks_exact(4) {
+            let l = 0.2126 * c[2] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[0] as f32;
+            sum += l;
+            sum_sq += l * l;
+        }
+        let mean = sum / n;
+        let var = (sum_sq / n - mean * mean).max(0.0);
+        (mean, var.sqrt())
+    }
+
+    /// Uniform near-black ≈ failed GPU capture, not a real dark title bar.
+    fn is_failed_dark_capture(luma: f32, stddev: f32) -> bool {
+        (luma < 14.0 && stddev < 18.0) || (luma < 22.0 && stddev < 6.0)
+    }
+
+    fn polish_pixel(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+        // Dead black → soft charcoal (frosted bar never looks like a hole).
+        if luma < 18.0 {
+            let t = (luma / 18.0).clamp(0.0, 1.0);
+            let (fr, fg, fb) = SOFT_FLOOR;
+            return (
+                (r as f32 * t + fr as f32 * (1.0 - t)).round() as u8,
+                (g as f32 * t + fg as f32 * (1.0 - t)).round() as u8,
+                (b as f32 * t + fb as f32 * (1.0 - t)).round() as u8,
+            );
+        }
+        // Mid tones: tiny saturation lift so wallpaper-derived strips feel less muddy.
+        if luma > 40.0 && luma < 210.0 {
+            let gray = luma;
+            let s = 1.08f32;
+            let nr = (gray + (r as f32 - gray) * s).clamp(0.0, 255.0);
+            let ng = (gray + (g as f32 - gray) * s).clamp(0.0, 255.0);
+            let nb = (gray + (b as f32 - gray) * s).clamp(0.0, 255.0);
+            return (nr.round() as u8, ng.round() as u8, nb.round() as u8);
+        }
+        (r, g, b)
+    }
+
+    fn polish_rgb_row(rgb: &mut [u8]) {
+        for chunk in rgb.chunks_exact_mut(3) {
+            let (r, g, b) = polish_pixel(chunk[0], chunk[1], chunk[2]);
+            chunk[0] = r;
+            chunk[1] = g;
+            chunk[2] = b;
+        }
+    }
+
+    fn polish_avg(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        polish_pixel(r, g, b)
     }
 
     /// Average `rows` of BGRA into a single row (per-column).
@@ -945,7 +1050,7 @@ mod win {
         bgra.chunks_exact(4).all(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
     }
 
-    /// Sample visible top 1–2 px of the target HWND.
+    /// Sample visible title chrome of the target HWND.
     /// - Edge: full-bar horizontal RGB strip (mapped 1:1, UI stretches 100%)
     /// - Center: solid mid-band color
     fn capture_edge_ribbon(self_hwnd: Option<isize>, target: Option<HWND>) -> Option<AmbientStrip> {
@@ -966,9 +1071,6 @@ mod win {
             let right_limit = (frame.right - wr.left).clamp(left_inset + 1, win_w);
             let vis_w = (right_limit - left_inset).max(1);
 
-            // 2nd visible row — skip hairline / border highlight
-            let y0 = (top_inset + 1).clamp(0, win_h - 1);
-
             let dpi_scale = {
                 let dpi = GetDpiForWindow(me);
                 if dpi == 0 {
@@ -981,8 +1083,8 @@ mod win {
             let bar_logical = ((bar_phys as f64) / dpi_scale).round() as i32;
             let mode = get_mode();
 
-            // Capture entire visible top ribbon once (window-local).
-            let bgra = capture_top_pixel_row(target, win_w, win_h, left_inset, vis_w, y0)?;
+            // Probe deeper rows — top 1px of Electron is often a black stub.
+            let bgra = capture_best_top_row(target, win_w, win_h, left_inset, vis_w, top_inset)?;
 
             if mode == SampleMode::Center {
                 let pad = ((vis_w as f64) * 0.35).round() as i32;
@@ -995,7 +1097,8 @@ mod win {
                         mid.extend_from_slice(&bgra[i..i + 4]);
                     }
                 }
-                let (r, g, b) = robust_rgb_from_bgra(&mid);
+                let (r0, g0, b0) = robust_rgb_from_bgra(&mid);
+                let (r, g, b) = polish_avg(r0, g0, b0);
                 return Some(AmbientStrip {
                     r,
                     g,
@@ -1026,6 +1129,7 @@ mod win {
                 }
             }
             blur_rgb_row_3(&mut rgb);
+            polish_rgb_row(&mut rgb);
 
             let (avg_r, avg_g, avg_b) = {
                 let mut sr = 0u64;
@@ -1076,7 +1180,7 @@ mod win {
     fn robust_rgb_from_bgra(bgra: &[u8]) -> (u8, u8, u8) {
         let n = bgra.len() / 4;
         if n == 0 {
-            return (32, 32, 34);
+            return SOFT_FLOOR;
         }
         let margin = ((n as f64) * 0.1).round() as usize;
         let start = margin.min(n.saturating_sub(1) / 4);
@@ -1096,7 +1200,7 @@ mod win {
         }
         let med = |v: &mut [u8]| -> u8 {
             if v.is_empty() {
-                return 32;
+                return SOFT_FLOOR.0;
             }
             v.sort_unstable();
             v[v.len() / 2]

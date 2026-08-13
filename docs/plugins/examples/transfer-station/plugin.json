@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.transfer-station",
   "name": "中转站",
-  "version": "2.0.5",
+  "version": "2.0.6",
   "official": true,
   "logo": "icon.svg",
   "description": "左侧快捷区入口：弹窗内添加/拖入文件、文件夹、文字、图片，横向预览与复制路径。纯本地暂存。",

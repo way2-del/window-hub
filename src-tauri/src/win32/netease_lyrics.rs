@@ -1,36 +1,21 @@
-//! Read now-playing / desktop lyric text from NetEase Cloud Music (cloudmusic).
+//! 网易云「正在播放 / 当前歌词」轻量读取。
 //!
-//! Strategy (stable → fragile):
-//! 1. Desktop lyrics HWND (`DesktopLyrics`) via window text + UI Automation
-//! 2. Main window title (`OrpheusBrowserHost`) → "歌名 - 歌手"
-//! 3. Optional memory pointer chain for known client versions (desktop lyric buffer)
+//! 不做进程堆扫 / RVA 探测 / UIA（3.1.36 上又慢又卡 UI）。
+//! 策略：
+//! 1. 检测 `DesktopLyrics` + 主窗口标题（歌名 - 歌手）
+//! 2. 官方 LRC + 本地播放时钟选句（SMTC Position 在 3.1.x 常卡 0）
+//! 3. HTTP 拉 LRC 只在后台线程，热路径绝不阻塞
 
 use serde::Serialize;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, MAX_PATH};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED,
-};
-use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows::Win32::System::ProcessStatus::{
-    EnumProcessModules, GetModuleBaseNameW, GetModuleInformation, MODULEINFO,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-};
-use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Children, TreeScope_Subtree,
-};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible,
+    EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
 };
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -41,39 +26,36 @@ pub struct NeteaseNowPlaying {
     pub artist: Option<String>,
     pub lyric: Option<String>,
     pub source: Option<String>,
+    /// 是否检测到桌面歌词窗口（无需置顶）
+    pub desktop_lyrics: bool,
 }
 
-/// Version → (module RVA, then pointer offsets). Final offset 0 = string at resolved addr.
-const VERSION_OFFSETS: &[(&str, &[usize])] = &[
-    ("3.1.32", &[0x01DF44D0, 0x120, 0x8, 0x0]),
-    ("3.1.30", &[0x01DF44D0, 0x120, 0x8, 0x0]),
-    ("3.1.29", &[0x01DEB4D0, 0x120, 0x8, 0x0]),
-    ("3.1.28", &[0x01DDF290, 0x120, 0x8, 0x0]),
-];
-
-struct MemCache {
-    pid: u32,
-    lyric_addr: usize,
+struct ApiLyricCache {
+    key: String,
+    lines: Vec<(u64, String)>,
+    at: Instant,
 }
 
-static MEM_CACHE: Mutex<Option<MemCache>> = Mutex::new(None);
-
-struct ComGuard;
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
-        }
-    }
+struct StickyLyric {
+    song_key: String,
+    text: String,
+    at: Instant,
 }
 
-fn with_com<T>(f: impl FnOnce() -> T) -> T {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-    }
-    let _guard = ComGuard;
-    f()
+struct SmtcClock {
+    song_key: String,
+    origin_ms: u64,
+    synced_at: Instant,
+    last_raw_ms: u64,
 }
+
+static API_LYRIC_CACHE: Mutex<Option<ApiLyricCache>> = Mutex::new(None);
+static STICKY_LYRIC: Mutex<Option<StickyLyric>> = Mutex::new(None);
+static SMTC_CLOCK: Mutex<Option<SmtcClock>> = Mutex::new(None);
+static LAST_SONG_KEY: Mutex<String> = Mutex::new(String::new());
+/// 切歌后作废进行中的旧 LRC 拉取，避免把上一首歌词写进缓存。
+static LRC_FETCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LRC_FETCH_BUSY: AtomicBool = AtomicBool::new(false);
 
 fn wide_to_string(buf: &[u16]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
@@ -137,19 +119,19 @@ struct EnumCtx {
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let ctx = &mut *(lparam.0 as *mut EnumCtx);
     let class = hwnd_class(hwnd);
+    let class_l = class.to_ascii_lowercase();
+    let visible = IsWindowVisible(hwnd).as_bool();
+
     if class == "OrpheusBrowserHost" {
-        if ctx.main.is_none() {
+        if visible && ctx.main.is_none() {
             ctx.main = Some(hwnd);
         }
-    } else if class == "DesktopLyrics" {
+    } else if class == "DesktopLyrics"
+        || class_l == "desktoplyrics"
+        || class_l.contains("desktoplyric")
+    {
+        // 桌面歌词可不开置顶；隐藏窗也算「开了桌面歌词」
         ctx.lyric = Some(hwnd);
-    } else if class.to_ascii_lowercase().contains("lyric") {
-        let title = hwnd_title(hwnd);
-        if title.contains("歌词") || title.to_ascii_lowercase().contains("lyric") {
-            if ctx.lyric.is_none() {
-                ctx.lyric = Some(hwnd);
-            }
-        }
     }
     BOOL(1)
 }
@@ -165,315 +147,504 @@ fn find_netease_hwnds() -> (Option<HWND>, Option<HWND>) {
     (ctx.main, ctx.lyric)
 }
 
-fn create_automation() -> Result<IUIAutomation, String> {
-    unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string()) }
+fn song_key(title: Option<&str>, artist: Option<&str>) -> String {
+    format!("{}|{}", title.unwrap_or(""), artist.unwrap_or(""))
 }
 
-fn uia_name(el: &IUIAutomationElement) -> Option<String> {
-    unsafe {
-        let s = el.CurrentName().ok()?.to_string();
-        let t = s.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    }
+fn is_unlock_noise(s: &str) -> bool {
+    let t = s.trim();
+    t.contains("桌面歌词解锁") || t.contains("解锁桌面歌词")
 }
 
-fn collect_uia_names(root: &IUIAutomationElement, subtree: bool) -> Vec<String> {
-    let Ok(auto) = create_automation() else {
-        return Vec::new();
-    };
-    let Ok(cond) = (unsafe { auto.CreateTrueCondition() }) else {
-        return Vec::new();
-    };
-    let scope = if subtree {
-        TreeScope_Subtree
-    } else {
-        TreeScope_Children
-    };
-    let Ok(finder) = (unsafe { root.FindAll(scope, &cond) }) else {
-        return Vec::new();
-    };
-    let Ok(len) = (unsafe { finder.Length() }) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for i in 0..len {
-        let Ok(el) = (unsafe { finder.GetElement(i) }) else {
-            continue;
-        };
-        if let Some(n) = uia_name(&el) {
-            if n.len() > 1
-                && !n.contains("网易云")
-                && n != "桌面歌词"
-                && !n.eq_ignore_ascii_case("DesktopLyrics")
-            {
-                out.push(n);
-            }
-        }
+fn is_lrc_credit_line(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return true;
     }
-    out
+    let lower = t.to_ascii_lowercase();
+    let keys = [
+        "原唱",
+        "作曲",
+        "作词",
+        "编曲",
+        "制作人",
+        "混音",
+        "母带",
+        "后期",
+        "mastering",
+        "producer",
+        "composer",
+        "lyricist",
+        "正版授权",
+    ];
+    keys.iter().any(|k| t.contains(k) || lower.contains(k))
 }
 
-fn read_desktop_lyric(hwnd: HWND) -> Option<String> {
-    let title = hwnd_title(hwnd);
-    if !title.is_empty() && title != "桌面歌词" && !title.contains("网易云音乐") {
-        return Some(title);
-    }
-    with_com(|| {
-        let Ok(auto) = create_automation() else {
-            return None;
-        };
-        let Ok(el) = (unsafe { auto.ElementFromHandle(hwnd) }) else {
-            return None;
-        };
-        if let Some(n) = uia_name(&el) {
-            if n != "桌面歌词" && !n.contains("网易云音乐") {
-                return Some(n);
-            }
+/// 切歌：丢掉上一首的 sticky / 进度钟，并作废进行中的 LRC 请求。
+fn on_song_changed(new_key: &str) {
+    let mut changed = false;
+    if let Ok(mut last) = LAST_SONG_KEY.lock() {
+        if last.as_str() != new_key {
+            *last = new_key.to_string();
+            changed = true;
         }
-        collect_uia_names(&el, false)
-            .into_iter()
-            .chain(collect_uia_names(&el, true))
-            .find(|s| {
-                let n = s.chars().count();
-                (1..=80).contains(&n)
-            })
-    })
+    }
+    if !changed {
+        return;
+    }
+    LRC_FETCH_GEN.fetch_add(1, Ordering::AcqRel);
+    let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
+    let _ = SMTC_CLOCK.lock().map(|mut g| *g = None);
+    // 旧歌 LRC 缓存可留着（按 key 区分）；但若当前缓存 key 不是新歌则不影响 peek
 }
 
-fn pe_file_version(path: &str) -> Option<(u16, u16, u16)> {
-    use windows::Win32::Storage::FileSystem::{
-        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
-    };
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        let mut handle = 0u32;
-        let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), Some(&mut handle));
-        if size == 0 {
-            return None;
-        }
-        let mut buf = vec![0u8; size as usize];
-        if GetFileVersionInfoW(PCWSTR(wide.as_ptr()), 0, size, buf.as_mut_ptr() as *mut _)
-            .is_err()
-        {
-            return None;
-        }
-        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut len = 0u32;
-        if !VerQueryValueW(
-            buf.as_ptr() as *const _,
-            windows::core::w!("\\"),
-            &mut ptr,
-            &mut len,
-        )
-        .as_bool()
-            || ptr.is_null()
-            || len < 52
-        {
-            return None;
-        }
-        let info = &*(ptr as *const [u32; 13]);
-        if info[0] != 0xFEEF_04BD {
-            return None;
-        }
-        let ms = info[2];
-        let ls = info[3];
-        Some((
-            ((ms >> 16) & 0xffff) as u16,
-            (ms & 0xffff) as u16,
-            ((ls >> 16) & 0xffff) as u16,
-        ))
-    }
-}
-
-fn process_exe_path(pid: u32) -> Option<String> {
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; MAX_PATH as usize];
-        let mut size = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_WIN32,
-            PWSTR(buf.as_mut_ptr()),
-            &mut size,
-        );
-        let _ = CloseHandle(handle);
-        if ok.is_err() {
-            return None;
-        }
-        Some(wide_to_string(&buf[..size as usize]))
-    }
-}
-
-fn find_module_base(process: HANDLE, names: &[&str]) -> Option<usize> {
-    unsafe {
-        let mut needed = 0u32;
-        let mut mods = [windows::Win32::Foundation::HMODULE::default(); 512];
-        if EnumProcessModules(
-            process,
-            mods.as_mut_ptr(),
-            (std::mem::size_of_val(&mods)) as u32,
-            &mut needed,
-        )
-        .is_err()
-        {
-            return None;
-        }
-        let count = (needed as usize) / std::mem::size_of::<windows::Win32::Foundation::HMODULE>();
-        for m in mods.iter().take(count) {
-            let mut name_buf = [0u16; 256];
-            let n = GetModuleBaseNameW(process, *m, &mut name_buf);
-            if n == 0 {
-                continue;
-            }
-            let name = wide_to_string(&name_buf[..n as usize]).to_ascii_lowercase();
-            if names.iter().any(|want| name == *want) {
-                let mut info = MODULEINFO::default();
-                if GetModuleInformation(
-                    process,
-                    *m,
-                    &mut info,
-                    std::mem::size_of::<MODULEINFO>() as u32,
-                )
-                .is_ok()
-                {
-                    return Some(info.lpBaseOfDll as usize);
-                }
-            }
-        }
-        None
-    }
-}
-
-fn read_qword(process: HANDLE, addr: usize) -> Option<usize> {
-    let mut buf = [0u8; 8];
-    let mut read = 0usize;
-    unsafe {
-        if ReadProcessMemory(
-            process,
-            addr as *const _,
-            buf.as_mut_ptr() as *mut _,
-            8,
-            Some(&mut read),
-        )
-        .is_err()
-            || read != 8
-        {
-            return None;
-        }
-    }
-    Some(usize::from_le_bytes(buf))
-}
-
-fn read_utf16_z(process: HANDLE, addr: usize, max_chars: usize) -> Option<String> {
-    let bytes = max_chars.saturating_mul(2).min(1024);
-    let mut buf = vec![0u8; bytes];
-    let mut read = 0usize;
-    unsafe {
-        if ReadProcessMemory(
-            process,
-            addr as *const _,
-            buf.as_mut_ptr() as *mut _,
-            bytes,
-            Some(&mut read),
-        )
-        .is_err()
-            || read < 2
-        {
-            return None;
-        }
-    }
-    let words: Vec<u16> = buf[..read]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .take_while(|&c| c != 0)
-        .collect();
-    if words.is_empty() {
-        return None;
-    }
-    let s = String::from_utf16_lossy(&words).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}
-
-fn resolve_lyric_addr(process: HANDLE, base: usize, offsets: &[usize]) -> Option<usize> {
-    if offsets.is_empty() {
-        return None;
-    }
-    let mut addr = base.checked_add(offsets[0])?;
-    for off in offsets.iter().skip(1) {
-        let ptr = read_qword(process, addr)?;
-        addr = ptr.checked_add(*off)?;
-        if addr <= 0x10000 || addr >= 0x7FFF_FFFF_0000 {
-            return None;
-        }
-    }
-    Some(addr)
-}
-
-fn read_memory_lyric(pid: u32) -> Option<String> {
-    if let Ok(guard) = MEM_CACHE.lock() {
-        if let Some(cache) = guard.as_ref() {
-            if cache.pid == pid {
-                if let Ok(handle) =
-                    unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, false, pid) }
-                {
-                    let text = read_utf16_z(handle, cache.lyric_addr, 256);
-                    unsafe {
-                        let _ = CloseHandle(handle);
-                    }
-                    if text.is_some() {
-                        return text;
-                    }
-                }
-            }
-        }
-    }
-
-    let exe = process_exe_path(pid)?;
-    let (maj, min, patch) = pe_file_version(&exe).unwrap_or((3, 1, 30));
-    let ver = format!("{maj}.{min}.{patch}");
-    let offsets = VERSION_OFFSETS
-        .iter()
-        .find(|(v, _)| *v == ver)
-        .or_else(|| VERSION_OFFSETS.first())
-        .map(|(_, o)| *o)?;
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, false, pid).ok()?;
-        let base = find_module_base(handle, &["cloudmusic.dll", "cloudmusic.exe"]);
-        let Some(base) = base else {
-            let _ = CloseHandle(handle);
-            return None;
-        };
-        let addr = resolve_lyric_addr(handle, base, offsets);
-        let text = addr.and_then(|a| read_utf16_z(handle, a, 256));
-        if let Some(a) = addr {
-            if let Ok(mut guard) = MEM_CACHE.lock() {
-                *guard = Some(MemCache {
-                    pid,
-                    lyric_addr: a,
+fn apply_sticky(out: &mut NeteaseNowPlaying) {
+    let key = song_key(out.title.as_deref(), out.artist.as_deref());
+    if let Some(lyric) = out.lyric.as_ref().filter(|s| !s.trim().is_empty()) {
+        if !is_lrc_credit_line(lyric) && !is_unlock_noise(lyric) {
+            if let Ok(mut g) = STICKY_LYRIC.lock() {
+                *g = Some(StickyLyric {
+                    song_key: key,
+                    text: lyric.clone(),
+                    at: Instant::now(),
                 });
             }
         }
-        let _ = CloseHandle(handle);
-        text
+        return;
+    }
+    if !out.active || !out.desktop_lyrics {
+        let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
+        return;
+    }
+    if let Ok(g) = STICKY_LYRIC.lock() {
+        if let Some(s) = g.as_ref() {
+            // 仅同曲且短窗口；切歌后 on_song_changed 已清空
+            if s.song_key == key && s.at.elapsed() < Duration::from_secs(6) {
+                out.lyric = Some(s.text.clone());
+                if out.source.as_deref() == Some("window-title") || out.source.is_none() {
+                    out.source = Some("sticky".into());
+                }
+            }
+        }
     }
 }
 
-/// Snapshot current NetEase Cloud Music playback / lyric line.
-/// Cached ~800ms so lyrics plugin ticks don't EnumWindows/RPM every call.
+fn normalize_title(s: &str) -> String {
+    let s = s.split('（').next().unwrap_or(s);
+    let s = s.split('(').next().unwrap_or(s);
+    let s = s.split('[').next().unwrap_or(s);
+    s.trim().to_ascii_lowercase()
+}
+
+/// 必须标题相关，避免搜索落到完全另一首歌（串词主因）。
+fn pick_search_song_id(songs: &[serde_json::Value], title: &str, artist: Option<&str>) -> Option<u64> {
+    let want_t = normalize_title(title);
+    if want_t.is_empty() {
+        return None;
+    }
+    let want_a = artist.map(normalize_title).unwrap_or_default();
+    let mut best: Option<(i32, u64)> = None;
+    for s in songs {
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let nt = normalize_title(name);
+        if nt.is_empty() {
+            continue;
+        }
+        let mut score = 0i32;
+        if nt == want_t {
+            score += 100;
+        } else if nt.contains(&want_t) || want_t.contains(&nt) {
+            // 太短的包含易误伤
+            if want_t.chars().count() >= 3 && nt.chars().count() >= 3 {
+                score += 55;
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        if !want_a.is_empty() {
+            let artists = s
+                .get("artists")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+                        .map(normalize_title)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            if artists.contains(&want_a) || want_a.contains(&artists) {
+                score += 40;
+            }
+        }
+        let Some(id) = s.get("id").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if best.map(|(sc, _)| score > sc).unwrap_or(true) {
+            best = Some((score, id));
+        }
+    }
+    best.and_then(|(sc, id)| if sc >= 55 { Some(id) } else { None })
+}
+
+fn filetime_now_ticks() -> i64 {
+    use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+    let ft = unsafe { GetSystemTimeAsFileTime() };
+    ((ft.dwHighDateTime as i64) << 32) | (ft.dwLowDateTime as i64)
+}
+
+fn ticks_to_ms(ticks: i64) -> u64 {
+    (ticks.max(0) as u64) / 10_000
+}
+
+struct SmtcSample {
+    song_key: String,
+    raw_ms: u64,
+    end_ms: Option<u64>,
+    playing: bool,
+}
+
+fn read_smtc_sample(expect_title: Option<&str>) -> Option<SmtcSample> {
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSessionManager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus,
+    };
+
+    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        .ok()?
+        .get()
+        .ok()?;
+
+    let mut best: Option<(i32, SmtcSample)> = None;
+    if let Ok(sessions) = manager.GetSessions() {
+        let n = sessions.Size().unwrap_or(0);
+        for i in 0..n {
+            let Ok(session) = sessions.GetAt(i) else {
+                continue;
+            };
+            let app = session
+                .SourceAppUserModelId()
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let mut score = 0;
+            if app.contains("cloudmusic") || app.contains("netease") {
+                score += 100;
+            }
+            let media_title = session
+                .TryGetMediaPropertiesAsync()
+                .ok()
+                .and_then(|op| op.get().ok())
+                .and_then(|p| p.Title().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if let Some(want) = expect_title.filter(|s| !s.is_empty()) {
+                let w = want.to_ascii_lowercase();
+                let t = media_title.to_ascii_lowercase();
+                if !t.is_empty() && (t.contains(&w) || w.contains(&t)) {
+                    score += 40;
+                }
+            }
+            if score <= 0 {
+                continue;
+            }
+            let Ok(timeline) = session.GetTimelineProperties() else {
+                continue;
+            };
+            let Ok(pos) = timeline.Position() else {
+                continue;
+            };
+            let raw_ms = ticks_to_ms(pos.Duration);
+            let end_ms = timeline
+                .EndTime()
+                .ok()
+                .map(|e| ticks_to_ms(e.Duration))
+                .filter(|&ms| ms > 0);
+            // 轻外推：Position 卡 0 时仍可能靠 LastUpdated 无效，后面用本地钟
+            let _ = timeline.LastUpdatedTime().map(|last| {
+                let _ = filetime_now_ticks().saturating_sub(last.UniversalTime);
+            });
+            let playing = session
+                .GetPlaybackInfo()
+                .ok()
+                .and_then(|info| info.PlaybackStatus().ok())
+                .map(|s| s == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+                .unwrap_or(true);
+            let song_key = expect_title
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or(media_title);
+            let sample = SmtcSample {
+                song_key,
+                raw_ms,
+                end_ms,
+                playing,
+            };
+            if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((score, sample));
+            }
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+/// 播放进度（ms）。SMTC 卡 0 时用本地时钟推进。
+/// WinRT 采样最多约 2s 一次，热路径多数只做 Instant 加法，避免卡 UI。
+fn playback_position_ms(expect_title: Option<&str>) -> u64 {
+    static LAST_SMTC_POLL: Mutex<Option<Instant>> = Mutex::new(None);
+    let need_poll = LAST_SMTC_POLL
+        .lock()
+        .ok()
+        .and_then(|g| g.map(|t| t.elapsed() >= Duration::from_secs(2)))
+        .unwrap_or(true);
+
+    if need_poll {
+        if let Some(sample) = read_smtc_sample(expect_title) {
+            if let Ok(mut guard) = SMTC_CLOCK.lock() {
+                let reported = sample.raw_ms;
+                match guard.as_mut() {
+                    Some(clock) if clock.song_key == sample.song_key => {
+                        let delta = reported as i64 - clock.last_raw_ms as i64;
+                        if delta.abs() >= 1200
+                            || (reported > 0 && reported != clock.last_raw_ms && delta >= 400)
+                        {
+                            clock.origin_ms = reported;
+                            clock.synced_at = Instant::now();
+                        }
+                        clock.last_raw_ms = reported;
+                        if !sample.playing {
+                            let frozen = clock
+                                .origin_ms
+                                .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
+                            let frozen = sample.end_ms.map(|e| frozen.min(e)).unwrap_or(frozen);
+                            clock.origin_ms = frozen;
+                            clock.synced_at = Instant::now();
+                        }
+                    }
+                    _ => {
+                        *guard = Some(SmtcClock {
+                            song_key: sample.song_key,
+                            origin_ms: reported,
+                            synced_at: Instant::now(),
+                            last_raw_ms: reported,
+                        });
+                    }
+                }
+            }
+            if let Ok(mut g) = LAST_SMTC_POLL.lock() {
+                *g = Some(Instant::now());
+            }
+        }
+    }
+
+    let Ok(guard) = SMTC_CLOCK.lock() else {
+        return 0;
+    };
+    let Some(clock) = guard.as_ref() else {
+        return 0;
+    };
+    clock
+        .origin_ms
+        .saturating_add(clock.synced_at.elapsed().as_millis() as u64)
+}
+
+fn parse_lrc(raw: &str) -> Vec<(u64, String)> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if !line.starts_with('[') {
+            continue;
+        }
+        let mut rest = line;
+        let mut times: Vec<u64> = Vec::new();
+        while rest.starts_with('[') {
+            let Some(end) = rest.find(']') else {
+                break;
+            };
+            let tag = &rest[1..end];
+            rest = &rest[end + 1..];
+            let mut parts = tag.split(':');
+            let Some(mm) = parts.next() else {
+                continue;
+            };
+            let Some(ss) = parts.next() else {
+                continue;
+            };
+            if parts.next().is_some() {
+                continue;
+            }
+            let Ok(m) = mm.parse::<u64>() else {
+                continue;
+            };
+            let (sec_s, frac_s) = match ss.split_once('.') {
+                Some((a, b)) => (a, b),
+                None => (ss, "0"),
+            };
+            let Ok(sec) = sec_s.parse::<u64>() else {
+                continue;
+            };
+            let frac = frac_s.chars().take(3).collect::<String>();
+            let frac_ms = match frac.len() {
+                0 => 0u64,
+                1 => frac.parse::<u64>().unwrap_or(0) * 100,
+                2 => frac.parse::<u64>().unwrap_or(0) * 10,
+                _ => frac.parse::<u64>().unwrap_or(0),
+            };
+            times.push(m * 60_000 + sec * 1000 + frac_ms);
+        }
+        let text = rest.trim();
+        if text.is_empty() || is_lrc_credit_line(text) {
+            continue;
+        }
+        for ms in times {
+            out.push((ms, text.to_string()));
+        }
+    }
+    out.sort_by_key(|(t, _)| *t);
+    out
+}
+
+fn lyric_line_at(lines: &[(u64, String)], pos_ms: u64) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let mut cur = None;
+    for (t, s) in lines {
+        if *t <= pos_ms {
+            cur = Some(s.clone());
+        } else {
+            break;
+        }
+    }
+    cur.or_else(|| lines.first().map(|(_, s)| s.clone()))
+}
+
+fn http_get_json(url: &str) -> Option<serde_json::Value> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_millis(800))
+        .timeout_read(std::time::Duration::from_millis(1500))
+        .build();
+    let resp = agent
+        .get(url)
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WindowHub/1.0",
+        )
+        .set("Referer", "https://music.163.com/")
+        .call()
+        .ok()?;
+    resp.into_json().ok()
+}
+
+fn peek_cached_lrc(title: &str, artist: Option<&str>) -> Option<Vec<(u64, String)>> {
+    let key = format!(
+        "{}|{}",
+        title.trim(),
+        artist.map(|a| a.trim()).unwrap_or("")
+    );
+    let guard = API_LYRIC_CACHE.lock().ok()?;
+    let c = guard.as_ref()?;
+    if c.key == key && !c.lines.is_empty() && c.at.elapsed() < Duration::from_secs(600) {
+        Some(c.lines.clone())
+    } else {
+        None
+    }
+}
+
+fn fetch_lrc_into_cache(title: &str, artist: Option<&str>, gen: u64) {
+    let key = format!(
+        "{}|{}",
+        title.trim(),
+        artist.map(|a| a.trim()).unwrap_or("")
+    );
+    if peek_cached_lrc(title, artist).is_some() {
+        return;
+    }
+    let bare = normalize_title(title);
+    let q = if let Some(a) = artist.filter(|s| !s.is_empty()) {
+        format!("{bare} {}", a.trim())
+    } else {
+        bare
+    };
+    let enc: String =
+        percent_encoding::utf8_percent_encode(&q, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let search_url = format!(
+        "https://music.163.com/api/search/get/web?s={enc}&type=1&offset=0&total=true&limit=8"
+    );
+    let Some(search) = http_get_json(&search_url) else {
+        return;
+    };
+    if LRC_FETCH_GEN.load(Ordering::Acquire) != gen {
+        return;
+    }
+    let Some(songs) = search.pointer("/result/songs").and_then(|v| v.as_array()) else {
+        return;
+    };
+    let Some(id) = pick_search_song_id(songs, title, artist) else {
+        return;
+    };
+    let lyric_url = format!("https://music.163.com/api/song/lyric?id={id}&lv=-1&kv=-1&tv=-1");
+    let Some(lyric_json) = http_get_json(&lyric_url) else {
+        return;
+    };
+    if LRC_FETCH_GEN.load(Ordering::Acquire) != gen {
+        return;
+    }
+    let lrc = lyric_json
+        .pointer("/lrc/lyric")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let lines = parse_lrc(lrc);
+    if lines.is_empty() {
+        return;
+    }
+    if LRC_FETCH_GEN.load(Ordering::Acquire) != gen {
+        return;
+    }
+    if let Ok(mut guard) = API_LYRIC_CACHE.lock() {
+        *guard = Some(ApiLyricCache {
+            key,
+            lines,
+            at: Instant::now(),
+        });
+    }
+}
+
+fn schedule_lrc_fetch(title: String, artist: Option<String>) {
+    if peek_cached_lrc(&title, artist.as_deref()).is_some() {
+        return;
+    }
+    // 允许切歌打断：busy 时若 gen 已变，仍可再开一枪
+    if LRC_FETCH_BUSY.load(Ordering::Acquire) {
+        return;
+    }
+    if LRC_FETCH_BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let gen = LRC_FETCH_GEN.load(Ordering::Acquire);
+    let _ = std::thread::Builder::new()
+        .name("netease-lrc-fetch".into())
+        .spawn(move || {
+            fetch_lrc_into_cache(&title, artist.as_deref(), gen);
+            LRC_FETCH_BUSY.store(false, Ordering::Release);
+            // 若拉取期间又切歌且缓存仍空，下次 snapshot 会再 schedule
+        });
+}
+
+fn lyric_from_cached_lrc(title: &str, artist: Option<&str>) -> Option<String> {
+    let lines = peek_cached_lrc(title, artist)?;
+    let pos = playback_position_ms(Some(title));
+    lyric_line_at(&lines, pos)
+}
+
+/// 热路径快照：只 EnumWindows + 读缓存 LRC，绝不 HTTP / 扫内存。
 pub fn snapshot() -> NeteaseNowPlaying {
     static CACHE: Mutex<Option<(Instant, NeteaseNowPlaying)>> = Mutex::new(None);
     if let Ok(guard) = CACHE.lock() {
         if let Some((at, snap)) = guard.as_ref() {
-            if at.elapsed() < Duration::from_millis(800) {
+            if at.elapsed() < Duration::from_millis(400) {
                 return snap.clone();
             }
         }
@@ -488,6 +659,7 @@ pub fn snapshot() -> NeteaseNowPlaying {
 fn snapshot_uncached() -> NeteaseNowPlaying {
     let (main, lyric_hwnd) = find_netease_hwnds();
     let mut out = NeteaseNowPlaying::default();
+    out.desktop_lyrics = lyric_hwnd.is_some();
 
     if let Some(hwnd) = main {
         let _ = unsafe { IsWindowVisible(hwnd) };
@@ -497,39 +669,49 @@ fn snapshot_uncached() -> NeteaseNowPlaying {
         out.title = title;
         out.artist = artist;
         out.source = Some("window-title".into());
+    } else if lyric_hwnd.is_some() {
+        out.active = true;
+    }
 
-        let mut pid = 0u32;
-        unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
+    let key = song_key(out.title.as_deref(), out.artist.as_deref());
+    if !key.is_empty() && key != "|" {
+        on_song_changed(&key);
+    }
 
-        if let Some(hwnd_l) = lyric_hwnd {
-            if let Some(line) = read_desktop_lyric(hwnd_l) {
+    // 不再用桌面歌词窗标题当歌词（置顶时是「解锁」，也易串）
+
+    if out.desktop_lyrics {
+        if let Some(title) = out.title.clone() {
+            if let Some(line) = lyric_from_cached_lrc(&title, out.artist.as_deref()) {
                 out.lyric = Some(line);
-                out.source = Some("desktop-lyrics".into());
+                out.source = Some("api-lrc".into());
+            } else {
+                schedule_lrc_fetch(title, out.artist.clone());
             }
-        }
-
-        if out.lyric.is_none() && pid != 0 {
-            if let Some(line) = read_memory_lyric(pid) {
-                let same_as_title = out.title.as_ref().map(|t| t == &line).unwrap_or(false);
-                if !same_as_title {
-                    out.lyric = Some(line);
-                    out.source = Some("memory".into());
-                }
-            }
-        }
-    } else if let Some(hwnd_l) = lyric_hwnd {
-        out.active = true;
-        if let Some(line) = read_desktop_lyric(hwnd_l) {
-            out.lyric = Some(line);
-            out.source = Some("desktop-lyrics".into());
         }
     }
 
-    if out.title.is_some() || out.lyric.is_some() {
+    if out.title.is_some() || out.lyric.is_some() || out.desktop_lyrics {
         out.active = true;
     }
-
+    apply_sticky(&mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credit_filter() {
+        assert!(is_lrc_credit_line("母带后期处理：Mastering"));
+        assert!(is_lrc_credit_line("【本歌曲已获得正版授权】"));
+        assert!(!is_lrc_credit_line("每天一张开眼睛就会想到你"));
+    }
+
+    #[test]
+    fn unlock_noise() {
+        assert!(is_unlock_noise("桌面歌词解锁"));
+        assert!(!is_unlock_noise("有没有暂停键可以stop"));
+    }
 }

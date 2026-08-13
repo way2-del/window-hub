@@ -44,7 +44,9 @@ Rust 单例轮询（默认 250ms），事件 `hub-windows-changed`。多插件 `
 ## `hub.staging.*`
 
 需 `staging`。事件 `staging-changed` → `{ pluginId, files, texts, images, total }`。  
-方法：`list` / `summary` / `addText` / `addPaths` / `addImageBytes` / `remove` / `clear` / `copy` / `copyAllPaths` / `thumb` / `reveal` / `startDrag` / `subscribe`。
+方法：`list` / `summary` / `addText` / `addPaths` / `addImageBytes` / `remove` / `clear` / `copy` / `copyAllPaths` / `thumb` / `reveal` / `open` / `startDrag` / `subscribe`。
+- `open(id)`：用系统默认关联打开/运行（exe、bat、文档等；文件夹在资源管理器打开）
+- `reveal(id)`：在资源管理器中选中该路径
 
 ## `hub.island.*` / `hub.panel`
 

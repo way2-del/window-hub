@@ -49,6 +49,28 @@ pub fn resolve_item_icon_png(icon_path: &str, launch_path: &str) -> Option<Strin
     }
 }
 
+/// Cheap 32px icon for dense lists (memory ranking). Avoids 256px ShellItem factory.
+pub fn resolve_small_icon_png(launch_path: &str) -> Option<String> {
+    let launch = launch_path.trim();
+    if launch.is_empty() {
+        return None;
+    }
+    let (path, _idx) = split_icon_location(launch);
+    let p = Path::new(path);
+    if !p.exists() {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        extract_via_shgfi_sized(p, 32)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        None
+    }
+}
+
 /// Windows icon location: `C:\App\app.exe,0` or plain path.
 fn split_icon_location(s: &str) -> (&str, i32) {
     if let Some((path, idx)) = s.rsplit_once(',') {
@@ -118,18 +140,29 @@ fn extract_via_shell_item(path: &Path) -> Option<String> {
 /// Fallback when shell item factory fails (rare / very old paths).
 #[cfg(windows)]
 fn extract_via_shgfi_fallback(path: &Path) -> Option<String> {
+    extract_via_shgfi_sized(path, 128)
+}
+
+#[cfg(windows)]
+fn extract_via_shgfi_sized(path: &Path, size: i32) -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, SelectObject,
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     };
-    use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW};
+    use windows::Win32::UI::Shell::{
+        SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGetFileInfoW,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, DrawIconEx, DI_NORMAL};
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // Draw into 128 so HiDPI still has some headroom even from a 32px HICON.
-    let size = 128i32;
+    let size = size.clamp(16, 128);
+    let flags = if size <= 24 {
+        SHGFI_ICON | SHGFI_SMALLICON
+    } else {
+        SHGFI_ICON | SHGFI_LARGEICON
+    };
     unsafe {
         let mut fi = SHFILEINFOW::default();
         let ok = SHGetFileInfoW(
@@ -137,7 +170,7 @@ fn extract_via_shgfi_fallback(path: &Path) -> Option<String> {
             Default::default(),
             Some(&mut fi),
             std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_LARGEICON,
+            flags,
         );
         if ok == 0 || fi.hIcon.is_invalid() {
             return None;

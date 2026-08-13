@@ -62,7 +62,9 @@ fn table_columns(table: &str) -> &'static [&'static str] {
             "msg_notify_text",
             "msg_notify_sec",
             "bar_resident",
+            "bar_priority",
             "volume_preview_sound",
+            "topbar_frost",
             "updated_at",
         ],
         "script_launchers" => &[

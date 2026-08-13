@@ -20,6 +20,7 @@ import {
   clampStagingPanelW,
   STAGING_PANEL_H_DEFAULT,
   type IslandPrefs,
+  mergeBarPriority,
 } from "./islandPrefs";
 import { islandNotifyBus, type IslandNotifyBanner } from "./plugins/islandNotify";
 import {
@@ -32,6 +33,8 @@ import { normalizeStagingChanged } from "./stagingApi";
 import {
   formatStagingBarText,
   isStagingPanelShell,
+  listBarResidentProviders,
+  pickIslandContentBar,
   resolveIslandDropPluginId,
   resolvePluginPanelShellSize,
   type IslandBarState,
@@ -354,10 +357,10 @@ function App() {
   const [trayOpen, setTrayOpen] = useState(false);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [material] = useState<Material>("none");
-  const [ambient, setAmbient] = useState<Ambient>({ r: 32, g: 32, b: 34 });
-  const [chromeLeft, setChromeLeft] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
-  const [chromeCenter, setChromeCenter] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
-  const [chromeRight, setChromeRight] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
+  const [ambient, setAmbient] = useState<Ambient>({ r: 42, g: 42, b: 46 });
+  const [chromeLeft, setChromeLeft] = useState(() => chromeTokens({ r: 42, g: 42, b: 46 }));
+  const [chromeCenter, setChromeCenter] = useState(() => chromeTokens({ r: 42, g: 42, b: 46 }));
+  const [chromeRight, setChromeRight] = useState(() => chromeTokens({ r: 42, g: 42, b: 46 }));
   const [size, setSize] = useState<IslandSize>(ISLAND_COLLAPSED);
   const [pulling, setPulling] = useState(false);
   const pullingRef = useRef(false);
@@ -372,11 +375,19 @@ function App() {
   const shellPanelWRef = useRef(shellPanelW);
   const [shellPanelH, setShellPanelH] = useState(VIEW_H_DEFAULT);
   const shellPanelHRef = useRef(shellPanelH);
-  /** 常驻层：仅全局设置选中的 barResident 插件可写 */
-  const [residentBar, setResidentBar] = useState<IslandBarState | null>(null);
-  /** 临时层：中转站等；有内容时盖住常驻 */
+  /** 各 island.bar 插件最近一次 setBar（歌词可与天气并存，由 pick 竞选） */
+  const [contentBars, setContentBars] = useState<Map<string, IslandBarState>>(
+    () => new Map(),
+  );
+  /** 临时层：中转站等；有内容时盖住内容竞选 */
   const [overlayBar, setOverlayBar] = useState<IslandBarState | null>(null);
-  const islandBar = overlayBar ?? residentBar;
+  const barOrder = mergeBarPriority(
+    islandPrefs.barPriority,
+    listBarResidentProviders().map((p) => p.id),
+    islandPrefs.barResident,
+  );
+  const contentBar = pickIslandContentBar(contentBars, barOrder);
+  const islandBar = overlayBar ?? contentBar;
   const [dropTarget, setDropTarget] = useState(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
   const panelOverrideRef = useRef<string | null>(null);
@@ -452,11 +463,16 @@ function App() {
             (rec.manifest.capabilities ?? []).includes("island.bar"),
         );
       };
-      setResidentBar((prev) => {
-        if (!prev) return prev;
-        const want = islandPrefsRef.current.barResident;
-        if (!want || prev.pluginId !== want || !barOk(prev.pluginId)) return null;
-        return prev;
+      setContentBars((prev) => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const id of prev.keys()) {
+          if (!barOk(id)) {
+            next.delete(id);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
       });
       setOverlayBar((prev) => {
         if (!prev) return prev;
@@ -473,13 +489,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const want = islandPrefs.barResident;
-    setResidentBar((prev) => {
-      if (!want) return null;
-      if (prev && prev.pluginId !== want) return null;
-      return prev;
-    });
-    // 竞选常驻的插件不得留在临时层（修「无」之后改设置又刷出天气）
+    // 非临时插件不得留在 overlay（改常驻设置时清掉误占位）
     setOverlayBar((prev) => {
       if (!prev) return prev;
       const rec = pluginRegistry.get(prev.pluginId);
@@ -1113,25 +1123,50 @@ function App() {
     let chromeTimer: number | undefined;
     let lastRgb = "";
 
-    const applyStripDom = (a: Ambient) => {
+    const frostRef = { current: getIslandPrefs().topbarFrost };
+
+    const applyStripDom = (a: Ambient, frost = frostRef.current) => {
       const el = document.querySelector(".ambient-strip") as HTMLElement | null;
       if (!el) return;
-      el.style.backgroundColor = `rgb(${a.r}, ${a.g}, ${a.b})`;
+      el.style.opacity = "1";
+      if (frost) {
+        el.style.backgroundColor = `rgba(${a.r}, ${a.g}, ${a.b}, 0.72)`;
+      } else {
+        el.style.backgroundColor = `rgb(${a.r}, ${a.g}, ${a.b})`;
+      }
       if (a.png_base64 && (a.width ?? 0) > 1) {
-        el.style.backgroundImage = `url(data:image/png;base64,${a.png_base64})`;
-        el.style.backgroundRepeat = "no-repeat";
-        el.style.backgroundSize =
-          a.offset_x === 0
-            ? "100% 100%"
-            : a.span_width && a.span_width > 0
-              ? `${a.span_width}px 100%`
-              : "100% 100%";
-        el.style.backgroundPosition =
-          a.offset_x === 0
-            ? "0 0"
-            : typeof a.offset_x === "number"
-              ? `${a.offset_x}px 0`
-              : "0 0";
+        if (frost) {
+          el.style.backgroundImage = `linear-gradient(rgba(255,255,255,0.06), rgba(255,255,255,0)), url(data:image/png;base64,${a.png_base64})`;
+          el.style.backgroundRepeat = "no-repeat, no-repeat";
+          el.style.backgroundSize =
+            a.offset_x === 0
+              ? "100% 100%, 100% 100%"
+              : a.span_width && a.span_width > 0
+                ? `100% 100%, ${a.span_width}px 100%`
+                : "100% 100%, 100% 100%";
+          el.style.backgroundPosition =
+            a.offset_x === 0
+              ? "0 0, 0 0"
+              : typeof a.offset_x === "number"
+                ? `0 0, ${a.offset_x}px 0`
+                : "0 0, 0 0";
+          el.style.opacity = "0.78";
+        } else {
+          el.style.backgroundImage = `url(data:image/png;base64,${a.png_base64})`;
+          el.style.backgroundRepeat = "no-repeat";
+          el.style.backgroundSize =
+            a.offset_x === 0
+              ? "100% 100%"
+              : a.span_width && a.span_width > 0
+                ? `${a.span_width}px 100%`
+                : "100% 100%";
+          el.style.backgroundPosition =
+            a.offset_x === 0
+              ? "0 0"
+              : typeof a.offset_x === "number"
+                ? `${a.offset_x}px 0`
+                : "0 0";
+        }
       } else {
         el.style.backgroundImage = "none";
       }
@@ -1174,6 +1209,7 @@ function App() {
       try {
         unlisten = await listen<Ambient>("ambient-color", (ev) => {
           const a = ev.payload;
+          frostRef.current = getIslandPrefs().topbarFrost;
           applyStripDom(a);
           const rgb = `${a.r},${a.g},${a.b}`;
           if (rgb !== lastRgb) {
@@ -1319,15 +1355,16 @@ function App() {
       const next = cleared
         ? null
         : { pluginId: p.pluginId, text: p.text, title: p.title };
-      const residentId = islandPrefsRef.current.barResident;
       const rec = pluginRegistry.get(p.pluginId);
-      const tempOnly = Boolean(rec?.manifest.slots?.["island.bar"]?.excludeFromBarResident);
-      // 常驻层：仅当前选中的常驻插件可写
-      if (residentId && p.pluginId === residentId) {
-        setResidentBar(next);
+      if (
+        !rec?.enabled ||
+        !rec.manifest.slots?.["island.bar"] ||
+        !(rec.manifest.capabilities ?? []).includes("island.bar")
+      ) {
         return;
       }
-      // 临时层：仅 excludeFromBarResident 插件（中转站等）
+      const tempOnly = Boolean(rec.manifest.slots?.["island.bar"]?.excludeFromBarResident);
+      // 临时层：中转站等（盖住歌词/天气）
       if (tempOnly) {
         setOverlayBar((prev) => {
           if (cleared) return prev?.pluginId === p.pluginId ? null : prev;
@@ -1335,7 +1372,26 @@ function App() {
         });
         return;
       }
-      // 未当选的常驻型插件（如天气在「无」时）→ 忽略 setBar，避免盖回岛栏
+      // 内容层：所有非临时 island.bar 可写；展示顺序由 settings.barPriority 决定
+      setContentBars((prev) => {
+        const cur = prev.get(p.pluginId);
+        if (cleared) {
+          if (!cur) return prev;
+          const m = new Map(prev);
+          m.delete(p.pluginId);
+          return m;
+        }
+        if (
+          cur &&
+          cur.text === next!.text &&
+          (cur.title ?? "") === (next!.title ?? "")
+        ) {
+          return prev;
+        }
+        const m = new Map(prev);
+        m.set(p.pluginId, next!);
+        return m;
+      });
     }).then((fn) => {
       unlistenBar = fn;
     });
@@ -1646,14 +1702,16 @@ function App() {
 
   const stripStyle: CSSProperties = {
     // PNG band is applied via DOM in ambient listener (avoids React re-render thrash).
-    backgroundColor: `rgb(${ambient.r}, ${ambient.g}, ${ambient.b})`,
+    backgroundColor: islandPrefs.topbarFrost
+      ? `rgba(${ambient.r}, ${ambient.g}, ${ambient.b}, 0.72)`
+      : `rgb(${ambient.r}, ${ambient.g}, ${ambient.b})`,
   };
 
   const shellExpanded = expanded || reveal > 0.2;
 
   return (
     <div
-      className={`shell${shellExpanded ? " is-expanded" : ""}`}
+      className={`shell${shellExpanded ? " is-expanded" : ""}${islandPrefs.topbarFrost ? " is-topbar-frost" : ""}`}
       style={ambientCss}
       data-material={material}
       data-chrome-left={chromeLeft.scheme}
@@ -1718,7 +1776,11 @@ function App() {
           aria-expanded={expanded}
           aria-label={expanded ? "收起灵动岛" : "下拉或点击展开灵动岛"}
           data-chrome={
-            dropTarget ? "dark" : immersed ? chromeCenter.scheme : "dark"
+            dropTarget
+              ? "dark"
+              : islandPrefs.topbarFrost || immersed
+                ? chromeCenter.scheme
+                : "dark"
           }
           onDragEnter={onIslandDragEnter}
           onDragOver={onIslandDragOver}

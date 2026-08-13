@@ -4,11 +4,15 @@
  *
  * NEVER use window.alert / confirm / prompt — WebView 原生对话框常抢焦点、点不到。
  * 确认删除等一律用应用内 `.wg-confirm` 遮罩。
+ *
+ * 整文件 IIFE：Host 热切换会二次注入；顶层 const 会 SyntaxError → 白屏。
  */
+(function () {
 const PLUGIN_ID =
   window.__WH_PLUGIN_ID__ ||
   (window.hub && window.hub.pluginId) ||
   "com.window-hub.window-groups";
+void PLUGIN_ID;
 
 /** Block browser-native dialogs (sync APIs cannot show our in-app UI). */
 (function blockNativeDialogs() {
@@ -311,9 +315,21 @@ function rebind(items) {
   });
 }
 
+let lastHwndFp = "";
+let renderWinTimer = 0;
+
+function hwndFp(list) {
+  return (list || [])
+    .map((w) => String(w.hwnd ?? w.id ?? ""))
+    .sort()
+    .join("|");
+}
+
 function onWindows(list) {
   if (state.disposed) return;
   state.windows = list || [];
+  const fp = hwndFp(list);
+  let storeDirty = false;
   if (state.store.groups.length) {
     const next = {
       ...state.store,
@@ -322,12 +338,19 @@ function onWindows(list) {
     const changed = JSON.stringify(next) !== JSON.stringify(state.store);
     state.store = next;
     if (changed) {
+      storeDirty = true;
       void hub()
         .storage.set("store", state.store)
         .catch(() => undefined);
     }
   }
-  render();
+  if (!storeDirty && fp === lastHwndFp) return;
+  lastHwndFp = fp;
+  if (renderWinTimer) window.clearTimeout(renderWinTimer);
+  renderWinTimer = window.setTimeout(() => {
+    renderWinTimer = 0;
+    if (!state.disposed) render();
+  }, 100);
 }
 
 function render() {
@@ -660,11 +683,20 @@ void (async () => {
     if (state.disposed) return;
     // Host already applies Mica Alt (settings sidebar). Do not re-apply mica here —
     // a second DWM backdrop looks like an extra frosted overlay.
+    const pending =
+      typeof window.__WH_PENDING_PREFER_GROUP__ === "string"
+        ? window.__WH_PENDING_PREFER_GROUP__.trim()
+        : "";
+    window.__WH_PENDING_PREFER_GROUP__ = null;
     const prefer =
+      pending ||
       new URLSearchParams(window.location.search).get("preferGroup") ||
       new URLSearchParams(window.location.search).get("preferGroupId");
 
-    // 存储与窗口列表并行，先出壳再填数据
+    // 同步先画壳：Host 在 inject 后立刻 reveal，若等 storage 才 render 会白屏灰块
+    if (prefer) applyPreferGroup(prefer);
+    render();
+
     const storeP = hub()
       .storage.get("store")
       .catch((err) => {
@@ -693,13 +725,24 @@ void (async () => {
     if (prefer) applyPreferGroup(prefer);
     render();
 
+    function onPrefer(id) {
+      if (state.disposed) return;
+      if (id) applyPreferGroup(id);
+    }
+
+    function onPreferDom(ev) {
+      onPrefer(typeof ev.detail === "string" ? ev.detail : null);
+    }
+    window.addEventListener("wh-plugin-popup-prefer-group", onPreferDom);
+    disposers.push(function () {
+      window.removeEventListener("wh-plugin-popup-prefer-group", onPreferDom);
+    });
+
     try {
       const listen = window.__TAURI__?.event?.listen;
       if (typeof listen === "function") {
         const unPref = await listen("plugin-popup-prefer-group", (ev) => {
-          if (state.disposed) return;
-          const id = typeof ev?.payload === "string" ? ev.payload : null;
-          if (id) applyPreferGroup(id);
+          onPrefer(typeof ev?.payload === "string" ? ev.payload : null);
         });
         if (typeof unPref === "function") disposers.push(unPref);
       }
@@ -710,5 +753,4 @@ void (async () => {
 
   mount();
 })();
-
-void PLUGIN_ID;
+})();

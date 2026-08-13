@@ -124,15 +124,25 @@ pub struct IslandPrefsRow {
     pub pull_content: String,
     #[serde(default = "default_bar_resident")]
     pub bar_resident: String,
+    /// Ordered plugin ids for island bar content (JSON array string).
+    #[serde(default = "default_bar_priority")]
+    pub bar_priority: String,
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
     #[serde(default = "default_volume_preview")]
     pub volume_preview_sound: bool,
+    /// MyDockFinder-like frosted top bar (default off).
+    #[serde(default)]
+    pub topbar_frost: bool,
 }
 
 fn default_bar_resident() -> String {
     "com.window-hub.weather".into()
+}
+
+fn default_bar_priority() -> String {
+    "[]".into()
 }
 
 fn default_volume_preview() -> bool {
@@ -143,7 +153,9 @@ pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
     conn.query_row(
         "SELECT auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
                 COALESCE(bar_resident, 'com.window-hub.weather'),
-                COALESCE(volume_preview_sound, 1)
+                COALESCE(volume_preview_sound, 1),
+                COALESCE(topbar_frost, 0),
+                COALESCE(bar_priority, '[]')
          FROM prefs_island WHERE id = 1",
         [],
         |r| {
@@ -156,6 +168,8 @@ pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
                 msg_notify_sec: r.get::<_, i64>(5)? as u32,
                 bar_resident: r.get(6)?,
                 volume_preview_sound: r.get::<_, i64>(7)? != 0,
+                topbar_frost: r.get::<_, i64>(8)? != 0,
+                bar_priority: r.get(9)?,
             })
         },
     )
@@ -167,8 +181,8 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
     conn.execute(
         "INSERT INTO prefs_island(
             id, auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
-            bar_resident, volume_preview_sound, updated_at
-         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9)
+            bar_resident, volume_preview_sound, topbar_frost, bar_priority, updated_at
+         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
          ON CONFLICT(id) DO UPDATE SET
            auto_immerse=excluded.auto_immerse,
            immerse_idle_sec=excluded.immerse_idle_sec,
@@ -178,6 +192,8 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
            msg_notify_sec=excluded.msg_notify_sec,
            bar_resident=excluded.bar_resident,
            volume_preview_sound=excluded.volume_preview_sound,
+           topbar_frost=excluded.topbar_frost,
+           bar_priority=excluded.bar_priority,
            updated_at=excluded.updated_at",
         params![
             p.auto_immerse as i64,
@@ -188,6 +204,8 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
             p.msg_notify_sec as i64,
             p.bar_resident,
             p.volume_preview_sound as i64,
+            p.topbar_frost as i64,
+            p.bar_priority,
             now_ms(),
         ],
     )
@@ -328,6 +346,8 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           msg_notify_sec INTEGER NOT NULL,
           bar_resident TEXT NOT NULL DEFAULT 'com.window-hub.weather',
           volume_preview_sound INTEGER NOT NULL DEFAULT 1,
+          topbar_frost INTEGER NOT NULL DEFAULT 0,
+          bar_priority TEXT NOT NULL DEFAULT '[]',
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS script_launchers (

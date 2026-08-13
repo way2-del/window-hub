@@ -42,16 +42,20 @@ export function resolveDark(prefs: GlassPrefs, resolvedSystemDark?: boolean): bo
 export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean, compatOpaque?: boolean) {
   const dark = resolveDark(prefs, resolvedSystemDark);
   const root = document.documentElement;
+  const compat =
+    compatOpaque === true ||
+    root.dataset.glassCompat === "1" ||
+    (window as Window & { __WH_GLASS_COMPAT__?: boolean }).__WH_GLASS_COMPAT__ === true;
   root.dataset.glass = "mica";
   root.dataset.theme = dark ? "dark" : "light";
-  root.dataset.glassCompat = compatOpaque ? "1" : "0";
+  root.dataset.glassCompat = compat ? "1" : "0";
   root.style.colorScheme = dark ? "dark" : "light";
 
   if (dark) {
     // Compat: fully opaque wash — transparent+acrylic freezes slim Win10 DWM.
     root.style.setProperty(
       "--glass-panel-bg",
-      compatOpaque ? "rgb(28, 28, 30)" : "rgba(28, 28, 30, 0.92)",
+      compat ? "rgb(28, 28, 30)" : "rgba(28, 28, 30, 0.92)",
     );
     root.style.setProperty("--glass-fg", "#f4f4f5");
     root.style.setProperty("--glass-fg-muted", "#a1a1aa");
@@ -64,7 +68,7 @@ export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean, c
   } else {
     root.style.setProperty(
       "--glass-panel-bg",
-      compatOpaque ? "rgb(245, 245, 247)" : "rgba(245, 245, 247, 0.94)",
+      compat ? "rgb(245, 245, 247)" : "rgba(245, 245, 247, 0.94)",
     );
     root.style.setProperty("--glass-fg", "#1c1c1e");
     root.style.setProperty("--glass-fg-muted", "#3f3f46");
@@ -87,11 +91,15 @@ export async function syncGlassCss(prefs: GlassPrefs): Promise<boolean> {
       /* matchMedia fallback */
     }
   }
-  let compat = false;
-  try {
-    compat = await invoke<boolean>("is_glass_compat_mode");
-  } catch {
-    /* older host */
+  let compat =
+    document.documentElement.dataset.glassCompat === "1" ||
+    (window as Window & { __WH_GLASS_COMPAT__?: boolean }).__WH_GLASS_COMPAT__ === true;
+  if (!compat) {
+    try {
+      compat = await invoke<boolean>("is_glass_compat_mode");
+    } catch {
+      /* older host */
+    }
   }
   applyGlassCss(prefs, systemDark, compat);
   return resolveDark(prefs, systemDark);

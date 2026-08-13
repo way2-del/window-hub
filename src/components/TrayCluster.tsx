@@ -145,7 +145,19 @@ function TrayClockButton({
   );
 }
 
-function WifiGlyph({ on }: { on: boolean }) {
+function WifiGlyph({ on, signal = 0 }: { on: boolean; signal?: number }) {
+  const level =
+    !on || signal <= 0
+      ? on
+        ? 3
+        : 0
+      : signal >= 80
+        ? 4
+        : signal >= 55
+          ? 3
+          : signal >= 30
+            ? 2
+            : 1;
   return (
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path
@@ -158,21 +170,28 @@ function WifiGlyph({ on }: { on: boolean }) {
         stroke="currentColor"
         strokeWidth="1.7"
         strokeLinecap="round"
-        opacity={on ? 0.95 : 0.3}
+        opacity={level >= 1 ? (on ? 0.95 : 0.3) : 0.14}
       />
       <path
         d="M5.4 11a11 11 0 0 1 13.2 0"
         stroke="currentColor"
         strokeWidth="1.7"
         strokeLinecap="round"
-        opacity={on ? 0.75 : 0.22}
+        opacity={level >= 2 ? (on ? 0.8 : 0.22) : 0.12}
       />
       <path
-        d="M2.6 7.8a15.5 15.5 0 0 1 18.8 0"
+        d="M3.4 8.2a14.2 14.2 0 0 1 17.2 0"
         stroke="currentColor"
         strokeWidth="1.7"
         strokeLinecap="round"
-        opacity={on ? 0.55 : 0.16}
+        opacity={level >= 3 ? (on ? 0.65 : 0.18) : 0.1}
+      />
+      <path
+        d="M1.6 5.4a17.8 17.8 0 0 1 20.8 0"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        opacity={level >= 4 ? (on ? 0.5 : 0.14) : 0.08}
       />
     </svg>
   );
@@ -439,6 +458,7 @@ export default function TrayCluster({
   const volRef = useRef<HTMLButtonElement>(null);
   const powerRef = useRef<HTMLButtonElement>(null);
   const imeRef = useRef<HTMLButtonElement>(null);
+  const memRef = useRef<HTMLButtonElement>(null);
   const togglingRef = useRef(false);
   const radioSigRef = useRef("");
 
@@ -651,7 +671,7 @@ export default function TrayCluster({
   }
 
   async function toggleFlyout(
-    kind: "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar",
+    kind: "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar" | "memory",
     anchor: HTMLElement | null,
   ) {
     if (!anchor || togglingRef.current) return;
@@ -679,6 +699,9 @@ export default function TrayCluster({
   }
 
   const wifiOn = Boolean(radio?.wifi.radioOn || radio?.wifi.connectedSsid);
+  const wifiSignal =
+    radio?.wifi.networks?.find((n) => n.connected)?.signal ??
+    (wifiOn ? 70 : 0);
   const btOn = Boolean(radio?.bluetooth.radioOn);
   const volMuted = Boolean(radio?.volume?.muted);
   const volLevel = radio?.volume?.level ?? 0;
@@ -700,7 +723,21 @@ export default function TrayCluster({
               gpuTempC={perf?.gpuTempC}
               cpuPercent={perf?.cpuPercent ?? 0}
             />
-            <MemMeter percent={perf?.memPercent ?? 0} />
+            <button
+              ref={memRef}
+              type="button"
+              className={`tray-sys-btn tray-perf-btn${flyoutKind === "memory" ? " is-open" : ""}`}
+              title={`内存 ${perf?.memPercent ?? 0}% · 点击查看占用`}
+              aria-label="内存占用"
+              aria-expanded={flyoutKind === "memory"}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                void invoke("suppress_system_flyout_blur", { ms: 400 });
+              }}
+              onClick={() => void toggleFlyout("memory", memRef.current)}
+            >
+              <MemMeter percent={perf?.memPercent ?? 0} />
+            </button>
           </div>
         ) : null}
 
@@ -718,7 +755,7 @@ export default function TrayCluster({
             }}
             onClick={() => void toggleFlyout("wifi", wifiRef.current)}
           >
-            <WifiGlyph on={wifiOn} />
+            <WifiGlyph on={wifiOn} signal={wifiSignal} />
           </button>
         ) : null}
 

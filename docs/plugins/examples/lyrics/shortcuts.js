@@ -1,13 +1,17 @@
 /**
  * 歌词 — 快捷区隐形 worker：轮询网易云 → hub.island.setBar
- * Host：hub.media.neteaseNowPlaying（桌面歌词 / 窗口标题 / 内存兜底）
+ * Host：hub.media.neteaseNowPlaying（桌面歌词 / api-lrc / 内存）
  */
 (function () {
   const CACHE_KEY = "cache";
-  const POLL_MS = 1600;
+  const POLL_MS = 2000;
+  const POLL_HIDDEN_MS = 5000;
+  /** 同曲短暂读空时保留上一句；切歌必须清掉，否则会串上一首 */
+  const HOLD_LYRIC_MS = 6000;
 
   let settingsCache = null;
   let lastBarKey = "";
+  let held = { songKey: "", text: "", at: 0 };
 
   function hub() {
     if (!window.hub) throw new Error("window.hub missing");
@@ -29,32 +33,73 @@
     settingsCache = {
       showWhenIdle: !!all.showWhenIdle,
       preferLyric: all.preferLyric !== false,
+      requireDesktopLyrics: all.requireDesktopLyrics !== false,
     };
     return settingsCache;
   }
 
+  function desktopLyricsOn(now) {
+    if (!now) return false;
+    if (now.desktopLyrics === true) return true;
+    return now.source === "desktop-lyrics" || now.source === "api-lrc" || now.source === "memory";
+  }
+
+  function resolveLyric(now, title, artist) {
+    let lyric = String(now && now.lyric || "").trim();
+    const songKey = title + "\0" + artist;
+    if (held.songKey && held.songKey !== songKey) {
+      held = { songKey: "", text: "", at: 0 };
+    }
+    if (lyric) {
+      held = { songKey: songKey, text: lyric, at: Date.now() };
+      return lyric;
+    }
+    if (
+      held.text &&
+      held.songKey === songKey &&
+      Date.now() - held.at < HOLD_LYRIC_MS
+    ) {
+      return held.text;
+    }
+    return "";
+  }
+
   function barFrom(now, settings) {
+    if (settings.requireDesktopLyrics && !desktopLyricsOn(now)) {
+      held = { songKey: "", text: "", at: 0 };
+      if (settings.showWhenIdle && now && now.active) {
+        return { text: "开桌面歌词", title: "请在网易云开启「桌面歌词」以显示在灵动岛" };
+      }
+      return null;
+    }
     if (!now || !now.active) {
+      held = { songKey: "", text: "", at: 0 };
       if (settings.showWhenIdle) {
         return { text: "网易云 · 未播放", title: "打开网易云音乐并开启桌面歌词" };
       }
       return null;
     }
-    const lyric = String(now.lyric || "").trim();
     const title = String(now.title || "").trim();
     const artist = String(now.artist || "").trim();
     const song = [title, artist].filter(Boolean).join(" · ");
-    if (settings.preferLyric && lyric) {
+    const lyric = resolveLyric(now, title, artist);
+    const desk = desktopLyricsOn(now);
+
+    // preferLyric：有桌面歌词时绝不把岛栏主文案掉回歌名（短暂读空用 hold /「同步中」）
+    if (settings.preferLyric && desk) {
+      if (lyric) {
+        return { text: truncate(lyric, 28), title: song || lyric };
+      }
       return {
-        text: truncate(lyric, 28),
-        title: song || lyric,
+        text: "歌词同步中…",
+        title: song || "网易云 · 桌面歌词",
       };
+    }
+    if (lyric) {
+      return { text: truncate(lyric, 28), title: song || lyric };
     }
     if (song) {
       return { text: truncate(song, 28), title: song };
-    }
-    if (lyric) {
-      return { text: truncate(lyric, 28), title: lyric };
     }
     if (settings.showWhenIdle) {
       return { text: "网易云 · 播放中", title: "网易云音乐" };
@@ -91,7 +136,6 @@
       console.warn("[lyrics] poll", err);
     }
     const payload = barFrom(now, settings);
-    // Avoid hammering SQLite every tick — only when lyric/title changes.
     const cacheKey = payload ? payload.text : "";
     if (cacheKey !== lastBarKey) {
       await h.storage.set(CACHE_KEY, { now: now, savedAt: Date.now() }).catch(function () {});
@@ -107,9 +151,18 @@
       }
     } catch (_) {}
     await tick();
-    setInterval(function () {
-      void tick();
-    }, POLL_MS);
+    let timer = 0;
+    function arm() {
+      if (timer) clearTimeout(timer);
+      const ms = document.hidden ? POLL_HIDDEN_MS : POLL_MS;
+      timer = setTimeout(function () {
+        void tick().finally(arm);
+      }, ms);
+    }
+    arm();
+    document.addEventListener("visibilitychange", function () {
+      arm();
+    });
     if (h.settings && h.settings.subscribe) {
       h.settings.subscribe(function () {
         settingsCache = null;

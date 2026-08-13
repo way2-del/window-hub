@@ -157,17 +157,24 @@
     card.appendChild(name);
     bindOsDrag(card, h, it);
 
+    // 单击延迟复制，避免双击时先触发两次 copy
+    var clickTimer = null;
     card.addEventListener("click", function (e) {
       if (card.dataset.didDrag) {
         delete card.dataset.didDrag;
         e.preventDefault();
         return;
       }
-      h.staging.copy(it.id).catch(console.error);
-      card.classList.add("is-selected");
-      window.setTimeout(function () {
-        card.classList.remove("is-selected");
-      }, 450);
+      if (clickTimer) window.clearTimeout(clickTimer);
+      clickTimer = window.setTimeout(function () {
+        clickTimer = null;
+        // 单击：复制路径（文字条目复制正文）
+        h.staging.copy(it.id).catch(console.error);
+        card.classList.add("is-selected");
+        window.setTimeout(function () {
+          card.classList.remove("is-selected");
+        }, 450);
+      }, 280);
     });
 
     card.addEventListener("contextmenu", function (e) {
@@ -178,8 +185,19 @@
 
     card.addEventListener("dblclick", function (e) {
       e.preventDefault();
+      e.stopPropagation();
+      if (clickTimer) {
+        window.clearTimeout(clickTimer);
+        clickTimer = null;
+      }
+      // 双击：系统默认方式打开/运行（exe、bat、文档等）
+      if (!it.path) return;
       if (it.kind === "file" || it.kind === "image" || it.kind === "folder") {
-        h.staging.reveal(it.id).catch(console.error);
+        if (h.staging.open) {
+          h.staging.open(it.id).catch(console.error);
+        } else {
+          h.staging.reveal(it.id).catch(console.error);
+        }
       }
     });
 
@@ -363,6 +381,7 @@
       "</div>" +
       '<footer class="ts-footer" id="footer">暂无内容</footer>' +
       '<div class="ts-ctx" id="ctx" hidden>' +
+      '<button type="button" data-act="open">打开</button>' +
       '<button type="button" data-act="copy-path">复制路径</button>' +
       '<button type="button" data-act="copy-file">复制到剪贴板</button>' +
       '<button type="button" data-act="reveal">打开位置</button>' +
@@ -448,7 +467,13 @@
         hideCtx();
         const h = hub();
         if (!h || !id) return;
-        if (act === "copy-path") {
+        if (act === "open") {
+          if (h.staging.open) {
+            h.staging.open(id).catch(console.error);
+          } else {
+            h.staging.reveal(id).catch(console.error);
+          }
+        } else if (act === "copy-path") {
           h.staging.copy(id).catch(console.error);
         } else if (act === "copy-file") {
           if (h.staging.copyFiles) {

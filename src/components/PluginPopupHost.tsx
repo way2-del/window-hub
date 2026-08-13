@@ -49,6 +49,7 @@ declare global {
         copyAllPaths: () => Promise<unknown>;
         thumb: (id: string) => Promise<unknown>;
         reveal: (id: string) => Promise<unknown>;
+        open: (id: string) => Promise<unknown>;
         startDrag: (ids: string[]) => Promise<unknown>;
         pickFiles: () => Promise<unknown>;
         pickFolders: () => Promise<unknown>;
@@ -229,6 +230,7 @@ function ensureHub(pluginId: string) {
       copyAllPaths: () => invoke("hub_staging_copy_all_paths", withPlugin()),
       thumb: (id) => invoke("hub_staging_thumb", withPlugin({ id })),
       reveal: (id) => invoke("hub_staging_reveal", withPlugin({ id })),
+      open: (id) => invoke("hub_staging_open", withPlugin({ id })),
       startDrag: (ids) => invoke("hub_staging_start_drag", withPlugin({ ids })),
       pickFiles: () => invoke("hub_staging_pick_files", withPlugin()),
       pickFolders: () => invoke("hub_staging_pick_folders", withPlugin()),
@@ -326,9 +328,11 @@ function isPluginPainted(pluginId: string): boolean {
   return !!app && app.childElementCount > 0;
 }
 
-async function readPopupAssets(pluginId: string): Promise<Boot> {
-  const cached = popupAssetCache.get(pluginId);
-  if (cached) return cached;
+async function readPopupAssets(pluginId: string, force = false): Promise<Boot> {
+  if (!force) {
+    const cached = popupAssetCache.get(pluginId);
+    if (cached) return cached;
+  }
   const [css, js] = await Promise.all([
     invoke<string>("hub_plugin_read_text", {
       pluginId,
@@ -357,7 +361,10 @@ function injectBoot(pluginId: string, boot: Boot) {
     (window as Window & { __WH_POPUP_GEN__?: number }).__WH_POPUP_GEN__ ?? 0;
   const script = document.createElement("script");
   script.setAttribute("data-wh-popup-js", pluginId);
-  script.textContent = `window.__WH_POPUP_SCRIPT_GEN__=${gen};\n${boot.js}`;
+  // 必须 IIFE：经典脚本顶层 const/let 会污染全局，二次注入直接 SyntaxError → 清完 DOM 却画不出来（白屏）
+  script.textContent =
+    `window.__WH_POPUP_SCRIPT_GEN__=${gen};\n` +
+    `(function(){\n"use strict";\n${boot.js}\n})();\n`;
   document.body.appendChild(script);
 }
 
@@ -373,44 +380,92 @@ function snapOpaque() {
   }
 }
 
+function stashPreferGroup(gid?: string | null) {
+  const id = typeof gid === "string" ? gid.trim() : "";
+  if (!id) return;
+  const w = window as Window & { __WH_PENDING_PREFER_GROUP__?: string | null };
+  w.__WH_PENDING_PREFER_GROUP__ = id;
+}
+
+function takePreferGroup(): string | null {
+  const w = window as Window & { __WH_PENDING_PREFER_GROUP__?: string | null };
+  const id = typeof w.__WH_PENDING_PREFER_GROUP__ === "string"
+    ? w.__WH_PENDING_PREFER_GROUP__.trim()
+    : "";
+  w.__WH_PENDING_PREFER_GROUP__ = null;
+  return id || null;
+}
+
+function dispatchPreferGroup(gid: string) {
+  try {
+    window.dispatchEvent(
+      new CustomEvent("wh-plugin-popup-prefer-group", { detail: gid }),
+    );
+  } catch {
+    /* noop */
+  }
+}
+
 /**
  * Host shell: Tauri IPC + inject plugin CSS/JS from disk (independent package).
  * Reuses one warm WebView and hot-swaps plugins (same pattern as Wi‑Fi flyout kind).
+ *
+ * `#app` is created imperatively — React must NOT own its children, or any
+ * setState after injectBoot will reconcile `<main />` and wipe the plugin DOM
+ * (white / empty mica shell after a few group switches).
  */
 export default function PluginPopupHost() {
-  const [pluginId, setPluginId] = useState(() => resolvePluginId());
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"enter" | "in">("enter");
-  const activeIdRef = useRef(pluginId);
+  const activeIdRef = useRef(resolvePluginId());
   const loadSeqRef = useRef(0);
   const glassReady = useRef(false);
   const phaseRef = useRef(phase);
+  const mountHostRef = useRef<HTMLDivElement | null>(null);
   phaseRef.current = phase;
-  // 勿每帧用 React state 覆盖 activeIdRef：activate 异步间隙会被打回旧 id，导致误判/白屏
+
+  // Imperative #app — stable across Host React re-renders.
+  useEffect(() => {
+    const host = mountHostRef.current;
+    if (!host) return;
+    let mount = document.getElementById("app") as HTMLElement | null;
+    if (!mount) {
+      mount = document.createElement("main");
+      mount.id = "app";
+      mount.className = "wg-shell";
+      host.appendChild(mount);
+    } else if (mount.parentElement !== host) {
+      host.appendChild(mount);
+    }
+    // Never remove #app on Host unmount while HWND is recycled — keep warm.
+  }, []);
 
   const activatePlugin = async (nextId: string) => {
     if (!nextId) return;
     const seq = ++loadSeqRef.current;
 
-    // 同插件且 #app 仍有内容 → 只 reveal（避免「有 script、无 DOM」early-return 白屏）
+    // 同插件且 #app 仍有内容 → 只 reveal / 切换 prefer（避免无意义清空）
     if (activeIdRef.current === nextId && isPluginPainted(nextId)) {
+      const prefer = takePreferGroup();
+      if (prefer) dispatchPreferGroup(prefer);
       setError(null);
       snapOpaque();
-      phaseRef.current = "in";
-      setPhase("in");
+      if (phaseRef.current !== "in") {
+        phaseRef.current = "in";
+        setPhase("in");
+      }
       void invoke("reveal_plugin_popup").catch(() => undefined);
       return;
     }
 
-    // 先读资源，再清 DOM：旧请求若在 await 后 abort，不会留下空壳白屏
+    // 先读资源；清空必须紧贴 inject，否则 await 后被更新的 seq abort 会留下空壳白板
     let boot: Boot;
     try {
-      boot = await readPopupAssets(nextId);
+      boot = await readPopupAssets(nextId, true);
     } catch (err) {
       if (seq !== loadSeqRef.current) return;
       setError(String(err));
       activeIdRef.current = nextId;
-      setPluginId(nextId);
       snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
@@ -420,19 +475,40 @@ export default function PluginPopupHost() {
     if (seq !== loadSeqRef.current) return;
 
     setError(null);
-    clearInjectedDom();
     activeIdRef.current = nextId;
-    setPluginId(nextId);
-    ensureHub(nextId);
 
     try {
-      // 若 clear 后 React 尚未提交 #app（极少），下一帧再注入
+      // Ensure imperative mount exists before inject
+      const host = mountHostRef.current;
+      if (host && !document.getElementById("app")) {
+        const mount = document.createElement("main");
+        mount.id = "app";
+        mount.className = "wg-shell";
+        host.appendChild(mount);
+      }
       if (!document.getElementById("app")) {
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
       }
       if (seq !== loadSeqRef.current) return;
+
+      clearInjectedDom();
+      ensureHub(nextId);
+      // pending prefer 留给 popup boot 同步读取；勿在此处 take 掉
       injectBoot(nextId, boot);
-      // 注入后仍空：脚本异步 mount 失败时再等一帧（boot 同步 render 通常已写入）
+      // 同步脚本应已 paint；若仍空（旧 WebView 缓存了未 IIFE 的失败态等）下一帧再注一次
+      if (!isPluginPainted(nextId) && seq === loadSeqRef.current) {
+        window.requestAnimationFrame(() => {
+          if (seq !== loadSeqRef.current) return;
+          if (isPluginPainted(nextId)) return;
+          try {
+            clearInjectedDom();
+            ensureHub(nextId);
+            injectBoot(nextId, boot);
+          } catch (err) {
+            setError(String(err));
+          }
+        });
+      }
       snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
@@ -530,8 +606,15 @@ export default function PluginPopupHost() {
     let lastAt = 0;
     const requestActivate = (id: string) => {
       const now = Date.now();
-      // 同 id 短时去重；若当前其实是白屏（无内容），允许重入修复
-      if (id === lastId && now - lastAt < 120 && isPluginPainted(id)) return;
+      // push_plugin_popup_load 会同时 CustomEvent + Tauri emit，必须合并
+      if (id === lastId && now - lastAt < 80) {
+        if (isPluginPainted(id)) {
+          const prefer = takePreferGroup();
+          if (prefer) dispatchPreferGroup(prefer);
+          return;
+        }
+        // 白屏空壳：不要 early-return，继续 activate 自愈
+      }
       lastId = id;
       lastAt = now;
       void activatePlugin(id);
@@ -542,6 +625,7 @@ export default function PluginPopupHost() {
         .detail;
       const id = detail?.pluginId?.trim();
       if (!id) return;
+      stashPreferGroup(detail?.preferGroupId);
       requestActivate(id);
     };
     window.addEventListener("wh-plugin-popup-load", onCustom);
@@ -552,6 +636,10 @@ export default function PluginPopupHost() {
       (ev) => {
         const id = ev.payload?.pluginId?.trim();
         if (!id) return;
+        const prefer = ev.payload?.preferGroupId;
+        stashPreferGroup(
+          typeof prefer === "string" ? prefer : prefer != null ? String(prefer) : null,
+        );
         requestActivate(id);
       },
     ).then((fn) => {
@@ -600,8 +688,8 @@ export default function PluginPopupHost() {
         if (p.type !== "drop") return;
         const paths = p.paths ?? [];
         if (!paths.length) return;
-        // 用 activeIdRef：热切换后 React pluginId 可能尚未提交，闭包旧 id 会 assert staging 失败
-        const pid = activeIdRef.current || pluginId;
+        // 用 activeIdRef：热切换后 React state 可能尚未提交
+        const pid = activeIdRef.current;
         if (!pid) return;
         void invoke("hub_staging_add_paths", { pluginId: pid, paths }).catch((err) => {
           console.error("[PluginPopupHost] staging drop failed", pid, err);
@@ -640,10 +728,11 @@ export default function PluginPopupHost() {
     };
   }, []);
 
-  if (error) {
-    return (
-      <div className={`plugin-popup-root is-${phase}`}>
-        <div className="plugin-popup-frame">
+  // Always keep imperative #app host — never swap trees on error (that remounts #app).
+  return (
+    <div className={`plugin-popup-root is-${phase}`}>
+      {error ? (
+        <div className="plugin-popup-frame plugin-popup-error-overlay">
           <div className="plugin-popup-empty">{error}</div>
           <button
             type="button"
@@ -653,16 +742,8 @@ export default function PluginPopupHost() {
             关闭
           </button>
         </div>
-        {/* Keep mount for next hot-swap */}
-        <main id="app" className="wg-shell" hidden />
-      </div>
-    );
-  }
-
-  // Always keep #app mounted — warm shell + hot-swap inject into it.
-  return (
-    <div className={`plugin-popup-root is-${phase}`}>
-      <main id="app" className="wg-shell" />
+      ) : null}
+      <div ref={mountHostRef} className="plugin-popup-mount" />
     </div>
   );
 }

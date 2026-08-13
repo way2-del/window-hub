@@ -94,10 +94,11 @@ fn ensure_hard_safe_detected() {
     HARD_SAFE_INIT.call_once(|| {
         let build = os_build();
         // Win11 starts at 22000. Win10 (including 精简版) → opaque by default.
-        if build > 0 && build < 22000 {
+        // build==0: RtlGetVersion failed (broken ntdll on some slim packs) → safe.
+        if build == 0 || (build > 0 && build < 22000) {
             HARD_SAFE.store(true, Ordering::SeqCst);
             eprintln!(
-                "[glass] Win10 build {build} — opaque HWND popups (no transparent WebView2)"
+                "[glass] Win10/unknown build {build} — opaque HWND popups (no transparent WebView2)"
             );
         }
         // User turned off Settings → Personalization → Transparency effects.
@@ -108,7 +109,17 @@ fn ensure_hard_safe_detected() {
                 "[glass] EnableTransparency=0 — forcing opaque popups (system transparency off)"
             );
         }
+        // Composition off → acrylic/mica paint as white slabs.
+        if !dwm_composition_enabled() {
+            HARD_SAFE.store(true, Ordering::SeqCst);
+            eprintln!("[glass] DWM composition off — forcing opaque popups");
+        }
     });
+}
+
+fn dwm_composition_enabled() -> bool {
+    use windows::Win32::Graphics::Dwm::DwmIsCompositionEnabled;
+    unsafe { DwmIsCompositionEnabled().ok().map(|b| b.as_bool()).unwrap_or(true) }
 }
 
 fn windows_transparency_enabled() -> bool {
@@ -130,6 +141,78 @@ fn windows_transparency_enabled() -> bool {
 pub fn is_hard_safe() -> bool {
     ensure_hard_safe_detected();
     HARD_SAFE.load(Ordering::SeqCst)
+}
+
+/// Sync JS injected **before** any page paint — sets `data-glass-compat` + solid
+/// CSS so React/`main.tsx` cannot race a transparent body over an opaque HWND
+/// (classic white zombie on slim Win10).
+pub fn glass_compat_boot_script() -> String {
+    if !is_hard_safe() {
+        return String::new();
+    }
+    let dark = super::material::system_apps_dark();
+    let (bg, fg, muted, theme, scheme) = if dark {
+        (
+            "rgb(28, 28, 30)",
+            "#f4f4f5",
+            "#a1a1aa",
+            "dark",
+            "dark",
+        )
+    } else {
+        (
+            "rgb(245, 245, 247)",
+            "#1c1c1e",
+            "#3f3f46",
+            "light",
+            "light",
+        )
+    };
+    format!(
+        r#"(function(){{
+  try {{
+    var r = document.documentElement;
+    r.dataset.glassCompat = "1";
+    r.dataset.glass = "mica";
+    r.dataset.theme = {theme:?};
+    r.style.colorScheme = {scheme:?};
+    r.style.setProperty("--glass-panel-bg", {bg:?});
+    r.style.setProperty("--glass-fg", {fg:?});
+    r.style.setProperty("--glass-fg-muted", {muted:?});
+    r.style.background = {bg:?};
+    window.__WH_GLASS_COMPAT__ = true;
+    var s = document.getElementById("wh-glass-compat-boot");
+    if (!s) {{
+      s = document.createElement("style");
+      s.id = "wh-glass-compat-boot";
+      (document.head || r).appendChild(s);
+    }}
+    s.textContent =
+      "html,body,#root{{background:" + {bg:?} + " !important;color:" + {fg:?} + " !important;}}" +
+      "html[data-glass-compat='1'] body,html[data-glass-compat='1'] body #root," +
+      "html[data-glass-compat='1'] .plugin-popup-root,html[data-glass-compat='1'] .system-flyout-shell," +
+      "html[data-glass-compat='1'] .tray-popup-shell,html[data-glass-compat='1'] .wg-shell{{" +
+      "background:" + {bg:?} + " !important;}}";
+  }} catch (e) {{}}
+}})();"#,
+        theme = theme,
+        scheme = scheme,
+        bg = bg,
+        fg = fg,
+        muted = muted,
+    )
+}
+
+/// Prepend opaque-compat boot JS to a window `initialization_script`.
+pub fn prepend_glass_compat_boot(user_js: &str) -> String {
+    let boot = glass_compat_boot_script();
+    if boot.is_empty() {
+        return user_js.to_string();
+    }
+    if user_js.trim().is_empty() {
+        return boot;
+    }
+    format!("{boot}\n{user_js}")
 }
 
 /// Win10 hard-safe: **never** create transparent HWNDs (EnableTransparency=0 +
@@ -425,6 +508,54 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
         let _ = apply_opaque_solid(window, dark);
     } else {
         clear_webview_fill(window);
+    }
+    Ok(())
+}
+
+/// Main top bar: MyDockFinder-like frosted blur under the ambient tint strip.
+/// Never falls back to opaque solid (that would kill ambient painting).
+pub fn apply_topbar_frost(window: &WebviewWindow) -> Result<(), String> {
+    ensure_hard_safe_detected();
+    // Win10 / transparency-off: keep HWND clear so CSS ambient + soft charcoal show.
+    if is_hard_safe() {
+        clear_webview_fill(window);
+        return Ok(());
+    }
+    let hwnd = hwnd_of(window)?;
+    disable_system_backdrop(hwnd);
+    // Soft dark frost tint — ambient strip paints translucent color on top.
+    let tint = pack_gradient(36, 36, 40, 72);
+    let ok = set_window_composition_attribute(
+        hwnd,
+        ACCENT_ENABLE_BLURBEHIND,
+        ACCENT_FLAGS_BLUR_FULL,
+        tint,
+    ) || set_window_composition_attribute(
+        hwnd,
+        ACCENT_ENABLE_ACRYLICBLURBEHIND,
+        ACCENT_FLAGS_BLUR_FULL,
+        tint,
+    );
+    clear_webview_fill(window);
+    unsafe {
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+    if !ok {
+        // Soft-fail: transparent bar + CSS tint still looks better than dead black.
+        return Ok(());
     }
     Ok(())
 }

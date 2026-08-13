@@ -15,7 +15,8 @@ body {
   max-height: var(--wh-bar-h, 28px);
   margin: 0;
   overflow: hidden;
-  background: transparent !important;
+  /* 勿用全透明：WebView2 点透会导致 OS 拖放进不来 */
+  background: rgba(0, 0, 0, 0.02) !important;
   display: flex;
   align-items: center;
   color: var(--wh-chrome-fg, rgba(255, 255, 255, 0.94));
@@ -51,7 +52,7 @@ body::-webkit-scrollbar,
   min-width: 22px;
   padding: 0;
   cursor: pointer;
-  background: transparent !important;
+  background: rgba(0, 0, 0, 0.02) !important;
   border: none !important;
   color: inherit;
   text-shadow: inherit;

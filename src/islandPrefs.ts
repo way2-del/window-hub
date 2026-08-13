@@ -13,10 +13,14 @@ export type IslandPrefs = {
   /** 下拉岛默认展示内容 */
   pullContent: PullContent;
   /**
-   * 岛栏常驻插件 id；空字符串 = 无常驻。
-   * 仅该插件的 setBar 写入常驻层；中转站等临时摘要为覆盖层。
+   * @deprecated 由 barPriority[0] 同步；设置 UI 请改 barPriority。
    */
   barResident: string;
+  /**
+   * 岛栏内容竞选顺序（高 → 低）。通知横幅始终最上；中转站临时层另算。
+   * 列表外的已启用 island.bar 插件会按 slot.order 追加在末尾。
+   */
+  barPriority: string[];
   /** 托盘闪动时在岛上弹出消息提示 */
   msgNotify: boolean;
   /** 无具体内容时的默认文案 */
@@ -25,6 +29,8 @@ export type IslandPrefs = {
   msgNotifySec: number;
   /** 调节岛栏音量后播放系统提示音 */
   volumePreviewSound: boolean;
+  /** 顶栏磨砂半透明（默认关，实心取色） */
+  topbarFrost: boolean;
 };
 
 const LS_AUTO = "wh-island-auto-immerse";
@@ -62,10 +68,12 @@ const DEFAULTS: IslandPrefs = {
   /** Weather is a plugin; migrate legacy "weather"|"mirror" in parsePullContent */
   pullContent: "plugin:com.window-hub.weather",
   barResident: "com.window-hub.weather",
+  barPriority: ["com.window-hub.weather"],
   msgNotify: true,
   msgNotifyText: "收到一条消息",
   msgNotifySec: 4,
   volumePreviewSound: true,
+  topbarFrost: false,
 };
 
 const IDLE_MIN = 2;
@@ -122,6 +130,40 @@ function parseBarResident(raw: string | null | undefined): string {
   return t;
 }
 
+function parseBarPriority(raw: unknown, legacyResident?: string): string[] {
+  const out: string[] = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const id = String(item ?? "").trim();
+      if (!id || out.includes(id)) continue;
+      out.push(id);
+    }
+  }
+  if (!out.length) {
+    const r = parseBarResident(legacyResident);
+    if (r) out.push(r);
+  }
+  return out;
+}
+
+/**
+ * 与已启用 island.bar 插件对齐：保留用户顺序，剔除失效，末尾补上新插件。
+ */
+export function mergeBarPriority(
+  saved: string[] | undefined,
+  availableIds: string[],
+  legacyResident?: string,
+): string[] {
+  const avail = availableIds.map((id) => String(id ?? "").trim()).filter(Boolean);
+  const availSet = new Set(avail);
+  const base = parseBarPriority(saved, legacyResident).filter((id) => availSet.has(id));
+  const ordered = [...base];
+  for (const id of avail) {
+    if (!ordered.includes(id)) ordered.push(id);
+  }
+  return ordered;
+}
+
 function parseMsgText(raw: string | null): string {
   const t = (raw ?? "").trim();
   return t || DEFAULTS.msgNotifyText;
@@ -142,10 +184,12 @@ function readLegacyLocalStorage(): IslandPrefs | null {
       immerseIdleSec: idleRaw == null ? DEFAULTS.immerseIdleSec : clampIdle(Number(idleRaw)),
       pullContent: parsePullContent(pullRaw),
       barResident: DEFAULTS.barResident,
+      barPriority: [...DEFAULTS.barPriority],
       msgNotify: msgRaw == null ? DEFAULTS.msgNotify : msgRaw === "1" || msgRaw === "true",
       msgNotifyText: parseMsgText(msgTextRaw),
       msgNotifySec: msgSecRaw == null ? DEFAULTS.msgNotifySec : clampMsgSec(Number(msgSecRaw)),
       volumePreviewSound: DEFAULTS.volumePreviewSound,
+      topbarFrost: DEFAULTS.topbarFrost,
     };
   } catch {
     return null;
@@ -161,19 +205,28 @@ function clearLegacyLocalStorage() {
 }
 
 function mergePrefs(prev: IslandPrefs, partial: Partial<IslandPrefs>): IslandPrefs {
+  const barPriority =
+    partial.barPriority != null
+      ? parseBarPriority(partial.barPriority, partial.barResident ?? prev.barResident)
+      : parseBarPriority(prev.barPriority, prev.barResident);
+  const barResident =
+    partial.barResident != null
+      ? parseBarResident(partial.barResident)
+      : barPriority[0] ?? prev.barResident;
   return {
     autoImmerse: partial.autoImmerse ?? prev.autoImmerse,
     immerseIdleSec:
       partial.immerseIdleSec != null ? clampIdle(partial.immerseIdleSec) : prev.immerseIdleSec,
     pullContent: partial.pullContent != null ? parsePullContent(partial.pullContent) : prev.pullContent,
-    barResident:
-      partial.barResident != null ? parseBarResident(partial.barResident) : prev.barResident,
+    barResident: barPriority[0] ?? barResident,
+    barPriority,
     msgNotify: partial.msgNotify ?? prev.msgNotify,
     msgNotifyText:
       partial.msgNotifyText != null ? parseMsgText(partial.msgNotifyText) : prev.msgNotifyText,
     msgNotifySec:
       partial.msgNotifySec != null ? clampMsgSec(partial.msgNotifySec) : prev.msgNotifySec,
     volumePreviewSound: partial.volumePreviewSound ?? prev.volumePreviewSound,
+    topbarFrost: partial.topbarFrost ?? prev.topbarFrost,
   };
 }
 

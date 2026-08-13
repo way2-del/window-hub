@@ -259,8 +259,20 @@ async function loadStore() {
   }
 }
 
+let lastHwndFp = "";
+let renderWinTimer = 0;
+
+function hwndFp(list) {
+  return (list || [])
+    .map((w) => String(w.hwnd ?? w.id ?? ""))
+    .sort()
+    .join("|");
+}
+
 function onWindows(list) {
   state.windows = list || [];
+  const fp = hwndFp(list);
+  let storeDirty = false;
   if (state.store.groups.length) {
     const next = {
       ...state.store,
@@ -269,12 +281,20 @@ function onWindows(list) {
     const changed = JSON.stringify(next) !== JSON.stringify(state.store);
     state.store = next;
     if (changed) {
+      storeDirty = true;
       void hub()
         .storage.set("store", state.store)
         .catch(() => undefined);
     }
   }
-  render();
+  // 仅标题变化时跳过整条快捷区重绘（Host 已降频 emit，这里再挡一层）
+  if (!storeDirty && fp === lastHwndFp) return;
+  lastHwndFp = fp;
+  if (renderWinTimer) window.clearTimeout(renderWinTimer);
+  renderWinTimer = window.setTimeout(() => {
+    renderWinTimer = 0;
+    render();
+  }, 80);
 }
 
 async function boot() {

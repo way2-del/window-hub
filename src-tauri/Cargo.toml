@@ -1,6 +1,6 @@
 [package]
 name = "window-hub"
-version = "0.1.2"
+version = "0.1.5"
 description = "Windows window mosaic hub with ECS capture and input forwarding"
 authors = ["you"]
 edition = "2021"
@@ -36,6 +36,9 @@ winreg = "0.52"
 windows-core = "0.58"
 windows = { version = "0.58", features = [
   "implement",
+  "Foundation",
+  "Foundation_Collections",
+  "Media_Control",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",

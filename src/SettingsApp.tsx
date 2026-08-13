@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   getIslandPrefs,
+  mergeBarPriority,
   hydrateIslandPrefs,
   setIslandPrefs,
   type IslandPrefs,
@@ -341,7 +342,7 @@ export default function SettingsApp() {
   const [nav, setNav] = useState<NavId>("general");
   const [query, setQuery] = useState("");
   const [ambientMode, setAmbientMode] = useState<AmbientMode>("edge");
-  const [ambient, setAmbient] = useState<Ambient>({ r: 32, g: 32, b: 34 });
+  const [ambient, setAmbient] = useState<Ambient>({ r: 42, g: 42, b: 46 });
   const [darkPref, setDarkPref] = useState<DarkPref>("dark");
   const [trays, setTrays] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
@@ -1119,31 +1120,81 @@ export default function SettingsApp() {
                 </div>
               </section>
               <section className="settings-card">
-                <h2>岛栏常驻</h2>
+                <h2>岛栏顺序</h2>
                 <p className="card-desc">
-                  折叠态岛栏默认展示哪个插件的摘要。列表来自已启用、声明 capability/slot
-                  island.bar、且未设 excludeFromBarResident 的插件（如天气、歌词）。中转站有条目时仍会临时覆盖，清空后回到常驻。
+                  折叠态按下方顺序竞选第一条有内容的插件摘要。通知横幅始终最优先；中转站有条目时临时盖住内容层。
+                  使用 ↑ ↓ 调整优先级（越靠上越优先）。
                 </p>
-                <div className="mode-list">
-                  <button
-                    type="button"
-                    className={`mode-item${islandPrefs.barResident === "" ? " is-selected" : ""}`}
-                    onClick={() => updateIslandPrefs({ barResident: "" })}
-                  >
-                    <span className="mode-label">无</span>
-                    <span className="mode-desc">岛栏不常驻任何插件摘要</span>
-                  </button>
-                  {barResidentOptions.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      className={`mode-item${islandPrefs.barResident === item.id ? " is-selected" : ""}`}
-                      onClick={() => updateIslandPrefs({ barResident: item.id })}
-                    >
-                      <span className="mode-label">{item.label}</span>
-                      <span className="mode-desc">{item.description}</span>
-                    </button>
-                  ))}
+                <div className="bar-priority-fixed">
+                  <div className="bar-priority-row is-fixed">
+                    <span className="bar-priority-rank">1</span>
+                    <div className="bar-priority-meta">
+                      <span className="mode-label">通知</span>
+                      <span className="mode-desc">插件 notify / 托盘闪动（固定最上，不可调）</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="mode-list bar-priority-list">
+                  {(() => {
+                    const order = mergeBarPriority(
+                      islandPrefs.barPriority,
+                      barResidentOptions.map((p) => p.id),
+                      islandPrefs.barResident,
+                    );
+                    const labelOf = (id: string) =>
+                      barResidentOptions.find((p) => p.id === id)?.label ?? id;
+                    const descOf = (id: string) =>
+                      barResidentOptions.find((p) => p.id === id)?.description ?? "岛栏摘要";
+                    const move = (id: string, dir: -1 | 1) => {
+                      const next = [...order];
+                      const i = next.indexOf(id);
+                      const j = i + dir;
+                      if (i < 0 || j < 0 || j >= next.length) return;
+                      const tmp = next[i]!;
+                      next[i] = next[j]!;
+                      next[j] = tmp;
+                      void updateIslandPrefs({ barPriority: next, barResident: next[0] ?? "" });
+                    };
+                    if (!order.length) {
+                      return (
+                        <div className="mode-item" style={{ cursor: "default" }}>
+                          <span className="mode-label">暂无岛栏插件</span>
+                          <span className="mode-desc">
+                            安装并启用声明 island.bar 的插件后会出现在此列表
+                          </span>
+                        </div>
+                      );
+                    }
+                    return order.map((id, idx) => (
+                      <div key={id} className="bar-priority-row">
+                        <span className="bar-priority-rank">{idx + 2}</span>
+                        <div className="bar-priority-meta">
+                          <span className="mode-label">{labelOf(id)}</span>
+                          <span className="mode-desc">{descOf(id)}</span>
+                        </div>
+                        <div className="bar-priority-actions">
+                          <button
+                            type="button"
+                            className="bar-priority-btn"
+                            disabled={idx === 0}
+                            title="上移"
+                            onClick={() => move(id, -1)}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="bar-priority-btn"
+                            disabled={idx >= order.length - 1}
+                            title="下移"
+                            onClick={() => move(id, 1)}
+                          >
+                            ↓
+                          </button>
+                        </div>
+                      </div>
+                    ));
+                  })()}
                 </div>
               </section>
               <section className="settings-card">
@@ -1261,7 +1312,9 @@ export default function SettingsApp() {
               </section>
               <section className="settings-card">
                 <h2>顶栏采样</h2>
-                <p className="card-desc">灵动岛顶栏颜色跟随当前窗口顶部边缘。</p>
+                <p className="card-desc">
+                  灵动岛顶栏跟随窗口标题栏取色。Electron 应用顶边采黑时会自动采更深或回退壁纸。
+                </p>
                 <div className="mode-list">
                   {AMBIENT_MODES.map((item) => (
                     <button
@@ -1275,6 +1328,21 @@ export default function SettingsApp() {
                     </button>
                   ))}
                 </div>
+                <label className="pref-row" style={{ marginTop: 12 }}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">顶栏磨砂</span>
+                    <span className="pref-row-desc">半透明模糊（接近 MyDockFinder），默认关闭</span>
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    className={`pref-switch${islandPrefs.topbarFrost ? " is-on" : ""}`}
+                    aria-checked={islandPrefs.topbarFrost}
+                    onClick={() => updateIslandPrefs({ topbarFrost: !islandPrefs.topbarFrost })}
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
               </section>
               <section className="settings-card">
                 <h2>当前顶栏色</h2>

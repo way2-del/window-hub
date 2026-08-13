@@ -21,14 +21,24 @@ use crate::win32::system_radio::{
 
 /// Light state: volume / power / IME / CPU·mem — background cadence.
 const TTL_LIGHT: Duration = Duration::from_secs(15);
+/// Under RAM pressure, slow light refresh to cut IPC + UI churn.
+const TTL_LIGHT_PRESSURE: Duration = Duration::from_secs(28);
 /// Heavy state: WiFi list / Bluetooth devices.
 const TTL_HEAVY: Duration = Duration::from_secs(45);
+const TTL_HEAVY_PRESSURE: Duration = Duration::from_secs(75);
 /// Temperature (PowerShell / nvidia-smi) — isolated, low frequency.
 const TTL_TEMP: Duration = Duration::from_secs(30);
+const TTL_TEMP_PRESSURE: Duration = Duration::from_secs(60);
 /// IME / Caps — cheap; keep near-instant so 中/英/A·a 切换跟手。
 const TTL_IME: Duration = Duration::from_millis(500);
+const TTL_IME_PRESSURE: Duration = Duration::from_millis(1200);
 
 const TICK: Duration = Duration::from_millis(400);
+const TICK_PRESSURE: Duration = Duration::from_millis(800);
+
+fn under_mem_pressure() -> bool {
+    crate::win32::system_memory::physical_mem_percent() >= 88
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
@@ -254,15 +264,17 @@ fn due(at: Instant, ttl: Duration) -> bool {
 fn light_loop() {
     let s = state();
     loop {
+        let pressure = under_mem_pressure();
+        let ttl_light = if pressure { TTL_LIGHT_PRESSURE } else { TTL_LIGHT };
+        let ttl_ime = if pressure { TTL_IME_PRESSURE } else { TTL_IME };
         let (need_light, need_ime) = {
             let c = s.caches.lock();
             let want = s.want_light.swap(false, Ordering::SeqCst);
             let light = want
-                || due(c.volume.at, TTL_LIGHT)
-                || due(c.power.at, TTL_LIGHT)
-                || due(c.perf.at, TTL_LIGHT);
-            // want_light also pulls IME so UI soft-refresh stays coherent.
-            let ime = want || due(c.ime.at, TTL_IME);
+                || due(c.volume.at, ttl_light)
+                || due(c.power.at, ttl_light)
+                || due(c.perf.at, ttl_light);
+            let ime = want || due(c.ime.at, ttl_ime);
             (light, ime)
         };
         if need_light && !s.busy_light.swap(true, Ordering::SeqCst) {
@@ -271,52 +283,58 @@ fn light_loop() {
         } else if need_ime {
             refresh_ime_only();
         }
-        std::thread::sleep(TICK);
+        std::thread::sleep(if pressure { TICK_PRESSURE } else { TICK });
     }
 }
 
 fn wifi_loop() {
     let s = state();
     loop {
+        let pressure = under_mem_pressure();
+        let ttl = if pressure { TTL_HEAVY_PRESSURE } else { TTL_HEAVY };
         let need = {
             let c = s.caches.lock();
-            s.want_wifi.swap(false, Ordering::SeqCst) || due(c.wifi.at, TTL_HEAVY)
+            s.want_wifi.swap(false, Ordering::SeqCst) || due(c.wifi.at, ttl)
         };
         if need && !s.busy_wifi.swap(true, Ordering::SeqCst) {
             refresh_wifi();
             s.busy_wifi.store(false, Ordering::SeqCst);
         }
-        std::thread::sleep(TICK);
+        std::thread::sleep(if pressure { TICK_PRESSURE } else { TICK });
     }
 }
 
 fn bluetooth_loop() {
     let s = state();
     loop {
+        let pressure = under_mem_pressure();
+        let ttl = if pressure { TTL_HEAVY_PRESSURE } else { TTL_HEAVY };
         let need = {
             let c = s.caches.lock();
-            s.want_bt.swap(false, Ordering::SeqCst) || due(c.bluetooth.at, TTL_HEAVY)
+            s.want_bt.swap(false, Ordering::SeqCst) || due(c.bluetooth.at, ttl)
         };
         if need && !s.busy_bt.swap(true, Ordering::SeqCst) {
             refresh_bluetooth();
             s.busy_bt.store(false, Ordering::SeqCst);
         }
-        std::thread::sleep(TICK);
+        std::thread::sleep(if pressure { TICK_PRESSURE } else { TICK });
     }
 }
 
 fn temperature_loop() {
     let s = state();
     loop {
+        let pressure = under_mem_pressure();
+        let ttl = if pressure { TTL_TEMP_PRESSURE } else { TTL_TEMP };
         let need = {
             let c = s.caches.lock();
-            s.want_temp.swap(false, Ordering::SeqCst) || due(c.temp_at, TTL_TEMP)
+            s.want_temp.swap(false, Ordering::SeqCst) || due(c.temp_at, ttl)
         };
         if need && !s.busy_temp.swap(true, Ordering::SeqCst) {
             refresh_temperature();
             s.busy_temp.store(false, Ordering::SeqCst);
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(if pressure { 2 } else { 1 }));
     }
 }
 
@@ -339,6 +357,21 @@ fn refresh_light(also_ime: bool) {
     let now = Instant::now();
     let snap = {
         let mut c = state().caches.lock();
+        // Skip emit when nothing chip-visible changed — cuts UI thrash under load.
+        let same_vol = c.volume.value.level == volume.level && c.volume.value.muted == volume.muted;
+        let same_pwr = c.power.value.percent == power.percent
+            && c.power.value.charging == power.charging
+            && c.power.value.ac_line == power.ac_line;
+        let same_perf = c.perf.value.mem_percent == perf.mem_percent
+            && c.perf.value.cpu_percent.abs_diff(perf.cpu_percent) < 2;
+        let same_ime = match &ime {
+            Some(i) => {
+                c.ime.value.mark == i.mark
+                    && c.ime.value.mode == i.mode
+                    && c.ime.value.caps == i.caps
+            }
+            None => true,
+        };
         c.volume = Timed {
             at: now,
             value: volume,
@@ -356,6 +389,9 @@ fn refresh_light(also_ime: bool) {
                 at: now,
                 value: ime,
             };
+        }
+        if same_vol && same_pwr && same_perf && same_ime {
+            return;
         }
         c.to_snapshot()
     };

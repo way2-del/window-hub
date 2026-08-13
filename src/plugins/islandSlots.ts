@@ -60,6 +60,34 @@ export function listBarResidentProviders(): {
     }));
 }
 
+/**
+ * 折叠岛栏内容竞选（通知横幅由 Host 另层处理）：
+ * 按 settings.barPriority 顺序取第一条有文案的插件。
+ * 临时层（中转站 excludeFromBarResident）在 App 侧盖在本结果之上。
+ */
+export function pickIslandContentBar(
+  bars: ReadonlyMap<string, IslandBarState>,
+  barPriority: string[],
+): IslandBarState | null {
+  const textOk = (b: IslandBarState | undefined) => !!b && !!String(b.text ?? "").trim();
+  const seen = new Set<string>();
+  for (const id of barPriority) {
+    const key = String(id ?? "").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const hit = bars.get(key);
+    if (textOk(hit)) return hit!;
+  }
+  // 未写入顺序的插件：按 slot.order 兜底
+  for (const p of listIslandBarPlugins()) {
+    if (p.manifest.slots?.["island.bar"]?.excludeFromBarResident) continue;
+    if (seen.has(p.pluginId)) continue;
+    const hit = bars.get(p.pluginId);
+    if (textOk(hit)) return hit!;
+  }
+  return null;
+}
+
 export function getPluginManifest(pluginId: string): PluginManifest | undefined {
   return pluginRegistry.get(pluginId)?.manifest;
 }

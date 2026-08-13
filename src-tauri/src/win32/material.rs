@@ -5,7 +5,38 @@
 //! Prefs id remains `mica-alt` for storage compatibility.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::WebviewWindow;
+
+/// Live flag for main AppBar frost (default off — solid ambient tint).
+static TOPBAR_FROST: AtomicBool = AtomicBool::new(false);
+
+pub fn set_topbar_frost_enabled(on: bool) {
+    TOPBAR_FROST.store(on, Ordering::SeqCst);
+}
+
+pub fn topbar_frost_enabled() -> bool {
+    TOPBAR_FROST.load(Ordering::SeqCst)
+}
+
+/// Apply or clear frosted blur on the main strip according to prefs.
+#[cfg(windows)]
+pub fn sync_topbar_frost(window: &WebviewWindow) -> Result<(), String> {
+    if topbar_frost_enabled() {
+        crate::win32::blur_glass::apply_topbar_frost(window)
+    } else {
+        crate::win32::blur_glass::clear(window)?;
+        // Keep WebView clear so opaque CSS ambient paints correctly.
+        use tauri::utils::config::Color;
+        let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn sync_topbar_frost(_window: &WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WindowMaterial {
@@ -138,7 +169,7 @@ pub fn apply(window: &WebviewWindow, material: WindowMaterial) -> Result<(), Str
     )
 }
 
-/// Clear all backdrop materials (main top bar stays transparent for ambient color).
+/// Clear all backdrop materials (prefer `sync_topbar_frost` for the main strip).
 #[cfg(windows)]
 pub fn clear(window: &WebviewWindow) -> Result<(), String> {
     crate::win32::blur_glass::clear(window)

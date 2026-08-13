@@ -80,14 +80,19 @@ export default function IslandPanelHost({ pullContent, active, onPanelClose }: P
           /<script[^>]*src=["'][^"']*panel\.js["'][^>]*>\s*<\/script>/gi,
           "",
         );
-        // Base dark shell before plugin CSS — avoids white flash / system scrollbar
-        // when panel opens from collapsed (direct island-bar click).
+        // Base + 收尾覆盖：禁止插件再铺灰底/双层卡片（歌词旧 panel.css 的 #12141a）
         const baseReset = `<style>
 html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;overflow:hidden}
 ::-webkit-scrollbar{width:0!important;height:0!important;display:none!important}
 *{scrollbar-width:none;-ms-overflow-style:none}
 </style>`;
-        const styleTag = css ? `${baseReset}<style>${css}</style>` : baseReset;
+        const shellOverride = `<style>
+html,body{background:#000!important}
+body>*{background:transparent!important}
+</style>`;
+        const styleTag = css
+          ? `${baseReset}<style>${css}</style>${shellOverride}`
+          : `${baseReset}${shellOverride}`;
         html = /<head[^>]*>/i.test(html)
           ? html.replace(/<head[^>]*>/i, (m) => `${m}${styleTag}`)
           : `${styleTag}${html}`;

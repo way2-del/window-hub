@@ -377,7 +377,7 @@ export default function ShortcutsPluginStrip({
               },
               "*",
             );
-            window.setTimeout(scheduleMeasure, 0);
+            // 勿在每次窗口列表变化时 measure — 标题闪烁会拖垮快捷区布局
           }),
         );
         unsubs.push(

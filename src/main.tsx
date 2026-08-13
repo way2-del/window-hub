@@ -69,7 +69,31 @@ function resolveWindowKind(): WindowKind {
 }
 
 const kind = resolveWindowKind();
-document.documentElement.style.background = "transparent";
+const glassCompat =
+  document.documentElement.dataset.glassCompat === "1" ||
+  (window as Window & { __WH_GLASS_COMPAT__?: boolean }).__WH_GLASS_COMPAT__ === true;
+const overlayOpaque =
+  glassCompat &&
+  (kind === "settings" ||
+    kind === "tray" ||
+    kind === "system-flyout" ||
+    kind === "status-menu" ||
+    kind === "plugin-popup");
+
+// Win10 hard-safe: never force transparent over opaque HWND (white zombie).
+if (!overlayOpaque) {
+  document.documentElement.style.background = "transparent";
+  document.body.style.background = "transparent";
+} else {
+  const bg =
+    getComputedStyle(document.documentElement)
+      .getPropertyValue("--glass-panel-bg")
+      .trim() || "rgb(28, 28, 30)";
+  document.documentElement.style.background = bg;
+  document.body.style.background = bg;
+  applyGlassCss({ kind: "mica-alt", dark: null }, undefined, true);
+}
+
 document.body.classList.add(
   kind === "settings"
     ? "is-settings"
@@ -85,7 +109,6 @@ document.body.classList.add(
               ? "is-dock"
               : "is-island",
 );
-document.body.style.background = "transparent";
 document.title =
   kind === "settings"
     ? "灵动岛设置"

@@ -203,19 +203,10 @@ export default function DockApp() {
       void applyMaterial();
     }).then((u) => unsubs.push(u));
 
-    const winTimer = window.setInterval(() => {
-      void invoke<HubWindow[]>("list_open_windows")
-        .then((list) => {
-          if (!cancelled) setWindows(list);
-        })
-        .catch(() => undefined);
-    }, 1500);
-
     return () => {
       cancelled = true;
       window.clearTimeout(retryA);
       window.clearTimeout(retryB);
-      window.clearInterval(winTimer);
       for (const u of unsubs) u();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };

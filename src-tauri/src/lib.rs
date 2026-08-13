@@ -81,8 +81,8 @@ fn spawn_watchdog(app: tauri::AppHandle) {
             if let Some(hwnd) = hwnd_of(&window) {
                 appbar::register(hwnd);
             }
-            // 跟随顶色：始终无模糊材质
-            let _ = crate::win32::material::clear(&window);
+            // 顶栏磨砂：按 prefs.topbarFrost（默认关）
+            let _ = crate::win32::material::sync_topbar_frost(&window);
             reassert_window(&window);
         }
 
@@ -101,6 +101,7 @@ fn spawn_watchdog(app: tauri::AppHandle) {
                 if let Some(hwnd) = hwnd_of(&window) {
                     appbar::sync(hwnd);
                 }
+                let _ = crate::win32::material::sync_topbar_frost(&window);
             }
         }
     });
@@ -142,16 +143,16 @@ fn spawn_fullscreen_watcher(app: tauri::AppHandle) {
     });
 }
 
-/// 最大化窗口顶 1–2px 取色；切窗后采 ~3s 再锁定，锁定后只侦测窗口切换。
+/// 最大化窗口顶栏取色；切窗后采 ~3s 再锁定，锁定后只侦测窗口切换。
 fn spawn_ambient_watcher(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(700));
-        let mut cleared = false;
+        let mut synced = false;
 
         // 启动时采一次
         if let Some(window) = app.get_webview_window("main") {
-            let _ = crate::win32::material::clear(&window);
-            cleared = true;
+            let _ = crate::win32::material::sync_topbar_frost(&window);
+            synced = true;
             if let Some(strip) = crate::win32::ambient::poll_changed(hwnd_of(&window)) {
                 let _ = app.emit("ambient-color", strip);
             } else {
@@ -161,8 +162,15 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
         }
 
         loop {
-            // 稳定期适度密采；锁定后低频侦测切窗（略降频减轻主岛跟色卡顿）
-            let ms = if crate::win32::ambient::is_settling() {
+            // 稳定期适度密采；锁定后低频侦测切窗。内存吃紧时大幅降频，避免跟色拖垮机器。
+            let pressure = crate::win32::system_memory::physical_mem_percent() >= 88;
+            let ms = if pressure {
+                if crate::win32::ambient::is_settling() {
+                    1200
+                } else {
+                    3200
+                }
+            } else if crate::win32::ambient::is_settling() {
                 450
             } else {
                 1400
@@ -172,9 +180,9 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 break;
             };
 
-            if !cleared {
-                let _ = crate::win32::material::clear(&window);
-                cleared = true;
+            if !synced {
+                let _ = crate::win32::material::sync_topbar_frost(&window);
+                synced = true;
             }
 
             if let Some(strip) = crate::win32::ambient::poll_changed(hwnd_of(&window)) {
@@ -214,6 +222,11 @@ pub fn run() {
             let handle = spawn_ecs_thread(app.handle().clone());
             app.manage(handle);
             app.manage(initial_material_state());
+            // Win10 / 精简包：尽早判定 opaque 弹窗策略（HARD_SAFE）
+            #[cfg(windows)]
+            {
+                let _ = crate::win32::blur_glass::is_hard_safe();
+            }
             app.manage(WindowsService::start(app.handle().clone()));
             app.manage(crate::dock::DockVisibility::new());
             let pins = ShortcutsPinStore::new();
@@ -223,13 +236,17 @@ pub fn run() {
             crate::plugin_install::ensure_official_plugins(app.handle());
             crate::win32::ambient::set_mode(commands::load_ambient_mode());
             crate::win32::tray::set_prefs(commands::load_tray_prefs());
+            {
+                let frost = commands::get_island_prefs().topbar_frost;
+                crate::win32::material::set_topbar_frost_enabled(frost);
+            }
 
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(hwnd) = hwnd_of(&window) {
                     crate::win32::topmost::set_main_hwnd(hwnd);
                 }
                 reassert_window(&window);
-                let _ = crate::win32::material::clear(&window);
+                let _ = crate::win32::material::sync_topbar_frost(&window);
             }
 
             spawn_watchdog(app.handle().clone());
@@ -449,6 +466,9 @@ pub fn run() {
             commands::list_audio_output_devices,
             commands::set_audio_output_device,
             commands::open_power_settings,
+            commands::list_memory_top,
+            commands::purge_system_memory,
+            commands::open_task_manager,
             commands::open_status_menu_popup,
             commands::close_status_menu_popup,
             commands::is_status_menu_popup_open,
@@ -544,6 +564,7 @@ pub fn run() {
             commands::hub_staging_copy_all_paths,
             commands::hub_staging_thumb,
             commands::hub_staging_reveal,
+            commands::hub_staging_open,
             commands::hub_staging_start_drag,
             commands::hub_staging_pick_files,
             commands::hub_staging_pick_folders,

@@ -11,35 +11,54 @@ export type ForegroundAppInfo = {
 };
 
 const EVENT = "wh-foreground";
-const INTERVAL_MS = 1200;
+const INTERVAL_MS = 1800;
+const INTERVAL_HIDDEN_MS = 4000;
 
 let timer: number | null = null;
 let refs = 0;
-let lastJson = "";
+let lastKey = "";
 
 async function tick() {
   try {
     const app = await invoke<ForegroundAppInfo>("get_foreground_app");
-    const json = JSON.stringify(app);
-    if (json === lastJson) return;
-    lastJson = json;
+    // 忽略 title 闪烁；允许同窗图标从空→有时再推一次
+    const key = [
+      app.windowId ?? "",
+      app.isSelf ? "1" : "0",
+      app.label ?? "",
+      app.iconPng?.trim() ? "1" : "0",
+    ].join("|");
+    if (key === lastKey) return;
+    lastKey = key;
     window.dispatchEvent(new CustomEvent(EVENT, { detail: app }));
   } catch {
     /* noop */
   }
 }
 
+function delayMs() {
+  return document.hidden ? INTERVAL_HIDDEN_MS : INTERVAL_MS;
+}
+
 function start() {
   if (timer != null) return;
   void tick();
-  timer = window.setInterval(() => void tick(), INTERVAL_MS);
+  const arm = () => {
+    timer = window.setTimeout(() => {
+      void tick().finally(() => {
+        if (refs > 0) arm();
+        else timer = null;
+      });
+    }, delayMs());
+  };
+  arm();
 }
 
 function stop() {
   if (timer == null) return;
-  window.clearInterval(timer);
+  window.clearTimeout(timer);
   timer = null;
-  lastJson = "";
+  lastKey = "";
 }
 
 /** 订阅前台变化；无人订阅时自动停表。 */

@@ -46,6 +46,20 @@
     h.popup.open({});
   }
 
+  function notifyHostDrop(paths) {
+    try {
+      window.parent.postMessage(
+        {
+          channel: "wh-shortcuts-hub",
+          cmd: "shortcuts.fileDrop",
+          pluginId: window.__WH_PLUGIN_ID__,
+          args: { paths: paths || [] },
+        },
+        "*",
+      );
+    } catch (_) {}
+  }
+
   function bindChip() {
     const bar = document.getElementById("bar");
     if (!bar) return;
@@ -65,6 +79,22 @@
     bar.addEventListener("dragover", function (e) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
+    });
+    // HTML5 兜底（有 File.path 时）；主路径仍是 Host Tauri onDragDropEvent
+    bar.addEventListener("drop", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const paths = [];
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (files && files.length) {
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i];
+          if (f && typeof f.path === "string" && f.path.trim()) {
+            paths.push(f.path);
+          }
+        }
+      }
+      notifyHostDrop(paths);
     });
   }
 

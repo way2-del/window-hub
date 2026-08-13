@@ -7,7 +7,7 @@ description: >-
 
 # 灵动岛沉浸式（immerse）
 
-沉浸 = 闲置后岛壳 `fill-opacity: 0.02`（勿用 0，否则 WebView2 点透、中转站拖放失效），栏内文字跟环境明暗切换（`data-chrome` = `chromeCenter.scheme`）。
+沉浸 = 闲置后岛壳 `fill-opacity: 0.02`（勿用 0，否则 WebView2 点透、中转站拖放失效），栏内文字跟环境明暗切换（`data-chrome` = `chromeCenter.scheme`）。顶栏磨砂（`topbarFrost`）默认关；开启时色带半透明叠在 HWND 磨砂上。
 
 源码：`src/App.tsx`（`scheduleImmerse` / `bumpIslandActivity`）、`src/App.css`（`.is-immersed`）、`src/islandPrefs.ts`（`autoImmerse`）。
 
@@ -46,11 +46,11 @@ description: >-
 
 | 状态 | `data-chrome` | 栏文字 |
 |------|---------------|--------|
-| 非沉浸 | `dark` | 白字 |
-| 沉浸 | `chromeCenter.scheme` | `--chrome-center-fg` |
+| 默认（磨砂关） | 非沉浸 `dark`；沉浸跟 `chromeCenter.scheme` | 非沉浸白字；沉浸跟取色 |
+| 磨砂开 `topbarFrost` | `chromeCenter.scheme` | `--chrome-center-fg` |
 | 仅拖放命中 | 可强制 `dark` | 白字 |
 
-中转站摘要（`.bar-staging`）在 `.is-immersed` 下须与 `.bar-weather` 一样跟 chrome，**禁止** `!important` 锁死白字 + 黑壳不透底。
+默认岛壳 `fill: #000`；磨砂开时跟 ambient。中转站摘要须与 `.bar-weather` 一样跟 chrome，**禁止** `!important` 锁死白字。
 
 ## 下拉面板对比度（插件 iframe）
 

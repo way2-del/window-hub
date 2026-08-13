@@ -567,7 +567,7 @@ pub fn hub_plugin_read_text(plugin_id: String, relative_path: String) -> Result<
 
 /// Build `window.hub` injection for plugin popups (trusted pluginId).
 pub fn hub_init_script(plugin_id: &str) -> String {
-    format!(
+    let body = format!(
         r#"
 (function () {{
   const PLUGIN_ID = {plugin_id:?};
@@ -667,6 +667,7 @@ pub fn hub_init_script(plugin_id: &str) -> String {
       copyAllPaths: () => invoke("hub_staging_copy_all_paths", withPlugin()),
       thumb: (id) => invoke("hub_staging_thumb", withPlugin({{ id }})),
       reveal: (id) => invoke("hub_staging_reveal", withPlugin({{ id }})),
+      open: (id) => invoke("hub_staging_open", withPlugin({{ id }})),
       startDrag: (ids) => invoke("hub_staging_start_drag", withPlugin({{ ids }})),
       pickFiles: () => invoke("hub_staging_pick_files", withPlugin()),
       pickFolders: () => invoke("hub_staging_pick_folders", withPlugin()),
@@ -772,5 +773,13 @@ pub fn hub_init_script(plugin_id: &str) -> String {
   }});
 }})();
 "#
-    )
+    );
+    #[cfg(windows)]
+    {
+        crate::win32::blur_glass::prepend_glass_compat_boot(&body)
+    }
+    #[cfg(not(windows))]
+    {
+        body
+    }
 }

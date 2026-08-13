@@ -448,6 +448,48 @@ pub fn reveal(plugin_id: &str, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Open / run with the default shell association (exe/bat run, docs open, folders browse).
+pub fn open_item(plugin_id: &str, id: &str) -> Result<(), String> {
+    let mut map = store().by_plugin.lock();
+    ensure_loaded(&mut map, plugin_id);
+    let item = map
+        .get(plugin_id)
+        .and_then(|idx| idx.items.iter().find(|i| i.id == id))
+        .ok_or_else(|| "item not found".to_string())?
+        .clone();
+    drop(map);
+
+    let path = item.path.trim();
+    if path.is_empty() {
+        return Err("item has no path".into());
+    }
+    let path_buf = PathBuf::from(path);
+    if !path_buf.exists() {
+        return Err(format!("path missing: {path}"));
+    }
+
+    #[cfg(windows)]
+    {
+        // `start "" <path>`：可靠打开/运行；空标题避免路径被当成窗口标题。
+        // 工作目录设为文件所在目录，方便 bat/exe 找相对资源。
+        // 不要 CREATE_NO_WINDOW：.bat/.cmd 需要控制台窗口。
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", path]);
+        if let Some(dir) = path_buf.parent() {
+            if !dir.as_os_str().is_empty() {
+                cmd.current_dir(dir);
+            }
+        }
+        cmd.spawn().map_err(|e| format!("open failed: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = item;
+        Err("open staging item is Windows-only".into())
+    }
+}
+
 pub fn paths_for_drag(plugin_id: &str, ids: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut map = store().by_plugin.lock();
     ensure_loaded(&mut map, plugin_id);
