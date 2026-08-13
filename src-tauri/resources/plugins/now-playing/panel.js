@@ -1,55 +1,66 @@
 /**
- * Now Playing — island panel mini player (minimal).
- * Layout: cover + title/artist + eq | progress | prev / pause / next only.
+ * Now Playing island panel — visual port of
+ * https://github.com/Widdit/now-playing-service/tree/master/Assets/PublicExample
+ * (iOS 歌曲组件). Data via hub.fetch / hub.media.
  */
 (function () {
-  const CACHE_KEY = "np-cache";
-  let timer = null;
+  const DEFAULTS = {
+    TITLE: "Nothing Playing",
+    ARTIST: "Get the music started",
+  };
+  const NUM_BARS = 6;
+
   let settings = {
     apiBase: "http://127.0.0.1:9863",
     pollMs: 1200,
   };
-  let lyricCache = { key: "", lines: [] };
-  let lastStoreKey = "";
-  let state = {
-    connected: false,
-    track: null,
-    player: null,
-    progressMs: 0,
-    lyricLine: "",
-    error: "",
+  let timer = null;
+  let failStreak = 0;
+  let currentCoverUrl = "";
+  let currentTitleStr = "";
+  let currentArtistStr = "";
+  let isPausedGlobal = true;
+  let pauseIconHoldUntil = 0;
+  let pauseIconAnimTimer = null;
+  let coverImageObj = null;
+  let lastProgressSec = 0;
+  let lastDurationSec = 0;
+  let waveTimer = null;
+  let lastDraw = 0;
+
+  const dom = {
+    titleContainer: document.getElementById("track-title"),
+    titleScroller: document.getElementById("title-scroller"),
+    artist: document.getElementById("track-artist"),
+    cover: document.getElementById("album-cover"),
+    timeCurrent: document.getElementById("time-current"),
+    timeRemaining: document.getElementById("time-remaining"),
+    progressFill: document.getElementById("progress-fill"),
+    playPauseBtn: document.getElementById("play-pause-btn"),
+    waveformCanvas: document.getElementById("waveform-canvas"),
+    prevBtn: document.getElementById("prev-btn"),
+    nextBtn: document.getElementById("next-btn"),
   };
+  const ctx = dom.waveformCanvas ? dom.waveformCanvas.getContext("2d") : null;
+
+  const springs = [];
+  for (let i = 0; i < NUM_BARS; i++) {
+    springs.push({
+      pos: 0.2 + Math.random() * 0.3,
+      vel: 0,
+      target: 0.4,
+    });
+  }
 
   function hub() {
     if (!window.hub) throw new Error("window.hub missing");
     return window.hub;
   }
 
-  function escapeHtml(s) {
-    return String(s ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;");
-  }
-
   function joinUrl(base, path) {
     const b = String(base || "").replace(/\/+$/, "");
     const p = path.startsWith("/") ? path : "/" + path;
     return b + p;
-  }
-
-  function fmtMs(ms) {
-    const n = Math.max(0, Math.floor(Number(ms) / 1000) || 0);
-    const m = Math.floor(n / 60);
-    const s = n % 60;
-    return m + ":" + String(s).padStart(2, "0");
-  }
-
-  function fmtRemain(progressMs, durationMs) {
-    if (!durationMs) return "--:--";
-    const left = Math.max(0, durationMs - progressMs);
-    return "-" + fmtMs(left);
   }
 
   async function refreshSettings() {
@@ -65,282 +76,432 @@
         "http://127.0.0.1:9863",
       pollMs: Math.max(500, Number(all.pollMs) || 1200),
     };
-    return settings;
   }
 
-  async function loadSettingsCached() {
-    return settings;
-  }
-
-  async function apiGet(base, path) {
-    const res = await hub().fetch(joinUrl(base, path), {
+  async function apiGet(path) {
+    const res = await hub().fetch(joinUrl(settings.apiBase, path), {
       method: "GET",
-      timeoutMs: 2500,
+      timeoutMs: failStreak > 0 ? 800 : 2000,
     });
     if (!res || !res.ok) throw new Error("HTTP " + (res && res.status));
     return JSON.parse(res.body || "{}");
   }
 
-  function trackKey(track) {
-    if (!track) return "";
-    return (
-      String(track.id || "") +
-      "\0" +
-      String(track.title || "") +
-      "\0" +
-      String(track.author || "")
-    );
-  }
-
-  async function ensureLyrics(base, track) {
-    const key = trackKey(track);
-    if (!key) {
-      lyricCache = { key: "", lines: [] };
-      return [];
-    }
-    if (lyricCache.key === key) return lyricCache.lines;
+  async function apiPost(path, body) {
+    const res = await hub().fetch(joinUrl(settings.apiBase, path), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      timeoutMs: 4000,
+    });
+    if (!res || !res.ok) throw new Error("HTTP " + (res && res.status));
     try {
-      const lyric = await apiGet(base, "/api/lyric");
-      const lines = parseLyricLines(lyric.lrc);
-      lyricCache = { key: key, lines: lines };
-      return lines;
+      return JSON.parse(res.body || "null");
     } catch (_) {
-      lyricCache = { key: key, lines: [] };
-      return [];
+      return res.body;
     }
   }
 
-  function parseLyricLines(lrc) {
-    const raw = String(lrc || "");
-    const out = [];
-    const lines = raw.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      if (line.charAt(0) === "{") {
-        try {
-          const obj = JSON.parse(line);
-          const t = typeof obj.t === "number" ? obj.t : 0;
-          const parts = Array.isArray(obj.c) ? obj.c : [];
-          const text = parts
-            .map(function (c) {
-              return c && c.tx != null ? String(c.tx) : "";
-            })
-            .join("")
-            .trim();
-          if (text) out.push({ t: t, text: text });
-        } catch (_) {}
-        continue;
+  function formatTime(seconds) {
+    const n = Math.max(0, Math.floor(Number(seconds) || 0));
+    const m = Math.floor(n / 60);
+    const s = n % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function loadCoverImage(src) {
+    return new Promise(function (resolve) {
+      if (!src) {
+        resolve(null);
+        return;
       }
-      const m = line.match(/^\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\](.*)$/);
-      if (m) {
-        const min = Number(m[1]) || 0;
-        const sec = Number(m[2]) || 0;
-        let frac = m[3] || "0";
-        if (frac.length === 1) frac += "00";
-        else if (frac.length === 2) frac += "0";
-        const ms = min * 60000 + sec * 1000 + (Number(frac.slice(0, 3)) || 0);
-        const text = String(m[4] || "").trim();
-        if (text) out.push({ t: ms, text: text });
-      }
-    }
-    out.sort(function (a, b) {
-      return a.t - b.t;
-    });
-    return out;
-  }
-
-  function lyricAt(lines, progressMs) {
-    let cur = "";
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].t <= progressMs) cur = lines[i].text;
-      else break;
-    }
-    return cur;
-  }
-
-  function iconPrev() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.5 12 20 6.2v11.6L11.5 12zm-7.5 5.8V6.2h2.2v11.6H4z"/></svg>';
-  }
-  function iconNext() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.5 12 4 17.8V6.2L12.5 12zm5.3-5.8h2.2v11.6h-2.2V6.2z"/></svg>';
-  }
-  function iconPlay() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.2 5.2v13.6L19.2 12 8.2 5.2z"/></svg>';
-  }
-  function iconPause() {
-    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5h3.4v14H6.4V5zm7.8 0h3.4v14h-3.4V5z"/></svg>';
-  }
-
-  function render() {
-    const app = document.getElementById("app");
-    if (!app) return;
-    const track = state.track || {};
-    const player = state.player || {};
-    const hasSong = !!(state.connected && player.hasSong && track.title);
-    const paused = !!player.isPaused;
-    const playing = hasSong && !paused;
-    const durationMs = (Number(track.duration) || 0) * 1000;
-    const pct = durationMs > 0 ? Math.min(100, (state.progressMs / durationMs) * 100) : 0;
-    const cover = track.cover || "";
-    const subtitle = !state.connected
-      ? state.error || "未连接 Now Playing"
-      : hasSong
-        ? track.author || track.album || "—"
-        : "暂无歌曲";
-
-    app.innerHTML =
-      '<div class="np-head">' +
-      (cover
-        ? '<img class="np-cover" alt="" src="' + escapeHtml(cover) + '" />'
-        : '<div class="np-cover is-empty" aria-hidden="true">♪</div>') +
-      '<div class="np-meta">' +
-      '<div class="np-title">' +
-      escapeHtml(hasSong ? track.title : "正在播放") +
-      "</div>" +
-      '<div class="np-artist">' +
-      escapeHtml(subtitle) +
-      "</div>" +
-      "</div>" +
-      '<div class="np-eq' +
-      (playing ? " is-playing" : "") +
-      '" aria-hidden="true"><span></span><span></span><span></span><span></span></div>' +
-      "</div>" +
-      '<div class="np-progress">' +
-      '<span class="np-time">' +
-      escapeHtml(fmtMs(state.progressMs)) +
-      "</span>" +
-      '<div class="np-bar" aria-hidden="true"><i style="width:' +
-      pct.toFixed(2) +
-      '%"></i></div>' +
-      '<span class="np-time is-end">' +
-      escapeHtml(fmtRemain(state.progressMs, durationMs)) +
-      "</span></div>" +
-      '<div class="np-controls">' +
-      '<button type="button" class="np-btn" data-act="previous" title="上一曲">' +
-      iconPrev() +
-      "</button>" +
-      '<button type="button" class="np-btn is-main" data-act="play_pause" title="播放 / 暂停">' +
-      (paused || !hasSong ? iconPlay() : iconPause()) +
-      "</button>" +
-      '<button type="button" class="np-btn" data-act="next" title="下一曲">' +
-      iconNext() +
-      "</button>" +
-      "</div>";
-
-    app.querySelectorAll("[data-act]").forEach(function (el) {
-      el.addEventListener("click", function () {
-        void sendMedia(el.getAttribute("data-act"));
-      });
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = function () {
+        resolve(img);
+      };
+      img.onerror = function () {
+        resolve(null);
+      };
+      img.src = src;
     });
   }
 
-  async function sendMedia(action) {
+  async function resolveCoverSrc(coverUrl) {
+    if (!coverUrl) return "";
+    if (String(coverUrl).startsWith("data:")) return coverUrl;
     try {
-      if (!hub().media || !hub().media.sendKey) {
-        throw new Error("hub.media.sendKey unavailable");
+      const b64 = await apiPost("/api/cover/convert", { cover_url: coverUrl });
+      if (typeof b64 === "string" && b64) {
+        return b64.indexOf("data:") === 0 ? b64 : "data:image/jpeg;base64," + b64;
       }
-      await hub().media.sendKey(action);
-      window.setTimeout(function () {
-        void refresh();
-      }, 250);
-    } catch (err) {
-      console.warn("[now-playing] media", err);
-    }
+    } catch (_) {}
+    // fallback: absolute API cover if relative
+    if (/^https?:\/\//i.test(coverUrl)) return coverUrl;
+    return joinUrl(settings.apiBase, coverUrl);
   }
 
-  async function refresh() {
-    const s = await loadSettingsCached();
-    try {
-      const q = await apiGet(s.apiBase, "/api/query");
-      state.connected = true;
-      state.error = "";
-      state.player = q.player || null;
-      state.track = q.player && q.player.hasSong ? q.track || null : null;
-      const seek =
-        state.player && typeof state.player.seekbarCurrentPosition === "number"
-          ? state.player.seekbarCurrentPosition
-          : 0;
-      state.progressMs = Math.round(seek * 1000);
-      if (state.track) {
-        const lines = await ensureLyrics(s.apiBase, state.track);
-        state.lyricLine = lyricAt(lines, state.progressMs);
+  function updateSprings(dt) {
+    const playing = !isPausedGlobal;
+    for (let i = 0; i < springs.length; i++) {
+      const s = springs[i];
+      if (playing) {
+        if (Math.random() < 0.08) {
+          s.target = 0.25 + Math.random() * 0.75;
+        }
       } else {
-        state.lyricLine = "";
+        s.target = 0.12 + (i % 3) * 0.04;
       }
-      const storeKey =
-        String(state.connected) +
-        "\0" +
-        ((state.track && state.track.title) || "") +
-        "\0" +
-        state.lyricLine +
-        "\0" +
-        Math.floor(state.progressMs / 1000);
-      if (storeKey !== lastStoreKey) {
-        lastStoreKey = storeKey;
-        await hub()
-          .storage.set(CACHE_KEY, {
-            connected: state.connected,
-            track: state.track,
-            progressMs: state.progressMs,
-            lyricLine: state.lyricLine,
-            savedAt: Date.now(),
-          })
-          .catch(function () {});
-      }
-    } catch (err) {
-      state.connected = false;
-      state.error = String((err && err.message) || err || "连接失败");
+      const stiffness = playing ? 180 : 90;
+      const damping = playing ? 12 : 18;
+      const force = (s.target - s.pos) * stiffness - s.vel * damping;
+      s.vel += force * dt;
+      s.pos += s.vel * dt;
+      s.pos = Math.max(0.05, Math.min(1, s.pos));
     }
-    render();
   }
 
-  async function loop() {
-    await refresh();
-    timer = window.setTimeout(function () {
-      void loop();
-    }, settings.pollMs);
+  function drawWaveform() {
+    if (!ctx || !dom.waveformCanvas) return;
+    const canvas = dom.waveformCanvas;
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(1, Math.floor(rect.width * (window.devicePixelRatio || 1)));
+    const h = Math.max(1, Math.floor(rect.height * (window.devicePixelRatio || 1)));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    ctx.clearRect(0, 0, w, h);
+
+    const gap = Math.max(2, w * 0.08);
+    const barW = (w - gap * (NUM_BARS - 1)) / NUM_BARS;
+    const radius = Math.min(barW / 2, h * 0.12);
+
+    for (let i = 0; i < NUM_BARS; i++) {
+      const bh = Math.max(h * 0.12, springs[i].pos * h);
+      const x = i * (barW + gap);
+      const y = h - bh;
+      ctx.save();
+      // rounded bar path
+      const r = Math.min(radius, barW / 2, bh / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + barW, y, x + barW, y + bh, r);
+      ctx.arcTo(x + barW, y + bh, x, y + bh, r);
+      ctx.arcTo(x, y + bh, x, y, r);
+      ctx.arcTo(x, y, x + barW, y, r);
+      ctx.closePath();
+      ctx.clip();
+
+      if (coverImageObj) {
+        const imgAspect = coverImageObj.width / coverImageObj.height;
+        const canvasAspect = w / h;
+        let sx = 0;
+        let sy = 0;
+        let sw = coverImageObj.width;
+        let sh = coverImageObj.height;
+        if (imgAspect > canvasAspect) {
+          sh = coverImageObj.height;
+          sw = sh * canvasAspect;
+          sx = (coverImageObj.width - sw) / 2;
+        } else {
+          sw = coverImageObj.width;
+          sh = sw / canvasAspect;
+          sy = (coverImageObj.height - sh) / 2;
+        }
+        ctx.drawImage(coverImageObj, sx, sy, sw, sh, 0, 0, w, h);
+        ctx.fillStyle = "rgba(0,0,0,0.18)";
+        ctx.fillRect(x, y, barW, bh);
+      } else {
+        ctx.fillStyle = "rgba(136,133,139,0.85)";
+        ctx.fillRect(x, y, barW, bh);
+      }
+      ctx.restore();
+    }
+  }
+
+  function waveLoop(ts) {
+    if (!lastDraw) lastDraw = ts;
+    const dt = Math.min(0.05, (ts - lastDraw) / 1000);
+    lastDraw = ts;
+    updateSprings(dt);
+    if (ts - (waveLoop._lastPaint || 0) > 32) {
+      waveLoop._lastPaint = ts;
+      drawWaveform();
+    }
+    waveTimer = requestAnimationFrame(waveLoop);
+  }
+
+  function startWave() {
+    if (waveTimer) return;
+    lastDraw = 0;
+    waveTimer = requestAnimationFrame(waveLoop);
+  }
+
+  function stopWave() {
+    if (waveTimer) cancelAnimationFrame(waveTimer);
+    waveTimer = null;
+  }
+
+  function coercePaused(v) {
+    if (v === false || v === 0 || v === "false" || v === "0") return false;
+    if (v === true || v === 1 || v === "true" || v === "1") return true;
+    return true;
+  }
+
+  function applyPlayPauseVisual(playing) {
+    const btn = dom.playPauseBtn;
+    if (!btn) return;
+    const playIcon = btn.querySelector(".icon-play");
+    const pauseIcon = btn.querySelector(".icon-pause");
+    btn.classList.toggle("is-playing", playing);
+    btn.classList.toggle("is-play", !playing);
+    if (playIcon) playIcon.toggleAttribute("hidden", playing);
+    if (pauseIcon) pauseIcon.toggleAttribute("hidden", !playing);
+  }
+
+  /**
+   * 缩放切换：先缩着旧图标 → 最小时换新图标 → 再弹回（对齐 PublicExample）
+   * @param {boolean} isPaused
+   * @param {{ silent?: boolean }} [opts] silent=true 时不动画（首屏）
+   */
+  function updatePlayPauseIcon(isPaused, opts) {
+    const btn = dom.playPauseBtn;
+    if (!btn) return;
+    const playing = !coercePaused(isPaused);
+    const already = btn.classList.contains("is-playing") === playing;
+    if (already) {
+      applyPlayPauseVisual(playing);
+      return;
+    }
+    if (opts && opts.silent) {
+      if (pauseIconAnimTimer) {
+        window.clearTimeout(pauseIconAnimTimer);
+        pauseIconAnimTimer = null;
+      }
+      btn.classList.remove("animating");
+      applyPlayPauseVisual(playing);
+      return;
+    }
+    if (pauseIconAnimTimer) {
+      window.clearTimeout(pauseIconAnimTimer);
+      pauseIconAnimTimer = null;
+    }
+    btn.classList.add("animating");
+    pauseIconAnimTimer = window.setTimeout(function () {
+      pauseIconAnimTimer = null;
+      applyPlayPauseVisual(playing);
+      // 下一帧再去掉 animating，确保已换成新图标再放大
+      requestAnimationFrame(function () {
+        btn.classList.remove("animating");
+      });
+    }, 200);
+  }
+
+  function checkTitleScroll() {
+    const scroller = dom.titleScroller;
+    const container = dom.titleContainer;
+    if (!scroller || !container) return;
+    const span = scroller.querySelector("span");
+    if (!span) return;
+    // duplicate for seamless scroll
+    const text = span.textContent || "";
+    scroller.innerHTML = "";
+    const a = document.createElement("span");
+    a.textContent = text;
+    scroller.appendChild(a);
+    const need = a.scrollWidth > container.clientWidth + 2;
+    container.classList.toggle("is-scrolling", need);
+    scroller.classList.toggle("animate", need);
+    if (need) {
+      const b = document.createElement("span");
+      b.textContent = text;
+      scroller.appendChild(b);
+      const distance = a.scrollWidth + 32;
+      scroller.style.animationDuration = Math.max(distance / 32, 5) + "s";
+    } else {
+      scroller.style.animationDuration = "";
+    }
+  }
+
+  function setProgress(currentSec, durationSec) {
+    lastProgressSec = currentSec;
+    lastDurationSec = durationSec;
+    if (dom.timeCurrent) dom.timeCurrent.textContent = formatTime(currentSec);
+    if (dom.timeRemaining) {
+      dom.timeRemaining.textContent = durationSec
+        ? "-" + formatTime(Math.max(0, durationSec - currentSec))
+        : "-0:00";
+    }
+    const pct = durationSec > 0 ? Math.min(100, (currentSec / durationSec) * 100) : 0;
+    if (dom.progressFill) dom.progressFill.style.width = pct + "%";
+  }
+
+  async function updateUI(data, opts) {
+    const hasData = data && data.player && data.player.hasSong && data.track && data.track.title;
+    const player = hasData ? data.player : { isPaused: true, seekbarCurrentPosition: 0 };
+    const track = hasData ? data.track : {};
+    const displayTitle = hasData ? track.title : DEFAULTS.TITLE;
+    const displayArtist = hasData ? track.author || "" : DEFAULTS.ARTIST;
+    const displayCoverUrl = hasData ? track.cover || "" : "";
+
+    // 点击后短时锁定本地态，避免 API 尚未跟上时又闪回双竖线再切三角形
+    if (Date.now() >= pauseIconHoldUntil) {
+      isPausedGlobal = coercePaused(player.isPaused);
+    }
+    updatePlayPauseIcon(isPausedGlobal, {
+      silent: Boolean(opts && opts.silentIcon),
+    });
+
+    if (displayTitle !== currentTitleStr) {
+      currentTitleStr = displayTitle;
+      if (dom.titleContainer) dom.titleContainer.title = displayTitle;
+      if (dom.titleScroller) {
+        dom.titleScroller.innerHTML = "";
+        const span = document.createElement("span");
+        span.textContent = displayTitle;
+        dom.titleScroller.appendChild(span);
+      }
+      window.setTimeout(checkTitleScroll, 0);
+    }
+    if (displayArtist !== currentArtistStr) {
+      currentArtistStr = displayArtist;
+      if (dom.artist) {
+        dom.artist.textContent = displayArtist;
+        dom.artist.title = displayArtist;
+      }
+    }
+
+    if (displayCoverUrl !== currentCoverUrl) {
+      currentCoverUrl = displayCoverUrl;
+      if (dom.cover) dom.cover.classList.remove("loaded");
+      const src = await resolveCoverSrc(displayCoverUrl);
+      if (dom.cover) {
+        if (src) {
+          dom.cover.src = src;
+          coverImageObj = await loadCoverImage(src);
+          if (coverImageObj) dom.cover.classList.add("loaded");
+        } else {
+          dom.cover.removeAttribute("src");
+          coverImageObj = null;
+        }
+      }
+    }
+
+    const current = Number(player.seekbarCurrentPosition) || 0;
+    const duration =
+      Number(track.duration) ||
+      Number(player.seekbarCurrentPositionMax) ||
+      Number(player.duration) ||
+      0;
+    setProgress(current, duration);
+  }
+
+  async function tick() {
+    try {
+      const q = await apiGet("/api/query");
+      failStreak = 0;
+      await updateUI(q);
+    } catch (err) {
+      failStreak = Math.min(8, failStreak + 1);
+      await updateUI(null, { silentIcon: true });
+    }
+  }
+
+  function nextDelay() {
+    if (failStreak <= 0) return settings.pollMs;
+    return Math.min(30000, settings.pollMs * Math.pow(2, failStreak));
   }
 
   function schedule() {
     if (timer) clearTimeout(timer);
     timer = null;
+    const loop = async function () {
+      await tick();
+      timer = window.setTimeout(loop, nextDelay());
+    };
     void loop();
+  }
+
+  function stopPoll() {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  }
+
+  async function sendMedia(action) {
+    try {
+      if (hub().media && hub().media.sendKey) {
+        await hub().media.sendKey(action);
+        return;
+      }
+    } catch (_) {}
+    // fallback Now Playing HTTP if available
+    try {
+      await apiPost("/api/media/" + action, {});
+    } catch (_) {}
+  }
+
+  function bindControls() {
+    function tap(el, action) {
+      if (!el) return;
+      const go = function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (action === "play_pause") {
+          isPausedGlobal = !isPausedGlobal;
+          pauseIconHoldUntil = Date.now() + 900;
+          updatePlayPauseIcon(isPausedGlobal);
+        } else {
+          el.classList.add("animating");
+          window.setTimeout(function () {
+            el.classList.remove("animating");
+          }, 280);
+        }
+        void sendMedia(action).then(function () {
+          window.setTimeout(function () {
+            void tick();
+          }, 280);
+        });
+      };
+      el.addEventListener("click", go);
+      el.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") go(e);
+      });
+    }
+    tap(dom.prevBtn, "previous");
+    tap(dom.nextBtn, "next");
+    tap(dom.playPauseBtn, "play_pause");
   }
 
   async function boot() {
     await refreshSettings();
-    const cached = await hub()
-      .storage.get(CACHE_KEY)
-      .catch(function () {
-        return null;
-      });
-    if (cached) {
-      state.connected = !!cached.connected;
-      state.track = cached.track || null;
-      state.player = { hasSong: !!cached.track, isPaused: false };
-      state.progressMs = Number(cached.progressMs) || 0;
-      state.lyricLine = cached.lyricLine || "";
-      render();
-    } else {
-      render();
-    }
+    bindControls();
+    startWave();
+    await updateUI(null, { silentIcon: true });
 
     const h = hub();
     if (h.panel && h.panel.onEnter) {
       h.panel.onEnter(function () {
+        failStreak = 0;
         schedule();
+        startWave();
+        window.setTimeout(checkTitleScroll, 50);
       });
     }
     if (h.panel && h.panel.onLeave) {
       h.panel.onLeave(function () {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
+        stopPoll();
       });
     }
-    // 勿在 boot 就轮询：面板未展开时不应打 HTTP
+    if (h.settings && h.settings.subscribe) {
+      h.settings.subscribe(function () {
+        void refreshSettings();
+      });
+    }
+    window.addEventListener("resize", function () {
+      checkTitleScroll();
+      drawWaveform();
+    });
   }
 
   if (document.readyState === "loading") {

@@ -7,22 +7,27 @@
 | 表面 | 行为 |
 |------|------|
 | 快捷区 | **不显示**（`manage: none` + `requestSize(0)` 隐形 worker） |
-| 岛栏常驻 | 当前歌词 / 歌名（`setBar`）；需在设置里选为「岛栏常驻」 |
-| 岛下拉 | 迷你播放器；需在设置里选为「下拉内容」或点岛栏打开会话 |
+| 岛栏常驻 | 当前歌词 / 歌名（`setBar`）；需在设置里选为「岛栏常驻」；`adaptiveWidth` 折叠岛随歌词变宽 |
+| 岛下拉 | 迷你播放器；视觉对齐官方 **iOS 歌曲组件**（`Assets/PublicExample`） |
 
 设置在 **插件市场 / 本插件设置**（`apiBase`、`pollMs`、`barMode` 等）。
 
+## 下拉 Panel 素材来源
+
+官方示例（与截图同款布局）：
+
+- 仓库：[Widdit/now-playing-service](https://github.com/Widdit/now-playing-service)
+- 路径：[`Assets/PublicExample/`](https://github.com/Widdit/now-playing-service/tree/master/Assets/PublicExample)
+  - `index.html` / `style.css` / `main.js`
+  - `assets/icon_{rewind,play,pause,forward}.svg`（控件图标）
+  - 右侧频谱：封面纹理裁切进 canvas 竖条（见 `main.js` `drawWaveform`）
+
+本插件：`panel.html` / `panel.css` / `panel.js`（控件 SVG **内联**进 HTML——Host 用 `srcdoc` 注入面板，相对路径 `./assets/*` 无法加载）。`assets/*.svg` 与 `vendor/public-example/` 仅作对照副本。
+
+完整播放器页在前端仓：[now-playing-frontend](https://github.com/Widdit/now-playing-frontend) 的 `Player.tsx`（偏 AMLL 全屏，不是这张迷你卡）。
+
 ## API（本机默认 `http://127.0.0.1:9863`）
 
-来自软件内「API 接口」页 / 源码 `NowPlayingController` / `LyricController`：
-
 - `GET /api/query` — 歌曲 + 播放器
-- `GET /api/query/track` / `player` / `progress` / `hasSong` / `isConnected`
-- `GET /api/lyric` — 歌词（前端按时轴解析）
-- 桌面端 `GET http://127.0.0.1:9864/player/show` — 打开自带播放器窗
-
-播放 / 暂停 / 切歌：Now Playing **无遥控接口**，下拉按钮走 Host `media.keys`（系统媒体键，对多数播放器有效）。
-
-## 安装
-
-设置 → 插件 → **导入示例：正在播放**，或开发目录指向本文件夹。需本机已运行 Now Playing。
+- `POST /api/cover/convert` — 封面转 base64（可选）
+- 媒体键：`hub.media.sendKey(play_pause|next|previous)`

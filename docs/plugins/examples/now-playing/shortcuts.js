@@ -3,10 +3,14 @@
  * Polls local Now Playing HTTP API → island.setBar (lyrics / title).
  * Width 0 so it never paints in the shortcuts strip.
  *
- * Prefs: user selects this plugin as 岛栏常驻 / 下拉 in Settings.
+ * Offline: exponential backoff (服务未开时勿每秒打 hub.fetch 拖垮 Host).
  */
 (function () {
   const CACHE_KEY = "np-cache";
+  const PLUGIN_ID =
+    (typeof window.__WH_PLUGIN_ID__ === "string" && window.__WH_PLUGIN_ID__) ||
+    "com.window-hub.now-playing";
+  const OFFLINE_MAX_MS = 60000;
   let timer = null;
   let lastBar = "";
   let settings = {
@@ -17,6 +21,11 @@
   let lyricCache = { key: "", lines: [] };
   let lastStoreKey = "";
   let tickInFlight = false;
+  /** consecutive failed /api/query (service down) */
+  let failStreak = 0;
+  /** only push setBar when Host selected us as 岛栏常驻 */
+  let isBarResident = false;
+  let prefsKnown = false;
 
   function hub() {
     if (!window.hub) throw new Error("window.hub missing");
@@ -27,6 +36,13 @@
     const b = String(base || "").replace(/\/+$/, "");
     const p = path.startsWith("/") ? path : "/" + path;
     return b + p;
+  }
+
+  function nextDelayMs() {
+    if (failStreak <= 0) return settings.pollMs;
+    // 1→2.5s, 2→5s, 3→10s, 4→20s, 5+→40–60s
+    const ms = Math.round(settings.pollMs * Math.pow(2, failStreak));
+    return Math.min(OFFLINE_MAX_MS, Math.max(2500, ms));
   }
 
   async function refreshSettings() {
@@ -47,9 +63,10 @@
   }
 
   async function apiGet(base, path) {
+    // 离线探测：短超时，避免服务未开时每次卡满 2.5s+
     const res = await hub().fetch(joinUrl(base, path), {
       method: "GET",
-      timeoutMs: 2500,
+      timeoutMs: failStreak > 0 ? 800 : 1500,
     });
     if (!res || !res.ok) throw new Error("HTTP " + (res && res.status));
     return JSON.parse(res.body || "{}");
@@ -120,7 +137,7 @@
 
   function barPayload(mode, track, lyricLine, connected) {
     if (!connected) {
-      return { text: "Now Playing 未连接", title: "请启动 Now Playing 服务" };
+      return { text: "", title: "" };
     }
     const title = (track && track.title) || "";
     const author = (track && track.author) || "";
@@ -130,11 +147,12 @@
       return { text: song, title: song };
     }
     if (mode === "both") {
-      const text = lyric || song;
+      const text = lyric ? "🎶 " + lyric : song;
       return { text: text, title: lyric ? song + " · " + lyric : song };
     }
+    // lyric（默认）：有歌词加音符前缀；无歌词回落歌名不加
     return {
-      text: lyric || song,
+      text: lyric ? "🎶 " + lyric : song,
       title: lyric ? song + " · " + lyric : song,
     };
   }
@@ -144,6 +162,7 @@
     if (!h.island || !h.island.setBar) return;
     const t = String(text || "").trim();
     if (!t) {
+      if (!lastBar) return;
       try {
         await h.island.clearBar();
       } catch (_) {}
@@ -178,10 +197,31 @@
     }
   }
 
+  function applyIslandPrefs(prefs) {
+    prefsKnown = true;
+    const bar =
+      prefs && typeof prefs.barResident === "string"
+        ? prefs.barResident
+        : prefs && typeof prefs.bar_resident === "string"
+          ? prefs.bar_resident
+          : "";
+    const next = bar === PLUGIN_ID;
+    if (isBarResident && !next) {
+      void applyBar("", "");
+    }
+    isBarResident = next;
+  }
+
   async function tick() {
     if (tickInFlight) return;
     tickInFlight = true;
     try {
+      // 未当选岛栏常驻：极少探测（仅保活），避免无意义 IPC
+      if (prefsKnown && !isBarResident) {
+        failStreak = Math.max(failStreak, 3);
+        return;
+      }
+
       const s = settings;
       let connected = false;
       let track = null;
@@ -190,6 +230,7 @@
       try {
         const q = await apiGet(s.apiBase, "/api/query");
         connected = true;
+        failStreak = 0;
         track = q.track || null;
         const player = q.player || {};
         if (!player.hasSong) {
@@ -206,10 +247,17 @@
         }
       } catch (err) {
         connected = false;
-        console.warn("[now-playing] poll", err);
+        failStreak = Math.min(8, failStreak + 1);
+        if (failStreak <= 2) {
+          console.warn("[now-playing] poll offline", failStreak, err);
+        }
       }
 
       const active = !!(connected && track);
+      if (!isBarResident && prefsKnown) {
+        return;
+      }
+
       const payload = barPayload(s.barMode, track, lyricLine, connected);
       const storeKey =
         String(connected) +
@@ -251,32 +299,21 @@
 
     await refreshSettings();
 
-    const cached = await h.storage.get(CACHE_KEY).catch(function () {
-      return null;
-    });
-    if (cached) {
-      const p = barPayload(
-        settings.barMode,
-        cached.track,
-        cached.lyricLine,
-        cached.connected,
-      );
-      await applyBar(p.text, p.title);
-    }
-
     const loop = async function () {
       try {
         await tick();
       } catch (err) {
         console.warn("[now-playing]", err);
+        failStreak = Math.min(8, failStreak + 1);
       }
-      timer = window.setTimeout(loop, settings.pollMs);
+      timer = window.setTimeout(loop, nextDelayMs());
     };
     void loop();
 
     if (h.settings && h.settings.subscribe) {
       h.settings.subscribe(function () {
         void refreshSettings().then(function () {
+          failStreak = 0;
           if (timer) {
             clearTimeout(timer);
             timer = null;
@@ -287,9 +324,25 @@
     }
     window.addEventListener("wh-shortcuts-evt", function (ev) {
       var d = ev && ev.detail;
-      if (!d || d.type !== "island-prefs") return;
-      void tick();
+      if (!d) return;
+      if (d.type === "island-prefs") {
+        applyIslandPrefs(d.prefs || {});
+        failStreak = 0;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        void loop();
+        return;
+      }
     });
+
+    // Host 可能晚于 boot 才广播 prefs；先拉一次（若 bridge 无此命令则忽略）
+    try {
+      if (h.invoke) {
+        /* no-op */
+      }
+    } catch (_) {}
   }
 
   if (document.readyState === "loading") {

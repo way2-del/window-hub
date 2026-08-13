@@ -151,6 +151,22 @@
             "excludeFromBarResident": {
               "type": "boolean",
               "description": "If true, omit from Settings 岛栏常驻 list; may still setBar temporarily"
+            },
+            "adaptiveWidth": {
+              "type": "boolean",
+              "description": "Host sizes collapsed island width to fit setBar text (lyrics etc.)"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 160,
+              "maximum": 720,
+              "description": "Min collapsed width when adaptiveWidth (default 220)"
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 160,
+              "maximum": 720,
+              "description": "Max collapsed width when adaptiveWidth (default 560)"
             }
           }
         },

@@ -22,7 +22,8 @@
 | `network` | `hub.fetch` + `permissions.network` 白名单 | ✅ |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。  
-设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。
+设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。  
+`slots["island.bar"].adaptiveWidth: true` → Host 按摘要文案自适应折叠岛宽（`minWidth`/`maxWidth`，默认 220–560）；长歌词等勿再靠 ellipsis 硬裁。
 
 ## 共享 WindowsService
 
@@ -52,8 +53,8 @@ Rust 单例轮询（默认 250ms），事件 `hub-windows-changed`。多插件 `
 
 | 方法 | 说明 |
 |------|------|
-| `island.setBar({ text, title? })` | 需 `island.bar` |
-| `island.clearBar()` | 需 `island.bar` |
+| `island.setBar({ text, title? })` | 需 `island.bar`；若 slot `adaptiveWidth`，Host 按文案调折叠岛宽 |
+| `island.clearBar()` | 需 `island.bar`；折叠宽回到默认 300 |
 | `island.onBarClick(cb)` | Shortcuts iframe：岛栏摘要被点击时回调（无 panel 也可） |
 | `panel.openSession()` | 需 `island.panel`；临时展开该插件面板 |
 | `panel.closeSession()` | 清会话并收起 |

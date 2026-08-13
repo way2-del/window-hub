@@ -1,8 +1,8 @@
-{
+﻿{
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.now-playing",
   "name": "正在播放",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "official": true,
   "logo": "icon.svg",
   "description": "对接本机 Now Playing 服务：岛栏滚动歌词，下拉迷你播放器（封面 / 进度 / 媒体键）。设置在本插件页配置 API 地址。",
@@ -20,10 +20,13 @@
       "manage": "none"
     },
     "island.bar": {
-      "order": 10
+      "order": 10,
+      "adaptiveWidth": true,
+      "minWidth": 260,
+      "maxWidth": 520
     },
     "island.panel": {
-      "defaultSize": { "w": 380, "h": 200 },
+      "defaultSize": { "w": 400, "h": 200 },
       "excludeFromPullContent": false
     }
   },
@@ -72,3 +75,4 @@
     "network": ["127.0.0.1", "localhost"]
   }
 }
+

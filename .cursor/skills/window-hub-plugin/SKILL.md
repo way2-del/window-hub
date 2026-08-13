@@ -1,4 +1,4 @@
-﻿---
+---
 name: window-hub-plugin
 description: >-
   Window Hub 插件开发完整流程 — plugin.json slots/capabilities、三种入口
@@ -34,7 +34,7 @@ description: >-
 |------|------|----------|----------|
 | 快捷区（状态菜单左侧） | `shortcuts` | `entry.shortcuts` → iframe 自画 | `shortcuts` + 常用 `storage`/`popup`/`windows.*` |
 | 灵动岛下拉面板 | `island.panel` | `entry.panel` | `island.panel` |
-| 岛栏摘要 | `island.bar` | （无独立入口；API / Host 同步） | **capability + slot** `island.bar`；全局设置「岛栏常驻」竞选；`excludeFromBarResident` 仅临时条 |
+| 岛栏摘要 | `island.bar` | （无独立入口；API / Host 同步） | **capability + slot** `island.bar`；全局设置「岛栏常驻」竞选；`excludeFromBarResident` 仅临时条；**`adaptiveWidth`** 折叠岛宽随文案（见下） |
 | 岛上拖放 | `island.drop` | （Host DnD） | **必须** `island.drop` + `staging` |
 | 岛通知横幅 | `island.notify` | （无独立 iframe；`hub.notify`） | `notify` |
 | 托管弹窗 | — | `entry.popup` | `popup` |
@@ -51,10 +51,11 @@ description: >-
 | 快捷区入口 + 可自建应用库 | **应用库** | `docs/plugins/examples/app-library/`（`manage=custom`） |
 | 拖放暂存 + 岛栏 + 矮面板 | **中转站** | `docs/plugins/examples/transfer-station/` |
 | 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/`（shortcuts `manage=none`） |
+| 岛栏歌词自适应宽 + 迷你播放器 | **正在播放** | `docs/plugins/examples/now-playing/`（`island.bar.adaptiveWidth`） |
 | 快捷区成语 chip + 历史弹窗 + 带调拼音 | **成语** | `docs/plugins/examples/idiom/`（`manage=custom`；`pinyin-pro.min.js`） |
 | 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
-打包资源镜像：`src-tauri/resources/plugins/{window-groups|app-library|transfer-station|weather|mirror|idiom}/`（与 docs 示例保持同步）。
+打包资源镜像：`src-tauri/resources/plugins/{window-groups|app-library|transfer-station|weather|mirror|idiom|now-playing}/`（与 docs 示例保持同步）。
 
 ### 1. 建目录与 `plugin.json`
 
@@ -124,6 +125,25 @@ my-plugin/
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。
 
+**岛栏宽自适应（基座能力）：** 在 `slots["island.bar"]` 声明即可，**无需**新 capability：
+
+```json
+"island.bar": {
+  "order": 10,
+  "adaptiveWidth": true,
+  "minWidth": 260,
+  "maxWidth": 520
+}
+```
+
+| 字段 | 含义 |
+|------|------|
+| `adaptiveWidth` | `true` → Host 按 `setBar` 文案测量并调整**折叠态**岛宽 |
+| `minWidth` / `maxWidth` | 逻辑像素；默认约 220–560；超长仍 ellipsis |
+| 未声明 | 折叠宽固定约 300，文案 ellipsis |
+
+插件只需正常 `hub.island.setBar({ text, title? })`；**禁止**自算宽度改壳。官方示例：正在播放 `com.window-hub.now-playing`。
+
 ### 3. 按表面写 UI（`window.hub` 分表面矩阵）
 
 同一插件在不同入口注入的 API **不一致**，按表选用：
@@ -183,6 +203,7 @@ Host 设置页自动渲染；中转站示例：`panelWidth` / `panelHeight`。
 - [ ] 未使用 `setPins`、`alert`/`confirm`/`prompt`
 - [ ] 未调用未实现的 `hub.clipboard.*`；`hub.fetch` 已声明 `network` + `permissions.network`；`hub.notify` 已声明 `notify` + `island.notify`
 - [ ] 快捷区高度来自 `getBounds` / `--wh-bar-h`
+- [ ] 长摘要 / 歌词：`slots["island.bar"].adaptiveWidth: true`（可选 min/max）；**勿**自改岛壳宽
 - [ ] 无硬编码官方插件 id 的 Host 后门依赖
 - [ ] 敏感 capability 在 README / 安装说明中写明
 - [ ] 缺系统能力 → Companion 脚本路径（`docs/plugins/companion-scripts.md`），非塞 DLL
