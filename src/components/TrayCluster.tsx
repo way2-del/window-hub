@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { hideChromeHoverTip, hostTipPointerProps, installChromeHoverTipGlobalDismiss } from "../chromeHoverTip";
-import { elementScreenRect } from "../genieAnchor";
 import {
   moveIdInOrder,
   pickDropTarget,
@@ -653,34 +652,15 @@ export default function TrayCluster({
   async function togglePopup() {
     try {
       const visible = await invoke<boolean>("is_tray_popup_open");
-      const el = chevronRef.current;
       if (visible || open) {
-        if (el) {
-          const anchor = await elementScreenRect(el);
-          await invoke("genie_hide_popup", {
-            slotId: "tray-popup",
-            windowLabel: "tray-popup",
-            anchor,
-          }).catch(() => invoke("close_tray_popup"));
-        } else {
-          await invoke("close_tray_popup");
-        }
+        await invoke("close_tray_popup");
         onOpenChange(false);
         return;
       }
+      const el = chevronRef.current;
       if (!el) return;
       const { x, y } = await popupAnchor(el, TRAY_POPUP_W);
-      const anchor = await elementScreenRect(el);
-      const shown = await invoke<boolean>("genie_show_popup", {
-        slotId: "tray-popup",
-        windowLabel: "tray-popup",
-        anchor,
-        x,
-        y,
-      }).catch(() => false);
-      if (!shown) {
-        await invoke("open_tray_popup", { x, y });
-      }
+      await invoke("open_tray_popup", { x, y });
       onOpenChange(true);
     } catch (e) {
       console.error(e);

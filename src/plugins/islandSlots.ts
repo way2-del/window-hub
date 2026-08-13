@@ -64,6 +64,60 @@ export function getPluginManifest(pluginId: string): PluginManifest | undefined 
   return pluginRegistry.get(pluginId)?.manifest;
 }
 
+/** 岛栏折叠宽自适应（slots.island.bar.adaptiveWidth） */
+export type IslandBarAdaptive = {
+  enabled: boolean;
+  minWidth: number;
+  maxWidth: number;
+};
+
+const ADAPTIVE_MIN_DEFAULT = 220;
+const ADAPTIVE_MAX_DEFAULT = 560;
+
+export function resolveIslandBarAdaptive(
+  pluginId: string | null | undefined,
+): IslandBarAdaptive {
+  if (!pluginId) {
+    return { enabled: false, minWidth: ADAPTIVE_MIN_DEFAULT, maxWidth: ADAPTIVE_MAX_DEFAULT };
+  }
+  const slot = getPluginManifest(pluginId)?.slots?.["island.bar"];
+  const enabled = Boolean(slot?.adaptiveWidth);
+  const minWidth = Math.min(
+    ADAPTIVE_MAX_DEFAULT,
+    Math.max(160, Number(slot?.minWidth) || ADAPTIVE_MIN_DEFAULT),
+  );
+  const maxWidth = Math.max(
+    minWidth,
+    Math.min(720, Number(slot?.maxWidth) || ADAPTIVE_MAX_DEFAULT),
+  );
+  return { enabled, minWidth, maxWidth };
+}
+
+/** Measure island bar label width (matches .bar-staging-text chrome). */
+export function measureIslandBarLabelWidth(
+  text: string,
+  opts?: { showDot?: boolean },
+): number {
+  const t = String(text || "");
+  if (!t) return 0;
+  if (typeof document === "undefined") {
+    return Math.ceil(t.length * 9);
+  }
+  const canvas =
+    (measureIslandBarLabelWidth as unknown as { _c?: HTMLCanvasElement })._c ??
+    document.createElement("canvas");
+  (measureIslandBarLabelWidth as unknown as { _c?: HTMLCanvasElement })._c = canvas;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return Math.ceil(t.length * 9);
+  // Match .bar-staging-text: 12px / 600 + letter-spacing 0.01em
+  ctx.font =
+    '600 12px "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif';
+  const tw = ctx.measureText(t).width + t.length * 0.12;
+  const chromePad = 32; // 岛左右内边距 + 安全余量
+  const dot = opts?.showDot ? 13 : 0;
+  return Math.ceil(tw + chromePad + dot);
+}
+
 /** Panel defaultSize from slot declaration (settings.panelWidth/Height override at runtime). */
 export function resolvePanelDefaultSize(
   pluginId: string | null | undefined,

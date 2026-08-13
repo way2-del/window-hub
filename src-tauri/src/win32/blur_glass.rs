@@ -14,9 +14,9 @@ use tauri::WebviewWindow;
 use windows::core::s;
 use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
-    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+    DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
+    DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWCP_ROUNDSMALL,
     DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
 };
@@ -240,66 +240,42 @@ pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(
     Ok(())
 }
 
-/// Dock glass strip: **SWCA acrylic + DWM rounded corners**.
+/// Settings window (decorated): true system Mica so **title bar + left nav** share
+/// the same theme backdrop. Right pane stays solid via CSS (`--glass-main-bg`).
 ///
-/// Under WebView2, SWCA paints a full HWND slab — `SetWindowRgn` cannot round it
-/// (only the CSS wash). The only way to round SWCA is `DWMWA_WINDOW_CORNER_PREFERENCE`
-/// (`ROUNDSMALL` / `ROUND`). Custom px maps to those two system sizes; 0 = square.
-pub fn apply_dock_glass_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+/// Popups keep SWCA acrylic (`apply_system_mica`); only the framed settings window
+/// uses `DWMSBT_MAINWINDOW` + caption color none.
+pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
     let hwnd = hwnd_of(window)?;
-    prepare_hwnd_for_system_backdrop(hwnd);
+    // Drop SWCA so SYSTEMBACKDROP owns the full frame (caption included).
+    let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
+    let _ = window_vibrancy::clear_acrylic(window);
+    let _ = window_vibrancy::clear_blur(window);
     clear_webview_fill(window);
-    // Drop legacy blur-behind / region experiments that fight SWCA.
-    disable_blur_behind(hwnd);
-    clear_window_region(hwnd);
 
-    apply_swca_acrylic(hwnd, dark)?;
-    apply_dock_glass_chrome(hwnd, dark, dock_corner_radius_px());
-    let _ = window.set_shadow(false);
-    strip_class_drop_shadow(hwnd);
+    let is_dark = dark.unwrap_or(true);
+    apply_mica_chrome(hwnd, Some(is_dark));
+    set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
 
-    let win = window.clone();
-    let dark_c = dark;
-    std::thread::spawn(move || {
-        for ms in [40_u64, 100, 220, 450, 800] {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            if let Ok(h) = hwnd_of(&win) {
-                disable_blur_behind(h);
-                clear_window_region(h);
-                let _ = apply_swca_acrylic(h, dark_c);
-                apply_dock_glass_chrome(h, dark_c, dock_corner_radius_px());
-                let _ = win.set_shadow(false);
-                strip_class_drop_shadow(h);
-                clear_webview_fill(&win);
-            }
-        }
-    });
-    clear_webview_fill(window);
-    Ok(())
-}
-
-/// Kill Win11 DWM 1px frame border + drop shadow on fully transparent overlays
-/// (e.g. Genie suck animation). Without this, a hairline rectangle flashes around
-/// the overlay while the mesh plays.
-pub fn strip_transparent_overlay_chrome(window: &WebviewWindow) {
-    let Ok(hwnd) = hwnd_of(window) else {
-        return;
-    };
-    let _ = window.set_shadow(false);
-    strip_class_drop_shadow(hwnd);
     unsafe {
-        let corner = DWMWCP_DONOTROUND;
+        // Let caption use the same system backdrop as the client (Win11 Settings-like).
+        let caption = DWMWA_COLOR_NONE;
         let _ = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &corner as *const _ as *const c_void,
-            std::mem::size_of_val(&corner) as u32,
+            DWMWA_CAPTION_COLOR,
+            &caption as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
         );
-        let border = DWMWA_COLOR_NONE;
+        // COLORREF 0x00BBGGRR
+        let text: u32 = if is_dark {
+            0x00_F5_F4_F4
+        } else {
+            0x00_1E_1C_1C
+        };
         let _ = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_BORDER_COLOR,
-            &border as *const u32 as *const c_void,
+            DWMWA_TEXT_COLOR,
+            &text as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
         );
         let thickness: u32 = 0;
@@ -309,45 +285,302 @@ pub fn strip_transparent_overlay_chrome(window: &WebviewWindow) {
             &thickness as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
         );
-        let backdrop = DWMSBT_NONE;
+    }
+
+    clear_webview_fill(window);
+    Ok(())
+}
+
+/// Dock glass strip.
+///
+/// - Radius 0–8: SWCA acrylic + system DWM corners.
+/// - Radius ≥ 9: Windows.UI.Composition HostBackdrop under WebView2 with
+///   RectangleClip radii (pixel-true capsule; same system backdrop sampling).
+pub fn apply_dock_glass_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    let hwnd = hwnd_of(window)?;
+    prepare_hwnd_for_system_backdrop(hwnd);
+    clear_webview_fill(window);
+    crate::win32::dock_comp::remember_glass_window(window);
+
+    let radius = dock_corner_radius_px();
+    apply_dock_glass_frost(window, hwnd, dark, radius)?;
+    let _ = window.set_shadow(false);
+    strip_class_drop_shadow(hwnd);
+
+    let win = window.clone();
+    let dark_c = dark;
+    // Two deferred refreshes is enough for WebView2 reparent; the old 5-hit
+    // loop stacked with hover resize and could stall the UI thread.
+    std::thread::spawn(move || {
+        for ms in [60_u64, 220] {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let w = win.clone();
+            let dark_inner = dark_c;
+            let w2 = w.clone();
+            let _ = w.run_on_main_thread(move || {
+                if let Ok(h) = hwnd_of(&w2) {
+                    let r = dock_corner_radius_px();
+                    let _ = apply_dock_glass_frost(&w2, h, dark_inner, r);
+                    let _ = w2.set_shadow(false);
+                    strip_class_drop_shadow(h);
+                    clear_webview_fill(&w2);
+                }
+            });
+        }
+    });
+    clear_webview_fill(window);
+    Ok(())
+}
+
+const DOCK_NC_SUBCLASS_ID: usize = 0xD0C4_0001;
+/// DWMWA_NCRENDERING_POLICY / DWMNCRP_DISABLED (not always in windows crate).
+use windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE;
+const DWMWA_NCRENDERING_POLICY: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(2);
+const DWMNCRP_DISABLED: u32 = 1;
+
+type SubclassProc = unsafe extern "system" fn(
+    HWND,
+    u32,
+    windows::Win32::Foundation::WPARAM,
+    windows::Win32::Foundation::LPARAM,
+    usize,
+    usize,
+) -> windows::Win32::Foundation::LRESULT;
+type SetWindowSubclassFn = unsafe extern "system" fn(HWND, SubclassProc, usize, usize) -> BOOL;
+type RemoveWindowSubclassFn = unsafe extern "system" fn(HWND, SubclassProc, usize) -> BOOL;
+type DefSubclassProcFn = unsafe extern "system" fn(
+    HWND,
+    u32,
+    windows::Win32::Foundation::WPARAM,
+    windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT;
+
+struct ComctlSubclass {
+    set: SetWindowSubclassFn,
+    remove: RemoveWindowSubclassFn,
+    def: DefSubclassProcFn,
+}
+
+fn comctl_subclass() -> Option<&'static ComctlSubclass> {
+    static CELL: std::sync::OnceLock<Option<ComctlSubclass>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| unsafe {
+        let module = LoadLibraryA(s!("comctl32.dll")).ok()?;
+        let set = GetProcAddress(module, s!("SetWindowSubclass"))?;
+        let remove = GetProcAddress(module, s!("RemoveWindowSubclass"))?;
+        let def = GetProcAddress(module, s!("DefSubclassProc"))?;
+        Some(ComctlSubclass {
+            set: std::mem::transmute(set),
+            remove: std::mem::transmute(remove),
+            def: std::mem::transmute(def),
+        })
+    })
+    .as_ref()
+}
+
+unsafe extern "system" fn dock_nc_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_MOUSEACTIVATE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, HTCLIENT,
+        MA_NOACTIVATE,
+    };
+    if msg == WM_NCCALCSIZE && wparam.0 != 0 {
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    if msg == WM_NCPAINT {
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    // Activation must not paint a caption strip into headroom (right-click menu).
+    if msg == WM_NCACTIVATE {
+        return windows::Win32::Foundation::LRESULT(1);
+    }
+    if msg == WM_NCHITTEST {
+        return windows::Win32::Foundation::LRESULT(HTCLIENT as isize);
+    }
+    if msg == WM_MOUSEACTIVATE {
+        return windows::Win32::Foundation::LRESULT(MA_NOACTIVATE as isize);
+    }
+    if let Some(api) = comctl_subclass() {
+        return (api.def)(hwnd, msg, wparam, lparam);
+    }
+    windows::Win32::Foundation::LRESULT(0)
+}
+
+fn dock_root_for_strip(hwnd: HWND) -> HWND {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
+    unsafe {
+        let root = GetAncestor(hwnd, GA_ROOT);
+        if root.0.is_null() {
+            hwnd
+        } else {
+            root
+        }
+    }
+}
+
+/// Drop caption chrome + keep a comctl subclass first in the chain so Win11
+/// cannot paint a light title-bar strip into dock headroom.
+pub fn strip_dock_native_titlebar(hwnd: HWND) {
+    use windows::Win32::Graphics::Gdi::{RedrawWindow, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_BORDER, WS_CAPTION,
+        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    };
+    unsafe {
+        let hwnd = dock_root_for_strip(hwnd);
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let kill = WS_CAPTION.0
+            | WS_THICKFRAME.0
+            | WS_SYSMENU.0
+            | WS_MINIMIZEBOX.0
+            | WS_MAXIMIZEBOX.0
+            | WS_BORDER.0;
+        // Force popup frame — overlapped styles reintroduce a Win11 caption band.
+        let new_style = (style & !kill) | WS_POPUP.0;
+        if new_style != style {
+            SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
+        }
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let new_ex = (ex | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) & !WS_EX_APPWINDOW.0;
+        if new_ex != ex {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex as i32);
+        }
+        // Remove+re-add so we stay the *newest* subclass after WebView2/Tao hooks.
+        if let Some(api) = comctl_subclass() {
+            let _ = (api.remove)(hwnd, dock_nc_subclass_proc, DOCK_NC_SUBCLASS_ID);
+            let _ = (api.set)(hwnd, dock_nc_subclass_proc, DOCK_NC_SUBCLASS_ID, 0);
+        }
+        let policy = DWMNCRP_DISABLED;
         let _ = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            &backdrop as *const _ as *const c_void,
-            std::mem::size_of_val(&backdrop) as u32,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW,
+        );
+        let none = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            &none as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TEXT_COLOR,
+            &none as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &none as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let thickness: u32 = 0;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            &thickness as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
         );
     }
-    // DWM sometimes reapplies chrome on first show — poke again shortly.
-    // IMPORTANT: only touch Win32 HWND attrs off-thread. Never call Tauri
-    // `set_shadow` / `set_size` here — that races softbuffer on the UI thread
-    // and can panic with `assertion failed: !bitmap.is_null()`.
-    let hwnd_raw = hwnd.0 as isize;
+}
+
+/// Tauri may depend on a newer `windows` crate — accept raw HWND bits.
+pub fn strip_dock_native_titlebar_raw(hwnd_raw: isize) {
+    strip_dock_native_titlebar(HWND(hwnd_raw as _));
+}
+
+/// WebView2 often re-subclasses after first show — re-strip on a short schedule
+/// so the light caption bar never sticks until the user clicks a few times.
+pub fn schedule_dock_titlebar_strip(hwnd_raw: isize) {
+    strip_dock_native_titlebar_raw(hwnd_raw);
     std::thread::spawn(move || {
-        for ms in [30_u64, 80, 160] {
+        for ms in [16_u64, 50, 120, 300, 700, 1500] {
             std::thread::sleep(std::time::Duration::from_millis(ms));
-            let h = HWND(hwnd_raw as *mut _);
-            strip_class_drop_shadow(h);
-            unsafe {
-                let border = DWMWA_COLOR_NONE;
-                let _ = DwmSetWindowAttribute(
-                    h,
-                    DWMWA_BORDER_COLOR,
-                    &border as *const u32 as *const c_void,
-                    std::mem::size_of::<u32>() as u32,
-                );
-                let thickness: u32 = 0;
-                let _ = DwmSetWindowAttribute(
-                    h,
-                    DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
-                    &thickness as *const u32 as *const c_void,
-                    std::mem::size_of::<u32>() as u32,
-                );
-            }
+            strip_dock_native_titlebar_raw(hwnd_raw);
         }
     });
 }
 
+/// Strip dock + dock-glass (and clear titles). Call when menus open / focus shifts.
+pub fn strip_dock_windows(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    for label in ["dock", "dock-glass"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.set_decorations(false);
+            let _ = w.set_title("");
+            if let Ok(hwnd) = w.hwnd() {
+                schedule_dock_titlebar_strip(hwnd.0 as isize);
+            }
+        }
+    }
+}
+
+/// Mild chrome for frameless menus/popups. Do **not** reuse the dock NC nuke
+/// (`DWMNCRP_DISABLED` / forced `WS_POPUP`) — that leaves a light window frame
+/// beside the dark menu shell.
+pub fn strip_frameless_popup_titlebar(hwnd_raw: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    };
+    let hwnd = dock_root_for_strip(HWND(hwnd_raw as _));
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let kill =
+            WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
+        let new_style = style & !kill;
+        if new_style != style {
+            SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND::default(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+    apply_mica_chrome(hwnd, None);
+    let thickness: u32 = 0;
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            &thickness as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+}
+
 fn apply_dock_glass_chrome(hwnd: HWND, dark: Option<bool>, corner_radius_logical: u32) {
+    strip_dock_native_titlebar(hwnd);
     unsafe {
         if let Some(d) = dark {
             let v: u32 = u32::from(d);
@@ -358,7 +591,6 @@ fn apply_dock_glass_chrome(hwnd: HWND, dark: Option<bool>, corner_radius_logical
                 std::mem::size_of::<u32>() as u32,
             );
         }
-        // Map slider → system SWCA-compatible corner sizes (only API that rounds acrylic).
         let corner = dwm_corner_for_radius(corner_radius_logical);
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -366,35 +598,53 @@ fn apply_dock_glass_chrome(hwnd: HWND, dark: Option<bool>, corner_radius_logical
             &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
             std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
-        let border = DWMWA_COLOR_NONE;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border as *const u32 as *const c_void,
-            std::mem::size_of::<u32>() as u32,
-        );
-        // Hide the 1px visible frame border that reads as a dark top hairline.
-        let thickness: u32 = 0;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
-            &thickness as *const u32 as *const c_void,
-            std::mem::size_of::<u32>() as u32,
-        );
     }
 }
 
 fn dwm_corner_for_radius(radius_logical: u32) -> DWM_WINDOW_CORNER_PREFERENCE {
     match radius_logical {
         0 => DWMWCP_DONOTROUND,
-        1..=14 => DWMWCP_ROUNDSMALL,
-        _ => DWMWCP_ROUND,
+        1..=4 => DWMWCP_ROUNDSMALL,
+        5..=8 => DWMWCP_ROUND,
+        // Composition owns silhouette past system ROUND.
+        _ => DWMWCP_DONOTROUND,
     }
 }
 
-/// Re-apply DWM corner preference after place/resize (SWCA path).
-pub fn apply_dock_glass_corners_pub(hwnd: HWND, corner_radius_logical: u32) {
-    apply_dock_glass_chrome(hwnd, None, corner_radius_logical);
+fn apply_dock_glass_frost(
+    window: &WebviewWindow,
+    hwnd: HWND,
+    dark: Option<bool>,
+    corner_radius_logical: u32,
+) -> Result<(), String> {
+    let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
+    apply_dock_glass_chrome(hwnd, dark, r);
+    clear_window_region(hwnd);
+    disable_blur_behind(hwnd);
+
+    if crate::win32::dock_comp::uses_composition(r) {
+        // Drop SWCA acrylic slab only — HostBackdrop accent is primed inside dock_comp.
+        // Do NOT leave ACCENT_DISABLED on: that turns HostBackdrop into a black fill.
+        disable_system_backdrop(hwnd);
+        clear_webview_fill(window);
+        let win = window.clone();
+        let dark_c = dark;
+        let win2 = win.clone();
+        let _ = win.run_on_main_thread(move || {
+            if let Ok(h) = hwnd_of(&win2) {
+                if let Err(e) = crate::win32::dock_comp::attach_or_update(h, r, dark_c) {
+                    eprintln!("[dock-comp] attach failed: {e}");
+                    let _ = apply_swca_acrylic(h, dark_c);
+                    apply_dock_glass_chrome(h, dark_c, 8);
+                }
+            }
+        });
+        return Ok(());
+    }
+
+    crate::win32::dock_comp::detach();
+    apply_swca_acrylic(hwnd, dark)?;
+    Ok(())
 }
 
 fn strip_class_drop_shadow(hwnd: HWND) {
@@ -442,22 +692,37 @@ fn dock_corner_radius_px() -> u32 {
                 .and_then(|x| x.as_u64())
                 .or_else(|| v.get("corner_radius_px").and_then(|x| x.as_u64()))
         })
-        .map(|n| n.min(28) as u32)
-        .unwrap_or(12)
+        .map(|n| n.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX as u64) as u32)
+        .unwrap_or(20)
 }
 
-/// Kept for place/resize hooks — clears region and refreshes DWM corners.
-pub fn apply_dock_glass_round_frost_pub(hwnd: HWND, corner_radius_logical: u32) {
+/// Place/resize hook — refreshes Composition clip or DWM corners.
+pub fn apply_dock_glass_round_frost_sized_pub(
+    hwnd: HWND,
+    corner_radius_logical: u32,
+    size_px: Option<(f32, f32)>,
+) {
+    let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
+    apply_dock_glass_chrome(hwnd, None, r);
     clear_window_region(hwnd);
-    apply_dock_glass_corners_pub(hwnd, corner_radius_logical);
+    disable_blur_behind(hwnd);
+    if crate::win32::dock_comp::uses_composition(r) {
+        // Layout-only refresh: never ACCENT_DISABLED (that blacks out HostBackdrop).
+        disable_system_backdrop(hwnd);
+        let _ = crate::win32::dock_comp::sync_attach_or_update_sized(hwnd, size_px, r, None);
+    } else {
+        crate::win32::dock_comp::detach();
+    }
 }
 
 /// Dock icons layer: no SWCA — a sibling `dock-glass` window owns the material
-/// on the 60px strip so magnification headroom stays fully clear.
+/// on the chrome strip so magnification headroom stays fully clear.
 pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
     clear_vibrancy(window);
     let hwnd = hwnd_of(window)?;
     disable_system_backdrop(hwnd);
+    let _ = window.set_decorations(false);
+    strip_dock_native_titlebar(hwnd);
     unsafe {
         if let Some(d) = dark {
             let v: u32 = u32::from(d);
@@ -474,13 +739,6 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
             DWMWA_WINDOW_CORNER_PREFERENCE,
             &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
             std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
-        );
-        let border = DWMWA_COLOR_NONE;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border as *const u32 as *const c_void,
-            std::mem::size_of::<u32>() as u32,
         );
     }
     let _ = window.set_shadow(false);
@@ -500,6 +758,12 @@ pub fn apply_effect(
         "dock" => return apply_dock_icons_layer(window, dark),
         // Glass strip: acrylic without rounded DWM chrome/shadow.
         "dock-glass" => return apply_dock_glass_layer(window, dark),
+        // Decorated settings: system Mica on title bar + left nav (theme-aligned).
+        "settings" | "dock-icon-editor" => {
+            if matches!(kind, WindowMaterial::MicaAlt) {
+                return apply_settings_frame_mica(window, dark);
+            }
+        }
         _ => {}
     }
 

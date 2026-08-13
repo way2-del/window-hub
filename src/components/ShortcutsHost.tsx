@@ -15,7 +15,6 @@ import {
   hostTipPointerProps,
   showChromeHoverTip,
 } from "../chromeHoverTip";
-import { elementScreenRect } from "../genieAnchor";
 import {
   moveIdInOrder,
   pickDropTarget,
@@ -339,7 +338,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     };
   }, []);
 
-  // island-prefs：Host 只 listen 一次，广播到各 iframe
+  // island-prefs：Host 只 listen 一次，广播到各 iframe；启动时先推一版当前 prefs
   useEffect(() => {
     let cancelled = false;
     const unsubs: Array<() => void> = [];
@@ -350,16 +349,24 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
         (el as HTMLIFrameElement).contentWindow?.postMessage(msg, "*");
       });
     };
+    const pushPrefs = (prefs: Record<string, unknown>) => {
+      broadcast({
+        channel: WH_SHORTCUTS_EVT,
+        type: "island-prefs",
+        prefs,
+      });
+    };
+    void invoke<Record<string, unknown>>("get_island_prefs")
+      .then((prefs) => {
+        if (!cancelled) pushPrefs(prefs ?? {});
+      })
+      .catch(() => undefined);
     void (async () => {
       try {
         unsubs.push(
           await listen<Record<string, unknown>>("island-prefs", (ev) => {
             if (cancelled) return;
-            broadcast({
-              channel: WH_SHORTCUTS_EVT,
-              type: "island-prefs",
-              prefs: ev.payload ?? {},
-            });
+            pushPrefs(ev.payload ?? {});
           }),
         );
       } catch {
@@ -422,39 +429,11 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     openingRef.current = true;
     try {
       const { x, y } = await popupAnchor(el);
-      const anchor = await elementScreenRect(el);
-      const slotId = `plugin:${pluginId}`;
-      const shown = await invoke<boolean>("genie_show_popup", {
-        slotId,
-        windowLabel: "plugin-popup",
-        anchor,
-        x,
-        y,
-      }).catch(() => false);
-      if (!shown) {
-        await invoke("open_plugin_popup", { pluginId, x, y });
-      }
+      await invoke("open_plugin_popup", { pluginId, x, y });
     } catch (err) {
       console.error("[ShortcutsHost] open popup failed", err);
     } finally {
       openingRef.current = false;
-    }
-  }, []);
-
-  const closePopupWithGenie = useCallback(async (pluginId: string | null, anchorKey?: string) => {
-    const el = anchorKey ? anchorRefs.current.get(anchorKey) : null;
-    const anchor = el
-      ? await elementScreenRect(el).catch(() => ({ x: 0, y: 0, w: 12, h: 12 }))
-      : { x: 0, y: 0, w: 12, h: 12 };
-    const slotId = pluginId ? `plugin:${pluginId}` : "plugin:unknown";
-    try {
-      await invoke("genie_hide_popup", {
-        slotId,
-        windowLabel: "plugin-popup",
-        anchor,
-      });
-    } catch {
-      await invoke("close_plugin_popup").catch(() => undefined);
     }
   }, []);
 
@@ -753,7 +732,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
                   if (reorderMode) return;
                   clearHoverTimer();
                   if (popupOpenRef.current && popupPluginId === p.pluginId) {
-                    void closePopupWithGenie(p.pluginId, chipKey);
+                    void invoke("close_plugin_popup").catch(() => undefined);
                     return;
                   }
                   void openPopupAt(p.pluginId, chipKey);

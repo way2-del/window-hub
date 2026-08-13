@@ -12,7 +12,7 @@ import WifiAuthPopupApp from "./WifiAuthPopupApp";
 import PluginPopupHost from "./components/PluginPopupHost";
 import DockApp from "./DockApp";
 import DockGlassApp from "./DockGlassApp";
-import GenieOverlayApp from "./GenieOverlayApp";
+import DockIconEditorApp from "./DockIconEditorApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
@@ -31,7 +31,8 @@ declare global {
     __WH_IS_PLUGIN_POPUP__?: boolean;
     __WH_IS_DOCK__?: boolean;
     __WH_IS_DOCK_GLASS__?: boolean;
-    __WH_IS_GENIE_OVERLAY__?: boolean;
+    __WH_IS_DOCK_ICON_EDITOR__?: boolean;
+    __WH_DOCK_ICON_EDITOR_FOCUS__?: string;
     __WH_PLUGIN_ID__?: string;
   }
 }
@@ -48,10 +49,10 @@ type WindowKind =
   | "plugin-popup"
   | "dock"
   | "dock-glass"
-  | "genie-overlay";
+  | "dock-icon-editor";
 
 function resolveWindowKind(): WindowKind {
-  if (window.__WH_IS_GENIE_OVERLAY__ === true) return "genie-overlay";
+  if (window.__WH_IS_DOCK_ICON_EDITOR__ === true) return "dock-icon-editor";
   if (window.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
   if (window.__WH_IS_DOCK__ === true) return "dock";
   if (window.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
@@ -64,7 +65,7 @@ function resolveWindowKind(): WindowKind {
   if (window.__WH_IS_SETTINGS__ === true) return "settings";
   try {
     const label = getCurrentWindow().label;
-    if (label === "genie-overlay") return "genie-overlay";
+    if (label === "dock-icon-editor") return "dock-icon-editor";
     if (label === "dock-glass") return "dock-glass";
     if (label === "dock") return "dock";
     if (label === "plugin-popup") return "plugin-popup";
@@ -79,7 +80,7 @@ function resolveWindowKind(): WindowKind {
     /* ignore */
   }
   const q = new URLSearchParams(window.location.search).get("window");
-  if (q === "genie-overlay") return "genie-overlay";
+  if (q === "dock-icon-editor") return "dock-icon-editor";
   if (q === "dock-glass") return "dock-glass";
   if (q === "dock") return "dock";
   if (q === "plugin-popup") return "plugin-popup";
@@ -95,7 +96,7 @@ function resolveWindowKind(): WindowKind {
 
 const kind = resolveWindowKind();
 document.documentElement.style.background = "transparent";
-document.body.classList.add(
+const bodyClass =
   kind === "settings"
     ? "is-settings"
     : kind === "tray"
@@ -112,12 +113,16 @@ document.body.classList.add(
                 ? "is-wifi-auth-popup"
                 : kind === "plugin-popup"
                   ? "is-plugin-popup"
-                  : kind === "dock" || kind === "dock-glass"
-                    ? "is-dock"
-                    : kind === "genie-overlay"
-                      ? "is-genie-overlay"
-                      : "is-island",
-);
+                  : kind === "dock-icon-editor"
+                    ? ["is-dock-icon-editor", "is-settings"]
+                    : kind === "dock" || kind === "dock-glass"
+                      ? "is-dock"
+                      : "is-island";
+if (Array.isArray(bodyClass)) {
+  document.body.classList.add(...bodyClass);
+} else {
+  document.body.classList.add(bodyClass);
+}
 document.body.style.background = "transparent";
 document.title =
   kind === "settings"
@@ -138,17 +143,19 @@ document.title =
                   ? "插件"
                   : kind === "dock-glass"
                     ? "Dock Glass"
-                    : kind === "dock"
-                      ? "Dock"
-                      : kind === "genie-overlay"
-                        ? "Genie"
+                    : kind === "dock-icon-editor"
+                      ? "修改图标"
+                      : kind === "dock"
+                        ? "Dock"
                         : "灵动岛";
 
 const root = document.getElementById("root") as HTMLElement;
-if (kind === "settings") {
+if (kind === "settings" || kind === "dock-icon-editor") {
   applyGlassCss({ kind: "mica-alt", dark: true, acrylicAlpha: 125 });
   root.innerHTML =
-    '<div style="padding:24px;color:var(--glass-fg,#f4f4f5);font-family:Segoe UI,sans-serif;background:var(--glass-panel-bg,rgba(32,32,34,0.55));min-height:100vh">正在加载设置…</div>';
+    kind === "dock-icon-editor"
+      ? '<div style="padding:24px;color:#f4f4f5;font-family:Segoe UI,sans-serif;background:#1c1c1e;min-height:100vh">正在加载修改图标…</div>'
+      : '<div style="padding:24px;color:var(--glass-fg,#f4f4f5);font-family:Segoe UI,sans-serif;background:var(--glass-panel-bg,rgba(32,32,34,0.55));min-height:100vh">正在加载设置…</div>';
 }
 if (
   kind === "dock" ||
@@ -179,12 +186,12 @@ ReactDOM.createRoot(root).render(
       <WifiAuthPopupApp />
     ) : kind === "plugin-popup" ? (
       <PluginPopupHost />
+    ) : kind === "dock-icon-editor" ? (
+      <DockIconEditorApp />
     ) : kind === "dock" ? (
       <DockApp />
     ) : kind === "dock-glass" ? (
       <DockGlassApp />
-    ) : kind === "genie-overlay" ? (
-      <GenieOverlayApp />
     ) : (
       <App />
     )}

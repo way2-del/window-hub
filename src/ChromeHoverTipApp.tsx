@@ -13,6 +13,7 @@ type TipPayload = {
   lines: string[];
   x: number;
   y: number;
+  placement?: "above" | "below" | string | null;
 };
 
 function normalizeTip(p: Partial<TipPayload> | null | undefined): TipPayload | null {
@@ -21,6 +22,7 @@ function normalizeTip(p: Partial<TipPayload> | null | undefined): TipPayload | n
     lines: p.lines.map(String).filter(Boolean).slice(0, 8),
     x: Number(p.x) || 0,
     y: Number(p.y) || 0,
+    placement: p.placement === "above" ? "above" : "below",
   };
 }
 
@@ -55,10 +57,13 @@ async function fitTipWindow(box: HTMLElement, tip: TipPayload) {
   const rect = box.getBoundingClientRect();
   const w = snapCssPx(Math.max(48, rect.width));
   const h = snapCssPx(Math.max(28, rect.height));
+  const above = tip.placement === "above";
+  // above: tip.y is the bottom edge of the tip window; below: tip.y is the top.
+  const top = above ? Math.max(0, tip.y - h) : Math.max(0, tip.y);
 
   const win = getCurrentWindow();
   await win.setSize(new LogicalSize(w, h));
-  await win.setPosition(new LogicalPosition(Math.max(4, tip.x - w / 2), Math.max(0, tip.y)));
+  await win.setPosition(new LogicalPosition(Math.max(4, tip.x - w / 2), top));
   await win.setIgnoreCursorEvents(true);
   await invoke("apply_window_effect", {}).catch(() => undefined);
 

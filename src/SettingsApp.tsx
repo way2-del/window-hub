@@ -103,7 +103,7 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
       2.5,
       Math.max(1, Number.isFinite(Number(dp?.magnification)) ? Number(dp?.magnification) : 1.6),
     ),
-    cornerRadiusPx: Math.min(28, Math.max(0, Number(dp?.cornerRadiusPx) || 12)),
+    cornerRadiusPx: Math.min(30, Math.max(0, Number(dp?.cornerRadiusPx) || 20)),
     hiddenItemIds: Array.isArray(dp?.hiddenItemIds) ? dp.hiddenItemIds.map(String) : [],
   };
 }
@@ -1215,8 +1215,8 @@ export default function SettingsApp() {
             <section className="settings-card">
               <h2>窗口材质</h2>
               <p className="card-desc">
-                设置窗、托盘弹窗、插件弹窗、Dock 统一使用系统磨砂透底（可透出壁纸）。其他
-                DWMBlurGlass 材质暂未开放。
+                设置窗标题栏、左侧与右/下留白共用系统 Mica（随主题深浅）；右侧内容为圆角实色板。托盘 /
+                插件弹窗、Dock 仍为磨砂透底。其他 DWMBlurGlass 材质暂未开放。
               </p>
               <div className="mode-list">
                 <button
@@ -1435,14 +1435,14 @@ export default function SettingsApp() {
                   <span className="pref-row-text">
                     <span className="pref-row-label">栏身圆角</span>
                     <span className="pref-row-desc">
-                      SWCA 毛玻璃圆角：0 直角 · 1–14 小圆角 · 15–28 大圆角（系统档，与材质同步）
+                      1–8 系统 DWM 圆角；9–30 Composition 原生圆角（HostBackdrop，拉满 ≈ 胶囊）
                     </span>
                   </span>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                     <input
                       type="range"
                       min={0}
-                      max={28}
+                      max={30}
                       step={1}
                       value={dockPrefs.cornerRadiusPx}
                       disabled={!dockPrefs.enabled || dockBusy}
@@ -1453,7 +1453,7 @@ export default function SettingsApp() {
                       }}
                       onPointerUp={(e) => {
                         const n = Math.min(
-                          28,
+                          30,
                           Math.max(0, Number((e.target as HTMLInputElement).value) || 0),
                         );
                         void persistDockPrefs({ cornerRadiusPx: n });

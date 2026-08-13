@@ -48,9 +48,10 @@ export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean) {
 
   if (dark) {
     root.style.setProperty("--glass-panel-bg", "rgba(28, 28, 30, 0.48)");
+    root.style.setProperty("--glass-main-bg", "#1c1c1e");
     root.style.setProperty("--glass-fg", "#f4f4f5");
     root.style.setProperty("--glass-fg-muted", "#a1a1aa");
-    root.style.setProperty("--glass-side", "rgba(255, 255, 255, 0.05)");
+    root.style.setProperty("--glass-side", "transparent");
     root.style.setProperty("--glass-card", "rgba(255, 255, 255, 0.07)");
     root.style.setProperty("--glass-border", "rgba(255, 255, 255, 0.1)");
     root.style.setProperty("--glass-input", "rgba(0, 0, 0, 0.22)");
@@ -58,13 +59,14 @@ export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean) {
     root.style.setProperty("--glass-btn-border", "rgba(255, 255, 255, 0.12)");
   } else {
     root.style.setProperty("--glass-panel-bg", "rgba(255, 255, 255, 0.52)");
+    root.style.setProperty("--glass-main-bg", "#f2f2f7");
     root.style.setProperty("--glass-fg", "#1c1c1e");
     root.style.setProperty("--glass-fg-muted", "#3f3f46");
-    root.style.setProperty("--glass-side", "rgba(255, 255, 255, 0.28)");
-    root.style.setProperty("--glass-card", "rgba(255, 255, 255, 0.36)");
+    root.style.setProperty("--glass-side", "transparent");
+    root.style.setProperty("--glass-card", "rgba(255, 255, 255, 0.85)");
     root.style.setProperty("--glass-border", "rgba(0, 0, 0, 0.1)");
-    root.style.setProperty("--glass-input", "rgba(255, 255, 255, 0.5)");
-    root.style.setProperty("--glass-btn", "rgba(255, 255, 255, 0.55)");
+    root.style.setProperty("--glass-input", "rgba(255, 255, 255, 0.72)");
+    root.style.setProperty("--glass-btn", "rgba(255, 255, 255, 0.9)");
     root.style.setProperty("--glass-btn-border", "rgba(0, 0, 0, 0.14)");
   }
 }

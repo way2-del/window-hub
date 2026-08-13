@@ -272,7 +272,7 @@ pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, S
             return Err("Invalid window".into());
         }
 
-        // Genie / full-frame: capture on-screen window chrome+client (matches GetWindowRect).
+        // Full-frame: capture on-screen window chrome+client (matches GetWindowRect).
         if roi.use_full || roi.w <= 0 || roi.h <= 0 {
             let mut rect = RECT::default();
             GetWindowRect(hwnd, &mut rect).map_err(|e| format!("GetWindowRect: {e}"))?;
@@ -326,136 +326,6 @@ pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, S
         let bgra = bgra.ok_or_else(|| "GetDIBits failed".to_string())?;
         encode_jpeg_bgra(&bgra, full_w, full_h, roi)
     }
-}
-
-/// Genie suck/expand freeze — visible frame only (no DWM shadow margins).
-/// Uses PrintWindow + crop to DWMWA_EXTENDED_FRAME_BOUNDS, encoded as PNG with alpha
-/// so transparent chrome does not become a black JPEG halo.
-#[cfg(windows)]
-pub fn capture_window_jpeg_genie(hwnd_raw: isize) -> Result<CapturedFrame, String> {
-    use std::ffi::c_void;
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
-    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindow};
-
-    let hwnd = HWND(hwnd_raw as *mut _);
-    unsafe {
-        if !IsWindow(hwnd).as_bool() {
-            return Err("Invalid window".into());
-        }
-        if IsIconic(hwnd).as_bool() {
-            return Err("window iconic — refuse screen-leak capture".into());
-        }
-
-        let mut outer = RECT::default();
-        GetWindowRect(hwnd, &mut outer).map_err(|e| format!("GetWindowRect: {e}"))?;
-        let outer_w = (outer.right - outer.left).max(1);
-        let outer_h = (outer.bottom - outer.top).max(1);
-
-        // Visible rectangle (excludes invisible resize/shadow margins that PrintWindow
-        // fills with black — those became the thick black "frame" around the freeze).
-        let mut visible = outer;
-        let _ = DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut visible as *mut RECT as *mut c_void,
-            std::mem::size_of::<RECT>() as u32,
-        );
-        let vis_w = (visible.right - visible.left).max(1);
-        let vis_h = (visible.bottom - visible.top).max(1);
-        if vis_w < 80 || vis_h < 60 {
-            return Err("window too small for genie".into());
-        }
-
-        let mut bgra = capture_printwindow_bgra(hwnd, outer_w, outer_h).filter(|b| !bgra_is_blank(b));
-        if bgra.is_none() {
-            bgra = capture_windowdc_bgra(hwnd, outer_w, outer_h).filter(|b| !bgra_is_blank(b));
-        }
-        let bgra = bgra.ok_or_else(|| "genie window capture blank".to_string())?;
-
-        let crop_x = (visible.left - outer.left).clamp(0, outer_w - 1);
-        let crop_y = (visible.top - outer.top).clamp(0, outer_h - 1);
-        let crop_w = vis_w.min(outer_w - crop_x).max(1);
-        let crop_h = vis_h.min(outer_h - crop_y).max(1);
-
-        encode_png_bgra_genie(&bgra, outer_w, outer_h, crop_x, crop_y, crop_w, crop_h)
-    }
-}
-
-#[cfg(windows)]
-fn encode_png_bgra_genie(
-    bgra: &[u8],
-    full_w: i32,
-    full_h: i32,
-    crop_x: i32,
-    crop_y: i32,
-    crop_w: i32,
-    crop_h: i32,
-) -> Result<CapturedFrame, String> {
-    use image::imageops::FilterType;
-    use image::{ImageBuffer, Rgba};
-    use std::io::Cursor;
-
-    let fw = full_w as usize;
-    let cx = crop_x as usize;
-    let cy = crop_y as usize;
-    let cw = crop_w as usize;
-    let ch = crop_h as usize;
-
-    let mut rgba = vec![0u8; cw * ch * 4];
-    for row in 0..ch {
-        let src_y = cy + row;
-        if src_y >= full_h as usize {
-            break;
-        }
-        for col in 0..cw {
-            let src_x = cx + col;
-            if src_x >= fw {
-                break;
-            }
-            let si = (src_y * fw + src_x) * 4;
-            let di = (row * cw + col) * 4;
-            let b = bgra[si];
-            let g = bgra[si + 1];
-            let r = bgra[si + 2];
-            let a = bgra[si + 3];
-            // PrintWindow often writes 0 alpha for opaque pixels — treat as opaque.
-            let a = if a == 0 && (r | g | b) != 0 { 255 } else { a };
-            rgba[di] = r;
-            rgba[di + 1] = g;
-            rgba[di + 2] = b;
-            rgba[di + 3] = a;
-        }
-    }
-
-    let img: ImageBuffer<Rgba<u8>, _> =
-        ImageBuffer::from_raw(cw as u32, ch as u32, rgba).ok_or("ImageBuffer failed")?;
-
-    const MAX_EDGE: u32 = 1440;
-    let (ow, oh) = img.dimensions();
-    let img = if ow.max(oh) > MAX_EDGE {
-        let scale = MAX_EDGE as f32 / ow.max(oh) as f32;
-        let nw = ((ow as f32) * scale).round().max(1.0) as u32;
-        let nh = ((oh as f32) * scale).round().max(1.0) as u32;
-        image::imageops::resize(&img, nw, nh, FilterType::Triangle)
-    } else {
-        img
-    };
-
-    let mut cursor = Cursor::new(Vec::new());
-    img.write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|e| format!("PNG encode: {e}"))?;
-
-    Ok(CapturedFrame {
-        jpeg: cursor.into_inner(),
-        width: img.width(),
-        height: img.height(),
-    })
-}
-
-#[cfg(not(windows))]
-pub fn capture_window_jpeg_genie(_hwnd_raw: isize) -> Result<CapturedFrame, String> {
-    Err("Windows only".into())
 }
 
 #[cfg(not(windows))]

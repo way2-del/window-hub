@@ -4,14 +4,14 @@ pub mod ambient;
 pub mod appbar;
 #[cfg(windows)]
 pub mod blur_glass;
+#[cfg(windows)]
+pub mod dock_comp;
 pub mod capture;
 pub mod enum_windows;
 pub mod fullscreen;
 pub mod input;
 pub mod material;
 pub mod park;
-#[cfg(windows)]
-pub mod minimize_hook;
 pub mod status_menu;
 pub mod switcher;
 pub mod topmost;

@@ -21,5 +21,5 @@ export {
 export { islandNotifyBus } from "./islandNotify";
 export { hubNotify } from "./notifyApi";
 export { listPanelProviders, isBuiltinPanel } from "./panelProviders";
-export { listBarResidentProviders } from "./islandSlots";
+export { listBarResidentProviders, resolveIslandBarAdaptive, measureIslandBarLabelWidth } from "./islandSlots";
 export { bootstrapPlugins, subscribeInstalledPlugins } from "./bootstrap";

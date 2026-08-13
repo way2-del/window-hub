@@ -228,11 +228,6 @@ pub fn run() {
             app.manage(initial_material_state());
             app.manage(WindowsService::start(app.handle().clone()));
             app.manage(crate::dock::DockVisibility::new());
-            app.manage(crate::dock::genie::GenieState::default());
-            crate::dock::genie::spawn_foreground_tracker(app.handle().clone());
-            crate::dock::genie::prewarm_overlay(app.handle());
-            #[cfg(windows)]
-            crate::win32::minimize_hook::spawn_minimize_interceptor(app.handle().clone());
             let pins = ShortcutsPinStore::new();
             pins.load_all_from_db();
             app.manage(pins);
@@ -273,6 +268,16 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Focused(focused) => {
+                    // Dock: re-strip native caption residue on activate (Win11 paints
+                    // a light bar into headroom on click / long-press otherwise).
+                    if *focused && (window.label() == "dock" || window.label() == "dock-glass") {
+                        #[cfg(windows)]
+                        if let Ok(hwnd) = window.hwnd() {
+                            crate::win32::blur_glass::schedule_dock_titlebar_strip(
+                                hwnd.0 as isize,
+                            );
+                        }
+                    }
                     // 托盘 / 插件 / 状态菜单弹窗失焦即关（WebView 侧 focus 事件不总是可靠）
                     if (window.label() == "tray-popup"
                         || window.label() == "plugin-popup"
@@ -456,6 +461,9 @@ pub fn run() {
             dock::set_dock_prefs,
             dock::import_dockico_ini,
             dock::pick_dockico_file,
+            dock::pick_dock_icon_file,
+            dock::open_dock_icon_editor,
+            dock::close_dock_icon_editor,
             dock::dock_launch_item,
             dock::dock_set_mouse_near_bottom,
             dock::dock_set_live_width,
@@ -466,17 +474,6 @@ pub fn run() {
             dock::get_dock_hidden_count,
             dock::get_dock_visibility,
             dock::ensure_dock_window,
-            dock::genie::genie_is_parked,
-            dock::genie::genie_item_is_foreground,
-            dock::genie::genie_arm_minimize_intent,
-            dock::genie::genie_overlay_done,
-            dock::genie::genie_overlay_painted,
-            dock::genie::genie_minimize_app,
-            dock::genie::dock_report_icon_rects,
-            dock::genie::genie_restore_app,
-            dock::genie::genie_hide_popup,
-            dock::genie::genie_show_popup,
-            dock::genie::genie_forget,
             commands::show_desktop,
             commands::restart_app,
             commands::exit_app,

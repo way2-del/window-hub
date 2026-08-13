@@ -223,6 +223,7 @@ button {
   position: absolute;
   top: 0;
   left: 50%;
+  right: auto;
   translate: -50% 0;
   z-index: 10;
   background: transparent;
@@ -230,8 +231,11 @@ button {
   /* 顶直角贴屏、底贴合岛圆角（--island-r-bot 由 paintDom 写入） */
   border-radius: 0 0 var(--island-r-bot, 14px) var(--island-r-bot, 14px) !important;
   overflow: visible !important;
-  /* 尺寸完全由 paintDom 控制，避免被子内容撑开 */
+  /* 尺寸完全由 paintDom / React style 控制，避免被子内容撑开 */
   box-sizing: border-box;
+  /* 变宽时始终绕屏幕中线扩展，禁止贴左 */
+  margin-left: 0;
+  margin-right: 0;
 }
 
 /* BorderBeam 伪元素默认四角同半径；强制底圆顶直，避免通知描边直角「耳朵」 */
@@ -255,6 +259,8 @@ button {
   touch-action: none;
   background: transparent;
   transform-origin: top center;
+  --island-corner-patch: 8px;
+  --island-top-bleed: 1px;
 }
 
 .island-root.is-pulling {
@@ -265,14 +271,92 @@ button {
   cursor: pointer;
 }
 
-.island-shape-layer {
+/* 实色顶盖：消除折叠岛贴屏时 SVG 顶边抗锯齿发丝缝 */
+.island-top-cap {
   position: absolute;
-  top: 0;
   left: 0;
-  /* width/height 由 paintDom / 内联跟随当前岛尺寸，与 path 同坐标 */
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: #000;
   pointer-events: none;
   z-index: 0;
-  overflow: hidden;
+  transition: background 240ms ease, opacity 320ms ease;
+}
+
+.island-root.is-immersed .island-top-cap {
+  opacity: 0;
+}
+
+.island-root.is-drop-target .island-top-cap,
+.island-root.is-notifying.is-immersed .island-top-cap {
+  opacity: 1;
+}
+
+.island-root.is-drop-target .island-top-cap {
+  background: #1a5a3a;
+}
+
+.island-root.is-drop-target[data-chrome="light"] .island-top-cap {
+  background: #2d8a55;
+}
+
+/* 岛顶左右外侧圆润补丁：贴直角顶边，凹弧接到岛侧壁 */
+.island-corner-patch {
+  position: absolute;
+  /* 与壳层同向上 bleed，避免补丁顶边再露一条缝 */
+  top: -1px;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+  z-index: 0;
+  overflow: visible;
+}
+
+.island-corner-patch--right {
+  /* 向岛内叠 1px，消除补丁与岛身接缝 */
+  left: calc(100% - 1px);
+}
+
+.island-corner-patch--left {
+  right: calc(100% - 1px);
+  left: auto;
+  transform: none;
+}
+
+.island-corner-patch-fill {
+  fill: #000000;
+  fill-opacity: 1;
+  transition: fill-opacity 320ms ease, fill 240ms ease;
+}
+
+.island-root.is-immersed .island-corner-patch-fill {
+  fill-opacity: 0;
+}
+
+.island-root.is-drop-target .island-corner-patch-fill,
+.island-root.is-notifying.is-immersed .island-corner-patch-fill {
+  fill-opacity: 1;
+}
+
+.island-root.is-drop-target .island-corner-patch-fill {
+  fill: #1a5a3a;
+}
+
+.island-root.is-drop-target[data-chrome="light"] .island-corner-patch-fill {
+  fill: #2d8a55;
+}
+
+.island-shape-layer {
+  position: absolute;
+  /* 相对岛身外伸补丁 + 顶 bleed；勿再由 React style 覆盖，否则收起后会错位 */
+  left: calc(-1 * var(--island-corner-patch));
+  top: calc(-1 * var(--island-top-bleed));
+  width: calc(100% + 2 * var(--island-corner-patch));
+  height: calc(100% + var(--island-top-bleed));
+  pointer-events: none;
+  z-index: 0;
+  overflow: visible;
 }
 
 .island-svg {
@@ -280,19 +364,23 @@ button {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* 减轻顶边抗锯齿发丝缝 */
+  shape-rendering: geometricPrecision;
 }
 
 .island-path {
   fill: #000000;
   fill-opacity: 1;
   transition: fill-opacity 320ms ease;
+  /* 顶边直角用非零填充，避免半透明描边感 */
+  stroke: none;
 }
 
-/* 消息通知：内描边（clip 后只保留路径内侧；路径本身不含顶边） */
+/* 消息通知：内描边（clip 后只留内侧；顶左右走补丁凹弧，不直角贴屏） */
 .island-notify-inner-stroke {
   fill: none;
   stroke-linejoin: round;
-  stroke-linecap: butt;
+  stroke-linecap: round;
   pointer-events: none;
 }
 
@@ -322,6 +410,7 @@ button {
   translate: none;
   display: flex;
   flex-direction: column;
+  width: 100%;
   height: 100%;
   min-height: 0;
   pointer-events: none;
@@ -407,6 +496,11 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   color: #fff;
+}
+
+/* adaptiveWidth：岛壳已按文案变宽，未触顶 max 时尽量不裁切 */
+.island-root.has-adaptive-bar .bar-staging-text {
+  text-overflow: clip;
 }
 
 .island-root.is-immersed .bar-staging,
@@ -1960,10 +2054,11 @@ body.is-chrome-hover-tip #root {
   margin: 0;
   padding: 0;
   pointer-events: none;
+  /* Same wash as island top-bar tip / status menu — no caret */
   background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
   color: var(--glass-fg, #f4f4f5);
-  /* Full-window shell: no CSS radius (DWM rounds the HWND) — same as plugin popup */
   border-radius: 0;
+  position: relative;
 }
 
 .chrome-hover-tip-box {

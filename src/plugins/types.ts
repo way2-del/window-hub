@@ -84,6 +84,13 @@ export type PluginManifest = {
       order?: number;
       /** 不出现在「岛栏常驻」列表（仍可临时 setBar，如中转站） */
       excludeFromBarResident?: boolean;
+      /**
+       * Host 按摘要文案自适应折叠岛宽（歌词等长文本）。
+       * 可选 minWidth / maxWidth（逻辑像素，默认 220–560）。
+       */
+      adaptiveWidth?: boolean;
+      minWidth?: number;
+      maxWidth?: number;
     };
     "island.drop"?: { order?: number };
     "island.panel"?: {

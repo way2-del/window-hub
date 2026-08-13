@@ -1,6 +1,6 @@
-//! Park / unpark HWNDs for genie minimize and ECS staging.
+//! Park / unpark HWNDs for ECS staging.
 //!
-//! Genie restore MUST use the captured screen rect via SetWindowPos.
+//! Restore MUST use the captured screen rect via SetWindowPos.
 //! SetWindowPlacement alone is unreliable after hide/off-screen moves
 //! (especially Electron/Chromium) and can leave a 1px strip on the left.
 
@@ -27,7 +27,6 @@ pub struct PlacementSnapshot {
 #[derive(Debug, Clone, Copy)]
 pub struct ParkOptions {
     /// When true, force WS_EX_TOOLWINDOW so the HWND leaves Alt+Tab / taskbar.
-    /// Genie minimize must keep this **false**.
     pub hide_from_switcher: bool,
 }
 
@@ -98,21 +97,13 @@ pub fn park_window(hwnd_raw: isize) -> Result<PlacementSnapshot, String> {
     Ok(snap)
 }
 
-#[cfg(windows)]
-pub fn park_window_ex(hwnd_raw: isize, opts: ParkOptions) -> Result<PlacementSnapshot, String> {
-    let snap = snapshot_window(hwnd_raw)?;
-    park_move_only(hwnd_raw, opts)?;
-    Ok(snap)
-}
-
 /// Hide / move HWND without rewriting WINDOWPLACEMENT size memory.
 #[cfg(windows)]
 pub fn park_move_only(hwnd_raw: isize, opts: ParkOptions) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, IsIconic, IsWindow, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_MINIMIZE, SW_RESTORE, WS_EX_APPWINDOW,
-        WS_EX_TOOLWINDOW,
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     let hwnd = HWND(hwnd_raw as *mut _);
@@ -120,48 +111,28 @@ pub fn park_move_only(hwnd_raw: isize, opts: ParkOptions) -> Result<(), String> 
         if !IsWindow(hwnd).as_bool() {
             return Err("Invalid window handle".into());
         }
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
         if opts.hide_from_switcher {
-            if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-            }
             let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
             let mut new_ex = ex_style as u32;
             new_ex |= WS_EX_TOOLWINDOW.0;
             new_ex &= !WS_EX_APPWINDOW.0;
             SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex as i32);
-            // ECS staging: off-screen + tool window (intentionally leaves Alt+Tab).
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                PARK_X,
-                PARK_Y,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        } else {
-            // Genie: real OS minimize — stays in Win+Tab / Task View with a preview.
-            // Never SW_HIDE (that drops the window from the switcher).
-            let _ = ShowWindow(hwnd, SW_MINIMIZE);
         }
+        // ECS staging: off-screen (+ tool window when hide_from_switcher).
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            PARK_X,
+            PARK_Y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         Ok(())
     }
-}
-
-/// True OS minimize for genie (alias clarity for call sites).
-#[cfg(windows)]
-pub fn minimize_window_os(hwnd_raw: isize) -> Result<(), String> {
-    park_move_only(
-        hwnd_raw,
-        ParkOptions {
-            hide_from_switcher: false,
-        },
-    )
-}
-
-#[cfg(not(windows))]
-pub fn minimize_window_os(_hwnd_raw: isize) -> Result<(), String> {
-    Err("Windows only".into())
 }
 
 #[cfg(windows)]
@@ -185,27 +156,11 @@ fn restore_box(snap: &PlacementSnapshot) -> (i32, i32, i32, i32) {
 
 #[cfg(windows)]
 pub fn unpark_window(hwnd_raw: isize, snap: &PlacementSnapshot) -> Result<(), String> {
-    unpark_window_ex(hwnd_raw, snap, false)
-}
-
-/// Restore geometry/visibility without raising above a TOPMOST cover (genie expand handoff).
-#[cfg(windows)]
-pub fn unpark_window_under_cover(hwnd_raw: isize, snap: &PlacementSnapshot) -> Result<(), String> {
-    unpark_window_ex(hwnd_raw, snap, true)
-}
-
-#[cfg(windows)]
-fn unpark_window_ex(
-    hwnd_raw: isize,
-    snap: &PlacementSnapshot,
-    under_cover: bool,
-) -> Result<(), String> {
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
         IsWindow, SetWindowLongW, SetWindowPlacement, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
-        SW_RESTORE, SW_SHOW, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOWPLACEMENT,
-        WINDOWPLACEMENT_FLAGS,
+        GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW,
+        SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
     };
 
     let hwnd = HWND(hwnd_raw as *mut _);
@@ -219,27 +174,11 @@ fn unpark_window_ex(
 
         let was_max = snap.show_cmd == SW_SHOWMAXIMIZED.0 as u32;
         let (left, top, w, h) = restore_box(snap);
-
-        let pos_flags = if under_cover {
-            SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE
-        } else {
-            SWP_SHOWWINDOW | SWP_FRAMECHANGED
-        };
+        let pos_flags = SWP_SHOWWINDOW | SWP_FRAMECHANGED;
 
         // Force the exact on-screen box first — this is what the user saw.
-        if under_cover {
-            let _ = SetWindowPos(hwnd, None, left, top, w, h, pos_flags);
-        } else {
-            let _ = SetWindowPos(hwnd, HWND_TOP, left, top, w, h, pos_flags);
-        }
-        let _ = ShowWindow(
-            hwnd,
-            if under_cover {
-                SW_SHOWNOACTIVATE
-            } else {
-                SW_SHOW
-            },
-        );
+        let _ = SetWindowPos(hwnd, HWND_TOP, left, top, w, h, pos_flags);
+        let _ = ShowWindow(hwnd, SW_SHOW);
 
         if was_max {
             let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
@@ -267,12 +206,8 @@ fn unpark_window_ex(
             };
             // Best-effort sync only — never rely on this alone for visibility.
             let _ = SetWindowPlacement(hwnd, &wp);
-            if under_cover {
-                let _ = SetWindowPos(hwnd, None, left, top, w, h, pos_flags);
-            } else {
-                let _ = SetWindowPos(hwnd, HWND_TOP, left, top, w, h, pos_flags);
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-            }
+            let _ = SetWindowPos(hwnd, HWND_TOP, left, top, w, h, pos_flags);
+            let _ = ShowWindow(hwnd, SW_RESTORE);
         }
 
         Ok(())
@@ -285,27 +220,11 @@ pub fn park_window(_hwnd_raw: isize) -> Result<PlacementSnapshot, String> {
 }
 
 #[cfg(not(windows))]
-pub fn park_window_ex(
-    _hwnd_raw: isize,
-    _opts: ParkOptions,
-) -> Result<PlacementSnapshot, String> {
-    Err("Windows only".into())
-}
-
-#[cfg(not(windows))]
 pub fn park_move_only(_hwnd_raw: isize, _opts: ParkOptions) -> Result<(), String> {
     Err("Windows only".into())
 }
 
 #[cfg(not(windows))]
 pub fn unpark_window(_hwnd_raw: isize, _snap: &PlacementSnapshot) -> Result<(), String> {
-    Err("Windows only".into())
-}
-
-#[cfg(not(windows))]
-pub fn unpark_window_under_cover(
-    _hwnd_raw: isize,
-    _snap: &PlacementSnapshot,
-) -> Result<(), String> {
     Err("Windows only".into())
 }

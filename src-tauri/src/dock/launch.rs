@@ -45,18 +45,10 @@ pub fn launch_or_focus(item: &DockItem) -> Result<(), String> {
         "trash" => open_trash(),
         "separator" => Ok(()),
         _ => {
-            // Genie-parked apps must go through genie_restore_app — focus_window's
-            // SW_RESTORE would flash the live window before the expand mesh.
-            if crate::dock::genie::item_is_genie_parked(&item.id) {
-                return Ok(());
-            }
             let wins = list_windows(None);
             let matched = matching_windows(item, &wins);
             if let Some(w) = matched.first() {
-                let hwnd = w.hwnd;
-                let _ = focus_window(hwnd);
-                crate::dock::genie::note_user_foreground(hwnd);
-                Ok(())
+                focus_window(w.hwnd)
             } else {
                 launch_app(item)
             }

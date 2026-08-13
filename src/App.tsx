@@ -34,6 +34,8 @@ import { normalizeStagingChanged } from "./stagingApi";
 import {
   formatStagingBarText,
   isStagingPanelShell,
+  measureIslandBarLabelWidth,
+  resolveIslandBarAdaptive,
   resolveIslandDropPluginId,
   resolvePluginPanelShellSize,
   type IslandBarState,
@@ -48,7 +50,13 @@ const VIEW_W_DEFAULT = 380;
 const VIEW_H_DEFAULT = 220;
 /** 岛贴屏顶后顶隙为 0；窗口高度 = 岛高 */
 const TOP_GAP = 0;
-const ISLAND_COLLAPSED = { width: 300, height: 28 };
+const ISLAND_BAR_H = 28;
+const ISLAND_COLLAPSED_W_DEFAULT = 300;
+/** 折叠目标宽（自适应歌词等）；与 liveExpanded 一样由 App 同步 */
+const liveCollapsed = { width: ISLAND_COLLAPSED_W_DEFAULT, height: ISLAND_BAR_H };
+function collapsedNow(): IslandSize {
+  return { width: liveCollapsed.width, height: liveCollapsed.height };
+}
 /** 当前展开目标 / SVG 画布（中转站时变宽变矮）——由 App 每帧同步 */
 const liveExpanded = { width: VIEW_W_DEFAULT, height: VIEW_H_DEFAULT };
 const HEIGHT_MS = 280;
@@ -85,8 +93,8 @@ function sizeFromProgress(p: number): IslandSize {
   const t = clamp01(p);
   return {
     // 跟手用亚像素，避免取整造成顶部黑条一顿一顿
-    width: lerp(ISLAND_COLLAPSED.width, liveExpanded.width, t),
-    height: lerp(ISLAND_COLLAPSED.height, liveExpanded.height, t),
+    width: lerp(liveCollapsed.width, liveExpanded.width, t),
+    height: lerp(liveCollapsed.height, liveExpanded.height, t),
   };
 }
 
@@ -104,12 +112,48 @@ function islandBottomRadius(width: number, height: number): number {
   return Math.min(raw, 32);
 }
 
+/** 岛顶左右外侧圆润补丁（源 right-angle.svg = 凹角扇形；左=水平镜像） */
+const ISLAND_CORNER_PATCH_SIZE = 8;
+/** 右上：原点贴岛右上角，扇形在内侧，外轮廓为凹弧 */
+const ISLAND_CORNER_PATCH_D_RIGHT = "M34 0C15.2223 0 0 15.2223 0 34V0H34Z";
+/** 左上：水平镜像 */
+const ISLAND_CORNER_PATCH_D_LEFT = "M0 0C18.7777 0 34 15.2223 34 34V0H0Z";
+/** 顶边向上多画 1px，盖住 WebView/DPI 发丝缝 */
+const ISLAND_TOP_BLEED = 1;
+
+function IslandCornerPatches() {
+  return (
+    <>
+      {/* 实色顶盖：盖住 SVG 顶边抗锯齿发丝缝（折叠岛贴屏时尤甚） */}
+      <div className="island-top-cap" aria-hidden />
+      <svg
+        className="island-corner-patch island-corner-patch--left"
+        width={ISLAND_CORNER_PATCH_SIZE}
+        height={ISLAND_CORNER_PATCH_SIZE}
+        viewBox="0 0 34 34"
+        aria-hidden
+      >
+        <path className="island-corner-patch-fill" d={ISLAND_CORNER_PATCH_D_LEFT} />
+      </svg>
+      <svg
+        className="island-corner-patch island-corner-patch--right"
+        width={ISLAND_CORNER_PATCH_SIZE}
+        height={ISLAND_CORNER_PATCH_SIZE}
+        viewBox="0 0 34 34"
+        aria-hidden
+      >
+        <path className="island-corner-patch-fill" d={ISLAND_CORNER_PATCH_D_RIGHT} />
+      </svg>
+    </>
+  );
+}
+
 /**
  * 灵动岛路径（本地坐标：左上为 0,0，宽高=当前岛尺寸）。
  * 禁止再嵌进更大的「画布居中」坐标系，否则折叠宽与展开画布不一致时黑壳会偏/歪。
  * topSquare≥1：顶角真直角贴边；底角始终圆角。
  */
-function islandPath(width: number, height: number, topSquare = 0): string {
+function islandPath(width: number, height: number, topSquare = 0, topBleed = 0): string {
   const w = Math.max(28, width);
   const h = Math.max(28, height);
   const x0 = 0;
@@ -121,7 +165,8 @@ function islandPath(width: number, height: number, topSquare = 0): string {
   const rTop = squareTop ? 0 : Math.max(0.05, rBot * (1 - flat));
   const k = 0.5522847498;
   const rkBot = rBot * k;
-  const y0 = 0;
+  // 顶边可上溢 topBleed，消除贴屏发丝缝；底边仍落在 h
+  const y0 = -Math.max(0, topBleed);
   const y1 = h;
   const sideBot = y1 - rBot;
 
@@ -140,61 +185,93 @@ function islandPath(width: number, height: number, topSquare = 0): string {
   }
 
   const rkTop = rTop * k;
-  const sideTop = y0 + rTop;
+  const sideTop = 0 + rTop;
   return [
     `M ${fmt(x0 + rTop)} ${fmt(y0)}`,
     `L ${fmt(x1 - rTop)} ${fmt(y0)}`,
-    `C ${fmt(x1 - rTop + rkTop)} ${fmt(y0)}, ${fmt(x1)} ${fmt(y0 + rTop - rkTop)}, ${fmt(x1)} ${fmt(sideTop)}`,
+    `C ${fmt(x1 - rTop + rkTop)} ${fmt(0)}, ${fmt(x1)} ${fmt(0 + rTop - rkTop)}, ${fmt(x1)} ${fmt(sideTop)}`,
     `L ${fmt(x1)} ${fmt(sideBot)}`,
     `C ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1 - rBot)} ${fmt(y1)}`,
     `L ${fmt(x0 + rBot)} ${fmt(y1)}`,
     `C ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0)} ${fmt(sideBot)}`,
     `L ${fmt(x0)} ${fmt(sideTop)}`,
-    `C ${fmt(x0)} ${fmt(y0 + rTop - rkTop)}, ${fmt(x0 + rTop - rkTop)} ${fmt(y0)}, ${fmt(x0 + rTop)} ${fmt(y0)}`,
+    `C ${fmt(x0)} ${fmt(0 + rTop - rkTop)}, ${fmt(x0 + rTop - rkTop)} ${fmt(0)}, ${fmt(x0 + rTop)} ${fmt(0)}`,
     `Z`,
   ].join(" ");
 }
 
 /**
- * 通知内描边：与 islandPath 同几何（左右底），开口路径、不画顶边，避免贴屏突兀。
- * 仍用全岛 clip，只留内侧半笔，路径不整体内缩偏移。
+ * 通知描边开口路径：顶左右沿补丁凹弧贴合（凹进去，非外凸耳朵）；不含顶边。
+ * 凹弧圆心在补丁外角 ( ±p, p )，从顶外尖接到岛侧壁。
  */
-function islandNotifyInnerStrokePath(width: number, height: number, topSquare = 0): string {
+function islandNotifyInnerStrokePath(
+  width: number,
+  height: number,
+  patch = ISLAND_CORNER_PATCH_SIZE,
+): string {
   const w = Math.max(28, width);
   const h = Math.max(28, height);
+  const p = Math.max(4, patch);
   const x0 = 0;
   const x1 = w;
   const rBot = islandBottomRadius(w, h);
-  const flat = clamp01(topSquare);
-  const squareTop = flat >= 0.999;
-  const rTop = squareTop ? 0 : Math.max(0.05, rBot * (1 - flat));
   const k = 0.5522847498;
   const rkBot = rBot * k;
-  const y0 = 0;
   const y1 = h;
   const sideBot = y1 - rBot;
+  // 凹弧控制点：圆心在 (±p, p)
+  const p1k = p * (1 - k);
 
-  if (squareTop) {
-    return [
-      `M ${fmt(x0)} ${fmt(y0)}`,
-      `L ${fmt(x0)} ${fmt(sideBot)}`,
-      `C ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0 + rBot)} ${fmt(y1)}`,
-      `L ${fmt(x1 - rBot)} ${fmt(y1)}`,
-      `C ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1)} ${fmt(sideBot)}`,
-      `L ${fmt(x1)} ${fmt(y0)}`,
-    ].join(" ");
-  }
-
-  const rkTop = rTop * k;
-  const sideTop = y0 + rTop;
-  // 顶有圆角时也不描顶边：从左侧竖边起点画到底再回到右侧竖边终点
   return [
-    `M ${fmt(x0)} ${fmt(sideTop)}`,
+    // 左：顶外尖 (-p,0) → 凹弧 → 岛左壁 (0,p)
+    `M ${fmt(-p)} ${fmt(0)}`,
+    `C ${fmt(-p1k)} ${fmt(0)}, ${fmt(x0)} ${fmt(p1k)}, ${fmt(x0)} ${fmt(p)}`,
     `L ${fmt(x0)} ${fmt(sideBot)}`,
     `C ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0 + rBot)} ${fmt(y1)}`,
     `L ${fmt(x1 - rBot)} ${fmt(y1)}`,
     `C ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1)} ${fmt(sideBot)}`,
-    `L ${fmt(x1)} ${fmt(sideTop)}`,
+    `L ${fmt(x1)} ${fmt(p)}`,
+    // 右：岛右壁 (w,p) → 凹弧 → 顶外尖 (w+p,0)
+    `C ${fmt(x1)} ${fmt(p1k)}, ${fmt(x1 + p1k)} ${fmt(0)}, ${fmt(x1 + p)} ${fmt(0)}`,
+  ].join(" ");
+}
+
+/** 通知描边 clip：岛身 + 左右凹角补丁（闭合） */
+function islandNotifyClipSilhouette(
+  width: number,
+  height: number,
+  patch = ISLAND_CORNER_PATCH_SIZE,
+  topBleed = 0,
+): string {
+  const w = Math.max(28, width);
+  const h = Math.max(28, height);
+  const p = Math.max(4, patch);
+  const bleed = Math.max(0, topBleed);
+  const x0 = 0;
+  const x1 = w;
+  const rBot = islandBottomRadius(w, h);
+  const k = 0.5522847498;
+  const rkBot = rBot * k;
+  const p1k = p * (1 - k);
+  const yTop = -bleed;
+  const y1 = h;
+  const sideBot = y1 - rBot;
+
+  return [
+    `M ${fmt(-p)} ${fmt(yTop)}`,
+    `L ${fmt(x1 + p)} ${fmt(yTop)}`,
+    `L ${fmt(x1 + p)} ${fmt(0)}`,
+    // 右凹弧：外尖 → 岛右壁
+    `C ${fmt(x1 + p1k)} ${fmt(0)}, ${fmt(x1)} ${fmt(p1k)}, ${fmt(x1)} ${fmt(p)}`,
+    `L ${fmt(x1)} ${fmt(sideBot)}`,
+    `C ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1 - rBot)} ${fmt(y1)}`,
+    `L ${fmt(x0 + rBot)} ${fmt(y1)}`,
+    `C ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0)} ${fmt(sideBot)}`,
+    `L ${fmt(x0)} ${fmt(p)}`,
+    // 左凹弧：岛左壁 → 外尖
+    `C ${fmt(x0)} ${fmt(p1k)}, ${fmt(-p1k)} ${fmt(0)}, ${fmt(-p)} ${fmt(0)}`,
+    `L ${fmt(-p)} ${fmt(yTop)}`,
+    `Z`,
   ].join(" ");
 }
 
@@ -396,7 +473,7 @@ async function setBarHeight(islandH: number) {
   const width = cachedScreenW;
   await getCurrentWindow().setSize(new LogicalSize(width, winHeight(islandH)));
   // 展开面板伸进桌面工作区 → TOPMOST；折叠条交回 AppBar 常规层级
-  const raised = islandH > ISLAND_COLLAPSED.height + 2;
+  const raised = islandH > ISLAND_BAR_H + 2;
   try {
     await invoke(raised ? "float_overlay" : "settle_overlay");
   } catch {
@@ -413,7 +490,7 @@ function App() {
   const [chromeLeft, setChromeLeft] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
   const [chromeCenter, setChromeCenter] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
   const [chromeRight, setChromeRight] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
-  const [size, setSize] = useState<IslandSize>(ISLAND_COLLAPSED);
+  const [size, setSize] = useState<IslandSize>(collapsedNow());
   const [pulling, setPulling] = useState(false);
   const pullingRef = useRef(false);
   /** 展开/收起/回弹动画中：顶角强制直角，只在完全静止胶囊时恢复圆顶 */
@@ -434,8 +511,59 @@ function App() {
   const islandBar = overlayBar ?? residentBar;
   const residentBarRef = useRef(residentBar);
   const overlayBarRef = useRef(overlayBar);
+  const barStagingTextRef = useRef<HTMLSpanElement>(null);
+  const collapsedSizeTimer = useRef<number | null>(null);
+  const syncCollapsedIslandWidthRef = useRef<(nextW: number) => void>(() => undefined);
+  const widthForBarLabelRef = useRef<
+    (text: string, pluginId: string | null | undefined, showDot: boolean, isDrop: boolean) => number
+  >(() => ISLAND_COLLAPSED_W_DEFAULT);
   residentBarRef.current = residentBar;
   overlayBarRef.current = overlayBar;
+
+  /** 折叠岛宽：即时 paintDom 居中变宽；debounce 的是 React size（ShortcutsHost 用） */
+  function syncCollapsedIslandWidth(nextW: number) {
+    const w = Math.max(28, Math.round(nextW));
+    liveCollapsed.width = w;
+    if (!expandedRef.current && revealRef.current < 0.02 && !pullingRef.current) {
+      const root = islandRef.current;
+      if (root) {
+        // 显式钉住水平居中，避免宽度动画/重绘时漂向一侧
+        root.style.left = "50%";
+        root.style.right = "auto";
+        root.style.setProperty("translate", "-50% 0");
+      }
+      paintDom({ width: w, height: ISLAND_BAR_H }, revealRef.current);
+    }
+    if (collapsedSizeTimer.current != null) {
+      window.clearTimeout(collapsedSizeTimer.current);
+    }
+    collapsedSizeTimer.current = window.setTimeout(() => {
+      collapsedSizeTimer.current = null;
+      setSize((prev) => {
+        if (Math.abs(prev.width - w) < 1 && prev.height === ISLAND_BAR_H) return prev;
+        return { width: w, height: ISLAND_BAR_H };
+      });
+    }, 64);
+  }
+
+  function widthForBarLabel(
+    text: string,
+    pluginId: string | null | undefined,
+    showDot: boolean,
+    isDrop: boolean,
+  ) {
+    const trimmed = text.trim();
+    if (!trimmed) return ISLAND_COLLAPSED_W_DEFAULT;
+    const adaptive = resolveIslandBarAdaptive(pluginId);
+    if (!(adaptive.enabled || isDrop)) return ISLAND_COLLAPSED_W_DEFAULT;
+    const measured = measureIslandBarLabelWidth(trimmed, { showDot });
+    const minW = isDrop ? 220 : adaptive.minWidth;
+    const maxW = isDrop ? 420 : adaptive.maxWidth;
+    return Math.min(maxW, Math.max(minW, measured));
+  }
+
+  syncCollapsedIslandWidthRef.current = syncCollapsedIslandWidth;
+  widthForBarLabelRef.current = widthForBarLabel;
   const [dropTarget, setDropTarget] = useState(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
   const [dropPluginId, setDropPluginId] = useState<string | null>(() =>
@@ -479,7 +607,7 @@ function App() {
   const shapeLayerRef = useRef<HTMLDivElement>(null);
   const islandUiRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const lastWinH = useRef(winHeight(ISLAND_COLLAPSED.height));
+  const lastWinH = useRef(winHeight(ISLAND_BAR_H));
   const idleTimer = useRef<number | null>(null);
   const drag = useRef<{
     pointerId: number;
@@ -498,6 +626,26 @@ function App() {
   shellPanelWRef.current = shellPanelW;
   shellPanelHRef.current = shellPanelH;
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
+
+  /** 按当前岛栏文案重算折叠尺寸（收起结束时用，避免 liveCollapsed 过期导致错位） */
+  function snapCollapsedFromBar(): IslandSize {
+    const overlay = overlayBarRef.current;
+    const resident = residentBarRef.current;
+    const dropId = dropPluginIdRef.current;
+    const text = String(overlay?.text ?? resident?.text ?? "");
+    const pluginId = overlay?.pluginId ?? resident?.pluginId ?? null;
+    const showDot = Boolean(
+      pluginId &&
+        pluginRegistry.get(pluginId)?.manifest.slots?.["island.bar"]
+          ?.excludeFromBarResident,
+    );
+    const w = text.trim()
+      ? widthForBarLabel(text, pluginId, showDot, false)
+      : ISLAND_COLLAPSED_W_DEFAULT;
+    liveCollapsed.width = w;
+    liveCollapsed.height = ISLAND_BAR_H;
+    return { width: w, height: ISLAND_BAR_H };
+  }
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
 
@@ -789,9 +937,10 @@ function App() {
   function paintDom(next: IslandSize, nextReveal: number) {
     sizeRef.current = next;
     revealRef.current = nextReveal;
-    // 非沉浸：顶角始终直角贴屏（gap=0）。沉浸态 path 透明，同样贴顶，避免进出沉浸/收拢时纵向跳动。
+    // 顶角直角贴屏；壳层向上 bleed 1px，盖住 WebView 顶边发丝缝
     const topSquare = 1;
     const gap = 0;
+    const bleed = ISLAND_TOP_BLEED;
     const w = Math.max(28, next.width);
     const h = Math.max(28, next.height);
     const root = islandRef.current;
@@ -803,25 +952,39 @@ function App() {
       root.style.setProperty("--island-r-bot", `${islandBottomRadius(w, h)}px`);
     }
     const shape = shapeLayerRef.current;
+    const patch = ISLAND_CORNER_PATCH_SIZE;
+    // 壳层几何由 CSS（--island-corner-patch / bleed）承担，避免 React style 抹掉 left 导致错位
     if (shape) {
-      shape.style.width = `${w}px`;
-      shape.style.height = `${h}px`;
+      shape.style.left = "";
+      shape.style.top = "";
+      shape.style.width = "";
+      shape.style.height = "";
     }
     const svg = svgRef.current;
     if (svg) {
-      svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-      svg.setAttribute("width", String(w));
-      svg.setAttribute("height", String(h));
+      svg.setAttribute(
+        "viewBox",
+        `${-patch} ${-bleed} ${w + patch * 2} ${h + bleed}`,
+      );
+      svg.removeAttribute("width");
+      svg.removeAttribute("height");
     }
     const path = pathRef.current;
-    const d = islandPath(w, h, topSquare);
+    const d = islandPath(w, h, topSquare, bleed);
     if (path) path.setAttribute("d", d);
-    pathClipRef.current?.setAttribute("d", d);
-    pathStrokeRef.current?.setAttribute("d", islandNotifyInnerStrokePath(w, h, topSquare));
+    // clip = 岛身+补丁外轮廓，描边沿补丁凹弧（非直角贴屏）
+    pathClipRef.current?.setAttribute(
+      "d",
+      islandNotifyClipSilhouette(w, h, patch, bleed),
+    );
+    pathStrokeRef.current?.setAttribute(
+      "d",
+      islandNotifyInnerStrokePath(w, h, patch),
+    );
     const ui = islandUiRef.current;
     if (ui) {
-      ui.style.width = `${w}px`;
-      ui.style.minHeight = `${h}px`;
+      ui.style.width = "";
+      ui.style.minHeight = "";
     }
     const panel = panelRef.current;
     if (panel) {
@@ -904,15 +1067,15 @@ function App() {
         }
         paintDom(
           {
-            width: lerp(ISLAND_COLLAPSED.width, liveExpanded.width, wE),
-            height: lerp(ISLAND_COLLAPSED.height, liveExpanded.height, hE),
+            width: lerp(liveCollapsed.width, liveExpanded.width, wE),
+            height: lerp(liveCollapsed.height, liveExpanded.height, hE),
           },
           rE,
         );
         if (p < 1) {
           requestAnimationFrame(step);
         } else {
-          const end = opening ? { ...liveExpanded } : ISLAND_COLLAPSED;
+          const end = opening ? { ...liveExpanded } : collapsedNow();
           const endReveal = opening ? 1 : 0;
           if (opening) morphingRef.current = false;
           paintDom(end, endReveal);
@@ -980,13 +1143,19 @@ function App() {
       setExpanded(false);
       // 收回一开始就直角贴顶，与下拉同理
       morphingRef.current = true;
+      // 收起目标宽按当前文案锁定，避免动画落到过期 liveCollapsed
+      snapCollapsedFromBar();
       paintDom(sizeRef.current, revealRef.current);
       await animateMorph(token, false);
       if (token !== gen.current) return;
-      await setBarHeight(ISLAND_COLLAPSED.height);
-      lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
+      await setBarHeight(ISLAND_BAR_H);
+      lastWinH.current = winHeight(ISLAND_BAR_H);
       morphingRef.current = false;
-      paintDom(ISLAND_COLLAPSED, 0);
+      // 再测一次 + 立刻 setSize，避免 React style 仍停在展开宽导致壳/居中错位
+      const settled = snapCollapsedFromBar();
+      paintDom(settled, 0);
+      setSize(settled);
+      setReveal(0);
       // 拖入会话覆盖仅本次展开有效；收起后恢复用户「下拉内容」
       setPanelOverride(null);
     } finally {
@@ -1116,18 +1285,22 @@ function App() {
     void (async () => {
       const token = ++gen.current;
       morphingRef.current = true;
+      snapCollapsedFromBar();
       paintDom(sizeRef.current, revealRef.current);
       if (token !== gen.current) return;
       // 未拉满：从当前尺寸收回（不走完整倒放，避免跳变）
-      await animateVisual(ISLAND_COLLAPSED, 0, SPRING_MS, token);
+      await animateVisual(collapsedNow(), 0, SPRING_MS, token);
       if (token !== gen.current) return;
       setSpringing(false);
       if (!expandedRef.current && !trayOpenRef.current) {
-        await setBarHeight(ISLAND_COLLAPSED.height);
-        lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
+        await setBarHeight(ISLAND_BAR_H);
+        lastWinH.current = winHeight(ISLAND_BAR_H);
       }
       morphingRef.current = false;
-      paintDom(ISLAND_COLLAPSED, 0);
+      const settled = snapCollapsedFromBar();
+      paintDom(settled, 0);
+      setSize(settled);
+      setReveal(0);
       setPanelOverride(null);
       scheduleImmerse();
     })();
@@ -1229,8 +1402,8 @@ function App() {
 
   useEffect(() => {
     void (async () => {
-      await setBarHeight(ISLAND_COLLAPSED.height);
-      lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
+      await setBarHeight(ISLAND_BAR_H);
+      lastWinH.current = winHeight(ISLAND_BAR_H);
       try {
         await invoke("set_window_material", { material: "none" });
       } catch {
@@ -1239,14 +1412,22 @@ function App() {
     })();
   }, []);
 
+  // React 每次 commit 可能用 style={{width:size.width}} 盖掉 paintDom 的即时宽；
+  // adaptive 歌词变宽时须按 sizeRef 重刷，并保持 island-beam 的 left:50% + translate 居中。
   useLayoutEffect(() => {
+    const root = islandRef.current;
+    if (root) {
+      root.style.left = "50%";
+      root.style.right = "auto";
+      root.style.setProperty("translate", "-50% 0");
+    }
     paintDom(sizeRef.current, revealRef.current);
-  }, []);
+  });
 
   useEffect(() => {
     if (expanded || busy.current || pulling || springing) return;
     // 托盘改为独立弹窗，主顶栏保持折叠高度
-    if (!trayOpen) void setBarHeight(ISLAND_COLLAPSED.height);
+    if (!trayOpen) void setBarHeight(ISLAND_BAR_H);
   }, [trayOpen, expanded, pulling, springing]);
 
   useEffect(() => {
@@ -1470,6 +1651,29 @@ function App() {
       const tempOnly = Boolean(rec?.manifest.slots?.["island.bar"]?.excludeFromBarResident);
       // 常驻层：仅当前选中的常驻插件可写
       if (residentId && p.pluginId === residentId) {
+        const adaptive = resolveIslandBarAdaptive(p.pluginId).enabled;
+        const prev = residentBarRef.current;
+        // adaptive：同插件仅改文案时不 setState，只改 DOM + 岛宽，避免歌词拖垮整机
+        if (adaptive && next && prev && prev.pluginId === next.pluginId) {
+          residentBarRef.current = next;
+          if (barStagingTextRef.current && !overlayBarRef.current) {
+            barStagingTextRef.current.textContent = next.text;
+          }
+          const showDot = Boolean(
+            rec?.manifest.slots?.["island.bar"]?.excludeFromBarResident,
+          );
+          syncCollapsedIslandWidthRef.current(
+            widthForBarLabelRef.current(next.text, next.pluginId, showDot, false),
+          );
+          return;
+        }
+        if (adaptive && !next && prev) {
+          residentBarRef.current = null;
+          if (barStagingTextRef.current && !overlayBarRef.current) {
+            barStagingTextRef.current.textContent = "";
+          }
+          syncCollapsedIslandWidthRef.current(ISLAND_COLLAPSED_W_DEFAULT);
+        }
         setResidentBar(next);
         return;
       }
@@ -1660,6 +1864,44 @@ function App() {
         pluginRegistry.get(barPluginId)?.manifest.slots?.["island.bar"]
           ?.excludeFromBarResident,
     );
+
+  // 岛栏折叠宽自适应：slots.island.bar.adaptiveWidth（如正在播放长歌词）
+  useLayoutEffect(() => {
+    if (expanded || pulling || springing || reveal > 0.02 || msgBanner) return;
+    const text =
+      dropTarget && dropPluginId
+        ? `${dropPluginName}|松开存入`
+        : (overlayBar?.text ?? residentBarRef.current?.text ?? barText);
+    const nextW = widthForBarLabel(text, barPluginId, showBarStagingDot, dropTarget);
+    if (Math.abs(nextW - liveCollapsed.width) < 2) return;
+    syncCollapsedIslandWidth(nextW);
+  }, [
+    barText,
+    overlayBar,
+    residentBar,
+    barPluginId,
+    showBarStagingDot,
+    dropTarget,
+    dropPluginId,
+    dropPluginName,
+    expanded,
+    pulling,
+    springing,
+    reveal,
+    msgBanner,
+  ]);
+
+  // 文案以 ref 为准（adaptive 高频路径不 setState）；其它重渲染后对齐 DOM
+  useLayoutEffect(() => {
+    const el = barStagingTextRef.current;
+    if (!el) return;
+    const text =
+      dropTarget && dropPluginId
+        ? `${dropPluginName}|松开存入`
+        : (overlayBar ?? residentBarRef.current)?.text ?? "";
+    if (el.textContent !== text) el.textContent = text;
+  }, [overlayBar, residentBar, dropTarget, dropPluginId, dropPluginName]);
+
   const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
   const viewH = activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT;
   const pluginStagingShell =
@@ -1939,12 +2181,18 @@ function App() {
         style={
           {
             overflow: "visible",
+            left: "50%",
+            right: "auto",
+            translate: "-50% 0",
+            // 与 paintDom / sizeRef 对齐；adaptive 变宽时 useLayoutEffect 会再刷 sizeRef
+            width: size.width,
+            height: size.height,
             ["--island-r-bot"]: `${islandBottomRadius(size.width, size.height)}px`,
           } as CSSProperties
         }
       >
         <div
-          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${msgBanner ? " is-notifying" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar || dropTarget ? " has-staging" : ""}`}
+          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${msgBanner ? " is-notifying" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar || dropTarget ? " has-staging" : ""}${resolveIslandBarAdaptive(barPluginId).enabled ? " has-adaptive-bar" : ""}`}
           role="button"
           tabIndex={0}
           aria-expanded={expanded}
@@ -1976,8 +2224,8 @@ function App() {
             void hideChromeHoverTip();
             if (drag.current?.active || expandedRef.current || busy.current) return;
             if (revealRef.current > 0.01) return;
-            lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
-            void setBarHeight(ISLAND_COLLAPSED.height);
+            lastWinH.current = winHeight(ISLAND_BAR_H);
+            void setBarHeight(ISLAND_BAR_H);
           }}
           onClick={() => {
             // 左滑划掉 / 明显滑动后忽略 click，避免误开应用
@@ -2037,18 +2285,15 @@ function App() {
           }}
           onKeyDown={onIslandKeyDown}
         >
+          <IslandCornerPatches />
           <div
             ref={shapeLayerRef}
             className="island-shape-layer"
-            style={{ width: size.width, height: size.height }}
             aria-hidden
           >
             <svg
               ref={svgRef}
               className="island-svg"
-              viewBox={`0 0 ${size.width} ${size.height}`}
-              width={size.width}
-              height={size.height}
             >
               <defs>
                 <clipPath id="wh-island-inner-clip" clipPathUnits="userSpaceOnUse">
@@ -2080,7 +2325,6 @@ function App() {
           <div
             ref={islandUiRef}
             className="island-ui"
-            style={{ width: size.width, minHeight: size.height }}
           >
             <div className={`island-bar${msgBanner ? " is-notifying" : ""}`}>
               <div className={`bar-weather${msgBanner ? " is-exiting" : ""}`}>
@@ -2123,7 +2367,7 @@ function App() {
                     {showBarStagingDot ? (
                       <span className="bar-staging-dot" aria-hidden />
                     ) : null}
-                    <span className="bar-staging-text">{barText}</span>
+                    <span className="bar-staging-text" ref={barStagingTextRef} />
                   </div>
                 ) : null}
               </div>

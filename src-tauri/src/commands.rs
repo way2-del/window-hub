@@ -378,7 +378,57 @@ pub fn is_tray_popup_open(app: AppHandle) -> bool {
 
 const STATUS_MENU_POPUP_W: f64 = 200.0;
 /// Placeholder only — frontend measures + fits while still hidden, then shows.
-const STATUS_MENU_POPUP_H: f64 = 292.0;
+const STATUS_MENU_POPUP_H: f64 = 340.0;
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusMenuOpenPayload {
+    from_dock: bool,
+    item_id: Option<String>,
+    pin_bottom: Option<f64>,
+}
+
+fn status_menu_init_script(payload: &StatusMenuOpenPayload) -> String {
+    let from_dock = if payload.from_dock { "true" } else { "false" };
+    let item_id = payload
+        .item_id
+        .as_ref()
+        .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
+    let pin_bottom = payload
+        .pin_bottom
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "null".into());
+    format!(
+        r#"
+      window.__WH_IS_STATUS_MENU_POPUP__ = true;
+      window.__WH_STATUS_MENU_FROM_DOCK__ = {from_dock};
+      window.__WH_STATUS_MENU_ITEM_ID__ = {item_id};
+      window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom};
+      document.addEventListener('keydown', function (e) {{
+        if (e.key === 'Escape') {{
+          try {{ window.__TAURI__.core.invoke('close_status_menu_popup'); }} catch (_) {{}}
+        }}
+      }});
+    "#
+    )
+}
+
+fn apply_status_menu_payload(win: &WebviewWindow, payload: &StatusMenuOpenPayload) {
+    let from_dock = if payload.from_dock { "true" } else { "false" };
+    let item_id = payload
+        .item_id
+        .as_ref()
+        .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
+    let pin_bottom = payload
+        .pin_bottom
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "null".into());
+    let _ = win.eval(&format!(
+        "window.__WH_STATUS_MENU_FROM_DOCK__ = {from_dock}; window.__WH_STATUS_MENU_ITEM_ID__ = {item_id}; window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom};"
+    ));
+}
 
 /// 左侧状态菜单弹窗：与插件/托盘共用 MicaAlt 材质与深浅色。
 /// Kept invisible until the webview fits content — avoids 80→full height stutter.
@@ -388,8 +438,21 @@ pub async fn open_status_menu_popup(
     state: State<'_, MaterialState>,
     x: f64,
     y: f64,
+    from_dock: Option<bool>,
+    item_id: Option<String>,
+    pin_bottom: Option<f64>,
 ) -> Result<(), String> {
     close_sibling_popups(&app, "status-menu-popup");
+    #[cfg(windows)]
+    crate::win32::blur_glass::strip_dock_windows(&app);
+
+    let payload = StatusMenuOpenPayload {
+        from_dock: from_dock.unwrap_or(false),
+        item_id: item_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        pin_bottom,
+    };
 
     if let Some(existing) = app.get_webview_window("status-menu-popup") {
         apply_saved_material(&existing, &state);
@@ -397,25 +460,21 @@ pub async fn open_status_menu_popup(
         let _ = existing.set_size(LogicalSize::new(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H));
         let _ = existing.set_position(LogicalPosition::new(x, y));
         let _ = existing.unminimize();
-        let _ = app.emit("status-menu-popup-opened", ());
+        #[cfg(windows)]
+        if let Ok(hwnd) = existing.hwnd() {
+            crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
+        }
+        apply_status_menu_payload(&existing, &payload);
+        let _ = app.emit("status-menu-popup-opened", &payload);
         return Ok(());
     }
-
-    let init = r#"
-      window.__WH_IS_STATUS_MENU_POPUP__ = true;
-      document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-          try { window.__TAURI__.core.invoke('close_status_menu_popup'); } catch (_) {}
-        }
-      });
-    "#;
 
     let win = WebviewWindowBuilder::new(
         &app,
         "status-menu-popup",
         WebviewUrl::App("index.html?window=status-menu".into()),
     )
-    .title("状态菜单")
+    .title("")
     .inner_size(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H)
     .resizable(false)
     .maximizable(false)
@@ -423,22 +482,26 @@ pub async fn open_status_menu_popup(
     .closable(true)
     .decorations(false)
     .transparent(true)
+    .shadow(false)
     .background_color(Color(0, 0, 0, 0))
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
     .visible(false)
-    .initialization_script(init)
+    .initialization_script(status_menu_init_script(&payload))
     .build()
     .map_err(|e| format!("open status menu popup failed: {e}"))?;
 
     let _ = win.set_position(LogicalPosition::new(x, y));
+    let _ = win.set_shadow(false);
     apply_saved_material(&win, &state);
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+        #[cfg(windows)]
+        crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
     }
-    // Do not show yet — StatusMenuPopupApp fits height, then show()+slide.
-    let _ = app.emit("status-menu-popup-opened", ());
+    // Do not show yet — StatusMenuPopupApp fits height, then show().
+    let _ = app.emit("status-menu-popup-opened", &payload);
     Ok(())
 }
 
@@ -650,6 +713,7 @@ pub fn apply_saved_material_pub(window: &tauri::WebviewWindow, state: &MaterialS
 fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::MaterialPrefs) {
     for label in [
         "settings",
+        "dock-icon-editor",
         "tray-popup",
         "plugin-popup",
         "status-menu-popup",
@@ -1038,6 +1102,9 @@ pub struct ChromeHoverTipPayload {
     pub lines: Vec<String>,
     pub x: f64,
     pub y: f64,
+    /// `above` | `below` (default). Dock tips sit above the icon.
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 const CHROME_HOVER_TIP_W: f64 = 160.0;
@@ -1156,6 +1223,7 @@ pub async fn show_chrome_hover_tip(
     lines: Vec<String>,
     x: f64,
     y: f64,
+    placement: Option<String>,
     #[allow(unused_variables)] epoch: Option<u64>,
 ) -> Result<(), String> {
     let lines: Vec<String> = lines
@@ -1171,7 +1239,15 @@ pub async fn show_chrome_hover_tip(
     // Claim a generation for this show; close/newer show will bump past it.
     let seq = CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-    let payload = ChromeHoverTipPayload { lines, x, y };
+    let placement = placement
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s == "above" || s == "below");
+    let payload = ChromeHoverTipPayload {
+        lines,
+        x,
+        y,
+        placement,
+    };
     if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
         *g = Some(payload.clone());
     }
@@ -1937,7 +2013,9 @@ pub fn hub_fetch(
     ) {
         return Err(format!("unsupported method: {method}"));
     }
-    let timeout = std::time::Duration::from_millis(opts.timeout_ms.unwrap_or(15_000).clamp(1_000, 60_000));
+    let timeout = std::time::Duration::from_millis(
+        opts.timeout_ms.unwrap_or(15_000).clamp(300, 60_000),
+    );
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let mut req = match method.as_str() {
         "GET" => agent.get(&url),

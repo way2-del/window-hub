@@ -604,11 +604,11 @@ fn dock_chrome_keep_rect(
     let chrome_h = (super::dock_chrome_height() * scale).round().max(1.0) as i32;
     let prefs = super::load_dock_prefs();
     let layout = super::dock_layout_items(&prefs);
-    let logical_keep = if super::dock_hover_expanded() {
-        super::dock_expanded_width(&layout)
-    } else {
-        super::dock_content_width(&layout)
-    };
+    let logical_keep = super::dock_window_width(
+        &layout,
+        prefs.corner_radius_px,
+        super::dock_hover_expanded(),
+    );
     let content_w = (logical_keep * scale).round().max(1.0) as i32;
 
     if let Some((l, _t, r, b)) = dock_root_screen_rect(app).filter(|(_l, t, _r, _b)| {
@@ -806,7 +806,11 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
             };
             let prefs = super::load_dock_prefs();
             let layout = super::dock_layout_items(&prefs);
-            let logical_w = super::dock_window_width(&layout, prefs.magnification);
+            let logical_w = super::dock_window_width(
+                &layout,
+                prefs.corner_radius_px,
+                super::dock_hover_expanded(),
+            );
             let logical_h = super::dock_window_height(prefs.magnification);
             let (l, t, r, b) =
                 dock_rest_pose_rect(&mi, scale, prefs.bottom_offset_px, logical_w, logical_h);

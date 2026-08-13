@@ -4,14 +4,11 @@
 //! Show-Desktop churn cannot bury it. Tray flyouts briefly call [`yield_for`].
 //! Game fullscreen uses `HIDDEN_FOR_FULLSCREEN` + `hide()` instead of clearing Z-order.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Main island HWND (set once from setup).
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
-
-/// True while the island webview is taller than the strip (panel / pull open).
-static OVERLAY_RAISED: AtomicBool = AtomicBool::new(false);
 
 /// Deadline (ms since unix epoch) while we must not re-apply TOPMOST (tray yield).
 static YIELD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
@@ -27,16 +24,7 @@ pub fn set_main_hwnd(hwnd: isize) {
     MAIN_HWND.store(hwnd, Ordering::SeqCst);
 }
 
-pub fn main_hwnd() -> isize {
-    MAIN_HWND.load(Ordering::SeqCst)
-}
-
-pub fn overlay_raised() -> bool {
-    OVERLAY_RAISED.load(Ordering::SeqCst)
-}
-
-pub fn set_overlay_raised(raised: bool) {
-    OVERLAY_RAISED.store(raised, Ordering::SeqCst);
+pub fn set_overlay_raised(_raised: bool) {
     // Collapsed or expanded: always keep TOPMOST on the desktop (unless yielding).
     reassert_main_zorder();
 }

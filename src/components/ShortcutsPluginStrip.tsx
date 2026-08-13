@@ -411,6 +411,22 @@ export default function ShortcutsPluginStrip({
           scrolling="no"
           frameBorder={0}
           sandbox="allow-scripts allow-same-origin"
+          onLoad={() => {
+            // iframe 晚于 Host 启动时补推 prefs，避免 worker 不知 barResident 仍狂轮询
+            void invoke<Record<string, unknown>>("get_island_prefs")
+              .then((prefs) => {
+                iframeRef.current?.contentWindow?.postMessage(
+                  {
+                    channel: WH_SHORTCUTS_EVT,
+                    type: "island-prefs",
+                    prefs: prefs ?? {},
+                  },
+                  "*",
+                );
+              })
+              .catch(() => undefined);
+            window.setTimeout(measureAndReport, 0);
+          }}
           style={{
             border: "none",
             outline: "none",

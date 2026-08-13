@@ -1,0 +1,357 @@
+/* Dock icon editor — settings-frame twin (left mica list / solid right). */
+
+body.is-dock-icon-editor,
+body.is-dock-icon-editor #root {
+  background: transparent !important;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  user-select: text;
+  color: var(--glass-fg, #f4f4f5);
+}
+
+.die-loading,
+.die-error,
+.die-empty {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 240px;
+  padding: 28px 24px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--glass-fg, #f4f4f5);
+  background: var(--glass-main-bg, #1c1c1e);
+  font-size: 14px;
+}
+
+.die-error {
+  align-content: start;
+  justify-items: start;
+  text-align: left;
+  gap: 12px;
+}
+
+.die-error pre {
+  max-width: 100%;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.die-shell.settings-shell {
+  /* Keep settings frame inset so mica shows around solid main */
+  min-height: 100%;
+}
+
+.die-side-title {
+  padding: 2px 8px 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  color: var(--glass-fg-muted, #a1a1aa);
+  text-transform: uppercase;
+}
+
+.die-nav {
+  gap: 2px;
+  /* Hide scrollbar — still scrollable */
+  overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.die-nav::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.die-side .settings-nav {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.die-side .settings-nav::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.die-nav-empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--glass-fg-muted, #a1a1aa);
+}
+
+.die-nav-item {
+  align-items: center;
+}
+
+.die-nav-thumb-wrap {
+  flex-shrink: 0;
+}
+
+.die-nav-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  background: #f2f2f7;
+}
+
+.die-nav-thumb .dock-glyph,
+.die-nav-thumb img {
+  width: 22px !important;
+  height: 22px !important;
+  display: block;
+  object-fit: contain;
+}
+
+.die-fallback-letter {
+  font-size: 11px;
+  font-weight: 700;
+  color: #1c1c1e;
+}
+
+.die-nav-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.die-nav-label {
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.die-nav-sub {
+  font-size: 10px;
+  color: var(--glass-fg-muted, #a1a1aa);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.die-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.die-head {
+  flex-shrink: 0;
+  padding: 18px 22px 8px;
+}
+
+.die-head-text h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--glass-fg, #f4f4f5);
+}
+
+.die-head-text p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--glass-fg-muted, #a1a1aa);
+}
+
+.die-body {
+  flex: 1 1 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 0;
+  padding: 8px 14px 14px;
+}
+
+.die-preview {
+  min-height: 280px;
+  border-radius: 12px 0 0 12px;
+  background: #141416;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+/* Plate fixed; glyph layer moves with scale/offset */
+.die-preview-plate {
+  width: 128px;
+  height: 128px;
+  border-radius: 28px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: #f2f2f7;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.die-preview-glyph {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  transform-origin: center center;
+}
+
+.die-preview-glyph .dock-glyph,
+.die-preview-glyph img {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+  object-fit: contain;
+}
+
+.die-fallback-letter {
+  font-size: 36px;
+  font-weight: 700;
+  color: #1c1c1e;
+}
+
+.die-nav-thumb .die-fallback-letter {
+  font-size: 11px;
+}
+
+.die-panel {
+  box-sizing: border-box;
+  min-height: 280px;
+  padding: 16px 16px 14px;
+  border-radius: 0 12px 12px 0;
+  background: var(--glass-main-bg, #1c1c1e);
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
+  border-left: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+.die-panel h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.die-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.die-bg-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.die-bg-block strong {
+  font-size: 12px;
+  color: var(--glass-fg, #e5e7eb);
+}
+
+.die-bg-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--glass-fg-muted, #a1a1aa);
+}
+
+.die-bg-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.die-bg-swatch,
+.die-bg-custom {
+  box-sizing: border-box;
+  width: 44px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.12));
+  padding: 0;
+  display: grid;
+  place-items: end center;
+  overflow: hidden;
+  cursor: pointer;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.die-bg-swatch span,
+.die-bg-custom span {
+  width: 100%;
+  padding: 2px 0;
+  background: rgba(0, 0, 0, 0.35);
+  text-align: center;
+}
+
+.die-bg-swatch.is-active,
+.die-bg-custom:focus-within {
+  outline: 2px solid #0a84ff;
+  outline-offset: 1px;
+}
+
+.die-bg-custom {
+  position: relative;
+  background: #f2f2f7;
+}
+
+.die-bg-custom input[type="color"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  border: none;
+}
+
+.die-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.die-msg {
+  font-size: 12px;
+  color: #64d2ff;
+}
+
+.die-shell .dock-glyph {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+html[data-theme="light"] .die-preview {
+  background: #e8e8ed;
+}
+
+html[data-theme="light"] .die-panel {
+  background: #f2f2f7;
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="light"] .die-head-text h1 {
+  color: #1c1c1e;
+}

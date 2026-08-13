@@ -1,12 +1,17 @@
 ﻿:root {
   color-scheme: dark;
   --glass-panel-bg: rgba(28, 28, 30, 0.48);
+  --glass-main-bg: #1c1c1e;
   --glass-fg: #f4f4f5;
   --glass-fg-muted: #9ca3af;
-  --glass-side: rgba(255, 255, 255, 0.04);
+  --glass-side: transparent;
   --glass-card: rgba(255, 255, 255, 0.06);
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-input: rgba(0, 0, 0, 0.22);
+  /* 右侧实色区相对窗体的 inset：露出系统材质 */
+  --settings-frame-pad: 10px;
+  --settings-main-radius: 8px;
+  --settings-side-gap: 8px;
   font-family:
     "Segoe UI Variable",
     "Segoe UI",
@@ -70,7 +75,10 @@ a {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+  column-gap: var(--settings-side-gap, 8px);
+  /* 右、下留白透出系统材质；左侧与标题栏同属材质区 */
+  padding: 0 var(--settings-frame-pad, 10px) var(--settings-frame-pad, 10px) 0;
+  background: transparent;
   color: var(--glass-fg, #f4f4f5);
   /* Window chrome / DWM owns outer radius — do not round the shell again. */
   border-radius: 0;
@@ -84,9 +92,9 @@ a {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  background: var(--glass-side, rgba(255, 255, 255, 0.04));
-  border-right: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
-  backdrop-filter: blur(0px);
+  /* 左侧：透出标题栏同款系统材质 */
+  background: var(--glass-side, transparent);
+  border-right: none;
 }
 
 .settings-search {
@@ -164,7 +172,9 @@ a {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: transparent;
+  /* 右侧：实色底板 + 小圆角，四周/缝隙露出系统材质 */
+  background: var(--glass-main-bg, #1c1c1e);
+  border-radius: var(--settings-main-radius, 8px);
 }
 
 .settings-main-head {
@@ -1072,8 +1082,9 @@ html[data-theme="light"] .mode-item:disabled:hover {
 }
 
 html[data-theme="light"] .settings-card {
-  background: rgba(255, 255, 255, 0.38);
-  border-color: rgba(0, 0, 0, 0.1);
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 html[data-theme="light"] .card-desc {
@@ -1337,4 +1348,161 @@ html[data-theme="light"] .settings-ghost-btn {
 .settings-ghost-btn.is-danger {
   color: #ff6961;
   border-color: rgba(255, 105, 97, 0.35);
+}
+
+/* ── Dock icon editor (settings-frame twin) ───────────────────── */
+body.is-dock-icon-editor,
+body.is-dock-icon-editor #root {
+  background: transparent !important;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  user-select: text;
+}
+
+.dock-icon-editor-side-title {
+  padding: 2px 8px 4px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--glass-fg-muted, #a1a1aa);
+  text-transform: uppercase;
+}
+
+.dock-icon-editor-nav-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  background: #f2f2f7;
+}
+
+.dock-icon-editor-nav-thumb .dock-icon-tile,
+.dock-icon-editor-nav-thumb .dock-glyph,
+.dock-icon-editor-nav-thumb img {
+  width: 22px !important;
+  height: 22px !important;
+}
+
+.dock-icon-editor-nav-thumb span {
+  font-size: 11px;
+  font-weight: 700;
+  color: #1c1c1e;
+}
+
+.dock-icon-editor-nav-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.dock-icon-editor-nav-label {
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dock-icon-editor-nav-sub {
+  font-size: 10px;
+  color: var(--glass-fg-muted, #a1a1aa);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dock-icon-editor-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--glass-fg-muted, #a1a1aa);
+}
+
+.dock-icon-editor-body {
+  display: flex !important;
+  flex-direction: column;
+}
+
+.dock-icon-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 14px;
+  align-items: stretch;
+  min-height: 320px;
+}
+
+.dock-icon-editor-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 280px;
+}
+
+.dock-icon-editor-preview-stage {
+  width: 168px;
+  height: 168px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.28);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.dock-icon-editor-preview-tile {
+  width: 96px;
+  height: 96px;
+  border-radius: 22px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: #f2f2f7;
+  transform-origin: center center;
+}
+
+.dock-icon-editor-preview-tile .dock-icon-tile,
+.dock-icon-editor-preview-tile .dock-glyph,
+.dock-icon-editor-preview-tile img {
+  width: 96px !important;
+  height: 96px !important;
+}
+
+.dock-icon-editor-preview-fallback {
+  font-size: 36px;
+  font-weight: 700;
+  color: #1c1c1e;
+}
+
+.dock-icon-editor-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dock-icon-editor-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.dock-icon-editor-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dock-icon-editor-msg {
+  font-size: 12px;
+  color: #64d2ff;
+}
+
+html[data-theme="light"] .dock-icon-editor-preview-stage {
+  background: rgba(0, 0, 0, 0.06);
 }

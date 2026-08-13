@@ -2,6 +2,8 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+export type ChromeHoverTipPlacement = "above" | "below";
+
 export type ChromeHoverTipShowOpts = {
   /** Prefer multi-line tip. */
   lines?: string[];
@@ -10,8 +12,15 @@ export type ChromeHoverTipShowOpts = {
   /** Viewport coords inside the calling window (logical CSS px). */
   x: number;
   y: number;
-  /** Extra gap below anchor (default 6). */
+  /**
+   * `below` (default): `(x,y)` is tip top-center (after gap).
+   * `above`: `(x,y)` is tip bottom-center — tip sits above the anchor (Dock).
+   */
+  placement?: ChromeHoverTipPlacement;
+  /** Gap between tip and anchor (default 6). */
   gap?: number;
+  /** Skip show debounce (follow / refresh while already hovering). */
+  immediate?: boolean;
 };
 
 /**
@@ -95,24 +104,34 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
   tipWanted = true;
   const token = ++tipToken;
   const gap = typeof opts.gap === "number" ? opts.gap : 6;
+  const placement: ChromeHoverTipPlacement = opts.placement === "above" ? "above" : "below";
 
   clearShowDebounce();
-  await new Promise<void>((resolve) => {
-    showDebounceTimer = setTimeout(() => {
-      showDebounceTimer = null;
-      resolve();
-    }, SHOW_DEBOUNCE_MS);
-  });
-  if (!tipWanted || token !== tipToken) return;
+  if (!opts.immediate) {
+    await new Promise<void>((resolve) => {
+      showDebounceTimer = setTimeout(() => {
+        showDebounceTimer = null;
+        resolve();
+      }, SHOW_DEBOUNCE_MS);
+    });
+    if (!tipWanted || token !== tipToken) return;
+  }
 
   try {
     const win = getCurrentWindow();
     const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
     if (!tipWanted || token !== tipToken) return;
+    const screenX = outer.x / factor + opts.x;
+    // below: tip top = anchor + gap; above: tip bottom = anchor - gap (FE fits with height).
+    const screenY =
+      placement === "above"
+        ? outer.y / factor + opts.y - gap
+        : outer.y / factor + opts.y + gap;
     await invoke("show_chrome_hover_tip", {
       lines,
-      x: outer.x / factor + opts.x,
-      y: outer.y / factor + opts.y + gap,
+      x: screenX,
+      y: screenY,
+      placement,
     });
     // Slow show finished after a hide: force closed.
     if (!tipWanted || token !== tipToken) {
@@ -137,23 +156,150 @@ export async function hideChromeHoverTip(): Promise<void> {
 }
 
 /** Drop-in replacement for native `title` on Host chrome controls. */
-export function hostTipPointerProps(text: string | null | undefined): {
+export function hostTipPointerProps(
+  text: string | null | undefined,
+  opts?: { placement?: ChromeHoverTipPlacement; gap?: number },
+): {
   onPointerEnter?: (e: ReactPointerEvent<HTMLElement>) => void;
   onPointerLeave?: () => void;
 } {
   const tip = (text ?? "").trim();
   if (!tip) return {};
+  const placement = opts?.placement === "above" ? "above" : "below";
   return {
     onPointerEnter: (e) => {
       const r = e.currentTarget.getBoundingClientRect();
       void showChromeHoverTip({
         text: tip,
         x: r.left + r.width / 2,
-        y: r.bottom,
+        y: placement === "above" ? r.top : r.bottom,
+        placement,
+        gap: opts?.gap,
       });
     },
     onPointerLeave: () => {
       void hideChromeHoverTip();
+    },
+  };
+}
+
+/**
+ * Dock icon tip — wait until the hovered icon finishes magnifying, then show
+ * once centered above `.dock-hit`. Switching icons cancels the previous tip
+ * and restarts the settle timer (no open/close flash storm).
+ */
+const DOCK_TIP_SETTLE_MS = 180; // matches .dock-hit 160ms width transition
+const DOCK_TIP_HIDE_GRACE_MS = 90;
+
+let dockTipEl: HTMLElement | null = null;
+let dockTipText = "";
+let dockTipGap = 8;
+let dockTipShowTimer: ReturnType<typeof setTimeout> | null = null;
+let dockTipHideTimer: ReturnType<typeof setTimeout> | null = null;
+let dockTipVisibleFor: HTMLElement | null = null;
+
+function clearDockTipShowTimer() {
+  if (dockTipShowTimer != null) {
+    clearTimeout(dockTipShowTimer);
+    dockTipShowTimer = null;
+  }
+}
+
+function clearDockTipHideTimer() {
+  if (dockTipHideTimer != null) {
+    clearTimeout(dockTipHideTimer);
+    dockTipHideTimer = null;
+  }
+}
+
+function measureDockHit(el: HTMLElement): DOMRect | null {
+  const hit = el.querySelector(".dock-hit") as HTMLElement | null;
+  const r = (hit ?? el).getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return null;
+  return r;
+}
+
+function showDockTipForEl(el: HTMLElement, text: string, gap: number) {
+  const r = measureDockHit(el);
+  if (!r) return;
+  dockTipVisibleFor = el;
+  void showChromeHoverTip({
+    text,
+    x: r.left + r.width / 2,
+    y: r.top,
+    placement: "above",
+    gap,
+    immediate: true,
+  });
+}
+
+function scheduleDockTipShow(el: HTMLElement, text: string, gap: number) {
+  clearDockTipHideTimer();
+  clearDockTipShowTimer();
+  dockTipEl = el;
+  dockTipText = text;
+  dockTipGap = gap;
+
+  // Leaving A → entering B: drop current tip while B is still growing.
+  if (dockTipVisibleFor && dockTipVisibleFor !== el) {
+    dockTipVisibleFor = null;
+    void hideChromeHoverTip();
+  }
+
+  dockTipShowTimer = setTimeout(() => {
+    dockTipShowTimer = null;
+    if (dockTipEl !== el) return;
+    showDockTipForEl(el, text, gap);
+    // One late re-anchor after HWND recenter / last fan frame (no continuous follow).
+    window.setTimeout(() => {
+      if (dockTipEl === el && dockTipVisibleFor === el) {
+        showDockTipForEl(el, text, gap);
+      }
+    }, 40);
+  }, DOCK_TIP_SETTLE_MS);
+}
+
+function scheduleDockTipHide() {
+  clearDockTipShowTimer();
+  dockTipEl = null;
+  dockTipText = "";
+  clearDockTipHideTimer();
+  dockTipHideTimer = setTimeout(() => {
+    dockTipHideTimer = null;
+    // Enter on a sibling may have claimed the tip already.
+    if (dockTipEl) return;
+    dockTipVisibleFor = null;
+    void hideChromeHoverTip();
+  }, DOCK_TIP_HIDE_GRACE_MS);
+}
+
+export function dockIconTipPointerProps(
+  text: string | null | undefined,
+  opts?: { gap?: number },
+): {
+  onPointerEnter?: (e: ReactPointerEvent<HTMLElement>) => void;
+  onPointerLeave?: (e: ReactPointerEvent<HTMLElement>) => void;
+} {
+  const tip = (text ?? "").trim();
+  if (!tip) return {};
+  const gap = typeof opts?.gap === "number" ? opts.gap : 8;
+  return {
+    onPointerEnter: (e) => {
+      scheduleDockTipShow(e.currentTarget, tip, gap);
+    },
+    onPointerLeave: (e) => {
+      const to = e.relatedTarget as Node | null;
+      // Moving onto another dock icon — let its enter restart settle; grace hide covers gaps.
+      if (to && (to as HTMLElement).closest?.(".dock-item")) {
+        if (dockTipEl === e.currentTarget) {
+          clearDockTipShowTimer();
+          dockTipEl = null;
+        }
+        return;
+      }
+      if (dockTipEl === e.currentTarget || dockTipVisibleFor === e.currentTarget) {
+        scheduleDockTipHide();
+      }
     },
   };
 }

@@ -111,6 +111,10 @@ pub fn parse_dockico_text(text: &str) -> Result<Vec<DockItem>, String> {
                 icon_path: String::new(),
                 uwp: false,
                 icon_png: None,
+                icon_scale: 1.0,
+                icon_offset_x: 0.0,
+                icon_offset_y: 0.0,
+                icon_bg: String::new(),
             });
             continue;
         }
@@ -163,6 +167,10 @@ pub fn parse_dockico_text(text: &str) -> Result<Vec<DockItem>, String> {
             icon_path: icopath,
             uwp,
             icon_png: None,
+            icon_scale: 1.0,
+            icon_offset_x: 0.0,
+            icon_offset_y: 0.0,
+            icon_bg: String::new(),
         });
     }
 

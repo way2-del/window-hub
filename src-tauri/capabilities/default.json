@@ -14,7 +14,7 @@
     "wifi-auth-popup",
     "dock",
     "dock-glass",
-    "genie-overlay"
+    "dock-icon-editor"
   ],
   "remote": {
     "urls": ["http://localhost:1420/*", "http://127.0.0.1:1420/*"]

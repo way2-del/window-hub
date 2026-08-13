@@ -3,12 +3,29 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
-import { slideRevealPopup } from "./popupFit";
+import { fitPopupToContent } from "./popupFit";
 import "./components/StatusMenu.css";
 
+declare global {
+  interface Window {
+    __WH_STATUS_MENU_FROM_DOCK__?: boolean;
+    __WH_STATUS_MENU_ITEM_ID__?: string | null;
+    __WH_STATUS_MENU_PIN_BOTTOM__?: number | null;
+  }
+}
+
 const POPUP_W = 200;
+
+type OpenPayload = {
+  fromDock?: boolean;
+  itemId?: string | null;
+  pinBottom?: number | null;
+};
+
 /** Captured once per open (dock menus open upward). */
 let pinBottomCached: number | null | undefined;
+let fromDockCached: boolean | undefined;
+let dockItemIdCached: string | null | undefined;
 
 async function closeSelf() {
   try {
@@ -32,12 +49,37 @@ async function run(action: () => Promise<void>) {
   }
 }
 
-function resetPinBottomCache() {
+function resetOpenCaches() {
   pinBottomCached = undefined;
+  fromDockCached = undefined;
+  dockItemIdCached = undefined;
+}
+
+function applyPayload(payload?: OpenPayload | null) {
+  if (!payload) return;
+  if (typeof payload.fromDock === "boolean") {
+    fromDockCached = payload.fromDock;
+    window.__WH_STATUS_MENU_FROM_DOCK__ = payload.fromDock;
+  }
+  if (payload.itemId !== undefined) {
+    const id = (payload.itemId ?? "").trim() || null;
+    dockItemIdCached = id;
+    window.__WH_STATUS_MENU_ITEM_ID__ = id;
+  }
+  if (payload.pinBottom !== undefined) {
+    const n = payload.pinBottom;
+    pinBottomCached = typeof n === "number" && Number.isFinite(n) ? n : null;
+    window.__WH_STATUS_MENU_PIN_BOTTOM__ = pinBottomCached;
+  }
 }
 
 function readPinBottom(): number | null {
   if (pinBottomCached !== undefined) return pinBottomCached;
+  const fromWin = window.__WH_STATUS_MENU_PIN_BOTTOM__;
+  if (typeof fromWin === "number" && Number.isFinite(fromWin)) {
+    pinBottomCached = fromWin;
+    return fromWin;
+  }
   try {
     const raw = sessionStorage.getItem("wh.statusMenu.pinBottom");
     sessionStorage.removeItem("wh.statusMenu.pinBottom");
@@ -50,6 +92,41 @@ function readPinBottom(): number | null {
     return pinBottomCached;
   } catch {
     pinBottomCached = null;
+    return null;
+  }
+}
+
+function readFromDock(): boolean {
+  if (fromDockCached !== undefined) return fromDockCached;
+  if (typeof window.__WH_STATUS_MENU_FROM_DOCK__ === "boolean") {
+    fromDockCached = window.__WH_STATUS_MENU_FROM_DOCK__;
+    return fromDockCached;
+  }
+  try {
+    const raw = sessionStorage.getItem("wh.statusMenu.fromDock");
+    sessionStorage.removeItem("wh.statusMenu.fromDock");
+    fromDockCached = raw === "1";
+    return fromDockCached;
+  } catch {
+    fromDockCached = false;
+    return false;
+  }
+}
+
+function readDockItemId(): string | null {
+  if (dockItemIdCached !== undefined) return dockItemIdCached;
+  const fromWin = window.__WH_STATUS_MENU_ITEM_ID__;
+  if (typeof fromWin === "string" && fromWin.trim()) {
+    dockItemIdCached = fromWin.trim();
+    return dockItemIdCached;
+  }
+  try {
+    const raw = (sessionStorage.getItem("wh.statusMenu.itemId") || "").trim();
+    sessionStorage.removeItem("wh.statusMenu.itemId");
+    dockItemIdCached = raw || null;
+    return dockItemIdCached;
+  } catch {
+    dockItemIdCached = null;
     return null;
   }
 }
@@ -72,25 +149,34 @@ async function syncGlass() {
   await invoke("apply_window_effect", {}).catch(() => undefined);
 }
 
-/** Measure while hidden → show at 2px → ease-out expand (~180ms, dock cadence). */
-async function revealFitted(direction: "up" | "down") {
+/** Fit to content then show — no 2px slide (that left a light window-frame strip). */
+async function revealFitted(_direction: "up" | "down") {
   const pinBottom = readPinBottom();
-  await slideRevealPopup({
+  await fitPopupToContent({
     width: POPUP_W,
     selector: ".status-menu-shell",
     minHeight: 72,
     maxHeight: 480,
     pinBottom,
-    direction,
   });
+  const win = getCurrentWindow();
+  await win.show();
+  await win.setFocus();
+  await invoke("apply_window_effect", {}).catch(() => undefined);
 }
 
 export default function StatusMenuPopupApp() {
-  const [boot, setBoot] = useState<{ hiddenCount: number; origin: "up" | "down" } | null>(null);
+  const [boot, setBoot] = useState<{
+    hiddenCount: number;
+    origin: "up" | "down";
+    fromDock: boolean;
+    dockItemId: string | null;
+  } | null>(null);
   const [entered, setEntered] = useState(false);
   const revealGen = useRef(0);
   /** After first reveal, `status-menu-popup-opened` means HWND reuse (not initial emit). */
   const reuseArmedRef = useRef(false);
+  const openingEditorRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +193,13 @@ export default function StatusMenuPopupApp() {
       }
       if (cancelled) return;
       setEntered(false);
-      setBoot({ hiddenCount: n, origin: menuOrigin() });
+      openingEditorRef.current = false;
+      setBoot({
+        hiddenCount: n,
+        origin: menuOrigin(),
+        fromDock: readFromDock(),
+        dockItemId: readDockItemId(),
+      });
     };
 
     void start();
@@ -146,9 +238,13 @@ export default function StatusMenuPopupApp() {
       }),
     );
 
-    void listen("status-menu-popup-opened", () => {
-      if (!reuseArmedRef.current) return;
-      resetPinBottomCache();
+    void listen<OpenPayload>("status-menu-popup-opened", (ev) => {
+      if (!reuseArmedRef.current) {
+        applyPayload(ev.payload);
+        return;
+      }
+      resetOpenCaches();
+      applyPayload(ev.payload);
       void start();
     }).then((fn) => {
       if (!cancelled) unsubs.push(fn);
@@ -200,7 +296,7 @@ export default function StatusMenuPopupApp() {
     return <div className="status-menu-shell is-booting" aria-hidden />;
   }
 
-  const { hiddenCount, origin } = boot;
+  const { hiddenCount, origin, fromDock, dockItemId } = boot;
   const shellClass = [
     "status-menu-shell",
     origin === "up" ? "is-origin-up" : "is-origin-down",
@@ -211,6 +307,36 @@ export default function StatusMenuPopupApp() {
 
   return (
     <div className={shellClass} role="menu">
+      {fromDock ? (
+        <>
+          <button
+            type="button"
+            className="status-menu-item"
+            role="menuitem"
+            disabled={openingEditorRef.current}
+            onClick={() => {
+              if (openingEditorRef.current) return;
+              openingEditorRef.current = true;
+              void (async () => {
+                try {
+                  // Open editor first — closing this HWND first aborts the invoke.
+                  await invoke("open_dock_icon_editor", {
+                    itemId: dockItemId || null,
+                  });
+                } catch (e) {
+                  console.error("[StatusMenuPopup] open editor", e);
+                  openingEditorRef.current = false;
+                  return;
+                }
+                await closeSelf();
+              })();
+            }}
+          >
+            修改图标
+          </button>
+          <div className="status-menu-sep" role="separator" />
+        </>
+      ) : null}
       <button
         type="button"
         className="status-menu-item"
