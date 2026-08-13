@@ -10,6 +10,7 @@ declare global {
   interface Window {
     __WH_STATUS_MENU_FROM_DOCK__?: boolean;
     __WH_STATUS_MENU_ITEM_ID__?: string | null;
+    __WH_STATUS_MENU_AFTER_ITEM_ID__?: string | null;
     __WH_STATUS_MENU_PIN_BOTTOM__?: number | null;
   }
 }
@@ -19,6 +20,7 @@ const POPUP_W = 200;
 type OpenPayload = {
   fromDock?: boolean;
   itemId?: string | null;
+  afterItemId?: string | null;
   pinBottom?: number | null;
 };
 
@@ -26,6 +28,7 @@ type OpenPayload = {
 let pinBottomCached: number | null | undefined;
 let fromDockCached: boolean | undefined;
 let dockItemIdCached: string | null | undefined;
+let afterItemIdCached: string | null | undefined;
 
 async function closeSelf() {
   try {
@@ -53,6 +56,7 @@ function resetOpenCaches() {
   pinBottomCached = undefined;
   fromDockCached = undefined;
   dockItemIdCached = undefined;
+  afterItemIdCached = undefined;
 }
 
 function applyPayload(payload?: OpenPayload | null) {
@@ -65,6 +69,11 @@ function applyPayload(payload?: OpenPayload | null) {
     const id = (payload.itemId ?? "").trim() || null;
     dockItemIdCached = id;
     window.__WH_STATUS_MENU_ITEM_ID__ = id;
+  }
+  if (payload.afterItemId !== undefined) {
+    const id = (payload.afterItemId ?? "").trim() || null;
+    afterItemIdCached = id;
+    window.__WH_STATUS_MENU_AFTER_ITEM_ID__ = id;
   }
   if (payload.pinBottom !== undefined) {
     const n = payload.pinBottom;
@@ -131,6 +140,29 @@ function readDockItemId(): string | null {
   }
 }
 
+/** Gap anchor for inserting a separator (from open payload / init script). */
+function readAfterItemId(): string | null {
+  if (afterItemIdCached !== undefined) return afterItemIdCached;
+  const fromWin = window.__WH_STATUS_MENU_AFTER_ITEM_ID__;
+  if (typeof fromWin === "string" && fromWin.trim()) {
+    afterItemIdCached = fromWin.trim();
+    return afterItemIdCached;
+  }
+  if (fromWin === null) {
+    afterItemIdCached = null;
+    return null;
+  }
+  try {
+    const raw = (sessionStorage.getItem("wh.statusMenu.afterItemId") || "").trim();
+    sessionStorage.removeItem("wh.statusMenu.afterItemId");
+    afterItemIdCached = raw || null;
+    return afterItemIdCached;
+  } catch {
+    afterItemIdCached = null;
+    return null;
+  }
+}
+
 function menuOrigin(): "up" | "down" {
   return readPinBottom() != null ? "up" : "down";
 }
@@ -165,12 +197,16 @@ async function revealFitted(_direction: "up" | "down") {
   await invoke("apply_window_effect", {}).catch(() => undefined);
 }
 
+type DockMenuItem = { id: string; kind: string };
+
 export default function StatusMenuPopupApp() {
   const [boot, setBoot] = useState<{
     hiddenCount: number;
     origin: "up" | "down";
     fromDock: boolean;
     dockItemId: string | null;
+    dockItemKind: string | null;
+    afterItemId: string | null;
   } | null>(null);
   const [entered, setEntered] = useState(false);
   const revealGen = useRef(0);
@@ -191,6 +227,17 @@ export default function StatusMenuPopupApp() {
       } catch {
         n = 0;
       }
+      const dockItemId = readDockItemId();
+      const afterItemId = readAfterItemId() ?? dockItemId;
+      let dockItemKind: string | null = null;
+      if (dockItemId) {
+        try {
+          const items = await invoke<DockMenuItem[]>("get_dock_display_items");
+          dockItemKind = items.find((it) => it.id === dockItemId)?.kind ?? null;
+        } catch {
+          dockItemKind = null;
+        }
+      }
       if (cancelled) return;
       setEntered(false);
       openingEditorRef.current = false;
@@ -198,7 +245,9 @@ export default function StatusMenuPopupApp() {
         hiddenCount: n,
         origin: menuOrigin(),
         fromDock: readFromDock(),
-        dockItemId: readDockItemId(),
+        dockItemId,
+        dockItemKind,
+        afterItemId,
       });
     };
 
@@ -296,7 +345,10 @@ export default function StatusMenuPopupApp() {
     return <div className="status-menu-shell is-booting" aria-hidden />;
   }
 
-  const { hiddenCount, origin, fromDock, dockItemId } = boot;
+  const { hiddenCount, origin, fromDock, dockItemId, dockItemKind, afterItemId } =
+    boot;
+  const isRunningTile = !!dockItemId?.startsWith("running:");
+  const isSeparator = dockItemKind === "separator";
   const shellClass = [
     "status-menu-shell",
     origin === "up" ? "is-origin-up" : "is-origin-down",
@@ -309,31 +361,110 @@ export default function StatusMenuPopupApp() {
     <div className={shellClass} role="menu">
       {fromDock ? (
         <>
-          <button
-            type="button"
-            className="status-menu-item"
-            role="menuitem"
-            disabled={openingEditorRef.current}
-            onClick={() => {
-              if (openingEditorRef.current) return;
-              openingEditorRef.current = true;
-              void (async () => {
-                try {
-                  // Open editor first — closing this HWND first aborts the invoke.
-                  await invoke("open_dock_icon_editor", {
-                    itemId: dockItemId || null,
-                  });
-                } catch (e) {
-                  console.error("[StatusMenuPopup] open editor", e);
-                  openingEditorRef.current = false;
-                  return;
-                }
-                await closeSelf();
-              })();
-            }}
-          >
-            修改图标
-          </button>
+          {isRunningTile ? (
+            <button
+              type="button"
+              className="status-menu-item"
+              role="menuitem"
+              onClick={() =>
+                void run(async () => {
+                  await invoke("dock_pin_item", { itemId: dockItemId });
+                })
+              }
+            >
+              固定到 Dock
+            </button>
+          ) : isSeparator ? (
+            <button
+              type="button"
+              className="status-menu-item is-danger"
+              role="menuitem"
+              onClick={() =>
+                void run(async () => {
+                  await invoke("dock_unpin_item", { itemId: dockItemId });
+                })
+              }
+            >
+              删除分割线
+            </button>
+          ) : (
+            <>
+              {dockItemId ? (
+                <>
+                  <button
+                    type="button"
+                    className="status-menu-item"
+                    role="menuitem"
+                    disabled={openingEditorRef.current}
+                    onClick={() => {
+                      if (openingEditorRef.current) return;
+                      openingEditorRef.current = true;
+                      void (async () => {
+                        try {
+                          // Open editor first — closing this HWND first aborts the invoke.
+                          await invoke("open_dock_icon_editor", {
+                            itemId: dockItemId || null,
+                          });
+                        } catch (e) {
+                          console.error("[StatusMenuPopup] open editor", e);
+                          openingEditorRef.current = false;
+                          return;
+                        }
+                        await closeSelf();
+                      })();
+                    }}
+                  >
+                    修改图标
+                  </button>
+                  <button
+                    type="button"
+                    className="status-menu-item"
+                    role="menuitem"
+                    onClick={() =>
+                      void run(async () => {
+                        await invoke("dock_add_separator", {
+                          afterItemId: afterItemId || dockItemId,
+                        });
+                      })
+                    }
+                  >
+                    在右侧添加分割线
+                  </button>
+                  {dockItemKind === "app" ? (
+                    <button
+                      type="button"
+                      className="status-menu-item is-danger"
+                      role="menuitem"
+                      onClick={() =>
+                        void run(async () => {
+                          await invoke("dock_unpin_item", {
+                            itemId: dockItemId,
+                          });
+                        })
+                      }
+                    >
+                      从 Dock 移除
+                    </button>
+                  ) : null}
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="status-menu-item"
+                  role="menuitem"
+                  onClick={() =>
+                    void run(async () => {
+                      await invoke("dock_add_separator", {
+                        afterItemId: afterItemId,
+                      });
+                    })
+                  }
+                >
+                  在此处添加分割线
+                </button>
+              )}
+            </>
+          )}
           <div className="status-menu-sep" role="separator" />
         </>
       ) : null}

@@ -7,12 +7,23 @@ import {
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { flushSync } from "react-dom";
+import {
+  DragDropContext,
+  Draggable,
+  Droppable,
+  type BeforeCapture,
+  type DragStart,
+  type DragUpdate,
+  type DropResult,
+} from "@hello-pangea/dnd";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { applyGlassCss, type GlassPrefs } from "./glassPrefs";
 import {
   hideChromeHoverTip,
+  showChromeHoverTip,
   dockIconTipPointerProps,
   installChromeHoverTipGlobalDismiss,
 } from "./chromeHoverTip";
@@ -62,11 +73,15 @@ const STATUS_MENU_H = 340;
 const STATUS_MENU_GAP = 8;
 const STATUS_MENU_MARGIN = 8;
 
+/** Shared with openStatusMenuAtClientPoint (module scope) + DockApp leave handlers. */
+let dockStatusMenuOpen = false;
+
 /** Icon slot width (matches CSS / Rust DOCK_ICON). */
 const ICON_SLOT = 40;
 const ICON_GAP = 6;
 const BAR_PAD_X_MIN = 2;
-const SEP_W = 10;
+/** Visual rule is 1px; hit/layout slot is wider for drag. Keep in sync with CSS. */
+const SEP_LAYOUT_W = 16;
 /** How many icon-widths the fan reaches on each side. */
 const MAG_RANGE = 2.25;
 /** Fixed magnification — not user-configurable (matches Rust DOCK_MAG_SCALE). */
@@ -93,7 +108,7 @@ function restingCenters(items: DockItem[], padX: number): Map<string, number> {
   items.forEach((item, i) => {
     if (i > 0) x += ICON_GAP;
     if (item.kind === "separator") {
-      x += SEP_W;
+      x += SEP_LAYOUT_W;
       return;
     }
     map.set(item.id, x + ICON_SLOT / 2);
@@ -107,9 +122,73 @@ function restingBarWidth(items: DockItem[], padX: number): number {
   let w = padX * 2;
   items.forEach((item, i) => {
     if (i > 0) w += ICON_GAP;
-    w += item.kind === "separator" ? SEP_W : ICON_SLOT;
+    w += item.kind === "separator" ? SEP_LAYOUT_W : ICON_SLOT;
   });
   return Math.max(120, w);
+}
+
+function isEphemeralDockId(id: string): boolean {
+  return id.startsWith("running:") || id === "running-sep";
+}
+
+/** Pinned tile immediately left of the pointer gap (between two icons). */
+function resolveAfterItemIdAtClientX(clientX: number): string | null {
+  const pins = Array.from(document.querySelectorAll<HTMLElement>("[data-dock-id]"))
+    .map((el) => {
+      const id = el.dataset.dockId || "";
+      if (!id || isEphemeralDockId(id)) return null;
+      const r = el.getBoundingClientRect();
+      if (r.width < 1) return null;
+      return { id, left: r.left, right: r.right, mid: r.left + r.width / 2 };
+    })
+    .filter((x): x is { id: string; left: number; right: number; mid: number } => !!x)
+    .sort((a, b) => a.left - b.left);
+  if (!pins.length) return null;
+
+  for (let i = 0; i < pins.length; i++) {
+    const cur = pins[i];
+    const next = pins[i + 1];
+    // Inside a tile: left half → previous; right half → this tile.
+    if (clientX >= cur.left && clientX < cur.right) {
+      if (clientX < cur.mid) {
+        return i > 0 ? pins[i - 1].id : cur.id;
+      }
+      return cur.id;
+    }
+    // In the gap before the next tile.
+    if (next && clientX >= cur.right && clientX < next.left) {
+      return cur.id;
+    }
+  }
+  // Past the last pin (but never treat trash as “after” — caller inserts before it).
+  const last = pins[pins.length - 1];
+  return clientX >= last.mid ? last.id : pins[0]?.id ?? null;
+}
+
+function reorderDockItems(items: DockItem[], from: number, to: number): DockItem[] {
+  if (from === to || from < 0 || to < 0 || from >= items.length || to >= items.length) {
+    return items;
+  }
+  const next = items.slice();
+  const [it] = next.splice(from, 1);
+  next.splice(to, 0, it);
+  return next;
+}
+
+/** Keep pins out of the ephemeral running:* zone (right side). */
+function clampPinnedDestIndex(items: DockItem[], from: number, dest: number): number {
+  const without = items.filter((_, i) => i !== from);
+  const firstEph = without.findIndex((i) => isEphemeralDockId(i.id));
+  const max = firstEph >= 0 ? firstEph : without.length;
+  return Math.max(0, Math.min(dest, max));
+}
+
+/** Prefs pin order = visible non-running tiles L→R, then any overflow-hidden pins. */
+function pinnedOrderIds(display: DockItem[], prefsItems: DockItem[]): string[] {
+  const visible = display.filter((d) => !isEphemeralDockId(d.id)).map((d) => d.id);
+  const seen = new Set(visible);
+  const rest = prefsItems.map((i) => i.id).filter((id) => !seen.has(id));
+  return [...visible, ...rest];
 }
 
 function exeMatches(item: DockItem, w: HubWindow): boolean {
@@ -164,15 +243,26 @@ async function openStatusMenuAtClientPoint(
     y = Math.max(STATUS_MENU_MARGIN, y);
   }
 
+  // Anchor for “添加分割线”: clicked tile, else the pin left of the pointer gap.
+  const afterItemId = (itemId?.trim() || resolveAfterItemIdAtClientX(clientX) || "").trim() || null;
+
+  // Hold AutoHide + skip FE collapse while the menu is open (pointer leaves chrome).
+  dockStatusMenuOpen = true;
+  await invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
+
   const visible = await invoke<boolean>("is_status_menu_popup_open");
   if (visible) {
     await invoke("close_status_menu_popup");
+    dockStatusMenuOpen = true;
+    // close clears hold — re-assert before reopen.
+    await invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
   }
   await invoke("open_status_menu_popup", {
     x,
     y,
     fromDock: true,
     itemId: itemId?.trim() || null,
+    afterItemId,
     pinBottom,
   });
 }
@@ -259,10 +349,34 @@ export default function DockApp() {
   const [windows, setWindows] = useState<HubWindow[]>([]);
   /** Overflow compact toast. */
   const [compactTip, setCompactTip] = useState<string | null>(null);
+  /** External file drop hover (pin apps). */
+  const [dropHover, setDropHover] = useState(false);
+  /** `@hello-pangea/dnd` drag in progress — fan magnification frozen. */
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  /** True while pointer is high enough to unpin on drop-outside. */
+  const [dragRemoveArmed, setDragRemoveArmed] = useState(false);
   /** Pointer X relative to `.dock-bar` content box. */
   const [localX, setLocalX] = useState<number | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
+  const suppressClickRef = useRef(false);
+  const dndActiveRef = useRef(false);
+  const dragRemoveArmedRef = useRef(false);
+  const dragStartYRef = useRef(0);
+  /** Last pointer during dnd (remove-arm + drop sample). */
+  const lastDndPointerRef = useRef({ x: 0, y: 0 });
+  /**
+   * Blocks fan only for the drop's own synchronous pointer samples.
+   * Cleared on microtask — next real move applies magnify immediately.
+   */
+  const postDndFanBlockedRef = useRef(false);
+  /** Skip prefs/display churn while a quiet reorder persist is in flight. */
+  const persistQuietRef = useRef(false);
+  const displayItemsRef = useRef<DockItem[]>([]);
+  const prefsRef = useRef<DockPrefs | null>(null);
   const rafRef = useRef(0);
+  /** Coalesce fan X to one setState per frame. */
+  const fanMoveRafRef = useRef(0);
+  const pendingFanClientXRef = useRef<number | null>(null);
   const expandedRef = useRef(false);
   const expandInflightRef = useRef<boolean | null>(null);
   /** Fan only after HWND widen succeeds — never grow icons on resting width. */
@@ -309,15 +423,6 @@ export default function DockApp() {
     });
   };
 
-  const armFan = () => {
-    fanArmedRef.current = true;
-    setFanArmed(true);
-    const pending = pendingFanXRef.current;
-    if (pending != null) {
-      setLocalX(pending);
-    }
-  };
-
   const setExpanded = (next: boolean) => {
     // Already widened this hover session — do not re-invoke snap / restore.
     if (expandedRef.current === next) {
@@ -359,20 +464,26 @@ export default function DockApp() {
   };
 
   const queueFanFromClientX = (clientX: number) => {
-    const bar = barRef.current;
-    if (!bar) return;
-    const rect = bar.getBoundingClientRect();
-    const padX = dockPadX(prefs?.cornerRadiusPx ?? 20);
-    const restW = restingBarWidth(displayItems, padX);
-    // Bar is full HWND width; icons are centered — map into resting content space.
-    const offset = (rect.width - restW) / 2;
-    const x = clientX - rect.left - offset;
-    // Buffer pointer until widen completes — never drive scales early.
-    if (!fanArmedRef.current || !expandedRef.current) {
-      pendingFanXRef.current = x;
-      return;
-    }
-    setLocalX(x);
+    pendingFanClientXRef.current = clientX;
+    if (fanMoveRafRef.current) return;
+    fanMoveRafRef.current = requestAnimationFrame(() => {
+      fanMoveRafRef.current = 0;
+      const cx = pendingFanClientXRef.current;
+      const bar = barRef.current;
+      if (cx == null || !bar) return;
+      const rect = bar.getBoundingClientRect();
+      const pad = dockPadX(prefsRef.current?.cornerRadiusPx ?? 20);
+      const restW = restingBarWidth(displayItemsRef.current, pad);
+      // Bar is full HWND width; icons are centered — map into resting content space.
+      const offset = (rect.width - restW) / 2;
+      const x = cx - rect.left - offset;
+      // Buffer pointer until widen completes — never drive scales early.
+      if (!fanArmedRef.current || !expandedRef.current) {
+        pendingFanXRef.current = x;
+        return;
+      }
+      setLocalX(x);
+    });
   };
 
   const beginCollapseAfterFanRest = () => {
@@ -388,6 +499,28 @@ export default function DockApp() {
   };
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
+
+  useEffect(() => {
+    let unOpen: (() => void) | undefined;
+    let unClose: (() => void) | undefined;
+    void listen("status-menu-popup-opened", () => {
+      dockStatusMenuOpen = true;
+      cancelCollapseTimer();
+      void invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
+    }).then((fn) => {
+      unOpen = fn;
+    });
+    void listen("status-menu-popup-closed", () => {
+      dockStatusMenuOpen = false;
+      void invoke("dock_set_interaction_hold", { hold: false }).catch(() => undefined);
+    }).then((fn) => {
+      unClose = fn;
+    });
+    return () => {
+      unOpen?.();
+      unClose?.();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -418,8 +551,10 @@ export default function DockApp() {
 
     const refreshDisplay = async () => {
       try {
+        // Never mutate Draggable sizes/count mid-drag (hello-pangea/dnd contract).
+        if (dndActiveRef.current || persistQuietRef.current) return;
         const items = await invoke<DockItem[]>("get_dock_display_items");
-        if (cancelled) return;
+        if (cancelled || dndActiveRef.current) return;
         const sig = items.map((i) => `${i.id}:${i.kind}`).join("|");
         const changed = sig !== layoutSigRef.current;
         layoutSigRef.current = sig;
@@ -475,11 +610,11 @@ export default function DockApp() {
 
     const unsubs: Array<() => void> = [];
     void listen<DockPrefs>("dock-prefs", (e) => {
-      if (!cancelled) {
-        setPrefs(e.payload);
-        // Pins already carry icons from the emit — merge running on top.
-        setDisplayItems(e.payload.items);
-      }
+      if (cancelled) return;
+      // Reorder persist emits stripped pins (no icons) — applying that prefs
+      // blob mid-fan hitchs the bar. Ignore until quiet persist finishes.
+      if (dndActiveRef.current || persistQuietRef.current) return;
+      setPrefs(e.payload);
       void refreshDisplay();
     }).then((u) => unsubs.push(u));
     void listen<{ windows: HubWindow[] }>("hub-windows-changed", (e) => {
@@ -518,10 +653,71 @@ export default function DockApp() {
   }, []);
 
   useEffect(() => {
-    if (!compactTip) return;
+    if (!compactTip || draggingId || dropHover) return;
     const t = window.setTimeout(() => setCompactTip(null), 6000);
     return () => window.clearTimeout(t);
-  }, [compactTip]);
+  }, [compactTip, draggingId, dropHover]);
+
+  // Native OLE file-drop (Rust) → tip + prefs refresh.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void listen<{ phase?: string; count?: number }>("dock-file-drag", (ev) => {
+      const phase = ev.payload?.phase;
+      const count = ev.payload?.count ?? 0;
+      if (phase === "enter") {
+        setDropHover(true);
+        const bar = barRef.current;
+        const r = bar?.getBoundingClientRect();
+        void showChromeHoverTip({
+          text: "松开以固定到 Dock",
+          x: r ? r.left + r.width / 2 : window.innerWidth / 2,
+          y: r ? r.top : 8,
+          placement: "above",
+          gap: 10,
+          immediate: true,
+        });
+      } else if (phase === "leave") {
+        setDropHover(false);
+        void hideChromeHoverTip();
+      } else if (phase === "drop") {
+        setDropHover(false);
+        if (count > 0) {
+          flashChromeTip(`已固定 ${count} 个到 Dock`);
+        } else {
+          void hideChromeHoverTip();
+        }
+      } else if (phase === "error") {
+        setDropHover(false);
+        flashChromeTip("无法固定到 Dock（请拖入 .exe / .lnk）");
+      }
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un?.();
+  }, []);
+
+  displayItemsRef.current = displayItems;
+  prefsRef.current = prefs;
+
+  // Track remove-arm + last pointer while dragging — tip is shown once on drag start only.
+  useEffect(() => {
+    if (!draggingId) return;
+    const onMove = (e: PointerEvent) => {
+      lastDndPointerRef.current = { x: e.clientX, y: e.clientY };
+      const chrome = document.querySelector(".dock-chrome") as HTMLElement | null;
+      const top = chrome?.getBoundingClientRect().top ?? window.innerHeight - 52;
+      const item = displayItemsRef.current.find((it) => it.id === draggingId);
+      const canRemove =
+        !!item && item.kind === "app" && !item.id.startsWith("running:");
+      const outside = e.clientY < top - 8 || dragStartYRef.current - e.clientY >= 36;
+      const armed = canRemove && outside;
+      if (armed === dragRemoveArmedRef.current) return;
+      dragRemoveArmedRef.current = armed;
+      setDragRemoveArmed(armed);
+    };
+    window.addEventListener("pointermove", onMove);
+    return () => window.removeEventListener("pointermove", onMove);
+  }, [draggingId]);
 
   const maxScale = DOCK_MAG;
   const magOn = true;
@@ -541,6 +737,12 @@ export default function DockApp() {
   }, [displayItems, windows]);
 
   const padX = dockPadX(prefs?.cornerRadiusPx ?? 20);
+  const cornerRadius = prefs?.cornerRadiusPx ?? 20;
+  /** Match Composition capsule: rest = content width; hover-wide = full host. */
+  const chromeWide = fanLive || !!draggingId;
+  const chromeWidth = chromeWide
+    ? undefined
+    : restingBarWidth(displayItems, padX);
   const centers = useMemo(
     () => restingCenters(displayItems, padX),
     [displayItems, padX],
@@ -548,8 +750,9 @@ export default function DockApp() {
 
   const scales = useMemo(() => {
     const map = new Map<string, number>();
-    // Strict order: no icon growth until dock has widened.
-    if (!fanArmed || localX == null) return map;
+    // During dnd, keep resting widths so hello-pangea/dnd's dimension model stays valid.
+    // Hover fan is unchanged whenever not dragging.
+    if (draggingId || !fanArmed || localX == null) return map;
     for (const item of displayItems) {
       if (item.kind === "separator") continue;
       const c = centers.get(item.id);
@@ -560,7 +763,7 @@ export default function DockApp() {
       map.set(item.id, fanScale(Math.abs(localX - c), maxScale));
     }
     return map;
-  }, [displayItems, localX, maxScale, centers, fanArmed]);
+  }, [displayItems, localX, maxScale, centers, fanArmed, draggingId]);
 
   // AutoHide / hide snap must clear fan + collapse HWND pad.
   useEffect(() => {
@@ -580,39 +783,53 @@ export default function DockApp() {
   }, []);
 
   const onBarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!prefs) return;
+    if (!prefs || dndActiveRef.current) return;
+    if (postDndFanBlockedRef.current) return;
     cancelCollapseTimer();
-    setFanLive(true);
+    if (!fanLive) setFanLive(true);
     // Widen at most once per hover session; moves only update fan X.
     if (!expandedRef.current && expandInflightRef.current !== true) {
       setExpanded(true);
+    } else if (!fanArmedRef.current) {
+      fanArmedRef.current = true;
+      setFanArmed(true);
     }
-    const clientX = e.clientX;
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(() => {
-      queueFanFromClientX(clientX);
-    });
+    queueFanFromClientX(e.clientX);
   };
 
   const onBarPointerEnter = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (dndActiveRef.current || postDndFanBlockedRef.current) return;
     cancelCollapseTimer();
     setFanLive(true);
-    queueFanFromClientX(e.clientX);
     // From default width only when this session is not already wide.
     if (!expandedRef.current && expandInflightRef.current !== true) {
       setExpanded(true);
     } else if (expandedRef.current && !fanArmedRef.current) {
-      armFanAfterWidenPaint();
+      fanArmedRef.current = true;
+      setFanArmed(true);
     }
+    queueFanFromClientX(e.clientX);
   };
 
   const onBarPointerLeave = () => {
+    if (dndActiveRef.current || dockStatusMenuOpen) return;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (fanMoveRafRef.current) {
+      cancelAnimationFrame(fanMoveRafRef.current);
+      fanMoveRafRef.current = 0;
+    }
+    pendingFanClientXRef.current = null;
     beginCollapseAfterFanRest();
   };
 
   const onBarPointerCancel = () => {
+    if (dndActiveRef.current || dockStatusMenuOpen) return;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (fanMoveRafRef.current) {
+      cancelAnimationFrame(fanMoveRafRef.current);
+      fanMoveRafRef.current = 0;
+    }
+    pendingFanClientXRef.current = null;
     beginCollapseAfterFanRest();
   };
 
@@ -642,82 +859,370 @@ export default function DockApp() {
     });
   }
 
+  function canReorder(item: DockItem): boolean {
+    // User separators are freely reorderable (Ctrl-only was unreliable: dock
+    // webview often misses keydown when unfocused). Ephemeral running-sep stays locked.
+    return !isEphemeralDockId(item.id);
+  }
+
+  function canDragUnpin(item: DockItem): boolean {
+    return item.kind === "app" && !item.id.startsWith("running:");
+  }
+
+  function chromeTopY(): number {
+    const chrome = document.querySelector(".dock-chrome") as HTMLElement | null;
+    return chrome?.getBoundingClientRect().top ?? window.innerHeight - 52;
+  }
+
+  /** Status toast above the bar — same chrome tip surface as hover labels. */
+  function flashChromeTip(text: string, clientX?: number, clientY?: number) {
+    const msg = text.trim();
+    if (!msg) return;
+    const bar = barRef.current?.getBoundingClientRect();
+    const x =
+      typeof clientX === "number"
+        ? clientX
+        : bar
+          ? bar.left + bar.width / 2
+          : window.innerWidth / 2;
+    const y = typeof clientY === "number" ? clientY : bar ? bar.top : chromeTopY();
+    void showChromeHoverTip({
+      text: msg,
+      x,
+      y,
+      placement: "above",
+      gap: 10,
+      immediate: true,
+    });
+    window.setTimeout(() => {
+      void hideChromeHoverTip();
+    }, 2200);
+  }
+
+  function endDndChrome() {
+    dndActiveRef.current = false;
+    dragRemoveArmedRef.current = false;
+    // Ignore the drop frame's pointer sample; microtask clears for the next move.
+    postDndFanBlockedRef.current = true;
+    queueMicrotask(() => {
+      postDndFanBlockedRef.current = false;
+    });
+    pendingFanXRef.current = null;
+    pendingFanClientXRef.current = null;
+    if (fanMoveRafRef.current) {
+      cancelAnimationFrame(fanMoveRafRef.current);
+      fanMoveRafRef.current = 0;
+    }
+    if (expandedRef.current) {
+      fanArmedRef.current = true;
+    }
+    // Keep this frame light — tip / hold IPC deferred off the drop hitch.
+    setDraggingId(null);
+    setDragRemoveArmed(false);
+    setLocalX(null);
+    setFanArmed((v) => (expandedRef.current ? true : v));
+    requestAnimationFrame(() => {
+      void hideChromeHoverTip();
+      void invoke("dock_set_interaction_hold", { hold: false }).catch(() => undefined);
+    });
+  }
+
+  /** Freeze fan *before* dimension capture so resting widths match the virtual model. */
+  function onBeforeCapture(before: BeforeCapture) {
+    dndActiveRef.current = true;
+    cancelCollapseTimer();
+    void hideChromeHoverTip();
+    void invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
+    // Must commit resting slot widths before rfd measures the DOM.
+    flushSync(() => {
+      setFanLive(true);
+      disarmFan();
+      setDraggingId(before.draggableId);
+      setDragRemoveArmed(false);
+    });
+  }
+
+  function onDragStart(start: DragStart) {
+    dndActiveRef.current = true;
+    void invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
+    setDraggingId(start.draggableId);
+    setDragRemoveArmed(false);
+    dragRemoveArmedRef.current = false;
+    dragStartYRef.current = 0;
+    // Capture start Y on next pointer sample (library owns the gesture).
+    const once = (e: PointerEvent) => {
+      dragStartYRef.current = e.clientY;
+      lastDndPointerRef.current = { x: e.clientX, y: e.clientY };
+      window.removeEventListener("pointermove", once);
+    };
+    window.addEventListener("pointermove", once, { once: true });
+    suppressClickRef.current = true;
+    const item = displayItemsRef.current.find((it) => it.id === start.draggableId);
+    const tip =
+      item && canDragUnpin(item) ? "横向调整位置，拖出可移除" : "拖动调整位置";
+    const bar = barRef.current?.getBoundingClientRect();
+    void showChromeHoverTip({
+      text: tip,
+      x: bar ? bar.left + bar.width / 2 : window.innerWidth / 2,
+      y: bar ? bar.top : chromeTopY(),
+      placement: "above",
+      gap: 10,
+      immediate: true,
+    });
+  }
+
+  function onDragUpdate(update: DragUpdate) {
+    if (!update.destination) {
+      const item = displayItemsRef.current.find((it) => it.id === update.draggableId);
+      if (item && canDragUnpin(item) && dragRemoveArmedRef.current) {
+        setDragRemoveArmed(true);
+      }
+    }
+  }
+
+  function onDragEnd(result: DropResult) {
+    const dragId = result.draggableId;
+    const item = displayItemsRef.current.find((it) => it.id === dragId) ?? null;
+    const armed = dragRemoveArmedRef.current;
+    endDndChrome();
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+
+    // Drop outside + armed upward → unpin (apps only).
+    if (!result.destination) {
+      if (result.reason === "DROP" && item && canDragUnpin(item) && armed) {
+        void invoke<DockPrefs>("dock_unpin_item", { itemId: item.id })
+          .then((next) => {
+            setPrefs(next);
+            setDisplayItems(next.items);
+            flashChromeTip("已从 Dock 移除", undefined, chromeTopY());
+            void invoke<DockItem[]>("get_dock_display_items")
+              .then((items) => {
+                if (!dndActiveRef.current) setDisplayItems(items);
+              })
+              .catch(() => undefined);
+          })
+          .catch((err) => {
+            console.error(err);
+            flashChromeTip(String(err), undefined, chromeTopY());
+          });
+      }
+      return;
+    }
+
+    const from = result.source.index;
+    const to = clampPinnedDestIndex(displayItemsRef.current, from, result.destination.index);
+    if (from === to) return;
+    // Ctrl may be released before mouse-up — still persist a separator move.
+    if (item && isEphemeralDockId(item.id)) return;
+
+    const nextDisplay = reorderDockItems(displayItemsRef.current, from, to);
+    displayItemsRef.current = nextDisplay;
+    layoutSigRef.current = nextDisplay.map((i) => `${i.id}:${i.kind}`).join("|");
+    setDisplayItems(nextDisplay);
+    const p = prefsRef.current;
+    const ordered = pinnedOrderIds(nextDisplay, p?.items ?? []);
+    // Persist off the drop frame; never apply stripped prefs (wipes icons / hitch).
+    persistQuietRef.current = true;
+    window.requestAnimationFrame(() => {
+      void invoke<DockPrefs>("dock_reorder_items", { orderedIds: ordered })
+        .then(() => {
+          const cur = prefsRef.current;
+          if (!cur) return;
+          const byId = new Map(cur.items.map((it) => [it.id, it]));
+          const items = ordered
+            .map((id) => byId.get(id))
+            .filter((it): it is DockItem => !!it);
+          for (const it of cur.items) {
+            if (!items.some((x) => x.id === it.id)) items.push(it);
+          }
+          const merged = { ...cur, items };
+          prefsRef.current = merged;
+          setPrefs(merged);
+        })
+        .catch((err) => {
+          console.error(err);
+          flashChromeTip(String(err), undefined, chromeTopY());
+        })
+        .finally(() => {
+          persistQuietRef.current = false;
+        });
+    });
+  }
+
   if (!prefs) {
     return <div className="dock-shell dock-loading" />;
   }
 
   return (
-    <div
-      className={`dock-shell${fanLive ? " is-fan-live" : ""}`}
-      data-mode={prefs.displayMode}
-      data-mag={magOn ? "on" : "off"}
-      onContextMenu={onBackgroundContextMenu}
+    <DragDropContext
+      onBeforeCapture={onBeforeCapture}
+      onDragStart={onDragStart}
+      onDragUpdate={onDragUpdate}
+      onDragEnd={onDragEnd}
     >
-      {compactTip ? (
-        <div className="dock-compact-tip" role="status">
-          {compactTip}
-        </div>
-      ) : null}
-      <div className="dock-stack">
-        <div className="dock-chrome" aria-hidden />
-        <div
-          ref={barRef}
-          className="dock-bar"
-          style={{ paddingLeft: padX, paddingRight: padX }}
-          onPointerEnter={onBarPointerEnter}
-          onPointerMove={onBarPointerMove}
-          onPointerLeave={onBarPointerLeave}
-          onPointerCancel={onBarPointerCancel}
-        >
-          {displayItems.map((item) => {
-            if (item.kind === "separator") {
-              return <span key={item.id} className="dock-sep" aria-hidden />;
+      <div
+        className={`dock-shell${fanLive ? " is-fan-live" : ""}${dropHover ? " is-drop-hover" : ""}${draggingId ? " is-dragging-item is-dnd-active" : ""}${dragRemoveArmed ? " is-dnd-remove" : ""}`}
+        data-mode={prefs.displayMode}
+        data-mag={magOn ? "on" : "off"}
+        onContextMenu={onBackgroundContextMenu}
+      >
+        {compactTip && !draggingId && !dropHover ? (
+          <div className="dock-compact-tip" role="status">
+            {compactTip}
+          </div>
+        ) : null}
+        <div className="dock-stack">
+          <div
+            className="dock-chrome"
+            aria-hidden
+            style={
+              {
+                borderRadius: cornerRadius,
+                ["--dock-radius" as string]: `${cornerRadius}px`,
+                ...(chromeWide
+                  ? { left: 0, right: 0, width: "auto", transform: "none" }
+                  : {
+                      left: "50%",
+                      right: "auto",
+                      width: chromeWidth,
+                      transform: "translateX(-50%)",
+                    }),
+              } as CSSProperties
             }
-            const running = activeIds.has(item.id);
-            const scale = scales.get(item.id) ?? 1;
-            const label =
-              item.kind === "startmenu"
-                ? "开始"
-                : item.kind === "trash"
-                  ? "回收站"
-                  : item.label || item.matchExe || item.id;
-            // Layout-based fan: slot grows in flex flow; sep stays unscaled.
-            const slot = ICON_SLOT * scale;
-            const style = {
-              ["--dock-scale" as string]: String(scale),
-              ["--dock-slot" as string]: `${slot}px`,
-              ["--dock-hit" as string]: `${slot}px`,
-            } as CSSProperties;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                className={`dock-item${running ? " is-running" : ""}${scale > 1.02 ? " is-magnified" : ""}`}
-                {...dockIconTipPointerProps(label, { gap: 8 })}
-                style={style}
-                onClick={() => {
-                  void hideChromeHoverTip();
-                  void onItemClick(item);
+          />
+          <Droppable droppableId="dock-bar" direction="horizontal">
+            {(dropProvided) => (
+              <div
+                ref={(el) => {
+                  barRef.current = el;
+                  dropProvided.innerRef(el);
                 }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (item.id.startsWith("running:")) return;
-                  void hideChromeHoverTip();
-                  void openStatusMenuAtClientPoint(e.clientX, e.clientY, item.id).catch(
-                    console.error,
-                  );
-                }}
+                {...dropProvided.droppableProps}
+                className="dock-bar"
+                style={{ paddingLeft: padX, paddingRight: padX }}
+                onPointerEnter={onBarPointerEnter}
+                onPointerMove={onBarPointerMove}
+                onPointerLeave={onBarPointerLeave}
+                onPointerCancel={onBarPointerCancel}
               >
-                <span className="dock-hit">
-                  <DockItemGlyph item={item} label={label} scale={scale} />
-                </span>
-                <span className={`dock-dot${running ? " is-on" : ""}`} aria-hidden />
-              </button>
-            );
-          })}
+                {displayItems.map((item, index) => {
+                  if (item.kind === "separator") {
+                    const ephemeral = isEphemeralDockId(item.id);
+                    const sepMovable = !ephemeral;
+                    return (
+                      <Draggable
+                        key={item.id}
+                        draggableId={item.id}
+                        index={index}
+                        isDragDisabled={!sepMovable}
+                        disableInteractiveElementBlocking
+                      >
+                        {(dragProvided, snapshot) => (
+                          <div
+                            ref={dragProvided.innerRef}
+                            {...dragProvided.draggableProps}
+                            {...dragProvided.dragHandleProps}
+                            data-dock-id={item.id}
+                            className={`dock-sep${ephemeral ? " is-ephemeral" : ""}${sepMovable ? " is-sep-movable" : ""}${snapshot.isDragging ? " is-dragging" : ""}`}
+                            title={ephemeral ? undefined : "拖动调整分割线 · 右键删除"}
+                            style={dragProvided.draggableProps.style}
+                            onContextMenu={(e) => {
+                              if (ephemeral) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void hideChromeHoverTip();
+                              void openStatusMenuAtClientPoint(
+                                e.clientX,
+                                e.clientY,
+                                item.id,
+                              ).catch(console.error);
+                            }}
+                          />
+                        )}
+                      </Draggable>
+                    );
+                  }
+                  const running = activeIds.has(item.id);
+                  const scale = scales.get(item.id) ?? 1;
+                  const label =
+                    item.kind === "startmenu"
+                      ? "开始"
+                      : item.kind === "trash"
+                        ? "回收站"
+                        : item.label || item.matchExe || item.id;
+                  // Layout-based fan: slot grows in flex flow; sep stays unscaled.
+                  const slot = ICON_SLOT * scale;
+                  const reorderable = canReorder(item);
+                  return (
+                    <Draggable
+                      key={item.id}
+                      draggableId={item.id}
+                      index={index}
+                      isDragDisabled={!reorderable}
+                      // Root used to be <button>; rfd blocks drag on interactive tags.
+                      disableInteractiveElementBlocking
+                    >
+                      {(dragProvided, snapshot) => (
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          data-dock-id={item.id}
+                          ref={dragProvided.innerRef}
+                          {...dragProvided.draggableProps}
+                          {...dragProvided.dragHandleProps}
+                          className={`dock-item${running ? " is-running" : ""}${scale > 1.02 ? " is-magnified" : ""}${snapshot.isDragging ? " is-dragging" : ""}${reorderable ? " is-unpinable" : ""}`}
+                          {...(draggingId ? {} : dockIconTipPointerProps(label, { gap: 8 }))}
+                          style={
+                            {
+                              ...dragProvided.draggableProps.style,
+                              ["--dock-scale" as string]: String(scale),
+                              ["--dock-slot" as string]: `${slot}px`,
+                              ["--dock-hit" as string]: `${slot}px`,
+                            } as CSSProperties
+                          }
+                          onClick={() => {
+                            if (suppressClickRef.current) return;
+                            void hideChromeHoverTip();
+                            void onItemClick(item);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key !== "Enter" && e.key !== " ") return;
+                            e.preventDefault();
+                            if (suppressClickRef.current) return;
+                            void hideChromeHoverTip();
+                            void onItemClick(item);
+                          }}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            void hideChromeHoverTip();
+                            void openStatusMenuAtClientPoint(
+                              e.clientX,
+                              e.clientY,
+                              item.id,
+                            ).catch(console.error);
+                          }}
+                        >
+                          <span className="dock-hit">
+                            <DockItemGlyph item={item} label={label} scale={scale} />
+                          </span>
+                          <span
+                            className={`dock-dot${running ? " is-on" : ""}`}
+                            aria-hidden
+                          />
+                        </div>
+                      )}
+                    </Draggable>
+                  );
+                })}
+                {dropProvided.placeholder}
+              </div>
+            )}
+          </Droppable>
         </div>
       </div>
-    </div>
+    </DragDropContext>
   );
 }

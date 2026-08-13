@@ -304,6 +304,11 @@ pub fn run() {
                                     let _ = app.emit("plugin-popup-closed", ());
                                 }
                                 "status-menu-popup" => {
+                                    if let Some(vis) =
+                                        app.try_state::<std::sync::Arc<crate::dock::DockVisibility>>()
+                                    {
+                                        vis.set_interaction_hold(false);
+                                    }
                                     let _ = app.emit("status-menu-popup-closed", ());
                                 }
                                 "input-lang-popup" => {
@@ -325,6 +330,12 @@ pub fn run() {
                         let _ = window.app_handle().emit("plugin-popup-closed", ());
                     }
                     if window.label() == "status-menu-popup" {
+                        if let Some(vis) = window
+                            .app_handle()
+                            .try_state::<std::sync::Arc<crate::dock::DockVisibility>>()
+                        {
+                            vis.set_interaction_hold(false);
+                        }
                         let _ = window.app_handle().emit("status-menu-popup-closed", ());
                     }
                     if window.label() == "input-lang-popup" {
@@ -462,11 +473,18 @@ pub fn run() {
             dock::import_dockico_ini,
             dock::pick_dockico_file,
             dock::pick_dock_icon_file,
+            dock::dock_cache_icon,
+            dock::dock_pin_paths,
+            dock::dock_pin_item,
+            dock::dock_add_separator,
+            dock::dock_reorder_items,
+            dock::dock_unpin_item,
             dock::open_dock_icon_editor,
             dock::close_dock_icon_editor,
             dock::dock_launch_item,
             dock::dock_set_mouse_near_bottom,
             dock::dock_set_live_width,
+            dock::dock_set_interaction_hold,
             dock::dock_set_hover_expand,
             dock::get_dock_display_items,
             dock::dock_relayout,

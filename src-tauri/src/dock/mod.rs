@@ -1,5 +1,6 @@
 //! Host bottom dock — MyDockFinder-style icons, visibility modes, ini import.
 
+mod file_drop;
 mod icon;
 mod ini;
 mod launch;
@@ -270,12 +271,37 @@ pub fn load_dock_prefs() -> DockPrefs {
 
 pub fn save_dock_prefs(prefs: &DockPrefs) -> Result<(), String> {
     // Do not persist PNG rasters (large + would pin stale low-res forever).
+    // Icon files live under `%APPDATA%\window-hub\dock-icons\`; prefs keep paths only.
     let mut stored = prefs.clone();
     for item in &mut stored.items {
         item.icon_png = None;
     }
     let v = serde_json::to_value(stored).map_err(|e| e.to_string())?;
     crate::db::with_conn(|c| crate::db::dock_set(c, &v))
+}
+
+/// Persist item list changes (pin / unpin / import) after materializing owned icons.
+fn commit_dock_item_prefs(app: &AppHandle, mut prefs: DockPrefs) -> Result<DockPrefs, String> {
+    prefs = prefs.normalize();
+    icon::ensure_prefs_icons_cached(&mut prefs);
+    prefs
+        .hidden_item_ids
+        .retain(|id| prefs.items.iter().any(|it| it.id == *id));
+    let prefs = with_icons(prefs);
+    save_dock_prefs(&prefs)?;
+    invalidate_dock_layout_cache();
+    let mut live = prefs.clone();
+    // Strip runtime PNG before compact mutate path re-saves.
+    for it in &mut live.items {
+        it.icon_png = None;
+    }
+    if live.enabled {
+        dock_compact_and_notify(app, &mut live);
+        position_dock_window(app, &live);
+    }
+    let out = with_icons(live);
+    let _ = app.emit("dock-prefs", &out);
+    Ok(out)
 }
 
 fn with_icons(mut prefs: DockPrefs) -> DockPrefs {
@@ -600,7 +626,8 @@ pub(crate) const DOCK_H: f64 = 52.0;
 const DOCK_ICON: f64 = 40.0;
 const DOCK_GAP: f64 = 6.0;
 const DOCK_PAD_X_MIN: f64 = 2.0;
-const DOCK_SEP: f64 = 10.0;
+/// Hit/layout width for separators (1px rule centered). Keep in sync with DockApp.css.
+const DOCK_SEP: f64 = 16.0;
 /// Fixed hover magnification (not user-configurable).
 pub(crate) const DOCK_MAG_SCALE: f64 = 1.6;
 /// Fixed total extra logical width when hovering (not dynamically measured).
@@ -853,6 +880,12 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
 fn width_tween_gen() -> &'static std::sync::atomic::AtomicU64 {
     static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     &GEN
+}
+
+/// Keep AutoHide from hiding while the dock UI holds an interaction (icon dnd).
+#[tauri::command]
+pub fn dock_set_interaction_hold(vis: State<'_, Arc<DockVisibility>>, hold: bool) {
+    vis.set_interaction_hold(hold);
 }
 
 /// Toggle hover pad: Composition animates capsule only (HWND already host-sized).
@@ -1831,7 +1864,20 @@ fn win32_dock_slide_root(
 
 #[tauri::command]
 pub fn get_dock_prefs() -> DockPrefs {
-    with_icons(load_dock_prefs())
+    let mut prefs = load_dock_prefs();
+    // Lazy migrate: older imports only stored MyDockFinder paths — copy into dock-icons/.
+    let before: Vec<String> = prefs.items.iter().map(|i| i.icon_path.clone()).collect();
+    icon::ensure_prefs_icons_cached(&mut prefs);
+    if prefs
+        .items
+        .iter()
+        .zip(before.iter())
+        .any(|(i, b)| i.icon_path != *b)
+    {
+        let _ = save_dock_prefs(&prefs);
+        invalidate_dock_layout_cache();
+    }
+    with_icons(prefs)
 }
 
 #[tauri::command]
@@ -1849,6 +1895,8 @@ pub async fn set_dock_prefs(
     // Drop stale hide ids after pin list edits / imports.
     next.hidden_item_ids
         .retain(|id| next.items.iter().any(|it| it.id == *id));
+    // Materialize any external / MyDockFinder paths into owned dock-icons/.
+    icon::ensure_prefs_icons_cached(&mut next);
     next = with_icons(next);
     save_dock_prefs(&next)?;
     invalidate_dock_layout_cache();
@@ -1900,12 +1948,9 @@ pub fn import_dockico_ini(app: AppHandle, path: String) -> Result<DockPrefs, Str
     let items = parse_dockico_ini(std::path::Path::new(path.trim()))?;
     let mut prefs = load_dock_prefs();
     prefs.items = items;
-    prefs = with_icons(prefs);
-    save_dock_prefs(&prefs)?;
-    invalidate_dock_layout_cache();
-    let _ = app.emit("dock-prefs", &prefs);
-    position_dock_window(&app, &prefs);
-    Ok(prefs)
+    // Copy icopath / shell icons into `%APPDATA%\window-hub\dock-icons` so prefs
+    // no longer depend on MyDockFinder backup paths.
+    commit_dock_item_prefs(&app, prefs)
 }
 
 #[tauri::command]
@@ -1924,6 +1969,377 @@ pub fn pick_dock_icon_file() -> Result<Option<String>, String> {
         .set_title("选择 Dock 图标")
         .pick_file();
     Ok(file.map(|p| p.to_string_lossy().to_string()))
+}
+
+/// Copy a picked / dropped icon into the owned `dock-icons` store for `item_id`.
+#[tauri::command]
+pub fn dock_cache_icon(item_id: String, source_path: String) -> Result<String, String> {
+    icon::cache_icon_from_source(&item_id, &source_path)
+}
+
+fn path_pin_id(path: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.trim().to_ascii_lowercase().hash(&mut h);
+    format!("pin-{:016x}", h.finish())
+}
+
+fn match_exe_from_path(path: &std::path::Path) -> String {
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app")
+        .to_string();
+    let lower = stem.to_ascii_lowercase();
+    if lower.ends_with(".exe") {
+        lower
+    } else if lower.ends_with(".lnk") {
+        format!(
+            "{}.exe",
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("app")
+                .to_ascii_lowercase()
+        )
+    } else {
+        format!("{lower}.exe")
+    }
+}
+
+fn label_from_path(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("App")
+        .to_string()
+}
+
+#[cfg(windows)]
+fn resolve_shortcut_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED, STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "lnk" {
+        return None;
+    }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let persist: IPersistFile = link.cast().ok()?;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        persist.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+        let mut buf = [0u16; 520];
+        link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        if len == 0 {
+            return None;
+        }
+        let s = String::from_utf16_lossy(&buf[..len]);
+        let p = std::path::PathBuf::from(s.trim());
+        if p.as_os_str().is_empty() {
+            None
+        } else {
+            Some(p)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn resolve_shortcut_target(_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    None
+}
+
+fn dock_item_from_path(path_raw: &str) -> Result<DockItem, String> {
+    let trimmed = path_raw.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return Err("empty path".into());
+    }
+    let path = std::path::PathBuf::from(trimmed);
+    if !path.exists() {
+        return Err(format!("path not found: {trimmed}"));
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "exe" | "lnk" | "url" | "msc" | "bat" | "cmd" | "com"
+    ) {
+        // Allow bare files that are applications without extension (rare) only if .exe-like.
+        return Err(format!("unsupported pin type: .{ext}"));
+    }
+
+    let target = resolve_shortcut_target(&path).unwrap_or_else(|| path.clone());
+    let launch = path.to_string_lossy().replace('/', "\\");
+    let real = target.to_string_lossy().replace('/', "\\");
+    let id = path_pin_id(&real);
+    let match_exe = match_exe_from_path(&target);
+    let label = label_from_path(if ext == "lnk" { &path } else { &target });
+
+    let mut item = DockItem {
+        id,
+        kind: "app".into(),
+        label,
+        match_exe,
+        launch_path: launch.clone(),
+        real_path: real.clone(),
+        virtual_path: String::new(),
+        // Prefer shell icon from shortcut / exe; materialize writes owned PNG.
+        icon_path: launch,
+        uwp: false,
+        icon_png: None,
+        icon_scale: 1.0,
+        icon_offset_x: 0.0,
+        icon_offset_y: 0.0,
+        icon_bg: String::new(),
+    };
+    icon::ensure_item_icon_cached(&mut item);
+    Ok(item)
+}
+
+fn insert_pin_before_trash(items: &mut Vec<DockItem>, item: DockItem) {
+    let launch_key = item.launch_path.trim().to_ascii_lowercase();
+    let real_key = item.real_path.trim().to_ascii_lowercase();
+    let match_key = item.match_exe.trim().to_ascii_lowercase();
+    items.retain(|it| {
+        if it.kind != "app" {
+            return true;
+        }
+        let l = it.launch_path.trim().to_ascii_lowercase();
+        let r = it.real_path.trim().to_ascii_lowercase();
+        let m = it.match_exe.trim().to_ascii_lowercase();
+        !(l == launch_key
+            || (!real_key.is_empty() && (r == real_key || l == real_key))
+            || (!match_key.is_empty() && m == match_key && !m.is_empty()))
+    });
+    if let Some(idx) = items.iter().position(|it| it.kind == "trash") {
+        items.insert(idx, item);
+    } else {
+        items.push(item);
+    }
+}
+
+/// Drop `.exe` / `.lnk` (and similar) onto the dock to pin them.
+#[tauri::command]
+pub fn dock_pin_paths(app: AppHandle, paths: Vec<String>) -> Result<DockPrefs, String> {
+    let mut prefs = load_dock_prefs();
+    let mut added = 0usize;
+    for raw in paths {
+        match dock_item_from_path(&raw) {
+            Ok(item) => {
+                insert_pin_before_trash(&mut prefs.items, item);
+                added += 1;
+            }
+            Err(e) => {
+                eprintln!("[dock] pin skip {raw}: {e}");
+            }
+        }
+    }
+    if added == 0 {
+        return Err("没有可固定到 Dock 的程序（请拖入 .exe / .lnk）".into());
+    }
+    commit_dock_item_prefs(&app, prefs)
+}
+
+fn new_dock_separator() -> DockItem {
+    let id = format!(
+        "sep-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    DockItem {
+        id,
+        kind: "separator".into(),
+        label: String::new(),
+        match_exe: String::new(),
+        launch_path: String::new(),
+        real_path: String::new(),
+        virtual_path: String::new(),
+        icon_path: String::new(),
+        uwp: false,
+        icon_png: None,
+        icon_scale: 1.0,
+        icon_offset_x: 0.0,
+        icon_offset_y: 0.0,
+        icon_bg: String::new(),
+    }
+}
+
+fn insert_separator_after(items: &mut Vec<DockItem>, after_item_id: Option<&str>) {
+    let sep = new_dock_separator();
+    if let Some(aid) = after_item_id.map(str::trim).filter(|s| !s.is_empty()) {
+        // Only pinned tiles (never ephemeral running:* / running-sep).
+        if !aid.starts_with("running:") && aid != "running-sep" {
+            if let Some(idx) = items.iter().position(|it| it.id == aid) {
+                // Never place after trash — that looks like “stuck at the end”.
+                if items[idx].kind == "trash" {
+                    items.insert(idx, sep);
+                } else {
+                    items.insert((idx + 1).min(items.len()), sep);
+                }
+                return;
+            }
+        }
+    }
+    // No usable anchor → after Start (or front). Avoid defaulting to before-trash
+    // (“always appears at the end”).
+    if let Some(idx) = items.iter().position(|it| it.kind == "startmenu") {
+        items.insert(idx + 1, sep);
+    } else if let Some(idx) = items.iter().position(|it| it.kind == "trash") {
+        items.insert(idx, sep);
+    } else {
+        items.insert(0, sep);
+    }
+}
+
+/// Insert a user separator after a pinned tile (or before trash when `after_item_id` is empty).
+#[tauri::command]
+pub fn dock_add_separator(
+    app: AppHandle,
+    after_item_id: Option<String>,
+) -> Result<DockPrefs, String> {
+    let mut prefs = load_dock_prefs();
+    insert_separator_after(&mut prefs.items, after_item_id.as_deref());
+    commit_dock_item_prefs(&app, prefs)
+}
+
+/// Persist a new pin order (ids of `prefs.items`). Unknown ids ignored; missing pins appended.
+#[tauri::command]
+pub fn dock_reorder_items(app: AppHandle, ordered_ids: Vec<String>) -> Result<DockPrefs, String> {
+    let mut prefs = load_dock_prefs();
+    if ordered_ids.is_empty() {
+        return Ok(with_icons(prefs));
+    }
+    let mut by_id: std::collections::HashMap<String, DockItem> = prefs
+        .items
+        .drain(..)
+        .map(|it| (it.id.clone(), it))
+        .collect();
+    let mut next = Vec::with_capacity(by_id.len());
+    for id in ordered_ids {
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if let Some(item) = by_id.remove(id) {
+            next.push(item);
+        }
+    }
+    // Keep any pins the client omitted (should be rare).
+    for (_, item) in by_id {
+        next.push(item);
+    }
+    prefs.items = next;
+    prefs = prefs.normalize();
+    // Reorder does not change pin count / bar width — skip icon encode, HWND
+    // place, and compact. Those were hitching the dock on drop.
+    save_dock_prefs(&prefs)?;
+    invalidate_dock_layout_cache();
+    let mut out = prefs;
+    for it in &mut out.items {
+        it.icon_png = None;
+    }
+    let _ = app.emit("dock-prefs", &out);
+    Ok(out)
+}
+
+/// Pin a display tile (typically `running:…`) into the fixed dock list.
+#[tauri::command]
+pub fn dock_pin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, String> {
+    let id = item_id.trim().to_string();
+    if id.is_empty() {
+        return Err("item_id required".into());
+    }
+    let prefs = load_dock_prefs();
+    let layout = dock_merge_running(&prefs, false);
+    let item = layout
+        .iter()
+        .find(|it| it.id == id)
+        .cloned()
+        .ok_or_else(|| format!("dock item not found: {id}"))?;
+    if item.kind != "app" {
+        return Err("只能固定应用程序".into());
+    }
+    let path = if !item.real_path.trim().is_empty() {
+        item.real_path.clone()
+    } else if !item.launch_path.trim().is_empty() {
+        item.launch_path.clone()
+    } else {
+        return Err("无法解析程序路径".into());
+    };
+    // Prefer building from path so icon cache + stable pin-id apply.
+    match dock_item_from_path(&path) {
+        Ok(mut pin) => {
+            if !item.label.trim().is_empty() {
+                pin.label = item.label;
+            }
+            if !item.match_exe.trim().is_empty() {
+                pin.match_exe = item.match_exe;
+            }
+            let mut next = prefs;
+            insert_pin_before_trash(&mut next.items, pin);
+            commit_dock_item_prefs(&app, next)
+        }
+        Err(_) => {
+            // Fallback: keep the ephemeral tile fields but give a stable pin id.
+            let mut pin = item;
+            pin.id = path_pin_id(&path);
+            icon::ensure_item_icon_cached(&mut pin);
+            let mut next = prefs;
+            insert_pin_before_trash(&mut next.items, pin);
+            commit_dock_item_prefs(&app, next)
+        }
+    }
+}
+
+/// Remove a pinned dock item (not Start / Trash / ephemeral running tiles).
+#[tauri::command]
+pub fn dock_unpin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, String> {
+    let id = item_id.trim().to_string();
+    if id.is_empty() {
+        return Err("item_id required".into());
+    }
+    if id.starts_with("running:") {
+        return Err("运行中图标未固定，无需移除".into());
+    }
+    let mut prefs = load_dock_prefs();
+    let Some(item) = prefs.items.iter().find(|it| it.id == id).cloned() else {
+        return Err(format!("dock item not found: {id}"));
+    };
+    if item.kind == "startmenu" || item.kind == "trash" {
+        return Err("开始菜单 / 回收站不可移除".into());
+    }
+    prefs.items.retain(|it| it.id != id);
+    prefs.hidden_item_ids.retain(|h| h != &id);
+    // Best-effort: remove owned icon file for this id.
+    if let Ok(dir) = icon::icons_dir() {
+        let stem = id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let file = dir.join(format!("{stem}.png"));
+        let _ = std::fs::remove_file(file);
+    }
+    commit_dock_item_prefs(&app, prefs)
 }
 
 /// Settings-styled icon editor (left list + right pane).
@@ -2161,6 +2577,10 @@ async fn ensure_dock_window_inner(
     if let Some(existing) = app.get_webview_window("dock") {
         let _ = existing.set_shadow(false);
         apply_saved_material_pub(&existing, state);
+        #[cfg(windows)]
+        if let Ok(hwnd) = existing.hwnd() {
+            file_drop::install_dock_file_drop(app, hwnd.0 as isize);
+        }
         sync_dock_visual(app, vis);
         return Ok(());
     }
@@ -2188,6 +2608,9 @@ async fn ensure_dock_window_inner(
     .skip_taskbar(true)
     .focused(false)
     .visible(false)
+    // Use our OLE target in `file_drop` — wry's handler leaves a no-drop cursor
+    // on this frameless HWND and blocks reliable HTML5 / pointer DnD.
+    .disable_drag_drop_handler()
     .initialization_script(init)
     .build()
     .map_err(|e| format!("open dock failed: {e}"))?;
@@ -2198,6 +2621,14 @@ async fn ensure_dock_window_inner(
     #[cfg(windows)]
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::blur_glass::schedule_dock_titlebar_strip(hwnd.0 as isize);
+        file_drop::install_dock_file_drop(app, hwnd.0 as isize);
+        // WebView2 children appear a tick later — re-bind drop targets.
+        let app_drop = app.clone();
+        let hwnd_raw = hwnd.0 as isize;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            file_drop::install_dock_file_drop(&app_drop, hwnd_raw);
+        });
     }
     // Snap whole window to shown/hidden rest pose (no CSS half-state).
     sync_dock_visual(app, vis);

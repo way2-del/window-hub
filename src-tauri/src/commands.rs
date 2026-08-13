@@ -1,18 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 use tauri::window::Color;
 
+use crate::dock::DockVisibility;
 use crate::ecs::components::CaptureRoi;
 use crate::ecs::resources::{HubCommand, KeyKindDto, PointerKindDto};
 use crate::ecs::EcsHandle;
 use crate::plugin_hub::hub_init_script;
 use crate::win32::enum_windows::{focus_window, parse_window_id, WindowInfo};
 use crate::windows_service::WindowsService;
+
+fn set_dock_menu_hold(app: &AppHandle, hold: bool) {
+    if let Some(vis) = app.try_state::<Arc<DockVisibility>>() {
+        vis.set_interaction_hold(hold);
+    }
+}
 
 #[derive(Deserialize)]
 pub struct AttachArgs {
@@ -385,6 +392,8 @@ const STATUS_MENU_POPUP_H: f64 = 340.0;
 struct StatusMenuOpenPayload {
     from_dock: bool,
     item_id: Option<String>,
+    /// Pinned tile id to insert a separator after (gap / “在右侧”).
+    after_item_id: Option<String>,
     pin_bottom: Option<f64>,
 }
 
@@ -392,6 +401,11 @@ fn status_menu_init_script(payload: &StatusMenuOpenPayload) -> String {
     let from_dock = if payload.from_dock { "true" } else { "false" };
     let item_id = payload
         .item_id
+        .as_ref()
+        .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
+    let after_item_id = payload
+        .after_item_id
         .as_ref()
         .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
         .unwrap_or_else(|| "null".into());
@@ -404,6 +418,7 @@ fn status_menu_init_script(payload: &StatusMenuOpenPayload) -> String {
       window.__WH_IS_STATUS_MENU_POPUP__ = true;
       window.__WH_STATUS_MENU_FROM_DOCK__ = {from_dock};
       window.__WH_STATUS_MENU_ITEM_ID__ = {item_id};
+      window.__WH_STATUS_MENU_AFTER_ITEM_ID__ = {after_item_id};
       window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom};
       document.addEventListener('keydown', function (e) {{
         if (e.key === 'Escape') {{
@@ -421,12 +436,17 @@ fn apply_status_menu_payload(win: &WebviewWindow, payload: &StatusMenuOpenPayloa
         .as_ref()
         .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
         .unwrap_or_else(|| "null".into());
+    let after_item_id = payload
+        .after_item_id
+        .as_ref()
+        .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
     let pin_bottom = payload
         .pin_bottom
         .map(|n| n.to_string())
         .unwrap_or_else(|| "null".into());
     let _ = win.eval(&format!(
-        "window.__WH_STATUS_MENU_FROM_DOCK__ = {from_dock}; window.__WH_STATUS_MENU_ITEM_ID__ = {item_id}; window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom};"
+        "window.__WH_STATUS_MENU_FROM_DOCK__ = {from_dock}; window.__WH_STATUS_MENU_ITEM_ID__ = {item_id}; window.__WH_STATUS_MENU_AFTER_ITEM_ID__ = {after_item_id}; window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom};"
     ));
 }
 
@@ -440,15 +460,25 @@ pub async fn open_status_menu_popup(
     y: f64,
     from_dock: Option<bool>,
     item_id: Option<String>,
+    after_item_id: Option<String>,
     pin_bottom: Option<f64>,
 ) -> Result<(), String> {
+    // Hold BEFORE closing siblings / focus moves — AutoHide leave must not win.
+    let from_dock = from_dock.unwrap_or(false);
+    if from_dock {
+        set_dock_menu_hold(&app, true);
+    }
+
     close_sibling_popups(&app, "status-menu-popup");
     #[cfg(windows)]
     crate::win32::blur_glass::strip_dock_windows(&app);
 
     let payload = StatusMenuOpenPayload {
-        from_dock: from_dock.unwrap_or(false),
+        from_dock,
         item_id: item_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        after_item_id: after_item_id
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
         pin_bottom,
@@ -507,6 +537,7 @@ pub async fn open_status_menu_popup(
 
 #[tauri::command]
 pub async fn close_status_menu_popup(app: AppHandle) -> Result<(), String> {
+    set_dock_menu_hold(&app, false);
     if let Some(w) = app.get_webview_window("status-menu-popup") {
         w.close().map_err(|e| e.to_string())?;
     }
@@ -1413,6 +1444,7 @@ fn close_sibling_popups(app: &AppHandle, except: &str) {
                     let _ = app.emit("plugin-popup-closed", ());
                 }
                 "status-menu-popup" => {
+                    set_dock_menu_hold(app, false);
                     let _ = app.emit("status-menu-popup-closed", ());
                 }
                 "input-lang-popup" => {
@@ -1538,6 +1570,7 @@ pub async fn open_wifi_auth_popup(
                     let _ = app.emit("plugin-popup-closed", ());
                 }
                 "status-menu-popup" => {
+                    set_dock_menu_hold(&app, false);
                     let _ = app.emit("status-menu-popup-closed", ());
                 }
                 "input-lang-popup" => {

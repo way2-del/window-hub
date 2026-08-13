@@ -43,6 +43,8 @@ struct VisInner {
     /// Matches HWND rest pose after place completes.
     shown: bool,
     busy: bool,
+    /// Frontend drag / modal — keep AutoHide from collapsing the bar.
+    interaction_hold: bool,
     /// When `Some`, hide only after this instant if still unwanted.
     hide_deadline: Option<Instant>,
     /// When the HWND last finished a show transition.
@@ -72,6 +74,7 @@ impl DockVisibility {
                 desired: false,
                 shown: false,
                 busy: false,
+                interaction_hold: false,
                 hide_deadline: None,
                 shown_at: None,
                 near_streak: 0,
@@ -137,6 +140,17 @@ impl DockVisibility {
 
     /// Kept for IPC compatibility — AutoHide ignores this (native geometry only).
     pub fn set_mouse_near_bottom(&self, _near: bool) {}
+
+    /// Hold AutoHide open (e.g. icon reorder drag leaving the chrome strip).
+    pub fn set_interaction_hold(&self, hold: bool) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.interaction_hold = hold;
+            if hold {
+                g.hide_deadline = None;
+                g.desired = true;
+            }
+        }
+    }
 
     pub fn start(self: &Arc<Self>, app: AppHandle) {
         if self
@@ -449,7 +463,7 @@ impl DockVisibility {
             use windows::Win32::Foundation::POINT;
             use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-            let (thick_log, bottom_off, shown) = {
+            let (thick_log, bottom_off, shown, hold) = {
                 let Ok(g) = self.inner.lock() else {
                     return false;
                 };
@@ -457,8 +471,12 @@ impl DockVisibility {
                     g.activation_thickness_px,
                     g.bottom_offset_px,
                     g.shown,
+                    g.interaction_hold,
                 )
             };
+            if hold {
+                return true;
+            }
 
             unsafe {
                 let mut pt = POINT::default();

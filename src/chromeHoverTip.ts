@@ -184,12 +184,11 @@ export function hostTipPointerProps(
 }
 
 /**
- * Dock icon tip — wait until the hovered icon finishes magnifying, then show
- * once centered above `.dock-hit`. Switching icons cancels the previous tip
- * and restarts the settle timer (no open/close flash storm).
+ * Dock icon tip — wait until the pointer settles on an icon, then show once
+ * above `.dock-hit`. Fast skimming only restarts the timer (no tip flash).
  */
-const DOCK_TIP_SETTLE_MS = 180; // matches .dock-hit 160ms width transition
-const DOCK_TIP_HIDE_GRACE_MS = 90;
+const DOCK_TIP_SETTLE_MS = 420;
+const DOCK_TIP_HIDE_GRACE_MS = 120;
 
 let dockTipEl: HTMLElement | null = null;
 let dockTipText = "";
@@ -240,7 +239,8 @@ function scheduleDockTipShow(el: HTMLElement, text: string, gap: number) {
   dockTipText = text;
   dockTipGap = gap;
 
-  // Leaving A → entering B: drop current tip while B is still growing.
+  // Switching icons: keep tip hidden until settle completes — do not hide/show
+  // on every enter (that was the flash when skimming the bar).
   if (dockTipVisibleFor && dockTipVisibleFor !== el) {
     dockTipVisibleFor = null;
     void hideChromeHoverTip();
@@ -250,12 +250,6 @@ function scheduleDockTipShow(el: HTMLElement, text: string, gap: number) {
     dockTipShowTimer = null;
     if (dockTipEl !== el) return;
     showDockTipForEl(el, text, gap);
-    // One late re-anchor after HWND recenter / last fan frame (no continuous follow).
-    window.setTimeout(() => {
-      if (dockTipEl === el && dockTipVisibleFor === el) {
-        showDockTipForEl(el, text, gap);
-      }
-    }, 40);
   }, DOCK_TIP_SETTLE_MS);
 }
 

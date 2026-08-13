@@ -3,13 +3,14 @@
 //! Prefer high-DPI shells (`IShellItemImageFactory` @ 256px) so 32 CSS px
 //! icons stay sharp on 150%/200% displays. Legacy SHGFI_LARGEICON is 32px only.
 //!
-//! Results are cached by source path — shell extraction is expensive and the
-//! dock used to re-run it on every window-title tick.
+//! Hot cache: process-local HashMap of base64 by source path.
+//! Cold store: `%APPDATA%\window-hub\dock-icons\{itemId}.png` — prefs only keep
+//! the owned path (MyDockFinder imports / picks / pins all materialize here).
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Source raster size — enough headroom for 200–300% DPI (UI draws at 32 CSS px).
@@ -25,6 +26,123 @@ pub fn clear_icon_cache() {
     icon_cache().lock().clear();
 }
 
+/// `%APPDATA%\window-hub\dock-icons`
+pub fn icons_dir() -> Result<PathBuf, String> {
+    let dir = crate::db::app_data_root()?.join("dock-icons");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("dock-icons dir: {e}"))?;
+    Ok(dir)
+}
+
+fn safe_icon_stem(item_id: &str) -> String {
+    let mut out = String::with_capacity(item_id.len());
+    for ch in item_id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "icon".into()
+    } else {
+        out
+    }
+}
+
+fn path_is_under_icons_dir(path: &Path) -> bool {
+    let Ok(dir) = icons_dir() else {
+        return false;
+    };
+    let Ok(canon_dir) = dunce_canonicalize(&dir) else {
+        return false;
+    };
+    let Ok(canon_path) = dunce_canonicalize(path) else {
+        return path.starts_with(&dir);
+    };
+    canon_path.starts_with(&canon_dir)
+}
+
+fn dunce_canonicalize(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let c = std::fs::canonicalize(path)?;
+    let s = c.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        Ok(PathBuf::from(stripped))
+    } else {
+        Ok(c)
+    }
+}
+
+fn owned_icon_path(item_id: &str) -> Result<PathBuf, String> {
+    Ok(icons_dir()?.join(format!("{}.png", safe_icon_stem(item_id))))
+}
+
+/// True when `icon_path` already points at our on-disk cache and the file exists.
+pub fn is_cached_icon_path(icon_path: &str) -> bool {
+    let p = Path::new(icon_path.trim());
+    !icon_path.trim().is_empty() && p.is_file() && path_is_under_icons_dir(p)
+}
+
+/// Resolve source → write `%APPDATA%\window-hub\dock-icons\{itemId}.png` → return path.
+pub fn materialize_item_icon(
+    item_id: &str,
+    icon_path: &str,
+    launch_path: &str,
+) -> Result<Option<String>, String> {
+    let id = item_id.trim();
+    if id.is_empty() {
+        return Err("item_id required".into());
+    }
+    if is_cached_icon_path(icon_path) {
+        return Ok(Some(normalize_path_string(icon_path.trim())));
+    }
+    let Some(png) = resolve_item_icon_png_bytes(icon_path, launch_path) else {
+        return Ok(None);
+    };
+    let dest = owned_icon_path(id)?;
+    std::fs::write(&dest, &png).map_err(|e| format!("write dock icon: {e}"))?;
+    // Invalidate hot cache entries that may still point at the old source.
+    clear_icon_cache();
+    Ok(Some(normalize_path_string(&dest.to_string_lossy())))
+}
+
+/// Copy / extract a user-picked file into the owned icon store for `item_id`.
+pub fn cache_icon_from_source(item_id: &str, source_path: &str) -> Result<String, String> {
+    let src = source_path.trim();
+    if src.is_empty() {
+        return Err("source_path required".into());
+    }
+    let cached = materialize_item_icon(item_id, src, src)?
+        .ok_or_else(|| "无法解析图标".to_string())?;
+    Ok(cached)
+}
+
+/// Ensure each pin stores an owned `icon_path` under `dock-icons` (when a raster exists).
+pub fn ensure_item_icon_cached(item: &mut super::DockItem) {
+    if item.kind == "separator" {
+        return;
+    }
+    // Builtin Start / Trash keep empty icon_path → Host SVG.
+    if (item.kind == "startmenu" || item.kind == "trash") && item.icon_path.trim().is_empty() {
+        return;
+    }
+    if is_cached_icon_path(&item.icon_path) {
+        return;
+    }
+    if let Ok(Some(path)) = materialize_item_icon(&item.id, &item.icon_path, &item.launch_path) {
+        item.icon_path = path;
+    }
+}
+
+pub fn ensure_prefs_icons_cached(prefs: &mut super::DockPrefs) {
+    for item in &mut prefs.items {
+        ensure_item_icon_cached(item);
+    }
+}
+
+fn normalize_path_string(s: &str) -> String {
+    s.replace('/', "\\")
+}
+
 pub fn resolve_item_icon_png(icon_path: &str, launch_path: &str) -> Option<String> {
     let key = format!(
         "{}||{}",
@@ -37,19 +155,19 @@ pub fn resolve_item_icon_png(icon_path: &str, launch_path: &str) -> Option<Strin
             return hit.clone();
         }
     }
-    let resolved = resolve_item_icon_png_uncached(icon_path, launch_path);
+    let resolved = resolve_item_icon_png_bytes(icon_path, launch_path).map(|b| B64.encode(b));
     icon_cache().lock().insert(key, resolved.clone());
     resolved
 }
 
-fn resolve_item_icon_png_uncached(icon_path: &str, launch_path: &str) -> Option<String> {
+fn resolve_item_icon_png_bytes(icon_path: &str, launch_path: &str) -> Option<Vec<u8>> {
     if !icon_path.trim().is_empty() {
         let (path, _idx) = split_icon_location(icon_path.trim());
-        if let Some(b) = load_image_file_png(Path::new(path)) {
+        if let Some(b) = load_image_file_png_bytes(Path::new(path)) {
             return Some(b);
         }
         #[cfg(windows)]
-        if let Some(b) = extract_shell_icon_png(Path::new(path)) {
+        if let Some(b) = extract_shell_icon_png_bytes(Path::new(path)) {
             return Some(b);
         }
     }
@@ -68,13 +186,13 @@ fn resolve_item_icon_png_uncached(icon_path: &str, launch_path: &str) -> Option<
         .unwrap_or("")
         .to_ascii_lowercase();
     if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "ico" | "bmp" | "webp") {
-        if let Some(b) = load_image_file_png(p) {
+        if let Some(b) = load_image_file_png_bytes(p) {
             return Some(b);
         }
     }
     #[cfg(windows)]
     {
-        return extract_shell_icon_png(p);
+        return extract_shell_icon_png_bytes(p);
     }
     #[cfg(not(windows))]
     {
@@ -95,30 +213,30 @@ fn split_icon_location(s: &str) -> (&str, i32) {
     (s.trim().trim_matches('"'), 0)
 }
 
-fn load_image_file_png(path: &Path) -> Option<String> {
+fn load_image_file_png_bytes(path: &Path) -> Option<Vec<u8>> {
     let img = image::open(path).ok()?;
     // Prefer the largest frame for multi-size ICO.
     let rgba = img.to_rgba8();
-    encode_rgba_png(rgba.as_raw(), rgba.width(), rgba.height())
+    encode_rgba_png_bytes(rgba.as_raw(), rgba.width(), rgba.height())
 }
 
-fn encode_rgba_png(pixels: &[u8], w: u32, h: u32) -> Option<String> {
+fn encode_rgba_png_bytes(pixels: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     let enc = image::codecs::png::PngEncoder::new(&mut buf);
     use image::ImageEncoder;
     enc.write_image(pixels, w, h, image::ExtendedColorType::Rgba8)
         .ok()?;
-    Some(B64.encode(buf))
+    Some(buf)
 }
 
 #[cfg(windows)]
-fn extract_shell_icon_png(path: &Path) -> Option<String> {
+fn extract_shell_icon_png_bytes(path: &Path) -> Option<Vec<u8>> {
     extract_via_shell_item(path).or_else(|| extract_via_shgfi_fallback(path))
 }
 
 /// High-quality path: shell image factory (jumbo / scaled icon, not 32px SHGFI).
 #[cfg(windows)]
-fn extract_via_shell_item(path: &Path) -> Option<String> {
+fn extract_via_shell_item(path: &Path) -> Option<Vec<u8>> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::SIZE;
@@ -142,7 +260,7 @@ fn extract_via_shell_item(path: &Path) -> Option<String> {
                 SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
             )
             .ok()?;
-        let png = hbitmap_to_png_b64(hbmp);
+        let png = hbitmap_to_png_bytes(hbmp);
         let _ = DeleteObject(hbmp);
         png
     }
@@ -150,7 +268,7 @@ fn extract_via_shell_item(path: &Path) -> Option<String> {
 
 /// Fallback when shell item factory fails (rare / very old paths).
 #[cfg(windows)]
-fn extract_via_shgfi_fallback(path: &Path) -> Option<String> {
+fn extract_via_shgfi_fallback(path: &Path) -> Option<Vec<u8>> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
@@ -215,12 +333,12 @@ fn extract_via_shgfi_fallback(path: &Path) -> Option<String> {
             return None;
         }
         bgra_to_rgba(&mut pixels);
-        encode_rgba_png(&pixels, size as u32, size as u32)
+        encode_rgba_png_bytes(&pixels, size as u32, size as u32)
     }
 }
 
 #[cfg(windows)]
-fn hbitmap_to_png_b64(hbmp: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<String> {
+fn hbitmap_to_png_bytes(hbmp: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<Vec<u8>> {
     use windows::Win32::Graphics::Gdi::{
         GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
         DIB_RGB_COLORS,
@@ -270,7 +388,7 @@ fn hbitmap_to_png_b64(hbmp: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<St
             return None;
         }
         bgra_to_rgba(&mut pixels);
-        encode_rgba_png(&pixels, w as u32, h as u32)
+        encode_rgba_png_bytes(&pixels, w as u32, h as u32)
     }
 }
 

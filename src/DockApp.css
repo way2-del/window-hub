@@ -14,6 +14,8 @@ body.is-dock {
   /* Fan paints into HWND headroom above the chrome — must not clip. */
   overflow: visible;
   --dock-chrome-h: 52px;
+  /* Shared hairline (chrome outline + separators). */
+  --dock-stroke: rgba(255, 255, 255, 0.18);
 }
 
 body.is-dock,
@@ -60,20 +62,30 @@ body.is-dock #root {
 }
 
 /* Visible dock height — never grows with magnification.
-   Acrylic is painted by sibling `dock-glass` only. Do NOT paint a CSS plate
-   here: fill + radius creates the dark top hairline over the glass. */
+   Acrylic is painted by sibling `dock-glass` only. Stroke must sit *inside*
+   the Win32 icons RGN — outer-edge hairlines get shaved at bottom-right. */
 .dock-chrome {
+  --dock-radius: 20px;
   position: absolute;
-  left: 0;
-  right: 0;
   bottom: 0;
   height: var(--dock-chrome-h);
   pointer-events: none;
   border: none;
   outline: none;
-  border-radius: 0;
   background: transparent;
   box-shadow: none;
+  box-sizing: border-box;
+}
+
+.dock-chrome::after {
+  content: "";
+  position: absolute;
+  /* 1px inset keeps the stroke inside CreateRoundRectRgn clipping. */
+  inset: 1px;
+  border: 1px solid var(--dock-stroke);
+  border-radius: max(0px, calc(var(--dock-radius) - 1px));
+  box-sizing: border-box;
+  pointer-events: none;
 }
 
 .dock-bar {
@@ -124,7 +136,8 @@ body.is-dock #root {
    up into headroom when the bar stretches for hit-testing. Does not scale. */
 .dock-sep {
   box-sizing: border-box;
-  width: 10px;
+  /* Wider than the 1px rule so drag / context-menu hits reliably between icons. */
+  width: 16px;
   height: var(--dock-chrome-h);
   max-height: var(--dock-chrome-h);
   align-self: flex-end;
@@ -136,6 +149,25 @@ body.is-dock #root {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+  cursor: default;
+  touch-action: none;
+  user-select: none;
+}
+
+.dock-sep.is-sep-movable {
+  cursor: grab;
+}
+
+.dock-sep.is-dragging {
+  opacity: 0.55;
+  cursor: grabbing;
+  z-index: 4;
+}
+
+.dock-sep.is-ephemeral {
   pointer-events: none;
 }
 
@@ -144,11 +176,12 @@ body.is-dock #root {
   width: 1px;
   height: 22px;
   border-radius: 1px;
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--dock-stroke, rgba(255, 255, 255, 0.18));
 }
 
 .dock-item {
   position: relative;
+  box-sizing: border-box;
   width: var(--dock-slot, 40px);
   /* Cap to chrome so flex-end sits on the strip; fan grows into headroom. */
   height: var(--dock-chrome-h);
@@ -169,9 +202,64 @@ body.is-dock #root {
   /* Dot nearly flush with chrome bottom; top gap shrinks with shorter chrome. */
   padding-bottom: 2px;
   overflow: visible;
-  /* Fan via real layout size — no CSS transform on icons. */
-  transition: width 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  /* div[role=button] — avoid text selection while dragging. */
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+  /* Rest / collapse only — tracking must not tween (see is-fan-live). */
+  transition:
+    width 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 120ms ease;
   will-change: width;
+}
+
+.dock-item.is-unpinable {
+  cursor: grab;
+  touch-action: none;
+}
+
+.dock-item.is-dragging {
+  opacity: 0.92;
+  cursor: grabbing;
+  z-index: 4;
+  /* Width only — never `transition: none` (kills rfd drop transform tween). */
+  transition: opacity 120ms ease;
+}
+
+.dock-shell.is-drop-hover .dock-chrome::after {
+  border-width: 1.5px;
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.dock-shell.is-dragging-item .dock-item:not(.is-dragging) {
+  opacity: 0.78;
+}
+
+/* Freeze resting slot widths during dnd — do NOT kill all transitions:
+   rfd drop-animation needs transform transition; `none !important` left
+   translate() stuck and icons looked overlapped / “frozen”. */
+.dock-shell.is-dnd-active .dock-item {
+  --dock-slot: 40px;
+  --dock-hit: 40px;
+  width: 40px;
+  transition: opacity 120ms ease;
+}
+
+.dock-shell.is-dnd-active .dock-hit {
+  width: 40px;
+  height: 40px;
+  transition: none;
+}
+
+.dock-shell.is-dnd-remove .dock-item.is-dragging {
+  opacity: 0.45;
+}
+
+/* While tracking the pointer, snap slot widths every frame — 160ms width
+   tween was why fan felt sticky / not following after drop. */
+.dock-shell.is-fan-live .dock-item,
+.dock-shell.is-fan-live .dock-hit {
+  transition: opacity 120ms ease;
 }
 
 /* Icon tile grows in layout px (bottom-aligned into headroom). */
@@ -290,8 +378,16 @@ body.is-dock #root {
   opacity: 1;
 }
 
+html[data-theme="light"] body.is-dock {
+  --dock-stroke: rgba(0, 0, 0, 0.16);
+}
+
 html[data-theme="light"] .dock-sep::before {
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--dock-stroke);
+}
+
+html[data-theme="light"] .dock-shell.is-drop-hover .dock-chrome::after {
+  border-color: rgba(0, 0, 0, 0.28);
 }
 
 html[data-theme="light"] .dock-dot.is-on {

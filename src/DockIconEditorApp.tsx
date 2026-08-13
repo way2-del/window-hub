@@ -269,8 +269,13 @@ function DockIconEditorInner() {
     try {
       const path = await invoke<string | null>("pick_dock_icon_file");
       if (!path) return;
+      // Materialize into `%APPDATA%\window-hub\dock-icons\{id}.png`.
+      const cached = await invoke<string>("dock_cache_icon", {
+        itemId: selected.id,
+        sourcePath: path,
+      });
       const next = prefs.items.map((it) =>
-        it.id === selected.id ? { ...it, iconPath: path, iconPng: null } : it,
+        it.id === selected.id ? { ...it, iconPath: cached, iconPng: null } : it,
       );
       await persist(next);
     } catch (e) {
