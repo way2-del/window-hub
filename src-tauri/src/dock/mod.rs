@@ -148,12 +148,12 @@ fn default_corner_radius_px() -> u32 {
 }
 
 fn default_icon_scale() -> f64 {
-    1.0
+    0.9
 }
 
 fn clamp_icon_scale(v: f64) -> f64 {
     if !v.is_finite() {
-        return 1.0;
+        return 0.9;
     }
     v.clamp(0.5, 2.0)
 }
@@ -474,7 +474,7 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
             icon_path: exe.to_string(),
             uwp: false,
             icon_png,
-            icon_scale: 1.0,
+            icon_scale: 0.9,
             icon_offset_x: 0.0,
             icon_offset_y: 0.0,
             icon_bg: String::new(),
@@ -499,7 +499,7 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
                 icon_path: String::new(),
                 uwp: false,
                 icon_png: None,
-                icon_scale: 1.0,
+                icon_scale: 0.9,
                 icon_offset_x: 0.0,
                 icon_offset_y: 0.0,
                 icon_bg: String::new(),
@@ -2167,7 +2167,7 @@ fn dock_item_from_path(path_raw: &str) -> Result<DockItem, String> {
         icon_path: launch,
         uwp: false,
         icon_png: None,
-        icon_scale: 1.0,
+        icon_scale: 0.9,
         icon_offset_x: 0.0,
         icon_offset_y: 0.0,
         icon_bg: String::new(),
@@ -2239,7 +2239,7 @@ fn new_dock_separator() -> DockItem {
         icon_path: String::new(),
         uwp: false,
         icon_png: None,
-        icon_scale: 1.0,
+        icon_scale: 0.9,
         icon_offset_x: 0.0,
         icon_offset_y: 0.0,
         icon_bg: String::new(),

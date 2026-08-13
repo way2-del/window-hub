@@ -106,12 +106,25 @@ body.is-dock-icon-editor #root {
   display: grid;
   place-items: center;
   background: #f2f2f7;
+  /* Same composition as die-preview-plate: plate fixed, glyph scaled inside. */
+  position: relative;
+}
+
+.die-nav-glyph {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  transform-origin: center center;
+  will-change: transform;
 }
 
 .die-nav-thumb .dock-glyph,
-.die-nav-thumb img {
-  width: 22px !important;
-  height: 22px !important;
+.die-nav-thumb img,
+.die-nav-glyph .dock-glyph,
+.die-nav-glyph img {
+  width: 18px !important;
+  height: 18px !important;
   display: block;
   object-fit: contain;
 }

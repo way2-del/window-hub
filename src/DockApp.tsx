@@ -27,8 +27,9 @@ import {
   dockIconTipPointerProps,
   installChromeHoverTipGlobalDismiss,
 } from "./chromeHoverTip";
-import { DockStartIcon, DockTrashIcon, DOCK_START_BG, DOCK_TRASH_BG } from "./dockIcons";
+import { DockStartIcon, DockTrashIcon, DOCK_START_BG, DOCK_TRASH_BG, DOCK_AUTO_PLATE_BG } from "./dockIcons";
 import { useDockIconPlate } from "./dockIconPlate";
+import { plateColorFromPngBase64, peekCachedPlateColor } from "./dockIconBg";
 import "./DockApp.css";
 
 type DockItem = {
@@ -90,8 +91,11 @@ const DOCK_FAN_EXTRA = 48;
  * so waiting the full 240ms feels laggy after AutoHide reveal.
  */
 const FAN_ARM_DELAY_MS = 90;
-/** Item width CSS settle after disarm, before collapsing dock capsule. */
-const FAN_COLLAPSE_REST_MS = 180;
+/**
+ * After snap-unmagnify (while is-fan-live kills width CSS tween), brief pause
+ * before shrinking the glass so layout is committed at rest — prevents leak.
+ */
+const FAN_COLLAPSE_SNAP_MS = 32;
 /** How many icon-widths the fan reaches on each side. */
 const MAG_RANGE = 2.25;
 /** Fixed magnification — not user-configurable (matches Rust DOCK_MAG_SCALE). */
@@ -281,6 +285,35 @@ function DockRasterGlyph({ src }: { src: string }) {
   return <img className="dock-icon" src={src} alt="" draggable={false} />;
 }
 
+/** Default draw scale when prefs omit iconScale (matches Rust default_icon_scale). */
+const DEFAULT_ICON_SCALE = 0.9;
+
+function useAutoPlateColor(pngBase64: string | null | undefined): string | null {
+  const key = (pngBase64 || "").trim() || null;
+  const [color, setColor] = useState<string | null>(() =>
+    key ? peekCachedPlateColor(key) : null,
+  );
+  useEffect(() => {
+    if (!key) {
+      setColor(null);
+      return;
+    }
+    const cached = peekCachedPlateColor(key);
+    if (cached) {
+      setColor(cached);
+      return;
+    }
+    let alive = true;
+    void plateColorFromPngBase64(key).then((c) => {
+      if (alive) setColor(c);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [key]);
+  return color;
+}
+
 function DockItemGlyph({
   item,
   label,
@@ -290,12 +323,16 @@ function DockItemGlyph({
   label: string;
   scale: number;
 }) {
-  const iconScale = typeof item.iconScale === "number" && item.iconScale > 0 ? item.iconScale : 1;
+  const iconScale =
+    typeof item.iconScale === "number" && item.iconScale > 0
+      ? item.iconScale
+      : DEFAULT_ICON_SCALE;
   const ox = item.iconOffsetX ?? 0;
   const oy = item.iconOffsetY ?? 0;
   const bgRaw = (item.iconBg ?? "").trim();
   const src = item.iconPng ? `data:image/png;base64,${item.iconPng}` : null;
   const autoPlate = useDockIconPlate(src);
+  const autoColor = useAutoPlateColor(bgRaw ? null : item.iconPng);
 
   let plateClass = "dock-icon-tile";
   let plateBg: string | undefined;
@@ -311,10 +348,14 @@ function DockItemGlyph({
   } else if (item.kind === "trash" && !item.iconPng) {
     plateClass += " has-custom-bg";
     plateBg = DOCK_TRASH_BG;
-  } else if (autoPlate || !src) {
-    plateClass += " needs-plate";
-  } else {
+  } else if (src && autoPlate) {
+    // Transparent-edge icons: plate = island-notify style dominant color.
+    plateClass += " has-custom-bg";
+    plateBg = autoColor || DOCK_AUTO_PLATE_BG;
+  } else if (src) {
     plateClass += " has-bg";
+  } else {
+    plateClass += " needs-plate";
   }
 
   const glyph =
@@ -396,7 +437,9 @@ export default function DockApp() {
   const [fanLive, setFanLive] = useState(false);
   /** Chrome stroke width tracks expand tween (not fanLive — that snapped early). */
   const [barWide, setBarWide] = useState(false);
-  const widthTweenTimerRef = useRef<number | null>(null);
+  /** Hold chrome/glass wide while finishing unmagnify → then shrink (no icon leak). */
+  const [fanCollapsing, setFanCollapsing] = useState(false);
+  const widthTweenTimerRef = useRef(null as number | null);
   /** Ignore stale dock_set_hover_expand responses after rapid enter/leave. */
   const expandSeqRef = useRef(0);
   /** True while pointer is inside the dock bar (gates fan arm). */
@@ -489,6 +532,7 @@ export default function DockApp() {
     if (clientX < rect.left - 2 || clientX > rect.right + 2) return;
     pointerInsideRef.current = true;
     cancelCollapseTimer();
+    if (fanCollapsing) setFanCollapsing(false);
     setFanLive(true);
     queueFanFromClientX(clientX);
     if (!expandedRef.current && expandInflightRef.current !== true) {
@@ -557,6 +601,13 @@ export default function DockApp() {
           if (expandInflightRef.current === next) {
             expandInflightRef.current = null;
           }
+          // Leave cancelled this expand — don't leave BE stuck wide with FE at rest.
+          if (next && !pointerInsideRef.current && !expandedRef.current) {
+            setBarWide(false);
+            void invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(
+              () => undefined,
+            );
+          }
           return;
         }
         if (!ok) {
@@ -613,21 +664,36 @@ export default function DockApp() {
   };
 
   const beginCollapseAfterFanRest = () => {
-    // 1) Clear magnification first (item width CSS ~160ms).
-    // 2) Only then shrink dock capsule / chrome.
+    // Fast leave must not shrink glass while slots are still mid CSS unmagnify
+    // (icons leak past the capsule). While `is-fan-live`, width has no transition —
+    // disarmFan snaps slots to rest, then we shrink glass.
     pointerInsideRef.current = false;
     expandSeqRef.current += 1;
     cancelWidthTweenTimer();
     expandInflightRef.current = null;
-    setFanLive(false);
-    disarmFan();
     cancelCollapseTimer();
+    setFanCollapsing(true);
+    // Snap magnification off first (is-fan-live still on → no width tween).
+    if (!fanLive) setFanLive(true);
+    disarmFan();
     collapseTimerRef.current = window.setTimeout(() => {
       collapseTimerRef.current = null;
-      if (!pointerInsideRef.current && expandedRef.current) {
-        setExpanded(false);
-      }
-    }, FAN_COLLAPSE_REST_MS);
+      setFanLive(false);
+      requestAnimationFrame(() => {
+        setFanCollapsing(false);
+        if (pointerInsideRef.current) return;
+        if (expandedRef.current || expandInflightRef.current === true) {
+          setExpanded(false);
+        } else {
+          // Expand response may have been cancelled — force BE + chrome rest.
+          expandedRef.current = false;
+          setBarWide(false);
+          void invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(
+            () => undefined,
+          );
+        }
+      });
+    }, FAN_COLLAPSE_SNAP_MS);
   };
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
@@ -871,7 +937,7 @@ export default function DockApp() {
   const padX = dockPadX(prefs?.cornerRadiusPx ?? 20);
   const cornerRadius = prefs?.cornerRadiusPx ?? 20;
   /** Match Composition capsule: rest = content; hover = content + FAN_EXTRA (not 100%). */
-  const chromeWide = barWide || !!draggingId;
+  const chromeWide = barWide || fanCollapsing || !!draggingId;
   const chromeRestPx = restingBarWidth(displayItems, padX);
   const chromeWidthPx = chromeWide ? chromeRestPx + DOCK_FAN_EXTRA : chromeRestPx;
   const centers = useMemo(
@@ -911,6 +977,7 @@ export default function DockApp() {
         showSettleUntilRef.current = 0;
         setFanLive(false);
         setBarWide(false);
+        setFanCollapsing(false);
         disarmFan();
         setExpanded(false);
         return;
@@ -942,6 +1009,7 @@ export default function DockApp() {
     lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
     pointerInsideRef.current = true;
     cancelCollapseTimer();
+    if (fanCollapsing) setFanCollapsing(false);
     if (!fanLive) setFanLive(true);
     // Widen at most once per hover session; moves only update fan X.
     if (!expandedRef.current && expandInflightRef.current !== true) {
@@ -958,6 +1026,7 @@ export default function DockApp() {
     lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
     pointerInsideRef.current = true;
     cancelCollapseTimer();
+    if (fanCollapsing) setFanCollapsing(false);
     setFanLive(true);
     // From default width only when this session is not already wide.
     if (!expandedRef.current && expandInflightRef.current !== true) {

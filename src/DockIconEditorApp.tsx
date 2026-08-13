@@ -14,6 +14,7 @@ import {
   DOCK_START_BG,
   DOCK_TRASH_BG,
 } from "./dockIcons";
+import { plateColorFromPngBase64, peekCachedPlateColor } from "./dockIconBg";
 import "./settings.css";
 import "./dockIconEditor.css";
 
@@ -43,6 +44,9 @@ type DockPrefs = {
   hiddenItemIds?: string[];
 };
 
+/** Matches Rust `default_icon_scale` (0.9 → 90%). */
+const DEFAULT_SCALE_PCT = 90;
+
 const BG_PRESETS: Array<{ id: string; label: string; value: string }> = [
   { id: "auto", label: "自动", value: "" },
   { id: "plate", label: "浅灰", value: DOCK_AUTO_PLATE_BG },
@@ -69,13 +73,18 @@ function itemSubtitle(it: DockItem): string {
   return slash >= 0 ? path.slice(slash + 1) : path;
 }
 
-function resolvePlateBg(item: DockItem, draftBg?: string): string {
+function scalePctFromItem(it: DockItem): number {
+  const s = typeof it.iconScale === "number" && it.iconScale > 0 ? it.iconScale : 0.9;
+  return Math.round(s * 100);
+}
+
+function resolveStaticPlateBg(item: DockItem, draftBg?: string): string | null {
   const raw = (draftBg ?? item.iconBg ?? "").trim();
   if (raw === "transparent" || raw === "none") return "transparent";
   if (raw) return raw;
   if (item.kind === "startmenu" && !item.iconPng) return DOCK_START_BG;
   if (item.kind === "trash" && !item.iconPng) return DOCK_TRASH_BG;
-  return DOCK_AUTO_PLATE_BG;
+  return null; // auto → sample from PNG
 }
 
 function ItemGlyph({ item }: { item: DockItem }) {
@@ -87,10 +96,70 @@ function ItemGlyph({ item }: { item: DockItem }) {
   return <span className="die-fallback-letter">{itemTitle(item).charAt(0)}</span>;
 }
 
-function ItemThumb({ item }: { item: DockItem }) {
+function useAutoPlateBg(item: DockItem, draftBg?: string): string {
+  const staticBg = resolveStaticPlateBg(item, draftBg);
+  const png = (item.iconPng || "").trim();
+  const [auto, setAuto] = useState<string>(
+    () => (staticBg != null ? staticBg : peekCachedPlateColor(png) || DOCK_AUTO_PLATE_BG),
+  );
+
+  useEffect(() => {
+    if (staticBg != null) {
+      setAuto(staticBg);
+      return;
+    }
+    if (!png) {
+      setAuto(DOCK_AUTO_PLATE_BG);
+      return;
+    }
+    const cached = peekCachedPlateColor(png);
+    if (cached) {
+      setAuto(cached);
+      return;
+    }
+    let alive = true;
+    void plateColorFromPngBase64(png).then((c) => {
+      if (alive) setAuto(c);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [staticBg, png]);
+
+  return auto;
+}
+
+function ItemThumb({
+  item,
+  draftBg,
+  scalePct,
+  offsetX,
+  offsetY,
+}: {
+  item: DockItem;
+  /** Live draft from the editor when this row is selected. */
+  draftBg?: string;
+  scalePct?: number;
+  offsetX?: number;
+  offsetY?: number;
+}) {
+  const bg = useAutoPlateBg(item, draftBg);
+  const scale = Math.min(2, Math.max(0.5, (scalePct ?? scalePctFromItem(item)) / 100));
+  const ox = offsetX ?? Math.round(item.iconOffsetX ?? 0);
+  const oy = offsetY ?? Math.round(item.iconOffsetY ?? 0);
+  // Thumb is 22px; preview uses ×2 on offsets — keep proportional (~22/64 of preview feel).
+  const oxPx = ox * (22 / 64);
+  const oyPx = oy * (22 / 64);
   return (
-    <span className="die-nav-thumb" style={{ background: resolvePlateBg(item) }}>
-      <ItemGlyph item={item} />
+    <span className="die-nav-thumb" style={{ background: bg }}>
+      <span
+        className="die-nav-glyph"
+        style={{
+          transform: `translate(${oxPx}px, ${oyPx}px) scale(${scale})`,
+        }}
+      >
+        <ItemGlyph item={item} />
+      </span>
     </span>
   );
 }
@@ -120,7 +189,7 @@ function DockIconEditorInner() {
   const [prefs, setPrefs] = useState<DockPrefs | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState("");
-  const [draftScale, setDraftScale] = useState(100);
+  const [draftScale, setDraftScale] = useState(DEFAULT_SCALE_PCT);
   const [draftOx, setDraftOx] = useState(0);
   const [draftOy, setDraftOy] = useState(0);
   const [draftBg, setDraftBg] = useState("");
@@ -136,6 +205,14 @@ function DockIconEditorInner() {
     () => editable.find((it) => it.id === selectedId) ?? editable[0] ?? null,
     [editable, selectedId],
   );
+
+  const applyItemDrafts = (hit: DockItem) => {
+    setSelectedId(hit.id);
+    setDraftScale(scalePctFromItem(hit));
+    setDraftOx(Math.round(hit.iconOffsetX ?? 0));
+    setDraftOy(Math.round(hit.iconOffsetY ?? 0));
+    setDraftBg((hit.iconBg ?? "").trim());
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -173,13 +250,7 @@ function DockIconEditorInner() {
           ""
         ).trim();
         const hit = list.find((it) => it.id === want) ?? list[0] ?? null;
-        if (hit) {
-          setSelectedId(hit.id);
-          setDraftScale(Math.round((hit.iconScale ?? 1) * 100));
-          setDraftOx(Math.round(hit.iconOffsetX ?? 0));
-          setDraftOy(Math.round(hit.iconOffsetY ?? 0));
-          setDraftBg((hit.iconBg ?? "").trim());
-        }
+        if (hit) applyItemDrafts(hit);
       } catch (e) {
         console.error(e);
         if (!cancelled) setLoadError(String(e));
@@ -198,7 +269,9 @@ function DockIconEditorInner() {
       void applyGlass();
     }).then((u) => unsubs.push(u));
     void listen<DockPrefs>("dock-prefs", (ev) => {
-      if (!cancelled) setPrefs(ev.payload);
+      if (cancelled) return;
+      // Always take host payload (includes freshly materialized iconPng).
+      setPrefs(ev.payload);
     }).then((u) => unsubs.push(u));
     void listen<string>("dock-icon-editor-focus", (ev) => {
       const id = String(ev.payload || "").trim();
@@ -217,15 +290,15 @@ function DockIconEditorInner() {
 
   useEffect(() => {
     if (!selected) return;
-    setDraftScale(Math.round((selected.iconScale ?? 1) * 100));
+    setDraftScale(scalePctFromItem(selected));
     setDraftOx(Math.round(selected.iconOffsetX ?? 0));
     setDraftOy(Math.round(selected.iconOffsetY ?? 0));
     setDraftBg((selected.iconBg ?? "").trim());
     setMsg(null);
   }, [selected?.id]);
 
-  async function persist(nextItems: DockItem[]) {
-    if (!prefs) return;
+  async function persist(nextItems: DockItem[]): Promise<DockPrefs | null> {
+    if (!prefs) return null;
     setBusy(true);
     setMsg(null);
     try {
@@ -234,9 +307,11 @@ function DockIconEditorInner() {
       });
       setPrefs(saved);
       setMsg("已保存");
+      return saved;
     } catch (e) {
       console.error(e);
       setMsg(String(e));
+      return null;
     } finally {
       setBusy(false);
     }
@@ -249,7 +324,7 @@ function DockIconEditorInner() {
         ? {
             ...it,
             iconPath: "",
-            iconScale: 1,
+            iconScale: 0.9,
             iconOffsetX: 0,
             iconOffsetY: 0,
             iconBg: "",
@@ -257,7 +332,7 @@ function DockIconEditorInner() {
           }
         : it,
     );
-    setDraftScale(100);
+    setDraftScale(DEFAULT_SCALE_PCT);
     setDraftOx(0);
     setDraftOy(0);
     setDraftBg("");
@@ -269,18 +344,38 @@ function DockIconEditorInner() {
     try {
       const path = await invoke<string | null>("pick_dock_icon_file");
       if (!path) return;
+      setBusy(true);
+      setMsg(null);
       // Materialize into `%APPDATA%\window-hub\dock-icons\{id}.png`.
       const cached = await invoke<string>("dock_cache_icon", {
         itemId: selected.id,
         sourcePath: path,
       });
-      const next = prefs.items.map((it) =>
+      const nextItems = prefs.items.map((it) =>
         it.id === selected.id ? { ...it, iconPath: cached, iconPng: null } : it,
       );
-      await persist(next);
+      const saved = await invoke<DockPrefs>("set_dock_prefs", {
+        prefs: { ...prefs, items: nextItems },
+      });
+      // Prefer host-resolved PNG so the left list updates immediately.
+      let withPng = saved;
+      const hit = saved.items.find((it) => it.id === selected.id);
+      if (hit && !hit.iconPng) {
+        withPng = await invoke<DockPrefs>("get_dock_prefs");
+      }
+      const fresh = withPng.items.find((it) => it.id === selected.id);
+      // Auto plate = island-notify dominant color (keep iconBg empty = 自动).
+      if (fresh?.iconPng) {
+        await plateColorFromPngBase64(fresh.iconPng);
+      }
+      setPrefs(withPng);
+      setDraftBg("");
+      setMsg("已保存");
     } catch (e) {
       console.error(e);
       setMsg(String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -299,13 +394,30 @@ function DockIconEditorInner() {
   }
 
   const previewScale = Math.min(200, Math.max(50, draftScale)) / 100;
-  const plateBg = selected ? resolvePlateBg(selected, draftBg) : DOCK_AUTO_PLATE_BG;
+  const plateBg = useAutoPlateBg(
+    selected ?? {
+      id: "",
+      kind: "",
+      label: "",
+      matchExe: "",
+      launchPath: "",
+      realPath: "",
+      virtualPath: "",
+      iconPath: "",
+      uwp: false,
+      iconPng: null,
+      iconBg: "",
+    },
+    selected ? draftBg : "",
+  );
   const colorPickerValue =
     draftBg && draftBg !== "transparent" && draftBg.startsWith("#")
       ? draftBg.length === 4
         ? `#${draftBg[1]}${draftBg[1]}${draftBg[2]}${draftBg[2]}${draftBg[3]}${draftBg[3]}`
         : draftBg.slice(0, 7)
-      : "#f2f2f7";
+      : plateBg.startsWith("#")
+        ? plateBg.slice(0, 7)
+        : "#f2f2f7";
 
   if (loadError) {
     return (
@@ -342,7 +454,13 @@ function DockIconEditorInner() {
                   onClick={() => setSelectedId(it.id)}
                 >
                   <span className="die-nav-thumb-wrap" aria-hidden>
-                    <ItemThumb item={it} />
+                    <ItemThumb
+                      item={it}
+                      draftBg={active ? draftBg : undefined}
+                      scalePct={active ? draftScale : undefined}
+                      offsetX={active ? draftOx : undefined}
+                      offsetY={active ? draftOy : undefined}
+                    />
                   </span>
                   <span className="die-nav-text">
                     <span className="die-nav-label">{itemTitle(it)}</span>
@@ -406,7 +524,9 @@ function DockIconEditorInner() {
 
                 <div className="die-bg-block">
                   <strong>背景色</strong>
-                  <p className="die-bg-hint">与图标图片分离；缩放/偏移只作用于图标</p>
+                  <p className="die-bg-hint">
+                    「自动」复用消息岛描边取色：从图标主色生成底板
+                  </p>
                   <div className="die-bg-presets" role="list">
                     {BG_PRESETS.map((p) => {
                       const active =
@@ -422,7 +542,9 @@ function DockIconEditorInner() {
                           style={{
                             background:
                               p.value === ""
-                                ? "conic-gradient(from 90deg, #f2f2f7, #0078D4, #1c1c1e, #f2f2f7)"
+                                ? plateBg.startsWith("#")
+                                  ? plateBg
+                                  : "conic-gradient(from 90deg, #f2f2f7, #0078D4, #1c1c1e, #f2f2f7)"
                                 : p.value === "transparent"
                                   ? "repeating-conic-gradient(#666 0% 25%, #333 0% 50%) 50% / 10px 10px"
                                   : p.value,

@@ -1,4 +1,4 @@
-﻿html,
+html,
 body,
 #root {
   margin: 0;
@@ -24,10 +24,10 @@ body.is-dock #root {
 }
 
 /* Full window is transparent; glass lives on the fixed-height chrome strip.
-   Headroom above the bar is paint-only — do not capture pointer there so
-   AutoHide / clicks fall through to the OS when not over the chrome.
-   While fan is live, stack grows to full HWND so magnified icons stay
-   hit-testable from chrome bottom through the tall glyph. */
+   Headroom above the bar is paint-only — never capture pointer there so
+   AutoHide / clicks fall through (same chrome-only keep rect as visibility.rs).
+   Magnified glyphs may paint into headroom via overflow:visible; empty air
+   above icons must NOT arm or hold fan. */
 .dock-shell {
   box-sizing: border-box;
   position: relative;
@@ -44,8 +44,7 @@ body.is-dock #root {
   pointer-events: none;
 }
 
-/* Shrink-wraps height; full HWND width so empty fan-pad still hit-tests
-   (avoids leave→shrink→widen loops when the cursor sits in the side pad). */
+/* Chrome-tall only — never stretch to HWND headroom (that was the fan hot-zone bug). */
 .dock-stack {
   position: relative;
   display: flex;
@@ -55,10 +54,6 @@ body.is-dock #root {
   height: var(--dock-chrome-h);
   overflow: visible;
   pointer-events: none;
-}
-
-.dock-shell.is-fan-live .dock-stack {
-  height: 100%;
 }
 
 /* Visible dock height — never grows with magnification.
@@ -106,7 +101,7 @@ body.is-dock #root {
   justify-content: center;
   gap: 6px;
   width: 100%;
-  /* Matches chrome at rest; fills stack (incl. headroom) while fan is live. */
+  /* Always chrome height — side fan-pad still hit-tests via full width; headroom does not. */
   height: 100%;
   min-height: var(--dock-chrome-h);
   padding: 0 2px;

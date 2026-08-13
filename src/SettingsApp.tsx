@@ -19,7 +19,7 @@ import { describeCapabilities, isSensitiveCapability } from "./plugins/capGate";
 import type { PluginCapability, PluginSettingField } from "./plugins/types";
 import { subscribeSystemDark, syncGlassCss } from "./glassPrefs";
 import SqliteDevPanel from "./components/SqliteDevPanel";
-import PluginSettingsForm from "./components/PluginSettingsForm";
+import PluginsMarketPanel from "./PluginsMarketPanel";
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
@@ -67,15 +67,6 @@ type DockPrefs = {
   hiddenItemIds: string[];
 };
 
-const DOCK_ACTIVATION_POSITIONS: {
-  id: "screenBottom" | "dockBottom";
-  label: string;
-  desc: string;
-}[] = [
-  { id: "screenBottom", label: "屏幕最底部", desc: "整条底边热区（默认）" },
-  { id: "dockBottom", label: "仅 Dock 宽度", desc: "只在底栏水平范围内触发" },
-];
-
 const DOCK_MODES: { id: DockDisplayMode; label: string; desc: string }[] = [
   { id: "default", label: "默认显示模式", desc: "常驻贴底；全屏游戏时隐藏" },
   { id: "layered", label: "叠层显示模式", desc: "常驻并保持置顶" },
@@ -87,6 +78,14 @@ const DOCK_MODES: { id: DockDisplayMode; label: string; desc: string }[] = [
   { id: "desktop", label: "桌面显示模式", desc: "仅在桌面前景时显示" },
 ];
 
+/** Host-fixed geometry — not exposed in Settings. */
+const DOCK_FIXED = {
+  activationPosition: "screenBottom" as const,
+  activationThicknessPx: 20,
+  bottomOffsetPx: 0,
+  cornerRadiusPx: 20,
+};
+
 function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPrefs {
   return {
     enabled: !!dp?.enabled,
@@ -94,16 +93,12 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
     hideSystemTaskbar: dp?.hideSystemTaskbar !== false,
     items: dp?.items ?? [],
     hotkey: dp?.hotkey || "Ctrl+Alt+D",
-    activationPosition:
-      dp?.activationPosition === "dockBottom" ? "dockBottom" : "screenBottom",
-    activationThicknessPx: Math.min(64, Math.max(4, Number(dp?.activationThicknessPx) || 20)),
-    bottomOffsetPx: Math.min(400, Math.max(0, Number(dp?.bottomOffsetPx) || 0)),
+    ...DOCK_FIXED,
     hideLingerMs: Math.min(10000, Math.max(200, Number(dp?.hideLingerMs) || 800)),
     magnification: Math.min(
       2.5,
       Math.max(1, Number.isFinite(Number(dp?.magnification)) ? Number(dp?.magnification) : 1.6),
     ),
-    cornerRadiusPx: Math.min(30, Math.max(0, Number(dp?.cornerRadiusPx) || 20)),
     hiddenItemIds: Array.isArray(dp?.hiddenItemIds) ? dp.hiddenItemIds.map(String) : [],
   };
 }
@@ -228,15 +223,6 @@ type ScriptLauncherRow = {
   running: boolean;
   pid?: number | null;
 };
-
-const SCRIPT_ENVS: { id: ScriptEnv; label: string }[] = [
-  { id: "python", label: "Python" },
-  { id: "node", label: "Node.js" },
-  { id: "powershell", label: "PowerShell" },
-  { id: "cmd", label: "CMD / Bat" },
-  { id: "exe", label: "可执行文件" },
-  { id: "custom", label: "自定义运行时" },
-];
 
 const emptyLauncherDraft = (): Omit<ScriptLauncherRow, "running" | "pid"> => ({
   id: "",
@@ -388,7 +374,8 @@ export default function SettingsApp() {
   const [trays, setTrays] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
-  const [menuHeightEditId, setMenuHeightEditId] = useState<string | null>(null);
+  /** Drill-down into a tray icon settings card (list → detail). */
+  const [trayDetailKey, setTrayDetailKey] = useState<string | null>(null);
   const [menuHeightDraft, setMenuHeightDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [dockPrefs, setDockPrefs] = useState<DockPrefs>(() => normalizeDockPrefs(null));
@@ -428,20 +415,6 @@ export default function SettingsApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- seed nav once from init focus
   }, []);
 
-  useEffect(() => {
-    if (!focusPluginId || nav !== "plugins") return;
-    const t = window.setTimeout(() => {
-      const el = document.querySelector(
-        `[data-plugin-id="${CSS.escape(focusPluginId)}"]`,
-      ) as HTMLElement | null;
-      if (!el) return;
-      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      el.classList.add("is-focus-flash");
-      window.setTimeout(() => el.classList.remove("is-focus-flash"), 1600);
-    }, 80);
-    return () => window.clearTimeout(t);
-  }, [focusPluginId, nav, installed]);
-
   const pullOptions = useMemo(() => {
     const panels = listPanelProviders(pluginRegistry.listPanelManifests());
     return panels.map((p) => ({
@@ -469,33 +442,6 @@ export default function SettingsApp() {
         settingsIntro: p.manifest?.description,
       })),
     [installed],
-  );
-  const windowGroupsInstalled = pluginEntries.some(
-    (entry) =>
-      entry.id === "com.window-hub.window-groups" ||
-      entry.id === "com.window-hub.window-groups__dev",
-  );
-  const transferStationInstalled = pluginEntries.some(
-    (entry) =>
-      entry.id === "com.window-hub.transfer-station" ||
-      entry.id === "com.window-hub.transfer-station__dev",
-  );
-  const weatherInstalled = pluginEntries.some(
-    (entry) =>
-      entry.id === "com.window-hub.weather" || entry.id === "com.window-hub.weather__dev",
-  );
-  const idiomInstalled = pluginEntries.some(
-    (entry) =>
-      entry.id === "com.window-hub.idiom" || entry.id === "com.window-hub.idiom__dev",
-  );
-  const mirrorInstalled = pluginEntries.some(
-    (entry) =>
-      entry.id === "com.window-hub.mirror" || entry.id === "com.window-hub.mirror__dev",
-  );
-  const appLibraryInstalled = pluginEntries.some(
-    (entry) =>
-      entry.id === "com.window-hub.app-library" ||
-      entry.id === "com.window-hub.app-library__dev",
   );
 
   const shortcutsPluginOptions = useMemo(() => {
@@ -525,7 +471,7 @@ export default function SettingsApp() {
   };
 
   const persistDockPrefs = async (patch: Partial<DockPrefs>) => {
-    const next: DockPrefs = { ...dockPrefs, ...patch };
+    const next: DockPrefs = normalizeDockPrefs({ ...dockPrefs, ...patch, ...DOCK_FIXED });
     setDockPrefs(next);
     setDockBusy(true);
     setDockMsg("");
@@ -665,6 +611,26 @@ export default function SettingsApp() {
     };
   }, []);
 
+  // Leave tray detail when switching away from the tray tab.
+  useEffect(() => {
+    if (nav !== "tray") {
+      setTrayDetailKey(null);
+      setMenuHeightDraft("");
+    }
+  }, [nav]);
+
+  // If the detailed icon vanished from the live tray list, return to the list.
+  useEffect(() => {
+    if (!trayDetailKey) return;
+    const stillThere = trays.some(
+      (t) => trayPinKey(t) === trayDetailKey || t.id === trayDetailKey,
+    );
+    if (!stillThere) {
+      setTrayDetailKey(null);
+      setMenuHeightDraft("");
+    }
+  }, [trays, trayDetailKey]);
+
   // 跟随系统：OS 主题变化时同步 CSS + DWM（解析成明确深/浅，不做第三种）
   useEffect(() => {
     if (darkPref !== "auto") return;
@@ -754,10 +720,10 @@ export default function SettingsApp() {
     await persistTrayPrefs(next, menuHeights);
   }
 
-  function openMenuHeightEditor(icon: TrayIconInfo) {
+  function openTrayDetail(icon: TrayIconInfo) {
     const key = trayPinKey(icon);
     const cur = menuHeights[key] ?? menuHeights[icon.id];
-    setMenuHeightEditId(key);
+    setTrayDetailKey(key);
     if (cur != null && cur > 0) {
       setMenuHeightDraft(String(cur));
     } else if (isTencentIm(icon)) {
@@ -765,6 +731,11 @@ export default function SettingsApp() {
     } else {
       setMenuHeightDraft("");
     }
+  }
+
+  function closeTrayDetail() {
+    setTrayDetailKey(null);
+    setMenuHeightDraft("");
   }
 
   async function saveIconMenuHeight(id: string) {
@@ -782,8 +753,6 @@ export default function SettingsApp() {
       nextHeights[id] = Math.round(Math.min(640, Math.max(48, parsed)));
     }
     setMenuHeights(nextHeights);
-    setMenuHeightEditId(null);
-    setMenuHeightDraft("");
     await persistTrayPrefs(pinned, nextHeights);
   }
 
@@ -795,7 +764,6 @@ export default function SettingsApp() {
       delete nextHeights[icon.id];
     }
     setMenuHeights(nextHeights);
-    setMenuHeightEditId(null);
     setMenuHeightDraft("");
     await persistTrayPrefs(pinned, nextHeights);
   }
@@ -1317,95 +1285,6 @@ export default function SettingsApp() {
                 </label>
                 <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
                   <span className="pref-row-text">
-                    <span className="pref-row-label">激活位置</span>
-                    <span className="pref-row-desc">
-                      自动隐藏等模式：鼠标靠近何处唤出 Dock（默认屏幕最底部）
-                    </span>
-                  </span>
-                  <select
-                    className="pref-select"
-                    value={
-                      dockPrefs.activationPosition === "dockBottom"
-                        ? "dockBottom"
-                        : "screenBottom"
-                    }
-                    disabled={!dockPrefs.enabled || dockBusy}
-                    onChange={(e) =>
-                      void persistDockPrefs({
-                        activationPosition: e.target.value as "screenBottom" | "dockBottom",
-                      })
-                    }
-                  >
-                    {DOCK_ACTIVATION_POSITIONS.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <p className="card-desc" style={{ marginTop: 4 }}>
-                  {
-                    DOCK_ACTIVATION_POSITIONS.find(
-                      (p) => p.id === (dockPrefs.activationPosition === "dockBottom"
-                        ? "dockBottom"
-                        : "screenBottom"),
-                    )?.desc
-                  }
-                </p>
-                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
-                  <span className="pref-row-text">
-                    <span className="pref-row-label">激活热区厚度</span>
-                    <span className="pref-row-desc">逻辑像素，默认 20</span>
-                  </span>
-                  <input
-                    className="pref-select"
-                    type="number"
-                    min={4}
-                    max={64}
-                    step={1}
-                    value={dockPrefs.activationThicknessPx}
-                    disabled={!dockPrefs.enabled || dockBusy}
-                    onChange={(e) => {
-                      const n = Number(e.target.value);
-                      if (!Number.isFinite(n)) return;
-                      setDockPrefs((p) => ({ ...p, activationThicknessPx: n }));
-                    }}
-                    onBlur={(e) => {
-                      const n = Math.min(64, Math.max(4, Number(e.target.value) || 20));
-                      void persistDockPrefs({ activationThicknessPx: n });
-                    }}
-                    style={{ width: 72, textAlign: "right" }}
-                  />
-                </label>
-                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
-                  <span className="pref-row-text">
-                    <span className="pref-row-label">Dock 底边偏移</span>
-                    <span className="pref-row-desc">
-                      Dock 底边距屏幕底的间距；0 = 底边贴屏幕底（默认）
-                    </span>
-                  </span>
-                  <input
-                    className="pref-select"
-                    type="number"
-                    min={0}
-                    max={400}
-                    step={1}
-                    value={dockPrefs.bottomOffsetPx}
-                    disabled={!dockPrefs.enabled || dockBusy}
-                    onChange={(e) => {
-                      const n = Number(e.target.value);
-                      if (!Number.isFinite(n)) return;
-                      setDockPrefs((p) => ({ ...p, bottomOffsetPx: n }));
-                    }}
-                    onBlur={(e) => {
-                      const n = Math.min(400, Math.max(0, Number(e.target.value) || 0));
-                      void persistDockPrefs({ bottomOffsetPx: n });
-                    }}
-                    style={{ width: 72, textAlign: "right" }}
-                  />
-                </label>
-                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
-                  <span className="pref-row-text">
                     <span className="pref-row-label">离开后隐藏延迟</span>
                     <span className="pref-row-desc">
                       鼠标离开 Dock / 激活条后，等待多久再收起（毫秒，默认 800）
@@ -1430,40 +1309,6 @@ export default function SettingsApp() {
                     }}
                     style={{ width: 88, textAlign: "right" }}
                   />
-                </label>
-                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
-                  <span className="pref-row-text">
-                    <span className="pref-row-label">栏身圆角</span>
-                    <span className="pref-row-desc">
-                      1–8 系统 DWM 圆角；9–30 Composition 原生圆角（HostBackdrop，拉满 ≈ 胶囊）
-                    </span>
-                  </span>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                    <input
-                      type="range"
-                      min={0}
-                      max={30}
-                      step={1}
-                      value={dockPrefs.cornerRadiusPx}
-                      disabled={!dockPrefs.enabled || dockBusy}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        if (!Number.isFinite(n)) return;
-                        setDockPrefs((p) => ({ ...p, cornerRadiusPx: n }));
-                      }}
-                      onPointerUp={(e) => {
-                        const n = Math.min(
-                          30,
-                          Math.max(0, Number((e.target as HTMLInputElement).value) || 0),
-                        );
-                        void persistDockPrefs({ cornerRadiusPx: n });
-                      }}
-                      style={{ width: 120 }}
-                    />
-                    <span style={{ minWidth: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                      {dockPrefs.cornerRadiusPx}
-                    </span>
-                  </span>
                 </label>
               </section>
               <section className="settings-card">
@@ -1494,43 +1339,154 @@ export default function SettingsApp() {
             </>
           )}
 
-          {nav === "tray" && (
-            <section className="settings-card settings-card-grow">
-              <div className="section-head">
-                <h2>托盘常显</h2>
-                <span className="section-hint">
-                  {saving
-                    ? "保存中…"
-                    : trays.length > 0
-                      ? "勾选常显；Wi‑Fi / 输入法为系统常驻；齿轮可设右键菜单高度"
-                      : "正在抓取系统托盘…"}
-                </span>
-              </div>
-              <p className="card-desc">
-                右键菜单默认自动测量高度并贴到点击下方；可为每个图标自定义像素高度。定位只改消息坐标并移动菜单窗口，真实鼠标指针不会跳动。Wi‑Fi 与输入法由 Host 自绘常驻，不依赖系统 NotifyIcon。
-              </p>
-              {trays.length === 0 ? (
-                <p className="tray-settings-empty">暂未收到托盘图标</p>
-              ) : (
-                <div className="tray-settings-list">
-                  {trays.map((icon) => {
-                    const key = trayPinKey(icon);
-                    const resident = isTrayResident(icon);
-                    const on = resident || isTrayPinned(icon, pinnedSet);
-                    const customH = menuHeights[key] ?? menuHeights[icon.id];
-                    const editing = menuHeightEditId === key || menuHeightEditId === icon.id;
-                    const tencentDefault = isTencentIm(icon);
-                    return (
-                      <div
-                        key={icon.id}
-                        className={`tray-settings-row${on ? " is-on" : ""}${editing ? " is-editing" : ""}`}
+          {nav === "tray" && (() => {
+            const detailIcon = trayDetailKey
+              ? trays.find(
+                  (t) => trayPinKey(t) === trayDetailKey || t.id === trayDetailKey,
+                ) ?? null
+              : null;
+
+            if (detailIcon) {
+              const key = trayPinKey(detailIcon);
+              const resident = isTrayResident(detailIcon);
+              const on = resident || isTrayPinned(detailIcon, pinnedSet);
+              const customH = menuHeights[key] ?? menuHeights[detailIcon.id];
+              const tencentDefault = isTencentIm(detailIcon);
+              return (
+                <section className="settings-card settings-card-grow tray-detail">
+                  <button
+                    type="button"
+                    className="tray-detail-back"
+                    onClick={closeTrayDetail}
+                  >
+                    <svg
+                      className="tray-detail-back-icon"
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.25"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                    >
+                      <path d="M15 18l-6-6 6-6" />
+                    </svg>
+                    <span className="tray-detail-back-label">托盘</span>
+                  </button>
+                  <div className="tray-detail-card">
+                    <div className="tray-detail-hero">
+                      {detailIcon.icon_png_base64 ? (
+                        <img
+                          className="tray-detail-hero-icon"
+                          src={`data:image/png;base64,${detailIcon.icon_png_base64}`}
+                          alt=""
+                          draggable={false}
+                        />
+                      ) : (
+                        <span className="tray-detail-hero-icon tray-settings-fallback">
+                          {trayLabel(detailIcon).charAt(0).toUpperCase()}
+                        </span>
+                      )}
+                      <div className="tray-detail-hero-meta">
+                        <div className="tray-detail-hero-name">{trayLabel(detailIcon)}</div>
+                        <div className="tray-detail-hero-sub">
+                          {detailIcon.process || detailIcon.id}
+                          {resident ? " · 系统常驻" : ""}
+                          {detailIcon.area === "overflow" ? " · 溢出区" : ""}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="tray-detail-row">
+                      <div className="tray-detail-row-text">
+                        <div className="tray-detail-row-title">在岛上常显</div>
+                        <div className="tray-detail-row-desc">
+                          {resident
+                            ? "Wi‑Fi / 输入法为系统常驻，不可取消常显"
+                            : saving
+                              ? "保存中…"
+                              : "常显图标会出现在灵动岛托盘区"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`pref-switch${on ? " is-on" : ""}${resident ? " is-disabled" : ""}`}
+                        role="switch"
+                        aria-checked={on}
+                        aria-disabled={resident || undefined}
+                        disabled={resident}
+                        onClick={() => void togglePinned(detailIcon)}
                       >
+                        <span className="pref-switch-knob" />
+                      </button>
+                    </div>
+
+                    <div className="tray-detail-divider" />
+
+                    <div className="tray-detail-block">
+                      <div className="tray-detail-row-title">右键菜单高度</div>
+                      <div className="tray-detail-row-desc">
+                        默认自动测量；可自定义像素高度（48–640）。当前：
+                        {menuHeightLabel(detailIcon, menuHeights)}
+                      </div>
+                      <div className="tray-settings-height tray-detail-height">
+                        <input
+                          className="pref-input pref-input-sm"
+                          type="number"
+                          min={48}
+                          max={640}
+                          placeholder={
+                            tencentDefault ? String(DEFAULT_TENCENT_MENU_HEIGHT) : "自动"
+                          }
+                          value={menuHeightDraft}
+                          onChange={(e) => setMenuHeightDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              void saveIconMenuHeight(key);
+                            }
+                            if (e.key === "Escape") {
+                              closeTrayDetail();
+                            }
+                          }}
+                        />
                         <button
                           type="button"
-                          className={`tray-settings-item${on ? " is-on" : ""}${resident ? " is-resident" : ""}`}
-                          onClick={() => void togglePinned(icon)}
-                          title={resident ? "Wi‑Fi / 输入法为系统常驻，不可取消常显" : undefined}
-                          aria-disabled={resident || undefined}
+                          className="settings-ghost-btn"
+                          onClick={() => void saveIconMenuHeight(key)}
+                        >
+                          保存
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-ghost-btn"
+                          disabled={customH == null && !tencentDefault}
+                          onClick={() => void clearIconMenuHeight(key)}
+                        >
+                          {tencentDefault ? "恢复默认" : "自动"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              );
+            }
+
+            return (
+              <section className="settings-card settings-card-grow">
+                {trays.length === 0 ? (
+                  <p className="tray-settings-empty">暂未收到托盘图标</p>
+                ) : (
+                  <div className="tray-settings-list">
+                    {trays.map((icon) => {
+                      const resident = isTrayResident(icon);
+                      return (
+                        <button
+                          key={icon.id}
+                          type="button"
+                          className="tray-settings-item"
+                          onClick={() => openTrayDetail(icon)}
                         >
                           {icon.icon_png_base64 ? (
                             <img
@@ -1546,469 +1502,48 @@ export default function SettingsApp() {
                           )}
                           <span className="tray-settings-meta">
                             <span className="tray-settings-name">{trayLabel(icon)}</span>
-                            <span className="tray-settings-sub">
-                              {icon.process || icon.id}
-                              {resident ? " · 系统常驻" : ""}
-                              {icon.area === "overflow" ? " · 溢出区" : ""}
-                              {` · ${menuHeightLabel(icon, menuHeights)}`}
-                            </span>
+                            {resident ? (
+                              <span className="tray-settings-sub">系统常驻</span>
+                            ) : null}
                           </span>
-                          <span className={`tray-check${on ? " is-on" : ""}`} aria-hidden>
-                            {on ? "✓" : ""}
+                          <span className="tray-settings-chevron" aria-hidden>
+                            ›
                           </span>
                         </button>
-                        <button
-                          type="button"
-                          className="tray-settings-gear"
-                          title="右键菜单高度"
-                          aria-label={`${trayLabel(icon)} 菜单高度`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (editing) {
-                              setMenuHeightEditId(null);
-                              setMenuHeightDraft("");
-                            } else {
-                              openMenuHeightEditor(icon);
-                            }
-                          }}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <circle cx="12" cy="12" r="3" />
-                            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-                          </svg>
-                        </button>
-                        {editing ? (
-                          <div className="tray-settings-height">
-                            <input
-                              className="pref-input pref-input-sm"
-                              type="number"
-                              min={48}
-                              max={640}
-                              placeholder={tencentDefault ? String(DEFAULT_TENCENT_MENU_HEIGHT) : "自动"}
-                              value={menuHeightDraft}
-                              autoFocus
-                              onChange={(e) => setMenuHeightDraft(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  void saveIconMenuHeight(key);
-                                }
-                                if (e.key === "Escape") {
-                                  setMenuHeightEditId(null);
-                                  setMenuHeightDraft("");
-                                }
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="settings-ghost-btn"
-                              onClick={() => void saveIconMenuHeight(key)}
-                            >
-                              保存
-                            </button>
-                            <button
-                              type="button"
-                              className="settings-ghost-btn"
-                              disabled={customH == null && !tencentDefault}
-                              onClick={() => void clearIconMenuHeight(key)}
-                            >
-                              {tencentDefault ? "恢复默认" : "自动"}
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          )}
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            );
+          })()}
 
           {nav === "plugins" && (
-            <section className="settings-card">
-              <h2>插件市场</h2>
-              <p className="card-desc">
-                安装 `.whpx` 包或开发目录（含 plugin.json）。安装前会预览所用界面表面（快捷区/弹窗、岛通知、岛下拉等）与能力声明。也可导入内置示例。
-              </p>
-              <div className="plugin-actions">
-                <button
-                  type="button"
-                  className="settings-primary-btn"
-                  disabled={pluginBusy}
-                  onClick={() => {
-                    void (async () => {
-                      try {
-                        const path = await invoke<string | null>("pick_whpx_file");
-                        if (!path) return;
-                        await beginInstallFromPath(path);
-                      } catch (err) {
-                        setPluginMsg(String(err));
-                      }
-                    })();
-                  }}
-                >
-                  安装 .whpx
-                </button>
-                <button
-                  type="button"
-                  className="settings-secondary-btn"
-                  disabled={pluginBusy}
-                  onClick={() => {
-                    void (async () => {
-                      try {
-                        const path = await invoke<string | null>("pick_plugin_directory");
-                        if (!path) return;
-                        await beginInstallFromPath(path);
-                      } catch (err) {
-                        setPluginMsg(String(err));
-                      }
-                    })();
-                  }}
-                >
-                  添加开发目录
-                </button>
-                {!windowGroupsInstalled ? (
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={pluginBusy}
-                    onClick={() => void beginInstallExample("window-groups")}
-                  >
-                    导入示例：窗口组
-                  </button>
-                ) : null}
-                {!transferStationInstalled ? (
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={pluginBusy}
-                    onClick={() => void beginInstallExample("transfer-station")}
-                  >
-                    导入示例：中转站
-                  </button>
-                ) : null}
-                {!weatherInstalled ? (
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={pluginBusy}
-                    onClick={() => void beginInstallExample("weather")}
-                  >
-                    导入示例：天气
-                  </button>
-                ) : null}
-                {!idiomInstalled ? (
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={pluginBusy}
-                    onClick={() => void beginInstallExample("idiom")}
-                  >
-                    导入示例：成语
-                  </button>
-                ) : null}
-                {!mirrorInstalled ? (
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={pluginBusy}
-                    onClick={() => void beginInstallExample("mirror")}
-                  >
-                    导入示例：镜子
-                  </button>
-                ) : null}
-                {!appLibraryInstalled ? (
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={pluginBusy}
-                    onClick={() => void beginInstallExample("app-library")}
-                  >
-                    导入示例：应用库
-                  </button>
-                ) : null}
-              </div>
-              {pluginMsg ? <p className="plugin-msg">{pluginMsg}</p> : null}
-
-              <div className="plugin-list">
-                {pluginEntries.map((entry) => (
-                  <div
-                    key={entry.id}
-                    data-plugin-id={entry.id}
-                    className={`plugin-row${entry.official ? " is-official" : ""}${entry.enabled ? "" : " is-disabled"}${focusPluginId === entry.id ? " is-focused" : ""}`}
-                  >
-                    <div className="plugin-meta">
-                      <strong>
-                        {entry.name}
-                        {entry.dev ? " (dev)" : ""}
-                      </strong>
-                      <span>
-                        {entry.id} · v{entry.version}
-                        {entry.official ? " · 官方" : ""}
-                      </span>
-                      {entry.capabilities.length ? (
-                        <span className="plugin-caps">
-                          {describeCapabilities(entry.capabilities).join(" · ")}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="plugin-row-actions">
-                      <button
-                        type="button"
-                        className={`pref-switch${entry.enabled ? " is-on" : ""}`}
-                        role="switch"
-                        aria-checked={entry.enabled}
-                        aria-label={`${entry.enabled ? "禁用" : "启用"} ${entry.name}`}
-                        onClick={() => toggleInstalled(entry.id, entry.enabled)}
-                      >
-                        <span className="pref-switch-knob" />
-                      </button>
-                      <button
-                        type="button"
-                        className="wg-text-btn is-danger"
-                        onClick={() => deleteInstalled(entry.id, entry.name)}
-                      >
-                        删除
-                      </button>
-                    </div>
-                    {entry.enabled && entry.settings && entry.settings.length > 0 ? (
-                      <PluginSettingsForm
-                        pluginId={entry.id}
-                        fields={entry.settings}
-                        description={entry.settingsIntro}
-                      />
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-
-              <h3 className="plugin-subhead">脚本启动器</h3>
-              <p className="settings-lead">
-                登记本机 Companion 脚本（独立进程，不注入 Window Hub）。可设置路径、运行环境、关联插件，以及随 Hub
-                / 开机启动。
-              </p>
-              <div className="launcher-form">
-                <label className="launcher-field">
-                  <span>名称</span>
-                  <input
-                    type="text"
-                    value={launcherDraft.name}
-                    placeholder="显示名称"
-                    onChange={(e) =>
-                      setLauncherDraft((d) => ({ ...d, name: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="launcher-field is-wide">
-                  <span>脚本路径</span>
-                  <div className="launcher-path-row">
-                    <input
-                      type="text"
-                      value={launcherDraft.scriptPath}
-                      placeholder="选择 .py / .js / .ps1 / .exe …"
-                      onChange={(e) =>
-                        setLauncherDraft((d) => ({ ...d, scriptPath: e.target.value }))
-                      }
-                    />
-                    <button
-                      type="button"
-                      className="settings-secondary-btn"
-                      disabled={launcherBusy}
-                      onClick={() => void pickLauncherScript()}
-                    >
-                      浏览
-                    </button>
-                  </div>
-                </label>
-                <label className="launcher-field">
-                  <span>运行环境</span>
-                  <select
-                    value={launcherDraft.environment}
-                    onChange={(e) =>
-                      setLauncherDraft((d) => ({
-                        ...d,
-                        environment: e.target.value as ScriptEnv,
-                      }))
-                    }
-                  >
-                    {SCRIPT_ENVS.map((env) => (
-                      <option key={env.id} value={env.id}>
-                        {env.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="launcher-field">
-                  <span>运行时路径（可选）</span>
-                  <input
-                    type="text"
-                    value={launcherDraft.envPath}
-                    placeholder={
-                      launcherDraft.environment === "custom"
-                        ? "必填：解释器/运行时绝对路径"
-                        : "留空则用 PATH 中的 python / node …"
-                    }
-                    onChange={(e) =>
-                      setLauncherDraft((d) => ({ ...d, envPath: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="launcher-field">
-                  <span>关联插件</span>
-                  <select
-                    value={launcherDraft.pluginId}
-                    onChange={(e) =>
-                      setLauncherDraft((d) => ({ ...d, pluginId: e.target.value }))
-                    }
-                  >
-                    <option value="">不关联</option>
-                    {pluginEntries.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                        {p.dev ? " (dev)" : ""}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="launcher-field">
-                  <span>额外参数</span>
-                  <input
-                    type="text"
-                    value={launcherDraft.args}
-                    placeholder="可选 CLI 参数"
-                    onChange={(e) =>
-                      setLauncherDraft((d) => ({ ...d, args: e.target.value }))
-                    }
-                  />
-                </label>
-                <div className="launcher-checks">
-                  <label className="launcher-check">
-                    <input
-                      type="checkbox"
-                      checked={launcherDraft.startWithHub}
-                      onChange={(e) =>
-                        setLauncherDraft((d) => ({
-                          ...d,
-                          startWithHub: e.target.checked,
-                        }))
-                      }
-                    />
-                    随 Window Hub 启动
-                  </label>
-                  <label className="launcher-check">
-                    <input
-                      type="checkbox"
-                      checked={launcherDraft.startOnBoot}
-                      onChange={(e) =>
-                        setLauncherDraft((d) => ({
-                          ...d,
-                          startOnBoot: e.target.checked,
-                        }))
-                      }
-                    />
-                    开机自启（用户 Startup）
-                  </label>
-                  <label className="launcher-check">
-                    <input
-                      type="checkbox"
-                      checked={launcherDraft.enabled}
-                      onChange={(e) =>
-                        setLauncherDraft((d) => ({ ...d, enabled: e.target.checked }))
-                      }
-                    />
-                    启用
-                  </label>
-                </div>
-                <div className="plugin-actions">
-                  <button
-                    type="button"
-                    className="settings-primary-btn"
-                    disabled={launcherBusy}
-                    onClick={() => void saveLauncher()}
-                  >
-                    {launcherDraft.id ? "保存修改" : "添加启动器"}
-                  </button>
-                  {launcherDraft.id ? (
-                    <button
-                      type="button"
-                      className="settings-secondary-btn"
-                      disabled={launcherBusy}
-                      onClick={() => {
-                        setLauncherDraft(emptyLauncherDraft());
-                        setLauncherMsg("");
-                      }}
-                    >
-                      取消编辑
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-              {launcherMsg ? <p className="plugin-msg">{launcherMsg}</p> : null}
-              <div className="plugin-list">
-                {launchers.length === 0 ? (
-                  <p className="settings-lead">暂无脚本启动器</p>
-                ) : (
-                  launchers.map((row) => (
-                    <div
-                      key={row.id}
-                      className={`plugin-row${row.enabled ? "" : " is-disabled"}`}
-                    >
-                      <div className="plugin-meta">
-                        <strong>
-                          {row.name}
-                          {row.running ? " · 运行中" : ""}
-                        </strong>
-                        <span>
-                          {row.environment}
-                          {row.pluginId ? ` · 关联 ${row.pluginId}` : " · 未关联插件"}
-                          {row.startWithHub ? " · 随 Hub" : ""}
-                          {row.startOnBoot ? " · 开机" : ""}
-                        </span>
-                        <span className="launcher-path-preview" title={row.scriptPath}>
-                          {row.scriptPath}
-                        </span>
-                      </div>
-                      <div className="plugin-row-actions">
-                        <button
-                          type="button"
-                          className="settings-secondary-btn"
-                          disabled={launcherBusy}
-                          onClick={() => editLauncher(row)}
-                        >
-                          编辑
-                        </button>
-                        {row.running ? (
-                          <button
-                            type="button"
-                            className="settings-secondary-btn"
-                            disabled={launcherBusy}
-                            onClick={() => void runLauncher(row.id, false)}
-                          >
-                            停止
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="settings-secondary-btn"
-                            disabled={launcherBusy || !row.enabled}
-                            onClick={() => void runLauncher(row.id, true)}
-                          >
-                            启动
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="wg-text-btn is-danger"
-                          disabled={launcherBusy}
-                          onClick={() => void removeLauncher(row.id, row.name)}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </section>
+            <PluginsMarketPanel
+              pluginEntries={pluginEntries}
+              pluginMsg={pluginMsg}
+              pluginBusy={pluginBusy}
+              focusPluginId={focusPluginId}
+              onClearFocusPlugin={() => setFocusPluginId(null)}
+              onBeginInstallFromPath={beginInstallFromPath}
+              onBeginInstallExample={beginInstallExample}
+              onToggleInstalled={toggleInstalled}
+              onDeleteInstalled={deleteInstalled}
+              launchers={launchers}
+              launcherDraft={launcherDraft}
+              setLauncherDraft={setLauncherDraft}
+              launcherMsg={launcherMsg}
+              launcherBusy={launcherBusy}
+              onPickLauncherScript={() => void pickLauncherScript()}
+              onSaveLauncher={() => void saveLauncher()}
+              onEditLauncher={editLauncher}
+              onRunLauncher={(id, start) => void runLauncher(id, start)}
+              onRemoveLauncher={(id, name) => void removeLauncher(id, name)}
+              onResetLauncherDraft={() => {
+                setLauncherDraft(emptyLauncherDraft());
+                setLauncherMsg("");
+              }}
+            />
           )}
 
           {nav === "developer" && <SqliteDevPanel />}
