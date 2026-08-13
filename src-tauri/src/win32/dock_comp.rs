@@ -14,8 +14,9 @@ use std::sync::Mutex;
 
 use parking_lot::Mutex as ParkingMutex;
 use tauri::WebviewWindow;
-use windows::core::Interface;
+use windows::core::{Interface, HSTRING};
 use windows::Foundation::Numerics::{Vector2, Vector3};
+use windows::Foundation::TimeSpan;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
     CompositionGeometricClip, CompositionRoundedRectangleGeometry, Compositor, ContainerVisual,
@@ -41,6 +42,8 @@ use windows::System::DispatcherQueueController;
 /// Above this, Composition owns the silhouette (DWM ROUND is only ~8px).
 pub const DOCK_COMP_RADIUS_MIN: u32 = 9;
 pub const DOCK_CORNER_RADIUS_MAX: u32 = 30;
+/// Rest ↔ hover capsule width (must match FE chrome `width` transition).
+pub const DOCK_WIDTH_TWEEN_MS: u64 = 240;
 
 fn pack_tint_color(r: u8, g: u8, b: u8, a: u8) -> Color {
     Color {
@@ -348,6 +351,16 @@ fn layout_capsule(
     layout_capsule_inner(session, hwnd, w, h, offset_x, radius_logical, dark, true)
 }
 
+fn stop_capsule_anims(session: &DockCompSession) {
+    let size = HSTRING::from("Size");
+    let offset = HSTRING::from("Offset");
+    let _ = session.root.StopAnimation(&size);
+    let _ = session.root.StopAnimation(&offset);
+    let _ = session.blur.StopAnimation(&size);
+    let _ = session.tint.StopAnimation(&size);
+    let _ = session.round_geom.StopAnimation(&size);
+}
+
 fn layout_capsule_inner(
     session: &DockCompSession,
     hwnd: HWND,
@@ -358,6 +371,8 @@ fn layout_capsule_inner(
     dark: Option<bool>,
     retint: bool,
 ) -> Result<(), String> {
+    stop_capsule_anims(session);
+
     let r = radius_px(hwnd, radius_logical, h);
     let size = Vector2 {
         X: w.max(1.0),
@@ -422,6 +437,236 @@ fn layout_capsule_inner(
 
     let _ = session.compositor.RequestCommitAsync();
     Ok(())
+}
+
+/// One Vector2 size animation instance (Composition binds 1 anim → 1 property).
+fn make_size_anim(
+    compositor: &Compositor,
+    from: Vector2,
+    to: Vector2,
+    duration: TimeSpan,
+    ease: &windows::UI::Composition::CubicBezierEasingFunction,
+) -> Result<windows::UI::Composition::Vector2KeyFrameAnimation, String> {
+    let anim = compositor
+        .CreateVector2KeyFrameAnimation()
+        .map_err(|e| format!("CreateVector2KeyFrameAnimation: {e}"))?;
+    anim.InsertKeyFrame(0.0, from)
+        .map_err(|e| format!("size InsertKeyFrame 0: {e}"))?;
+    anim.InsertKeyFrameWithEasingFunction(1.0, to, ease)
+        .map_err(|e| format!("size InsertKeyFrame 1: {e}"))?;
+    anim.SetDuration(duration)
+        .map_err(|e| format!("size SetDuration: {e}"))?;
+    Ok(anim)
+}
+
+fn make_offset_anim(
+    compositor: &Compositor,
+    from: Vector3,
+    to: Vector3,
+    duration: TimeSpan,
+    ease: &windows::UI::Composition::CubicBezierEasingFunction,
+) -> Result<windows::UI::Composition::Vector3KeyFrameAnimation, String> {
+    let anim = compositor
+        .CreateVector3KeyFrameAnimation()
+        .map_err(|e| format!("CreateVector3KeyFrameAnimation: {e}"))?;
+    anim.InsertKeyFrame(0.0, from)
+        .map_err(|e| format!("offset InsertKeyFrame 0: {e}"))?;
+    anim.InsertKeyFrameWithEasingFunction(1.0, to, ease)
+        .map_err(|e| format!("offset InsertKeyFrame 1: {e}"))?;
+    anim.SetDuration(duration)
+        .map_err(|e| format!("offset SetDuration: {e}"))?;
+    Ok(anim)
+}
+
+/// GPU rest↔hover capsule width. Animates from the **current** visual Size
+/// (after StopAnimation) so interrupted tweens never snap to a stale from-width
+/// (that flash is what left transparent left/right gaps).
+/// Returns effective duration ms (0 if already at target).
+pub fn animate_capsule_width(
+    hwnd: HWND,
+    to_w: f32,
+    height_px: f32,
+    host_w: f32,
+    radius_logical: u32,
+) -> Result<u64, String> {
+    let r = radius_logical.min(DOCK_CORNER_RADIUS_MAX);
+    if r < DOCK_COMP_RADIUS_MIN {
+        return Err("composition radius too small".into());
+    }
+    let raw = hwnd.0 as isize;
+    let slot = SESSION.lock();
+    let Some(session) = slot.as_ref() else {
+        return Err("no composition session".into());
+    };
+    if session.hwnd_raw != raw {
+        return Err("composition hwnd mismatch".into());
+    }
+
+    let h = height_px.max(1.0);
+    let to = to_w.max(1.0);
+    let host = host_w.max(1.0);
+    let to_ox = ((host - to) * 0.5).max(0.0);
+    let corner_r = radius_px(hwnd, r, h);
+
+    stop_capsule_anims(session);
+
+    let cur_size = session
+        .root
+        .Size()
+        .unwrap_or(Vector2 { X: to, Y: h });
+    let from = cur_size.X.max(1.0);
+    let cur_off = session.root.Offset().unwrap_or(Vector3 {
+        X: ((host - from) * 0.5).max(0.0),
+        Y: 0.0,
+        Z: 0.0,
+    });
+    let from_ox = cur_off.X.clamp(0.0, (host - 1.0).max(0.0));
+
+    // Target pose for frost re-attach while tweening / after settle.
+    remember_capsule(to, h, to_ox);
+
+    // Already there — commit pose, no keyframes.
+    if (from - to).abs() < 1.5 {
+        drop(slot);
+        layout_tween_frame(hwnd, to, h, to_ox, radius_logical)?;
+        return Ok(0);
+    }
+
+    let from_size = Vector2 { X: from, Y: h };
+    let to_size = Vector2 { X: to, Y: h };
+    let from_off = Vector3 {
+        X: from_ox,
+        Y: 0.0,
+        Z: 0.0,
+    };
+    let to_off = Vector3 {
+        X: to_ox,
+        Y: 0.0,
+        Z: 0.0,
+    };
+    let zero = Vector3 {
+        X: 0.0,
+        Y: 0.0,
+        Z: 0.0,
+    };
+    let corner = Vector2 {
+        X: corner_r,
+        Y: corner_r,
+    };
+
+    // Keep current visual as the animation start (no snap).
+    session
+        .blur
+        .SetSize(from_size)
+        .map_err(|e| format!("anim seed blur Size: {e}"))?;
+    session
+        .blur
+        .SetOffset(zero)
+        .map_err(|e| format!("anim seed blur Offset: {e}"))?;
+    session
+        .tint
+        .SetSize(from_size)
+        .map_err(|e| format!("anim seed tint Size: {e}"))?;
+    session
+        .tint
+        .SetOffset(zero)
+        .map_err(|e| format!("anim seed tint Offset: {e}"))?;
+    session
+        .round_geom
+        .SetSize(from_size)
+        .map_err(|e| format!("anim seed geom Size: {e}"))?;
+    session
+        .round_geom
+        .SetCornerRadius(corner)
+        .map_err(|e| format!("anim seed CornerRadius: {e}"))?;
+
+    let ease = session
+        .compositor
+        .CreateCubicBezierEasingFunction(
+            Vector2 { X: 0.22, Y: 1.0 },
+            Vector2 { X: 0.36, Y: 1.0 },
+        )
+        .map_err(|e| format!("CreateCubicBezierEasingFunction: {e}"))?;
+    // Shorter travel → shorter tween (fast reverse feels stable, less overlap).
+    let travel = ((to - from).abs() / host).clamp(0.35, 1.0);
+    let ms = ((DOCK_WIDTH_TWEEN_MS as f32) * travel).round().max(90.0) as u64;
+    let duration = TimeSpan {
+        Duration: (ms as i64) * 10_000,
+    };
+
+    let size_prop = HSTRING::from("Size");
+    let offset_prop = HSTRING::from("Offset");
+    let root_size = make_size_anim(&session.compositor, from_size, to_size, duration, &ease)?;
+    let blur_size = make_size_anim(&session.compositor, from_size, to_size, duration, &ease)?;
+    let tint_size = make_size_anim(&session.compositor, from_size, to_size, duration, &ease)?;
+    let geom_size = make_size_anim(&session.compositor, from_size, to_size, duration, &ease)?;
+    let root_off = make_offset_anim(&session.compositor, from_off, to_off, duration, &ease)?;
+
+    session
+        .root
+        .StartAnimation(&size_prop, &root_size)
+        .map_err(|e| format!("root StartAnimation Size: {e}"))?;
+    session
+        .root
+        .StartAnimation(&offset_prop, &root_off)
+        .map_err(|e| format!("root StartAnimation Offset: {e}"))?;
+    session
+        .blur
+        .StartAnimation(&size_prop, &blur_size)
+        .map_err(|e| format!("blur StartAnimation Size: {e}"))?;
+    session
+        .tint
+        .StartAnimation(&size_prop, &tint_size)
+        .map_err(|e| format!("tint StartAnimation Size: {e}"))?;
+    session
+        .round_geom
+        .StartAnimation(&size_prop, &geom_size)
+        .map_err(|e| format!("geom StartAnimation Size: {e}"))?;
+
+    let _ = session.compositor.RequestCommitAsync();
+    Ok(ms)
+}
+
+/// Start GPU width tween on the UI thread; returns once animations are committed.
+/// Returns the effective duration ms used (scaled by travel).
+pub fn sync_animate_capsule_width(
+    hwnd: HWND,
+    to_w: f32,
+    height_px: f32,
+    host_w: f32,
+    radius_logical: u32,
+) -> Result<u64, String> {
+    if on_composition_thread() || COMP_THREAD.lock().is_none() {
+        return animate_capsule_width(hwnd, to_w, height_px, host_w, radius_logical);
+    }
+    let raw = hwnd.0 as isize;
+    let win = GLASS_WIN.lock().clone();
+    let Some(w) = win else {
+        return animate_capsule_width(hwnd, to_w, height_px, host_w, radius_logical);
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = w.run_on_main_thread(move || {
+        let h = HWND(raw as *mut _);
+        let r = animate_capsule_width(h, to_w, height_px, host_w, radius_logical);
+        let _ = tx.send(r);
+    });
+    match rx.recv_timeout(std::time::Duration::from_millis(80)) {
+        Ok(r) => r,
+        Err(_) => Ok(DOCK_WIDTH_TWEEN_MS),
+    }
+}
+
+/// True when preferred capsule is already within ~2px of the expected rest/hover width.
+pub fn capsule_near_target(expanded: bool, content_px: f32, host_px: f32) -> bool {
+    let Some(p) = preferred_capsule() else {
+        return false;
+    };
+    let expect = if expanded {
+        host_px.max(1.0)
+    } else {
+        content_px.max(1.0)
+    };
+    (p.w - expect).abs() < 2.5
 }
 
 /// Geometry-only update for width tween frames (no accent / chrome / retint churn).

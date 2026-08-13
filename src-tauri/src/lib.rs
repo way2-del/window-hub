@@ -486,6 +486,7 @@ pub fn run() {
             dock::dock_set_live_width,
             dock::dock_set_interaction_hold,
             dock::dock_set_hover_expand,
+            dock::dock_pointer_client_xy,
             dock::get_dock_display_items,
             dock::dock_relayout,
             dock::dock_restore_hidden_items,

@@ -75,15 +75,24 @@ body.is-dock #root {
   background: transparent;
   box-shadow: none;
   box-sizing: border-box;
+  /* Same ms + bezier as Composition DOCK_WIDTH_TWEEN_MS — px→px (not %). */
+  transition: width 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dock-chrome {
+    transition: none;
+  }
 }
 
 .dock-chrome::after {
   content: "";
   position: absolute;
-  /* 1px inset keeps the stroke inside CreateRoundRectRgn clipping. */
-  inset: 1px;
-  border: 1px solid var(--dock-stroke);
-  border-radius: max(0px, calc(var(--dock-radius) - 1px));
+  /* Outer edge matches glass capsule; stroke paints inside so glass doesn't peek. */
+  inset: 0;
+  border: none;
+  border-radius: var(--dock-radius);
+  box-shadow: inset 0 0 0 1px var(--dock-stroke);
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -227,8 +236,7 @@ body.is-dock #root {
 }
 
 .dock-shell.is-drop-hover .dock-chrome::after {
-  border-width: 1.5px;
-  border-color: rgba(255, 255, 255, 0.45);
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.45);
 }
 
 .dock-shell.is-dragging-item .dock-item:not(.is-dragging) {
@@ -387,7 +395,7 @@ html[data-theme="light"] .dock-sep::before {
 }
 
 html[data-theme="light"] .dock-shell.is-drop-hover .dock-chrome::after {
-  border-color: rgba(0, 0, 0, 0.28);
+  box-shadow: inset 0 0 0 1.5px rgba(0, 0, 0, 0.28);
 }
 
 html[data-theme="light"] .dock-dot.is-on {

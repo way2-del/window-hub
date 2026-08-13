@@ -901,9 +901,6 @@ pub fn dock_set_hover_expand(
         set_hover_expanded(false);
         return false;
     }
-    if dock_hover_expanded() == expanded {
-        return true;
-    }
     let prefs = load_dock_prefs();
     let layout = dock_layout_items(&prefs);
     let content_w = dock_content_width(&layout, prefs.corner_radius_px);
@@ -920,10 +917,23 @@ pub fn dock_set_hover_expand(
             .and_then(|g| g.hwnd().ok())
             .map(|h| h.0 as isize);
         if let Ok(hwnd) = win.hwnd() {
+            let raw = hwnd.0 as isize;
+            // Skip (and do not bump gen) when already settled at the target pose.
+            if let Some((mi, scale, _y, _cur_w)) = win32_dock_width_context(raw) {
+                let _ = mi;
+                let content_px = (content_w * scale).round().max(1.0) as f32;
+                let host_px = (host_w * scale).round().max(1.0) as f32;
+                if dock_hover_expanded() == expanded
+                    && !crate::win32::dock_comp::width_tween_active()
+                    && crate::win32::dock_comp::capsule_near_target(expanded, content_px, host_px)
+                {
+                    return true;
+                }
+            }
             let gen = width_tween_gen().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             set_hover_expanded(expanded);
-            if win32_dock_tween_pair_width(
-                hwnd.0 as isize,
+            let _ = win32_dock_tween_pair_width(
+                raw,
                 glass_hwnd,
                 content_w,
                 host_w,
@@ -931,11 +941,14 @@ pub fn dock_set_hover_expand(
                 prefs.corner_radius_px,
                 expanded,
                 gen,
-            ) {
-                return true;
-            }
+            );
             return true;
         }
+    }
+
+    #[cfg(not(windows))]
+    if dock_hover_expanded() == expanded {
+        return true;
     }
 
     // Non-Windows / no hwnd: fall back to resizing to host or content.
@@ -981,6 +994,53 @@ pub fn dock_set_live_width(app: AppHandle, vis: State<'_, Arc<DockVisibility>>, 
     let rest = dock_content_width(&layout, prefs.corner_radius_px);
     let expanded = width.is_finite() && width > rest + DOCK_FAN_EXTRA * 0.5;
     dock_set_hover_expand(app, vis, expanded)
+}
+
+/// Cursor position in the dock icons webview client space (CSS px), or `None`
+/// if the cursor is outside the dock HWND. Used to resume fan after AutoHide
+/// show (window slides under a stationary pointer — no pointerenter).
+#[tauri::command]
+pub fn dock_pointer_client_xy(app: AppHandle) -> Option<(f64, f64)> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{POINT, RECT};
+        use windows::Win32::Graphics::Gdi::ScreenToClient;
+        use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetCursorPos};
+
+        let win = app.get_webview_window("dock")?;
+        let hwnd = win.hwnd().ok()?;
+        let hwnd = dock_root_hwnd(hwnd.0 as isize);
+        unsafe {
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_err() {
+                return None;
+            }
+            let mut client = pt;
+            if !ScreenToClient(hwnd, &mut client).as_bool() {
+                return None;
+            }
+            let mut rc = RECT::default();
+            if GetClientRect(hwnd, &mut rc).is_err() {
+                return None;
+            }
+            if client.x < rc.left
+                || client.y < rc.top
+                || client.x >= rc.right
+                || client.y >= rc.bottom
+            {
+                return None;
+            }
+            let dpi = GetDpiForWindow(hwnd).max(96) as f64;
+            let scale = dpi / 96.0;
+            return Some((client.x as f64 / scale, client.y as f64 / scale));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        None
+    }
 }
 
 /// Read monitor + scale + current Y for width place/tween.
@@ -1029,8 +1089,8 @@ fn win32_dock_width_context(
     }
 }
 
-/// Expand/collapse visual width. Composition: **capsule only** (HWND stays put).
-/// SWCA: one centered HWND snap (no mid-flight SetWindowPos frames).
+/// Expand/collapse visual width. Composition: GPU keyframe capsule Size/Offset
+/// (HWND stays host-sized). SWCA: one centered HWND snap (no mid-flight SetWindowPos).
 #[cfg(windows)]
 fn win32_dock_tween_pair_width(
     icons_hwnd_raw: isize,
@@ -1079,11 +1139,6 @@ fn win32_dock_tween_pair_width(
             );
         }
 
-        let from_w = if expanded {
-            content_px as f32
-        } else {
-            host_px as f32
-        };
         let to_w = if expanded {
             host_px as f32
         } else {
@@ -1092,42 +1147,55 @@ fn win32_dock_tween_pair_width(
         let host_f = host_px as f32;
 
         crate::win32::dock_comp::begin_width_tween();
-        // Start pose (centered in fixed host) — no SetWindowPos.
-        win32_dock_set_capsule(
-            raw,
-            from_w,
+        let gh = dock_root_hwnd(raw);
+        // Animate from live visual Size → to_w (no assumed from snap).
+        let started = crate::win32::dock_comp::sync_animate_capsule_width(
+            gh,
+            to_w,
             glass_h as f32,
-            ((host_f - from_w) * 0.5).max(0.0),
+            host_f,
             corner_radius_px,
-            true,
         );
-
-        const FRAMES: u32 = 15;
-        const FRAME_MS: u64 = 12;
-        for i in 1..=FRAMES {
-            if width_tween_gen().load(std::sync::atomic::Ordering::Relaxed) != gen {
+        let tween_ms = match &started {
+            Ok(ms) => *ms,
+            Err(_) => {
+                let ox = ((host_f - to_w) * 0.5).max(0.0);
+                win32_dock_set_capsule(raw, to_w, glass_h as f32, ox, corner_radius_px, true);
+                win32_dock_icons_set_round(icons_hwnd_raw, corner_radius_px);
                 crate::win32::dock_comp::end_width_tween();
-                return false;
+                return true;
             }
-            let t = i as f64 / FRAMES as f64;
-            let e = 1.0 - (1.0 - t).powi(3);
-            let w = from_w + (to_w - from_w) * e as f32;
-            let ox = ((host_f - w) * 0.5).max(0.0);
-            win32_dock_set_capsule(raw, w, glass_h as f32, ox, corner_radius_px, false);
-            if i < FRAMES {
-                std::thread::sleep(std::time::Duration::from_millis(FRAME_MS));
-            }
+        };
+        if tween_ms == 0 {
+            win32_dock_icons_set_round(icons_hwnd_raw, corner_radius_px);
+            crate::win32::dock_comp::end_width_tween();
+            return true;
         }
 
-        if width_tween_gen().load(std::sync::atomic::Ordering::Relaxed) != gen {
+        let icons = icons_hwnd_raw;
+        let glass_raw = raw;
+        let to = to_w;
+        let gh_f = glass_h as f32;
+        let host = host_f;
+        let radius = corner_radius_px;
+        std::thread::spawn(move || {
+            let slice = std::time::Duration::from_millis(16);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(tween_ms);
+            while std::time::Instant::now() < deadline {
+                if width_tween_gen().load(std::sync::atomic::Ordering::Relaxed) != gen {
+                    return;
+                }
+                std::thread::sleep(slice);
+            }
+            if width_tween_gen().load(std::sync::atomic::Ordering::Relaxed) != gen {
+                return;
+            }
+            let ox = ((host - to) * 0.5).max(0.0);
+            win32_dock_set_capsule(glass_raw, to, gh_f, ox, radius, true);
+            win32_dock_icons_set_round(icons, radius);
             crate::win32::dock_comp::end_width_tween();
-            return false;
-        }
-        let ox = ((host_f - to_w) * 0.5).max(0.0);
-        win32_dock_set_capsule(raw, to_w, glass_h as f32, ox, corner_radius_px, true);
-        // Icons region matches host (not the resting capsule).
-        win32_dock_icons_set_round(icons_hwnd_raw, corner_radius_px);
-        crate::win32::dock_comp::end_width_tween();
+        });
         return true;
     }
 

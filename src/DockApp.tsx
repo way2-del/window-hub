@@ -82,6 +82,16 @@ const ICON_GAP = 6;
 const BAR_PAD_X_MIN = 2;
 /** Visual rule is 1px; hit/layout slot is wider for drag. Keep in sync with CSS. */
 const SEP_LAYOUT_W = 16;
+/** Match Rust `DOCK_FAN_EXTRA` — host HWND / expanded chrome width. */
+const DOCK_FAN_EXTRA = 48;
+/** Chrome / Composition width tween is 240ms (DockApp.css + Rust DOCK_WIDTH_TWEEN_MS). */
+/**
+ * Arm fan before the glass tween fully finishes — pad already exists mid-widen,
+ * so waiting the full 240ms feels laggy after AutoHide reveal.
+ */
+const FAN_ARM_DELAY_MS = 90;
+/** Item width CSS settle after disarm, before collapsing dock capsule. */
+const FAN_COLLAPSE_REST_MS = 180;
 /** How many icon-widths the fan reaches on each side. */
 const MAG_RANGE = 2.25;
 /** Fixed magnification — not user-configurable (matches Rust DOCK_MAG_SCALE). */
@@ -384,6 +394,18 @@ export default function DockApp() {
   const [fanArmed, setFanArmed] = useState(false);
   /** Extend stack hit height through headroom while hovering. */
   const [fanLive, setFanLive] = useState(false);
+  /** Chrome stroke width tracks expand tween (not fanLive — that snapped early). */
+  const [barWide, setBarWide] = useState(false);
+  const widthTweenTimerRef = useRef<number | null>(null);
+  /** Ignore stale dock_set_hover_expand responses after rapid enter/leave. */
+  const expandSeqRef = useRef(0);
+  /** True while pointer is inside the dock bar (gates fan arm). */
+  const pointerInsideRef = useRef(false);
+  /** Last pointer client coords — resume fan after AutoHide show under cursor. */
+  const lastPointerClientRef = useRef<{ x: number; y: number } | null>(null);
+  /** Ignore flaky pointerleave while dock HWND slides up under the cursor. */
+  const showSettleUntilRef = useRef(0);
+  const showResumeTimersRef = useRef<number[]>([]);
   /** Bumped to cancel a pending armFanAfterWidenPaint. */
   const fanArmGenRef = useRef(0);
   const pendingFanXRef = useRef<number | null>(null);
@@ -399,68 +421,26 @@ export default function DockApp() {
     }
   };
 
+  const cancelWidthTweenTimer = () => {
+    if (widthTweenTimerRef.current != null) {
+      window.clearTimeout(widthTweenTimerRef.current);
+      widthTweenTimerRef.current = null;
+    }
+  };
+
+  const cancelShowResumeTimers = () => {
+    for (const id of showResumeTimersRef.current) {
+      window.clearTimeout(id);
+    }
+    showResumeTimersRef.current = [];
+  };
+
   const disarmFan = () => {
     fanArmGenRef.current += 1;
     fanArmedRef.current = false;
     setFanArmed(false);
     pendingFanXRef.current = null;
     setLocalX(null);
-  };
-
-  /** Only after HWND widen is committed + painted — never grow icons on resting width. */
-  const armFanAfterWidenPaint = () => {
-    const gen = fanArmGenRef.current;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (gen !== fanArmGenRef.current) return;
-        if (!expandedRef.current) return;
-        if (expandInflightRef.current === false) return;
-        fanArmedRef.current = true;
-        setFanArmed(true);
-        const pending = pendingFanXRef.current;
-        if (pending != null) setLocalX(pending);
-      });
-    });
-  };
-
-  const setExpanded = (next: boolean) => {
-    // Already widened this hover session — do not re-invoke snap / restore.
-    if (expandedRef.current === next) {
-      if (next && !fanArmedRef.current) armFanAfterWidenPaint();
-      return;
-    }
-    if (expandInflightRef.current === next) return;
-    expandInflightRef.current = next;
-    if (next) {
-      // Phase 1: widen only — fan stays off until invoke + paint.
-      disarmFan();
-    }
-    void invoke<boolean>("dock_set_hover_expand", { expanded: next })
-      .then((ok) => {
-        if (ok) {
-          expandedRef.current = next;
-          if (next) {
-            // Phase 2: HWND is wide — paint, then allow magnification.
-            armFanAfterWidenPaint();
-          } else {
-            disarmFan();
-          }
-        } else if (next) {
-          expandInflightRef.current = null;
-          window.setTimeout(() => {
-            if (!expandedRef.current) setExpanded(true);
-          }, 32);
-          return;
-        }
-        if (expandInflightRef.current === next) {
-          expandInflightRef.current = null;
-        }
-      })
-      .catch(() => {
-        if (expandInflightRef.current === next) {
-          expandInflightRef.current = null;
-        }
-      });
   };
 
   const queueFanFromClientX = (clientX: number) => {
@@ -486,16 +466,168 @@ export default function DockApp() {
     });
   };
 
+  /** After AutoHide reveal, HWND slides under a stationary cursor — synthesize hover. */
+  const resumeHoverAfterShow = async () => {
+    if (dndActiveRef.current || postDndFanBlockedRef.current) return;
+    if (dockStatusMenuOpen) return;
+    let clientX = lastPointerClientRef.current?.x ?? null;
+    let clientY = lastPointerClientRef.current?.y ?? null;
+    if (clientX == null || clientY == null) {
+      try {
+        const pt = await invoke<[number, number] | null>("dock_pointer_client_xy");
+        if (!pt) return;
+        clientX = pt[0];
+        clientY = pt[1];
+        lastPointerClientRef.current = { x: clientX, y: clientY };
+      } catch {
+        return;
+      }
+    }
+    const bar = barRef.current;
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    if (clientX < rect.left - 2 || clientX > rect.right + 2) return;
+    pointerInsideRef.current = true;
+    cancelCollapseTimer();
+    setFanLive(true);
+    queueFanFromClientX(clientX);
+    if (!expandedRef.current && expandInflightRef.current !== true) {
+      setExpanded(true);
+    } else if (expandedRef.current && expandInflightRef.current == null) {
+      if (!fanArmedRef.current) {
+        fanArmedRef.current = true;
+        setFanArmed(true);
+      }
+      queueFanFromClientX(clientX);
+    }
+  };
+
+  /** Only after widen has started + a short settle — overlap with glass tween. */
+  const armFanAfterWidenPaint = () => {
+    const gen = fanArmGenRef.current;
+    requestAnimationFrame(() => {
+      if (gen !== fanArmGenRef.current) return;
+      if (!expandedRef.current) return;
+      if (expandInflightRef.current === false) return;
+      if (!pointerInsideRef.current) {
+        void resumeHoverAfterShow();
+        return;
+      }
+      fanArmedRef.current = true;
+      setFanArmed(true);
+      const pending = pendingFanXRef.current;
+      if (pending != null) {
+        setLocalX(pending);
+      } else if (lastPointerClientRef.current) {
+        queueFanFromClientX(lastPointerClientRef.current.x);
+      }
+    });
+  };
+
+  const setExpanded = (next: boolean) => {
+    const seq = ++expandSeqRef.current;
+    // Same target: still re-assert backend (heals stuck capsule) but do not nest timers.
+    if (expandedRef.current === next && expandInflightRef.current == null) {
+      if (next) {
+        void invoke<boolean>("dock_set_hover_expand", { expanded: true })
+          .then((ok) => {
+            if (seq !== expandSeqRef.current) return;
+            if (!ok || fanArmedRef.current) return;
+            if (pointerInsideRef.current) armFanAfterWidenPaint();
+            else void resumeHoverAfterShow();
+          })
+          .catch(() => undefined);
+      }
+      return;
+    }
+    if (expandInflightRef.current === next) return;
+    expandInflightRef.current = next;
+    cancelWidthTweenTimer();
+    if (next) {
+      // Phase 1: start widen — fan arms shortly after (overlaps glass tween).
+      disarmFan();
+    } else {
+      // Width collapse only — fan must already be cleared by beginCollapseAfterFanRest.
+      setFanLive(false);
+    }
+    // Start glass first; setBarWide in `.then` so chrome CSS begins with Composition.
+    void invoke<boolean>("dock_set_hover_expand", { expanded: next })
+      .then((ok) => {
+        if (seq !== expandSeqRef.current) {
+          if (expandInflightRef.current === next) {
+            expandInflightRef.current = null;
+          }
+          return;
+        }
+        if (!ok) {
+          if (next) {
+            expandInflightRef.current = null;
+            window.setTimeout(() => {
+              if (seq !== expandSeqRef.current) return;
+              if (!expandedRef.current && pointerInsideRef.current) setExpanded(true);
+            }, 32);
+            return;
+          }
+          setBarWide(false);
+          expandedRef.current = false;
+          if (expandInflightRef.current === next) {
+            expandInflightRef.current = null;
+          }
+          return;
+        }
+        expandedRef.current = next;
+        // Collapse: barWide false starts chrome shrink together with glass (fan already gone).
+        // Expand: barWide true starts chrome grow; fan arms after FAN_ARM_DELAY_MS.
+        setBarWide(next);
+        if (!next) {
+          if (expandInflightRef.current === next) {
+            expandInflightRef.current = null;
+          }
+          return;
+        }
+        widthTweenTimerRef.current = window.setTimeout(() => {
+          widthTweenTimerRef.current = null;
+          if (seq !== expandSeqRef.current) {
+            if (expandInflightRef.current === next) {
+              expandInflightRef.current = null;
+            }
+            return;
+          }
+          if (expandInflightRef.current === next) {
+            expandInflightRef.current = null;
+          }
+          if (expandedRef.current) {
+            if (pointerInsideRef.current) armFanAfterWidenPaint();
+            else void resumeHoverAfterShow();
+          }
+        }, FAN_ARM_DELAY_MS);
+      })
+      .catch(() => {
+        if (seq !== expandSeqRef.current) return;
+        setBarWide(expandedRef.current);
+        cancelWidthTweenTimer();
+        if (expandInflightRef.current === next) {
+          expandInflightRef.current = null;
+        }
+      });
+  };
+
   const beginCollapseAfterFanRest = () => {
-    // Un-magnify first (~160ms CSS), then animate HWND width down (same ~180ms
-    // ease as widen) — never snap-shrink the glass.
+    // 1) Clear magnification first (item width CSS ~160ms).
+    // 2) Only then shrink dock capsule / chrome.
+    pointerInsideRef.current = false;
+    expandSeqRef.current += 1;
+    cancelWidthTweenTimer();
+    expandInflightRef.current = null;
     setFanLive(false);
     disarmFan();
     cancelCollapseTimer();
     collapseTimerRef.current = window.setTimeout(() => {
       collapseTimerRef.current = null;
-      if (expandedRef.current) setExpanded(false);
-    }, 160);
+      if (!pointerInsideRef.current && expandedRef.current) {
+        setExpanded(false);
+      }
+    }, FAN_COLLAPSE_REST_MS);
   };
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
@@ -738,11 +870,10 @@ export default function DockApp() {
 
   const padX = dockPadX(prefs?.cornerRadiusPx ?? 20);
   const cornerRadius = prefs?.cornerRadiusPx ?? 20;
-  /** Match Composition capsule: rest = content width; hover-wide = full host. */
-  const chromeWide = fanLive || !!draggingId;
-  const chromeWidth = chromeWide
-    ? undefined
-    : restingBarWidth(displayItems, padX);
+  /** Match Composition capsule: rest = content; hover = content + FAN_EXTRA (not 100%). */
+  const chromeWide = barWide || !!draggingId;
+  const chromeRestPx = restingBarWidth(displayItems, padX);
+  const chromeWidthPx = chromeWide ? chromeRestPx + DOCK_FAN_EXTRA : chromeRestPx;
   const centers = useMemo(
     () => restingCenters(displayItems, padX),
     [displayItems, padX],
@@ -765,32 +896,57 @@ export default function DockApp() {
     return map;
   }, [displayItems, localX, maxScale, centers, fanArmed, draggingId]);
 
-  // AutoHide / hide snap must clear fan + collapse HWND pad.
+  // AutoHide show/hide — clear fan on hide; on show resume hover under stationary cursor.
   useEffect(() => {
     let unsub: (() => void) | undefined;
     void listen<{ visible?: boolean }>("dock-visibility", (ev) => {
       if (ev.payload?.visible === false) {
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
         cancelCollapseTimer();
+        cancelWidthTweenTimer();
+        cancelShowResumeTimers();
+        expandSeqRef.current += 1;
+        expandInflightRef.current = null;
+        pointerInsideRef.current = false;
+        showSettleUntilRef.current = 0;
         setFanLive(false);
+        setBarWide(false);
         disarmFan();
         setExpanded(false);
+        return;
+      }
+      if (ev.payload?.visible === true) {
+        // Match backend settle — ignore leave while HWND slides under cursor.
+        showSettleUntilRef.current = performance.now() + 700;
+        cancelShowResumeTimers();
+        // Probe early + a couple retries (slide still moving).
+        const delays = [0, 50, 140, 280];
+        showResumeTimersRef.current = delays.map((ms) =>
+          window.setTimeout(() => {
+            void resumeHoverAfterShow();
+          }, ms),
+        );
       }
     }).then((u) => {
       unsub = u;
     });
-    return () => unsub?.();
+    return () => {
+      unsub?.();
+      cancelShowResumeTimers();
+    };
   }, []);
 
   const onBarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!prefs || dndActiveRef.current) return;
     if (postDndFanBlockedRef.current) return;
+    lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
+    pointerInsideRef.current = true;
     cancelCollapseTimer();
     if (!fanLive) setFanLive(true);
     // Widen at most once per hover session; moves only update fan X.
     if (!expandedRef.current && expandInflightRef.current !== true) {
       setExpanded(true);
-    } else if (!fanArmedRef.current) {
+    } else if (expandedRef.current && !fanArmedRef.current && expandInflightRef.current == null) {
       fanArmedRef.current = true;
       setFanArmed(true);
     }
@@ -799,12 +955,14 @@ export default function DockApp() {
 
   const onBarPointerEnter = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (dndActiveRef.current || postDndFanBlockedRef.current) return;
+    lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
+    pointerInsideRef.current = true;
     cancelCollapseTimer();
     setFanLive(true);
     // From default width only when this session is not already wide.
     if (!expandedRef.current && expandInflightRef.current !== true) {
       setExpanded(true);
-    } else if (expandedRef.current && !fanArmedRef.current) {
+    } else if (expandedRef.current && !fanArmedRef.current && expandInflightRef.current == null) {
       fanArmedRef.current = true;
       setFanArmed(true);
     }
@@ -813,6 +971,11 @@ export default function DockApp() {
 
   const onBarPointerLeave = () => {
     if (dndActiveRef.current || dockStatusMenuOpen) return;
+    // AutoHide slide-up under cursor often fires a spurious leave — ignore during settle.
+    if (performance.now() < showSettleUntilRef.current) {
+      void resumeHoverAfterShow();
+      return;
+    }
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     if (fanMoveRafRef.current) {
       cancelAnimationFrame(fanMoveRafRef.current);
@@ -824,6 +987,10 @@ export default function DockApp() {
 
   const onBarPointerCancel = () => {
     if (dndActiveRef.current || dockStatusMenuOpen) return;
+    if (performance.now() < showSettleUntilRef.current) {
+      void resumeHoverAfterShow();
+      return;
+    }
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     if (fanMoveRafRef.current) {
       cancelAnimationFrame(fanMoveRafRef.current);
@@ -1063,7 +1230,7 @@ export default function DockApp() {
       onDragEnd={onDragEnd}
     >
       <div
-        className={`dock-shell${fanLive ? " is-fan-live" : ""}${dropHover ? " is-drop-hover" : ""}${draggingId ? " is-dragging-item is-dnd-active" : ""}${dragRemoveArmed ? " is-dnd-remove" : ""}`}
+        className={`dock-shell${fanLive ? " is-fan-live" : ""}${chromeWide ? " is-bar-wide" : ""}${dropHover ? " is-drop-hover" : ""}${draggingId ? " is-dragging-item is-dnd-active" : ""}${dragRemoveArmed ? " is-dnd-remove" : ""}`}
         data-mode={prefs.displayMode}
         data-mag={magOn ? "on" : "off"}
         onContextMenu={onBackgroundContextMenu}
@@ -1081,14 +1248,10 @@ export default function DockApp() {
               {
                 borderRadius: cornerRadius,
                 ["--dock-radius" as string]: `${cornerRadius}px`,
-                ...(chromeWide
-                  ? { left: 0, right: 0, width: "auto", transform: "none" }
-                  : {
-                      left: "50%",
-                      right: "auto",
-                      width: chromeWidth,
-                      transform: "translateX(-50%)",
-                    }),
+                left: "50%",
+                right: "auto",
+                width: chromeWidthPx,
+                transform: "translateX(-50%)",
               } as CSSProperties
             }
           />
