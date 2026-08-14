@@ -29,6 +29,7 @@ pub fn sync_topbar_frost(window: &WebviewWindow) -> Result<(), String> {
         // Keep WebView clear so opaque CSS ambient paints correctly.
         use tauri::utils::config::Color;
         let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+        crate::win32::blur_glass::strip_dwm_chrome_border(window);
         Ok(())
     }
 }

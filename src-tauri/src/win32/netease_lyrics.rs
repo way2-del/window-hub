@@ -155,6 +155,25 @@ fn is_ink(r: u8, g: u8, b: u8) -> bool {
     luma(r, g, b) > INK_LUMA
 }
 
+/// 裁切包围盒：要字不要底板。低饱和底板（棕/灰）排除；亮笔/绿描边保留（含字顶细笔）。
+fn is_ink_core(r: u8, g: u8, b: u8) -> bool {
+    let y = luma(r, g, b);
+    let maxc = r.max(g).max(b) as i32;
+    let minc = r.min(g).min(b) as i32;
+    let sat = maxc - minc;
+    // 网易云桌面歌词底板：中低亮 + 低饱和
+    if sat < 28 && y < 105 {
+        return false;
+    }
+    if y >= 88 {
+        return true;
+    }
+    if g as i32 > r as i32 + 12 && g as i32 > b as i32 + 6 && y >= 48 {
+        return true;
+    }
+    false
+}
+
 /// 截取桌面歌词窗 → BGRA（含透明区被填成黑的情况）。
 fn capture_lyric_bgra(hwnd: HWND) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
@@ -403,12 +422,13 @@ fn capture_lyric_image(hwnd: HWND) -> Option<String> {
     Some(data_url)
 }
 
-/// 有字区域在源窗客户区中的裁切矩形（物理像素），供 DWM rcSource。
+/// 有字区域相对源画面的归一化裁切 `(l,t,r,b)`（约 0..1），供 DWM `rcSource`。
+/// 用比例而非像素，避免 PrintWindow 与 DWM 缩略图源尺寸不一致时错位。
 /// 只取「墨迹最多的一行带」，避免上下两句叠进岛栏。
-pub fn ink_source_crop(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
-    let (bgra, w, h) = capture_lyric_bgra(hwnd)?;
-    let w = w as usize;
-    let h = h as usize;
+pub fn ink_source_crop(hwnd: HWND) -> Option<(f64, f64, f64, f64)> {
+    let (bgra, w0, h0) = capture_lyric_bgra(hwnd)?;
+    let w = w0 as usize;
+    let h = h0 as usize;
     if w == 0 || h == 0 || bgra.len() < w * h * 4 {
         return None;
     }
@@ -422,7 +442,7 @@ pub fn ink_source_crop(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
         }
     }
     let thr = (w / 80).max(3);
-    // 连续有墨行 → 若干行带；优先「最矮且够密」的单行（当前句），避免两句粘成一条
+    // 连续有墨迹 → 若干行带；优先「最矮且够密」的单行（当前句）
     let mut bands: Vec<(usize, usize, usize, f64)> = Vec::new(); // y0,y1,ink,density
     let mut y = 0usize;
     while y < h {
@@ -444,7 +464,6 @@ pub fn ink_source_crop(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     if bands.is_empty() {
         return None;
     }
-    // 单行通常 ≤ 48px；过高的带拆成密度峰附近
     let (band0, band1) = {
         let mut best = &bands[0];
         for b in &bands[1..] {
@@ -456,14 +475,12 @@ pub fn ink_source_crop(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
                 }
                 continue;
             }
-            // 同档：密度优先，其次墨迹总量
             if b.3 > best.3 * 1.05 || (b.3 >= best.3 * 0.95 && b.2 > best.2) {
                 best = b;
             }
         }
         let (mut y0, mut y1, _, _) = *best;
         if y1 - y0 > 56 {
-            // 过高：取行墨迹峰值附近 ± 半行
             let mut peak_y = y0;
             let mut peak_v = 0usize;
             for yy in y0..y1 {
@@ -486,7 +503,7 @@ pub fn ink_source_crop(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     for y in band0..band1 {
         for x in 0..w {
             let i = (y * w + x) * 4;
-            if is_ink(bgra[i + 2], bgra[i + 1], bgra[i]) {
+            if is_ink_core(bgra[i + 2], bgra[i + 1], bgra[i]) {
                 found = true;
                 min_x = min_x.min(x);
                 max_x = max_x.max(x);
@@ -498,16 +515,25 @@ pub fn ink_source_crop(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
     if !found {
         return None;
     }
-    let pad_x = 6usize;
-    let pad_y = 1usize;
-    let x0 = min_x.saturating_sub(pad_x) as i32;
-    let y0 = min_y.saturating_sub(pad_y) as i32;
-    let x1 = (max_x + pad_x + 1).min(w) as i32;
-    let y1 = (max_y + pad_y + 1).min(h) as i32;
-    if x1 - x0 < 4 || y1 - y0 < 4 {
+    // 网易云桌面歌词字在胶囊里偏上；底边多留、顶边少留，映到岛栏后更接近视觉居中
+    let pad_x = 5usize;
+    let pad_top = 3usize;
+    let pad_bot = 7usize;
+    let x0 = min_x.saturating_sub(pad_x);
+    let y0 = min_y.saturating_sub(pad_top);
+    let x1 = (max_x + pad_x + 1).min(w);
+    let y1 = (max_y + pad_bot + 1).min(h);
+    if x1 <= x0 + 3 || y1 <= y0 + 3 {
         return None;
     }
-    Some((x0, y0, x1, y1))
+    let fw = w as f64;
+    let fh = h as f64;
+    Some((
+        x0 as f64 / fw,
+        y0 as f64 / fh,
+        x1 as f64 / fw,
+        y1 as f64 / fh,
+    ))
 }
 
 /// 当前可见 DesktopLyrics 窗句柄（0 = 无）。

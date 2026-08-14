@@ -154,7 +154,8 @@ export function shortcutsHubBootstrapScript(
           text: (opts && opts.text) || "",
           title: opts && opts.title,
           image: opts && opts.image,
-          mirror: !!(opts && opts.mirror)
+          mirror: !!(opts && opts.mirror),
+          mirrorOffsetY: opts && typeof opts.mirrorOffsetY === "number" ? opts.mirrorOffsetY : undefined
         }));
       },
       clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }

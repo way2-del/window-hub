@@ -310,7 +310,42 @@ fn clear_vibrancy(window: &WebviewWindow) {
 
 pub fn clear(window: &WebviewWindow) -> Result<(), String> {
     clear_vibrancy(window);
+    strip_dwm_chrome_border(window);
     Ok(())
+}
+
+/// 去掉 DWM / 透明窗常见的浅色描边（展开岛贴白底时尤其明显）。Win10 上部分属性为 no-op。
+pub fn strip_dwm_chrome_border(window: &WebviewWindow) {
+    let Ok(hwnd) = hwnd_of(window) else {
+        return;
+    };
+    unsafe {
+        use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+        use windows::Win32::UI::Controls::MARGINS;
+        let margins = MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: 0,
+            cyBottomHeight: 0,
+        };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        for attr in [DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR] {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &border as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
 }
 
 /// Solid opaque fill — safe on slim Win10 where transparent+acrylic freezes DWM.

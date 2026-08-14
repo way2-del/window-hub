@@ -63,6 +63,8 @@ fn reassert_window(window: &tauri::WebviewWindow) {
         // 持续排除 Alt+Tab / Win+Tab，防止样式被重置后又出现在窗口切换里
         crate::win32::switcher::exclude_from_switcher(hwnd);
     }
+    #[cfg(windows)]
+    crate::win32::blur_glass::strip_dwm_chrome_border(window);
     if crate::win32::topmost::is_yielding() {
         // Keep geometry pinned, but don't steal Z-order over tray menus.
         pin_top_bar(window);

@@ -179,6 +179,31 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
           );
         }
         if (field.type === "number") {
+          const n = typeof value === "number" ? value : Number(value) || 0;
+          const hasRange = field.min != null && field.max != null;
+          if (hasRange) {
+            return (
+              <label key={field.key} className="pref-row is-stack">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">{field.label}</span>
+                  {desc ? <span className="pref-row-desc">{desc}</span> : null}
+                </span>
+                <div className="pref-range-row">
+                  <input
+                    type="range"
+                    className="pref-range"
+                    disabled={busy}
+                    min={field.min}
+                    max={field.max}
+                    step={field.step ?? 1}
+                    value={n}
+                    onChange={(e) => void setField(field.key, Number(e.target.value))}
+                  />
+                  <span className="pref-range-value">{n}</span>
+                </div>
+              </label>
+            );
+          }
           return (
             <label key={field.key} className="pref-row">
               <span className="pref-row-text">
@@ -192,7 +217,7 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
                 min={field.min}
                 max={field.max}
                 step={field.step ?? 1}
-                value={typeof value === "number" ? value : Number(value) || 0}
+                value={n}
                 onChange={(e) => void setField(field.key, Number(e.target.value))}
               />
             </label>

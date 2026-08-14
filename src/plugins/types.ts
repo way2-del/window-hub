@@ -127,4 +127,6 @@ export type IslandBarState = {
   image?: string;
   /** DWM live mirror slot (Host paints DesktopLyrics into bar) */
   mirror?: boolean;
+  /** 歌词镜像垂直微调（逻辑像素，正数下移） */
+  mirrorOffsetY?: number;
 };

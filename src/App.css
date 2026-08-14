@@ -119,18 +119,29 @@ button {
 }
 
 .shell.is-expanded {
-  /* 展开时由 dismiss-backdrop 吃住左右空白点击；极淡底避免 Win 透明点透 */
+  /* 展开时由左右 dismiss 条吃住空白点击；勿铺全宽淡底（会显成一块大框） */
   background: transparent;
 }
 
+/* 仅岛左右 gutter 接点击；不要 inset:0 全幅遮罩 */
 .dismiss-backdrop {
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
   z-index: 5;
-  /* WebView2 / Win 对 alpha=0 像素点透，必须留一点不透明才能收到点击 */
-  background: rgba(0, 0, 0, 0.02);
+  width: var(--dismiss-gutter, 0px);
+  /* WebView2 / Win 对 alpha=0 点透；1/255 几乎看不见仍可命中 */
+  background: rgba(0, 0, 0, 0.004);
   pointer-events: auto;
   cursor: default;
+}
+
+.dismiss-backdrop.is-left {
+  left: 0;
+}
+
+.dismiss-backdrop.is-right {
+  right: 0;
 }
 
 /* 顶栏色带：默认实心取色；开启磨砂时见 .shell.is-topbar-frost */
@@ -245,20 +256,38 @@ button {
   color: #9ca3af;
 }
 
-/* BorderBeam 承接岛的定位与尺寸（paintDom 写 width/height/top），不改变岛本身大小 */
+/* BorderBeam 只负责定位；圆角交给 SVG path，避免 CSS border-radius 在透明底上裁出「淡框」 */
 .island-beam {
   position: absolute;
   top: 0;
   left: 50%;
   translate: -50% 0;
   z-index: 10;
-  background: transparent;
+  background: transparent !important;
   transform-origin: top center;
-  /* 顶直角贴屏、底贴合岛圆角（--island-r-bot 由 paintDom 写入） */
+  border-radius: 0 !important;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  overflow: visible !important;
+  box-sizing: border-box;
+}
+
+/* 通知描边才需要圆角裁切 */
+.island-beam[data-active],
+.island-beam[data-fading] {
   border-radius: 0 0 var(--island-r-bot, 14px) var(--island-r-bot, 14px) !important;
   overflow: visible !important;
-  /* 尺寸完全由 paintDom 控制，避免被子内容撑开 */
-  box-sizing: border-box;
+}
+
+/* 非通知：掐掉 BorderBeam 残留伪元素 */
+.island-beam:not([data-active]):not([data-fading])::before,
+.island-beam:not([data-active]):not([data-fading])::after {
+  display: none !important;
+  opacity: 0 !important;
+  content: none !important;
+  background: none !important;
+  box-shadow: none !important;
 }
 
 /* BorderBeam 伪元素默认四角同半径；强制底圆顶直，避免通知描边直角「耳朵」 */
@@ -280,9 +309,14 @@ button {
   outline: none;
   overflow: visible;
   touch-action: none;
-  /* 微底色：WebView2 对 alpha≈0 点透，否则沉浸后拖放进不了中转站 */
-  background: rgba(0, 0, 0, 0.02);
+  /* 默认全透明：展开时若留 0.02 黑+ CSS 圆角，会在白底上显出淡框 */
+  background: transparent;
   transform-origin: top center;
+}
+
+/* 仅沉浸需要极淡底接拖放命中 */
+.island-root.is-immersed:not(.is-expanded) {
+  background: rgba(0, 0, 0, 0.02);
 }
 
 .island-root.is-pulling {
@@ -300,6 +334,18 @@ button {
   /* width/height 由 paintDom / 内联跟随当前岛尺寸，与 path 同坐标 */
   pointer-events: none;
   z-index: 0;
+}
+
+/* 折叠歌词：黑壳几乎透明，只留 DWM/贴图字，避免灰底+淡边「鼓」在字外面 */
+.island-root:not(.is-expanded).has-staging {
+  background: transparent;
+}
+.island-root:not(.is-expanded).has-staging .island-path {
+  fill-opacity: 0.02;
+}
+.island-root:not(.is-expanded).has-staging.is-drop-target .island-path,
+.island-root:not(.is-expanded).has-staging.is-notifying .island-path {
+  fill-opacity: 1;
 }
 
 .island-svg {
@@ -368,6 +414,12 @@ button {
   overflow: hidden;
 }
 
+/* 折叠+歌词：顶栏铺满岛高；勿 overflow:hidden，否则 DWM 字顶会被裁 */
+.island-root:not(.is-expanded).has-staging .island-bar {
+  height: 100%;
+  overflow: visible;
+}
+
 .bar-weather {
   display: flex;
   align-items: center;
@@ -408,6 +460,21 @@ button {
   position: absolute;
   transform: translateY(130%);
   opacity: 0;
+  transition: none;
+}
+
+.bar-weather.is-exiting .bar-staging.has-lyric-img {
+  transition: none;
+}
+
+.bar-weather.is-exiting .bar-lyric-img {
+  opacity: 0;
+  transition: none;
+}
+
+.bar-weather.is-exiting .bar-lyric-slot {
+  opacity: 0;
+  transition: none;
 }
 
 .bar-staging {
@@ -463,9 +530,10 @@ button {
   gap: 0;
   height: 100%;
   align-self: stretch;
-  max-width: min(460px, 92vw);
+  max-width: min(400px, 92vw);
   padding: 0;
-  overflow: hidden;
+  overflow: visible;
+  background: transparent;
 }
 
 .bar-lyric-img {
@@ -480,14 +548,17 @@ button {
   user-select: none;
   image-rendering: auto;
   filter: none;
+  align-self: center;
+  background: transparent;
 }
 
 .bar-lyric-slot {
   display: block;
-  width: min(440px, 90vw);
+  width: min(400px, 90vw);
   height: 100%;
   min-height: 100%;
   pointer-events: none;
+  background: transparent;
 }
 
 .island-root[data-chrome="light"] .bar-lyric-img {
@@ -509,6 +580,7 @@ button {
 .bar-notify {
   position: absolute;
   inset: 0;
+  z-index: 10;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -739,6 +811,11 @@ button {
   transition: opacity 180ms ease;
 }
 
+/* 折叠：面板退出布局，避免把岛底撑出一块灰壳 */
+.island-root:not(.is-expanded):not(.is-pulling):not(.is-springing) .island-panel {
+  display: none;
+}
+
 .island-panel.has-tags {
   justify-content: stretch;
 }
@@ -793,7 +870,7 @@ button {
 
 .island-lyric-dwm-slot {
   flex: 0 0 auto;
-  height: 68px;
+  height: 64px;
   margin: 4px 10px 8px;
   border-radius: 8px;
   background: transparent;

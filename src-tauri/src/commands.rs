@@ -269,6 +269,8 @@ pub fn float_overlay(window: WebviewWindow) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     crate::win32::topmost::force_topmost(hwnd.0 as isize);
+    #[cfg(windows)]
+    crate::win32::blur_glass::strip_dwm_chrome_border(&window);
     Ok(())
 }
 
@@ -2496,6 +2498,9 @@ pub struct IslandBarDto {
     /// DWM 实时映射占位：岛栏留槽，由 Host 把 DesktopLyrics 映上去。
     #[serde(default)]
     pub mirror: bool,
+    /// 歌词镜像垂直微调（逻辑像素，正数下移）。
+    #[serde(default)]
+    pub mirror_offset_y: Option<f64>,
 }
 
 #[tauri::command]
@@ -2506,6 +2511,7 @@ pub fn hub_island_set_bar(
     title: Option<String>,
     image: Option<String>,
     mirror: Option<bool>,
+    mirror_offset_y: Option<f64>,
 ) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
     crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.bar")?;
@@ -2514,6 +2520,7 @@ pub fn hub_island_set_bar(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let mirror = mirror.unwrap_or(false);
+    let mirror_offset_y = mirror_offset_y.map(|v| v.clamp(-24.0, 24.0));
     let _ = app.emit(
         "island-bar-changed",
         IslandBarDto {
@@ -2522,6 +2529,7 @@ pub fn hub_island_set_bar(
             title,
             image,
             mirror,
+            mirror_offset_y,
         },
     );
     Ok(())
@@ -2543,6 +2551,7 @@ pub fn hub_island_clear_bar(app: AppHandle, plugin_id: String) -> Result<(), Str
             title: None,
             image: None,
             mirror: false,
+            mirror_offset_y: None,
         },
     );
     Ok(())
@@ -2556,6 +2565,8 @@ pub fn hub_lyric_mirror_set_slot(
     y: f64,
     w: f64,
     h: f64,
+    offset_y: Option<f64>,
+    scale: Option<f64>,
 ) -> Result<bool, String> {
     #[cfg(windows)]
     {
@@ -2566,13 +2577,23 @@ pub fn hub_lyric_mirror_set_slot(
         let Ok(hwnd) = win.hwnd() else {
             return Ok(false);
         };
-        let scale = win.scale_factor().unwrap_or(1.0);
-        let px = (x * scale).round() as i32;
-        let py = (y * scale).round() as i32;
-        let pw = (w * scale).round().max(1.0) as i32;
-        let ph = (h * scale).round().max(1.0) as i32;
-        crate::win32::lyric_mirror::set_dest_slot(hwnd.0 as isize, px, py, pw, ph);
-        // 立刻跟一次当前桌面歌词窗
+        let dpi = win.scale_factor().unwrap_or(1.0);
+        let px = (x * dpi).round() as i32;
+        let py = (y * dpi).round() as i32;
+        let pw = (w * dpi).round().max(1.0) as i32;
+        let ph = (h * dpi).round().max(1.0) as i32;
+        let (logical_oy, user_scale) = lyrics_mirror_layout();
+        let _ = (offset_y, scale);
+        let oy = (logical_oy.clamp(-12.0, 12.0) * dpi).round() as i32;
+        crate::win32::lyric_mirror::set_dest_slot(
+            hwnd.0 as isize,
+            px,
+            py,
+            pw,
+            ph,
+            oy,
+            user_scale,
+        );
         let src = crate::win32::netease_lyrics::desktop_lyrics_hwnd();
         if src != 0 {
             let crop = {
@@ -2585,9 +2606,50 @@ pub fn hub_lyric_mirror_set_slot(
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, x, y, w, h);
+        let _ = (app, x, y, w, h, offset_y, scale);
         Ok(false)
     }
+}
+
+fn resolve_lyrics_plugin_id() -> Option<String> {
+    let plugins = crate::plugin_install::list_installed_plugins_sync();
+    let base = "com.window-hub.lyrics";
+    let dev = format!("{base}__dev");
+    if let Some(p) = plugins.iter().find(|p| p.id == dev && p.enabled) {
+        return Some(p.id.clone());
+    }
+    if let Some(p) = plugins.iter().find(|p| p.id == *base && p.enabled) {
+        return Some(p.id.clone());
+    }
+    plugins
+        .into_iter()
+        .find(|p| p.id == dev || p.id == base)
+        .map(|p| p.id)
+}
+
+fn lyrics_settings_number(val: &serde_json::Value, key: &str) -> Option<f64> {
+    val.get(key).and_then(|v| {
+        v.as_f64()
+            .or_else(|| v.as_i64().map(|n| n as f64))
+            .or_else(|| v.as_u64().map(|n| n as f64))
+    })
+}
+
+/// `(offset_y 逻辑像素, user_scale 0.5–1.5)`
+fn lyrics_mirror_layout() -> (f64, f64) {
+    let Some(id) = resolve_lyrics_plugin_id() else {
+        return (0.0, 1.0);
+    };
+    let Ok(Some(val)) = crate::db::with_conn(|c| {
+        crate::db::plugin_get_system(c, &id, crate::db::KEY_SETTINGS)
+    }) else {
+        return (0.0, 1.0);
+    };
+    let oy = lyrics_settings_number(&val, "mirrorOffsetY").unwrap_or(0.0);
+    // mirrorScale：百分比 50–150，默认 100
+    let scale_pct = lyrics_settings_number(&val, "mirrorScale").unwrap_or(100.0);
+    let user_scale = (scale_pct / 100.0).clamp(0.5, 1.5);
+    (oy, user_scale)
 }
 
 #[tauri::command]

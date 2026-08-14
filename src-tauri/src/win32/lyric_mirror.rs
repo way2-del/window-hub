@@ -2,6 +2,9 @@
 //!
 //! `DwmRegisterThumbnail(岛栏 HWND, DesktopLyrics)`，由 DWM 合成源窗口画面。
 //! 可选 `rcSource` 裁切有字区域，避免整窗竖条被压扁。
+//!
+//! - `offset_y`：只挪位置（改源裁切），不改大小
+//! - `user_scale`：只改显示大小（相对铺满槽位），不因偏移而缩放
 
 use std::sync::Mutex;
 
@@ -11,8 +14,12 @@ struct MirrorState {
     dest_hwnd: isize,
     /// 目的矩形：相对 dest 客户区，物理像素 (l,t,r,b)
     dest: (i32, i32, i32, i32),
-    /// 源裁切：相对源客户区，物理像素；None = 整窗
-    src_crop: Option<(i32, i32, i32, i32)>,
+    /// 源裁切：相对源画面归一化 (l,t,r,b)∈[0,1]；None = 底部带 fallback
+    src_crop: Option<(f64, f64, f64, f64)>,
+    /// 槽内垂直微调（物理像素，正数下移）
+    offset_y: i32,
+    /// 显示缩放（1.0 = 铺满可用高度）
+    user_scale: f64,
 }
 
 fn state() -> &'static Mutex<MirrorState> {
@@ -24,27 +31,40 @@ fn state() -> &'static Mutex<MirrorState> {
             dest_hwnd: 0,
             dest: (0, 0, 0, 0),
             src_crop: None,
+            offset_y: 0,
+            user_scale: 1.0,
         })
     })
 }
 
 /// 前端测好岛栏歌词槽位后写入（物理像素，相对岛窗客户区）。
-pub fn set_dest_slot(dest_hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+pub fn set_dest_slot(
+    dest_hwnd: isize,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    offset_y: i32,
+    user_scale: f64,
+) {
     if dest_hwnd == 0 || w < 4 || h < 4 {
         return;
     }
     let dest = (x, y, x + w, y + h);
-    let (thumb_id, src, crop) = {
+    let scale = user_scale.clamp(0.5, 1.5);
+    let (thumb_id, src, crop, oy, us) = {
         let Ok(mut g) = state().lock() else {
             return;
         };
         g.dest_hwnd = dest_hwnd;
         g.dest = dest;
-        (g.thumb_id, g.src_hwnd, g.src_crop)
+        g.offset_y = offset_y;
+        g.user_scale = scale;
+        (g.thumb_id, g.src_hwnd, g.src_crop, g.offset_y, g.user_scale)
     };
     if let Some(id) = thumb_id {
         if src != 0 {
-            let _ = update_props(id, src, dest, crop);
+            let _ = update_props(id, src, dest, crop, oy, us);
         }
     }
 }
@@ -60,7 +80,11 @@ pub fn clear() {
                 }
             }
             g.src_hwnd = 0;
+            g.dest_hwnd = 0;
+            g.dest = (0, 0, 0, 0);
             g.src_crop = None;
+            g.offset_y = 0;
+            g.user_scale = 1.0;
         }
     }
     #[cfg(not(windows))]
@@ -68,7 +92,11 @@ pub fn clear() {
         if let Ok(mut g) = state().lock() {
             g.thumb_id = None;
             g.src_hwnd = 0;
+            g.dest_hwnd = 0;
+            g.dest = (0, 0, 0, 0);
             g.src_crop = None;
+            g.offset_y = 0;
+            g.user_scale = 1.0;
         }
     }
 }
@@ -89,8 +117,8 @@ pub fn is_live() -> bool {
         .unwrap_or(false)
 }
 
-/// 把 DesktopLyrics 实时映到已设置的岛栏槽位。`src_crop` 为源窗客户区裁切。
-pub fn sync(src_hwnd: isize, src_crop: Option<(i32, i32, i32, i32)>) -> bool {
+/// 把 DesktopLyrics 实时映到已设置的岛栏槽位。
+pub fn sync(src_hwnd: isize, src_crop: Option<(f64, f64, f64, f64)>) -> bool {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::HWND;
@@ -109,7 +137,7 @@ pub fn sync(src_hwnd: isize, src_crop: Option<(i32, i32, i32, i32)>) -> bool {
             }
         }
 
-        let (dest_hwnd, dest, same, old_id) = {
+        let (dest_hwnd, dest, same, old_id, oy, us) = {
             let Ok(mut g) = state().lock() else {
                 return false;
             };
@@ -125,12 +153,21 @@ pub fn sync(src_hwnd: isize, src_crop: Option<(i32, i32, i32, i32)>) -> bool {
                 let id = g.thumb_id.unwrap();
                 let d = g.dest;
                 let crop = g.src_crop;
+                let oy = g.offset_y;
+                let us = g.user_scale;
                 drop(g);
-                return update_props(id, src_hwnd, d, crop);
+                return update_props(id, src_hwnd, d, crop, oy, us);
             }
             let old = g.thumb_id.take();
             g.src_hwnd = src_hwnd;
-            (g.dest_hwnd, g.dest, false, old)
+            (
+                g.dest_hwnd,
+                g.dest,
+                false,
+                old,
+                g.offset_y,
+                g.user_scale,
+            )
         };
         let _ = same;
 
@@ -145,7 +182,7 @@ pub fn sync(src_hwnd: isize, src_crop: Option<(i32, i32, i32, i32)>) -> bool {
         let Ok(id) = thumb else {
             return false;
         };
-        if !update_props(id, src_hwnd, dest, src_crop) {
+        if !update_props(id, src_hwnd, dest, src_crop, oy, us) {
             unsafe {
                 let _ = DwmUnregisterThumbnail(id);
             }
@@ -172,7 +209,9 @@ fn update_props(
     thumb_id: isize,
     _src: isize,
     dest: (i32, i32, i32, i32),
-    src_crop: Option<(i32, i32, i32, i32)>,
+    src_crop: Option<(f64, f64, f64, f64)>,
+    offset_y: i32,
+    user_scale: f64,
 ) -> bool {
     use windows::Win32::Foundation::{BOOL, RECT};
     use windows::Win32::Graphics::Dwm::{
@@ -184,6 +223,7 @@ fn update_props(
     let (l, t, r, b) = dest;
     let dw = (r - l).max(1) as f64;
     let dh = (b - t).max(1) as f64;
+    let user_scale = user_scale.clamp(0.5, 1.5);
 
     let thumb_sz = unsafe { DwmQueryThumbnailSourceSize(thumb_id) };
     let (full_w, full_h) = match thumb_sz {
@@ -209,47 +249,44 @@ fn update_props(
         }
     };
 
-    // 有字裁切；失败则取源窗底部分行带（桌面歌词字常贴底，整窗映射会又小又偏下）
-    let (origin_l, origin_t, sw0, sh0) = match src_crop {
-        Some((sl, st, sr, sb)) if sr - sl >= 4 && sb - st >= 4 => {
-            let mut cw = (sr - sl) as f64;
-            let mut ch = (sb - st) as f64;
-            let mut ol = sl as f64;
-            let mut ot = st as f64;
-            // PrintWindow 尺寸与 DWM 源尺寸不一致时按比例映射
-            if (cw > full_w + 2.0 || ch > full_h + 2.0) && full_w > 0.0 && full_h > 0.0 {
-                // crop 可能相对更大的 frame；若明显超出则夹紧
-                ol = ol.clamp(0.0, full_w - 1.0);
-                ot = ot.clamp(0.0, full_h - 1.0);
-                cw = cw.min(full_w - ol);
-                ch = ch.min(full_h - ot);
-            }
-            (ol, ot, cw.max(1.0), ch.max(1.0))
+    // 归一化裁切 → 像素；失败则取源窗底部带
+    let (origin_l, mut origin_t, sw0, sh0) = match src_crop {
+        Some((fl, ft, fr, fb)) if fr > fl + 0.01 && fb > ft + 0.01 => {
+            let ol = (fl.clamp(0.0, 1.0) * full_w).round().clamp(0.0, full_w - 1.0);
+            let ot = (ft.clamp(0.0, 1.0) * full_h).round().clamp(0.0, full_h - 1.0);
+            let or_ = (fr.clamp(0.0, 1.0) * full_w).round().clamp(ol + 1.0, full_w);
+            let ob = (fb.clamp(0.0, 1.0) * full_h).round().clamp(ot + 1.0, full_h);
+            (ol, ot, (or_ - ol).max(1.0), (ob - ot).max(1.0))
         }
         _ => {
-            // DesktopLyrics 常把字画在窗底部；整窗映射会又小又贴底
-            let band = (dh * 1.4).clamp(28.0, 72.0).min(full_h).round().max(16.0);
+            let band = (dh * 1.6).clamp(32.0, 64.0).min(full_h).round().max(20.0);
             let ot = (full_h - band).max(0.0);
             (0.0, ot, full_w, band)
         }
     };
 
-    // 始终撑满槽位高度；长句过宽则水平居中裁源
-    let scale = dh / sh0.max(1.0);
-    let max_sw = dw / scale;
-    let (draw_sw, trim_x) = if sw0 > max_sw + 0.5 {
-        (max_sw, ((sw0 - max_sw) / 2.0).round().max(0.0))
-    } else {
-        (sw0, 0.0)
-    };
-    let tw = (draw_sw * scale).round().max(1.0).min(dw);
-    let th = dh;
+    // 大小：只由槽位 + user_scale 决定（与偏移无关）
+    let edge = if dh < 20.0 { 1.0 } else { 2.0 };
+    let inner_h = (dh - edge * 2.0).max(8.0);
+    let inner_w = dw.max(8.0);
+    let fit = (inner_h / sh0.max(1.0)).min(inner_w / sw0.max(1.0));
+    let scale = (fit * user_scale).max(0.05);
+    let tw = (sw0 * scale).round().max(1.0);
+    let th = (sh0 * scale).round().max(1.0);
+    // 允许略超出槽位（放大时裁切边缘），水平仍居中
     let ox = ((dw - tw) / 2.0).round() as i32;
-    // 垂直：目的矩形铺满槽位（oy=0），源已裁成单行，视觉上相对岛栏居中
-    let oy = 0i32;
+    let oy = ((dh - th) / 2.0).round() as i32;
 
-    let src_l = (origin_l + trim_x).round() as i32;
-    let src_r = (origin_l + trim_x + draw_sw).round() as i32;
+    // 位置：只挪源裁切，正数下移 → 源窗口上移取样（字在画面里显得更靠下）
+    // 换算：目的像素 / 当前缩放 ≈ 源像素
+    if offset_y != 0 && scale > 0.01 {
+        let src_shift = -(offset_y as f64) / scale;
+        let max_t = (full_h - sh0).max(0.0);
+        origin_t = (origin_t + src_shift).clamp(0.0, max_t);
+    }
+
+    let src_l = origin_l.round() as i32;
+    let src_r = (origin_l + sw0).round() as i32;
     let src_t = origin_t.round() as i32;
     let src_b = (origin_t + sh0).round() as i32;
 

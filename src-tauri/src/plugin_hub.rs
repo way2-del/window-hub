@@ -716,6 +716,10 @@ pub fn hub_init_script(plugin_id: &str) -> String {
             title: opts && opts.title,
             image: opts && opts.image,
             mirror: !!(opts && opts.mirror),
+            mirrorOffsetY:
+              opts && typeof opts.mirrorOffsetY === "number"
+                ? opts.mirrorOffsetY
+                : undefined,
           }}),
         ),
       clearBar: () => invoke("hub_island_clear_bar", withPlugin()),

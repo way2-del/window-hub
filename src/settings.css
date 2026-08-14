@@ -360,6 +360,40 @@ html[data-theme="light"] .chip-settings-row:hover .chip-settings-grip {
   align-items: stretch;
 }
 
+.pref-row.is-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.pref-range-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pref-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 4px;
+  accent-color: #0a84ff;
+  cursor: pointer;
+}
+
+.pref-range:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pref-range-value {
+  flex: 0 0 auto;
+  min-width: 2.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  opacity: 0.85;
+}
+
 .pref-row.pref-row-stack .mode-list {
   margin-top: 4px;
 }

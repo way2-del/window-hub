@@ -63,16 +63,27 @@ function panelTabExtraFor(pluginId: string | null | undefined): number {
   return n >= 2 ? PANEL_TAB_ROW_H : 0;
 }
 const ISLAND_COLLAPSED = { width: 300, height: 28 };
+/** 桌面歌词：只加宽，高度与默认折叠一致，避免底下多出一截壳 */
+const ISLAND_LYRICS_COLLAPSED = { width: 420, height: 28 };
+type IslandSize = { width: number; height: number };
 /** 当前展开目标 / SVG 画布（中转站时变宽变矮）——由 App 每帧同步 */
 const liveExpanded = { width: VIEW_W_DEFAULT, height: VIEW_H_DEFAULT };
+/** 当前折叠目标（普通 / 歌词）——下拉插值起点 */
+const liveCollapsed = {
+  width: ISLAND_COLLAPSED.width,
+  height: ISLAND_COLLAPSED.height,
+};
+
+function setLiveCollapsed(next: IslandSize) {
+  liveCollapsed.width = next.width;
+  liveCollapsed.height = next.height;
+}
 const HEIGHT_MS = 280;
 /** 展开/收起总时长：宽高交错，禁止出现「380×28 宽扁直角条」中间态 */
 const MORPH_MS = 420;
 const PULL_OPEN = 0.52;
 const CLICK_SLOP = 6;
 const SPRING_MS = 320;
-
-type IslandSize = { width: number; height: number };
 
 /** 窗口实际高度 = 岛高（贴顶，无额外顶隙） */
 function winHeight(islandH: number) {
@@ -99,8 +110,8 @@ function sizeFromProgress(p: number): IslandSize {
   const t = clamp01(p);
   return {
     // 跟手用亚像素，避免取整造成顶部黑条一顿一顿
-    width: lerp(ISLAND_COLLAPSED.width, liveExpanded.width, t),
-    height: lerp(ISLAND_COLLAPSED.height, liveExpanded.height, t),
+    width: lerp(liveCollapsed.width, liveExpanded.width, t),
+    height: lerp(liveCollapsed.height, liveExpanded.height, t),
   };
 }
 
@@ -113,6 +124,8 @@ function islandBottomRadius(width: number, height: number): number {
     Math.max(14, 14 + ((h - 28) * 18) / 192),
     w * 0.5 - 4,
   );
+  // 折叠矮岛：底角过大看起来像「下面鼓出一块」
+  if (h <= 48) return Math.min(raw, 12);
   // 较矮面板：底角过大时会切掉四角内容
   if (h <= STAGING_PANEL_H_DEFAULT + 4) return Math.min(raw, 18);
   return Math.min(raw, 32);
@@ -401,7 +414,9 @@ function App() {
     islandPrefs.barResident,
   );
   const contentBar = pickIslandContentBar(contentBars, barOrder);
-  const islandBar = overlayBar ?? contentBar;
+  /** 托盘闪动消息提示（岛内落下） */
+  const [msgBanner, setMsgBanner] = useState<MsgBanner | null>(null);
+  const islandBar = msgBanner ? null : (overlayBar ?? contentBar);
   const [dropTarget, setDropTarget] = useState(false);
   /** 系统文件拖拽：同 HWND mini 落点（中转站） */
   const [catcherActive, setCatcherActive] = useState(false);
@@ -422,8 +437,6 @@ function App() {
    * 驱动 hub.panel.onEnter / onLeave（镜子等勿在折叠态开摄像头）。
    */
   const [panelActive, setPanelActive] = useState(false);
-  /** 托盘闪动消息提示（岛内落下） */
-  const [msgBanner, setMsgBanner] = useState<MsgBanner | null>(null);
   const gen = useRef(0);
   const busy = useRef(false);
   const expandedRef = useRef(expanded);
@@ -450,9 +463,12 @@ function App() {
   const svgRef = useRef<SVGSVGElement>(null);
   const shapeLayerRef = useRef<HTMLDivElement>(null);
   const islandUiRef = useRef<HTMLDivElement>(null);
-  const lyricSlotRef = useRef<HTMLElement | null>(null);
+  const lyricSlotRef = useRef<HTMLImageElement | HTMLSpanElement | null>(null);
   const lyricPanelSlotRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  /** 歌词垂直微调 / 显示大小：直接读插件设置 */
+  const [lyricOffsetY, setLyricOffsetY] = useState(0);
+  const [lyricScale, setLyricScale] = useState(100);
   const lastWinH = useRef(winHeight(ISLAND_COLLAPSED.height));
   const idleTimer = useRef<number | null>(null);
   const drag = useRef<{
@@ -653,6 +669,9 @@ function App() {
     if (ui) {
       ui.style.width = `${w}px`;
       ui.style.minHeight = `${h}px`;
+      ui.style.height = `${h}px`;
+      // 折叠时裁掉面板占位，避免 opacity:0 的 panel 把壳撑出岛底
+      ui.style.overflow = nextReveal < 0.02 ? "hidden" : "visible";
     }
     const panel = panelRef.current;
     if (panel) {
@@ -735,15 +754,15 @@ function App() {
         }
         paintDom(
           {
-            width: lerp(ISLAND_COLLAPSED.width, liveExpanded.width, wE),
-            height: lerp(ISLAND_COLLAPSED.height, liveExpanded.height, hE),
+            width: lerp(liveCollapsed.width, liveExpanded.width, wE),
+            height: lerp(liveCollapsed.height, liveExpanded.height, hE),
           },
           rE,
         );
         if (p < 1) {
           requestAnimationFrame(step);
         } else {
-          const end = opening ? { ...liveExpanded } : ISLAND_COLLAPSED;
+          const end = opening ? { ...liveExpanded } : { ...liveCollapsed };
           const endReveal = opening ? 1 : 0;
           if (opening) morphingRef.current = false;
           paintDom(end, endReveal);
@@ -815,10 +834,10 @@ function App() {
       paintDom(sizeRef.current, revealRef.current);
       await animateMorph(token, false);
       if (token !== gen.current) return;
-      await setBarHeight(ISLAND_COLLAPSED.height);
-      lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
+      await setBarHeight(liveCollapsed.height);
+      lastWinH.current = winHeight(liveCollapsed.height);
       morphingRef.current = false;
-      paintDom(ISLAND_COLLAPSED, 0);
+      paintDom({ ...liveCollapsed }, 0);
       // 拖入会话覆盖仅本次展开有效；收起后恢复用户「下拉内容」
       setPanelOverride(null);
     } finally {
@@ -947,15 +966,15 @@ function App() {
       paintDom(sizeRef.current, revealRef.current);
       if (token !== gen.current) return;
       // 未拉满：从当前尺寸收回（不走完整倒放，避免跳变）
-      await animateVisual(ISLAND_COLLAPSED, 0, SPRING_MS, token);
+      await animateVisual({ ...liveCollapsed }, 0, SPRING_MS, token);
       if (token !== gen.current) return;
       setSpringing(false);
       if (!expandedRef.current && !trayOpenRef.current) {
-        await setBarHeight(ISLAND_COLLAPSED.height);
-        lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
+        await setBarHeight(liveCollapsed.height);
+        lastWinH.current = winHeight(liveCollapsed.height);
       }
       morphingRef.current = false;
-      paintDom(ISLAND_COLLAPSED, 0);
+      paintDom({ ...liveCollapsed }, 0);
       setPanelOverride(null);
       scheduleImmerse();
     })();
@@ -1074,7 +1093,7 @@ function App() {
   useEffect(() => {
     if (expanded || busy.current || pulling || springing) return;
     // 托盘改为独立弹窗，主顶栏保持折叠高度
-    if (!trayOpen) void setBarHeight(ISLAND_COLLAPSED.height);
+    if (!trayOpen) void setBarHeight(liveCollapsed.height);
   }, [trayOpen, expanded, pulling, springing]);
 
   useEffect(() => {
@@ -1386,6 +1405,10 @@ function App() {
             title: p.title,
             image: p.image,
             mirror: !!p.mirror,
+            mirrorOffsetY:
+              typeof p.mirrorOffsetY === "number" && Number.isFinite(p.mirrorOffsetY)
+                ? p.mirrorOffsetY
+                : undefined,
           };
       const rec = pluginRegistry.get(p.pluginId);
       if (
@@ -1553,7 +1576,7 @@ function App() {
     if (catcherActive && !suppress) {
       if (!catcherRaisedRef.current) {
         catcherRaisedRef.current = true;
-        const h = ISLAND_COLLAPSED.height + STAGING_CATCHER_EXTRA;
+        const h = liveCollapsed.height + STAGING_CATCHER_EXTRA;
         lastWinH.current = winHeight(h);
         void setBarHeight(h);
       }
@@ -1562,8 +1585,8 @@ function App() {
     if (!catcherRaisedRef.current) return;
     catcherRaisedRef.current = false;
     if (!expanded && !trayOpen && !pulling && !springing && reveal < 0.02) {
-      lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
-      void setBarHeight(ISLAND_COLLAPSED.height);
+      lastWinH.current = winHeight(liveCollapsed.height);
+      void setBarHeight(liveCollapsed.height);
     }
   }, [catcherActive, expanded, trayOpen, pulling, springing, reveal]);
 
@@ -1572,11 +1595,112 @@ function App() {
   const stagingBar = islandBar?.text ?? "";
   const stagingImage = islandBar?.image ?? "";
   const stagingMirror = !!islandBar?.mirror;
+  const stagingMirrorOffsetY = lyricOffsetY;
+  const stagingMirrorScale = lyricScale;
   const showStagingBar = !!(
     stagingBar.trim() ||
     stagingImage.trim() ||
     stagingMirror
   );
+
+  // 歌词垂直位置 / 大小：Host 直读设置，拖滑块立刻生效
+  useEffect(() => {
+    const BASE = "com.window-hub.lyrics";
+    const DEV = `${BASE}__dev`;
+    const clampOy = (v: unknown) => {
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n)) return 0;
+      return Math.max(-12, Math.min(12, Math.round(n)));
+    };
+    const clampScale = (v: unknown) => {
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isFinite(n)) return 100;
+      return Math.max(50, Math.min(150, Math.round(n / 5) * 5));
+    };
+    const applySettings = (all?: Record<string, unknown> | null) => {
+      setLyricOffsetY(clampOy(all?.mirrorOffsetY));
+      setLyricScale(clampScale(all?.mirrorScale ?? 100));
+    };
+    const isLyricsId = (id?: string) => id === BASE || id === DEV;
+    let activeId = BASE;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const list = await invoke<Array<{ id: string; enabled?: boolean }>>(
+          "list_installed_plugins",
+        );
+        const prefer =
+          list.find((p) => p.id === DEV && p.enabled !== false) ||
+          list.find((p) => p.id === BASE && p.enabled !== false) ||
+          list.find((p) => p.id === DEV) ||
+          list.find((p) => p.id === BASE);
+        if (prefer?.id) activeId = prefer.id;
+      } catch {
+        /* keep BASE */
+      }
+      if (cancelled) return;
+      try {
+        const all = await invoke<Record<string, unknown>>("hub_settings_get_all", {
+          pluginId: activeId,
+        });
+        if (!cancelled) applySettings(all);
+      } catch {
+        /* ignore */
+      }
+    })();
+
+    void listen<{ pluginId?: string; settings?: Record<string, unknown> }>(
+      "plugin-settings-changed",
+      (ev) => {
+        if (!isLyricsId(ev.payload?.pluginId)) return;
+        applySettings(ev.payload?.settings ?? null);
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 歌词映射：折叠岛加高加宽，顶栏槽位跟着变高，字才能居中放大
+  useEffect(() => {
+    const lyricsOn = stagingMirror && showStagingBar && !msgBanner;
+    const target = lyricsOn ? ISLAND_LYRICS_COLLAPSED : ISLAND_COLLAPSED;
+    setLiveCollapsed(target);
+
+    const idle =
+      !expanded &&
+      !trayOpen &&
+      !pulling &&
+      !springing &&
+      reveal < 0.02 &&
+      !busy.current &&
+      !catcherRaisedRef.current;
+    if (!idle) return;
+
+    if (
+      Math.abs(sizeRef.current.width - target.width) > 1 ||
+      Math.abs(sizeRef.current.height - target.height) > 1
+    ) {
+      paintDom(target, 0);
+      setSize(target);
+    }
+    lastWinH.current = winHeight(target.height);
+    void setBarHeight(target.height);
+  }, [
+    stagingMirror,
+    showStagingBar,
+    msgBanner,
+    expanded,
+    trayOpen,
+    pulling,
+    springing,
+    reveal,
+  ]);
 
   const activePanelExcluded =
     !!activePanelPluginId &&
@@ -1588,6 +1712,12 @@ function App() {
   // 否则会画在顶栏最左侧（快捷区旁），而不是灵动岛胶囊里。
   useLayoutEffect(() => {
     if (!stagingMirror || !showStagingBar) {
+      void invoke("hub_lyric_mirror_clear").catch(() => undefined);
+      return;
+    }
+
+    // 通知横幅显示时：清掉 DWM 映射，让通知覆盖歌词
+    if (msgBanner) {
       void invoke("hub_lyric_mirror_clear").catch(() => undefined);
       return;
     }
@@ -1624,10 +1754,19 @@ function App() {
     }
 
     if (w < 4 || h < 4) return;
-    void invoke("hub_lyric_mirror_set_slot", { x, y, w, h }).catch(() => undefined);
+    void invoke("hub_lyric_mirror_set_slot", {
+      x,
+      y,
+      w,
+      h,
+      offsetY: stagingMirrorOffsetY,
+      scale: stagingMirrorScale / 100,
+    }).catch(() => undefined);
   }, [
     showStagingBar,
     stagingMirror,
+    stagingMirrorOffsetY,
+    stagingMirrorScale,
     stagingBar,
     stagingImage,
     size.width,
@@ -1637,6 +1776,18 @@ function App() {
     showPanelTags,
     activePanelPluginId,
   ]);
+
+  // DWM 强制清理：当条件不满足时立即清除，独立于主渲染逻辑
+  const LYRICS_PLUGIN_ID = "com.window-hub.lyrics";
+  useEffect(() => {
+    const needClear =
+      !!msgBanner ||
+      (expanded && activePanelPluginId !== LYRICS_PLUGIN_ID) ||
+      (!expanded && !islandBar);
+    if (needClear) {
+      void invoke("hub_lyric_mirror_clear").catch(() => undefined);
+    }
+  }, [msgBanner, expanded, activePanelPluginId, islandBar]);
 
   const tabExtraH = showPanelTags ? PANEL_TAB_ROW_H : 0;
   const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
@@ -1856,6 +2007,21 @@ function App() {
   };
 
   const shellExpanded = expanded || reveal > 0.2;
+  const dismissGutter = Math.max(0, window.innerWidth - size.width) / 2;
+  const dismissGutterStyle = {
+    ["--dismiss-gutter" as string]: `${dismissGutter}px`,
+  } as CSSProperties;
+  const onDismissBackdrop = (e: ReactPointerEvent) => {
+    // 点岛左右空白：关掉弹窗（透明区原先会被系统点透）
+    e.preventDefault();
+    trayOpenRef.current = false;
+    setTrayOpen(false);
+    pluginPopupOpenRef.current = false;
+    void invoke("close_plugin_popup").catch(() => undefined);
+    if (expandedRef.current || revealRef.current > 0.01) {
+      void collapse();
+    }
+  };
 
   return (
     <div
@@ -1868,23 +2034,22 @@ function App() {
     >
       <div className="ambient-strip" style={stripStyle} aria-hidden />
 
-      {expanded && (
-        <div
-          className="dismiss-backdrop"
-          aria-hidden
-          onPointerDown={(e) => {
-            // 点岛左右空白：关掉弹窗（透明区原先会被系统点透）
-            e.preventDefault();
-            trayOpenRef.current = false;
-            setTrayOpen(false);
-            pluginPopupOpenRef.current = false;
-            void invoke("close_plugin_popup").catch(() => undefined);
-            if (expandedRef.current || revealRef.current > 0.01) {
-              void collapse();
-            }
-          }}
-        />
-      )}
+      {expanded ? (
+        <>
+          <div
+            className="dismiss-backdrop is-left"
+            style={dismissGutterStyle}
+            aria-hidden
+            onPointerDown={onDismissBackdrop}
+          />
+          <div
+            className="dismiss-backdrop is-right"
+            style={dismissGutterStyle}
+            aria-hidden
+            onPointerDown={onDismissBackdrop}
+          />
+        </>
+      ) : null}
 
       <div
         ref={settingsAnchorRef}
@@ -1909,12 +2074,17 @@ function App() {
         size="pulse-inner"
         colorVariant="colorful"
         strength={0.7}
-        borderRadius={Math.round(islandBottomRadius(size.width, size.height))}
+        borderRadius={
+          msgBanner ? Math.round(islandBottomRadius(size.width, size.height)) : 0
+        }
         active={!!msgBanner}
         className="island-beam"
         style={
           {
-            overflow: "visible",
+            background: "transparent",
+            borderRadius: 0,
+            boxShadow: "none",
+            outline: "none",
             ["--island-r-bot"]: `${islandBottomRadius(size.width, size.height)}px`,
           } as CSSProperties
         }
@@ -1947,8 +2117,8 @@ function App() {
           onPointerLeave={() => {
             if (drag.current?.active || expandedRef.current || busy.current) return;
             if (revealRef.current > 0.01) return;
-            lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
-            void setBarHeight(ISLAND_COLLAPSED.height);
+            lastWinH.current = winHeight(liveCollapsed.height);
+            void setBarHeight(liveCollapsed.height);
           }}
           onClick={() => {
             // 左滑划掉 / 明显滑动后忽略 click，避免误开应用
@@ -2075,14 +2245,24 @@ function App() {
                   >
                     {stagingMirror ? (
                       // DWM 映在槽位上；ref 挂槽本身，保证目的矩形铺满岛栏并垂直居中
-                      <span ref={lyricSlotRef} className="bar-lyric-slot" aria-hidden />
+                      <span ref={lyricSlotRef as React.RefObject<HTMLSpanElement>} className="bar-lyric-slot" aria-hidden />
                     ) : stagingImage ? (
                       <img
-                        ref={lyricSlotRef}
+                        ref={lyricSlotRef as React.RefObject<HTMLImageElement>}
                         className="bar-lyric-img"
                         src={stagingImage}
                         alt={islandBar?.title || stagingBar || "歌词"}
                         draggable={false}
+                        style={
+                          stagingMirrorOffsetY || stagingMirrorScale !== 100
+                            ? {
+                                transform: `translateY(${stagingMirrorOffsetY}px) scale(${
+                                  stagingMirrorScale / 100
+                                })`,
+                                transformOrigin: "center center",
+                              }
+                            : undefined
+                        }
                       />
                     ) : (
                       <>
