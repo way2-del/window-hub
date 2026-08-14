@@ -8,7 +8,8 @@
   const CACHE_KEY = "cache";
   const HISTORY_KEY = "history";
   const HISTORY_MAX = 200;
-  const HOVER_OPEN_MS = 180;
+  /** Dwell before hover-opens popup (avoid flash on every pass). */
+  const HOVER_OPEN_MS = 450;
 
   const state = {
     popupOpen: false,

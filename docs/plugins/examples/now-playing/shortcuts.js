@@ -1,9 +1,9 @@
 /**
- * Now Playing — shortcuts invisible worker.
- * Polls local Now Playing HTTP API → island.setBar (lyrics / title).
- * Width 0 so it never paints in the shortcuts strip.
+ * Now Playing — shortcuts invisible worker (情景临时).
+ * Healthy (backend up + has song) → claimScenario + setBar / pull takeover.
+ * Stop song / backend down → clearBar + releaseScenario → prefs restore.
  *
- * Offline: exponential backoff (服务未开时勿每秒打 hub.fetch 拖垮 Host).
+ * Offline: short timeouts, exponential backoff, long park — do not hammer Host.
  */
 (function () {
   const CACHE_KEY = "np-cache";
@@ -11,6 +11,8 @@
     (typeof window.__WH_PLUGIN_ID__ === "string" && window.__WH_PLUGIN_ID__) ||
     "com.window-hub.now-playing";
   const OFFLINE_MAX_MS = 60000;
+  const PARK_AFTER_STREAK = 5;
+  const PARK_SLEEP_MS = 120000;
   let timer = null;
   let lastBar = "";
   let settings = {
@@ -21,11 +23,9 @@
   let lyricCache = { key: "", lines: [] };
   let lastStoreKey = "";
   let tickInFlight = false;
-  /** consecutive failed /api/query (service down) */
   let failStreak = 0;
-  /** only push setBar when Host selected us as 岛栏常驻 */
-  let isBarResident = false;
-  let prefsKnown = false;
+  let loopGen = 0;
+  let scenarioHeld = false;
 
   function hub() {
     if (!window.hub) throw new Error("window.hub missing");
@@ -38,9 +38,16 @@
     return b + p;
   }
 
+  function clearTimer() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  }
+
   function nextDelayMs() {
     if (failStreak <= 0) return settings.pollMs;
-    // 1→2.5s, 2→5s, 3→10s, 4→20s, 5+→40–60s
+    if (failStreak >= PARK_AFTER_STREAK) return PARK_SLEEP_MS;
     const ms = Math.round(settings.pollMs * Math.pow(2, failStreak));
     return Math.min(OFFLINE_MAX_MS, Math.max(2500, ms));
   }
@@ -63,10 +70,10 @@
   }
 
   async function apiGet(base, path) {
-    // 离线探测：短超时，避免服务未开时每次卡满 2.5s+
+    const offline = failStreak > 0;
     const res = await hub().fetch(joinUrl(base, path), {
       method: "GET",
-      timeoutMs: failStreak > 0 ? 800 : 1500,
+      timeoutMs: offline ? 400 : 1200,
     });
     if (!res || !res.ok) throw new Error("HTTP " + (res && res.status));
     return JSON.parse(res.body || "{}");
@@ -150,7 +157,6 @@
       const text = lyric ? "🎶 " + lyric : song;
       return { text: text, title: lyric ? song + " · " + lyric : song };
     }
-    // lyric（默认）：有歌词加音符前缀；无歌词回落歌名不加
     return {
       text: lyric ? "🎶 " + lyric : song,
       title: lyric ? song + " · " + lyric : song,
@@ -179,6 +185,32 @@
     }
   }
 
+  async function claimScenario() {
+    const h = hub();
+    if (!h.island || !h.island.claimScenario) return;
+    try {
+      await h.island.claimScenario();
+      scenarioHeld = true;
+    } catch (err) {
+      console.warn("[now-playing] claimScenario", err);
+    }
+  }
+
+  async function releaseScenario() {
+    const h = hub();
+    if (!scenarioHeld) return;
+    try {
+      if (h.island && h.island.clearBar) await h.island.clearBar();
+    } catch (_) {}
+    lastBar = "";
+    try {
+      if (h.island && h.island.releaseScenario) await h.island.releaseScenario();
+    } catch (err) {
+      console.warn("[now-playing] releaseScenario", err);
+    }
+    scenarioHeld = false;
+  }
+
   async function ensureLyrics(base, track) {
     const key = trackKey(track);
     if (!key) {
@@ -197,31 +229,10 @@
     }
   }
 
-  function applyIslandPrefs(prefs) {
-    prefsKnown = true;
-    const bar =
-      prefs && typeof prefs.barResident === "string"
-        ? prefs.barResident
-        : prefs && typeof prefs.bar_resident === "string"
-          ? prefs.bar_resident
-          : "";
-    const next = bar === PLUGIN_ID;
-    if (isBarResident && !next) {
-      void applyBar("", "");
-    }
-    isBarResident = next;
-  }
-
   async function tick() {
     if (tickInFlight) return;
     tickInFlight = true;
     try {
-      // 未当选岛栏常驻：极少探测（仅保活），避免无意义 IPC
-      if (prefsKnown && !isBarResident) {
-        failStreak = Math.max(failStreak, 3);
-        return;
-      }
-
       const s = settings;
       let connected = false;
       let track = null;
@@ -247,18 +258,13 @@
         }
       } catch (err) {
         connected = false;
-        failStreak = Math.min(8, failStreak + 1);
+        failStreak = Math.min(12, failStreak + 1);
         if (failStreak <= 2) {
           console.warn("[now-playing] poll offline", failStreak, err);
         }
       }
 
       const active = !!(connected && track);
-      if (!isBarResident && prefsKnown) {
-        return;
-      }
-
-      const payload = barPayload(s.barMode, track, lyricLine, connected);
       const storeKey =
         String(connected) +
         "\0" +
@@ -279,14 +285,37 @@
           })
           .catch(function () {});
       }
+
       if (!active) {
-        await applyBar("", "");
+        await releaseScenario();
         return;
       }
+
+      if (!scenarioHeld) {
+        await claimScenario();
+      }
+      const payload = barPayload(s.barMode, track, lyricLine, connected);
       await applyBar(payload.text, payload.title);
     } finally {
       tickInFlight = false;
     }
+  }
+
+  function startLoop() {
+    clearTimer();
+    const gen = ++loopGen;
+    const loop = async function () {
+      if (gen !== loopGen) return;
+      try {
+        await tick();
+      } catch (err) {
+        console.warn("[now-playing]", err);
+        failStreak = Math.min(12, failStreak + 1);
+      }
+      if (gen !== loopGen) return;
+      timer = window.setTimeout(loop, nextDelayMs());
+    };
+    void loop();
   }
 
   async function boot() {
@@ -298,51 +327,16 @@
     } catch (_) {}
 
     await refreshSettings();
-
-    const loop = async function () {
-      try {
-        await tick();
-      } catch (err) {
-        console.warn("[now-playing]", err);
-        failStreak = Math.min(8, failStreak + 1);
-      }
-      timer = window.setTimeout(loop, nextDelayMs());
-    };
-    void loop();
+    startLoop();
 
     if (h.settings && h.settings.subscribe) {
       h.settings.subscribe(function () {
         void refreshSettings().then(function () {
           failStreak = 0;
-          if (timer) {
-            clearTimeout(timer);
-            timer = null;
-          }
-          void loop();
+          startLoop();
         });
       });
     }
-    window.addEventListener("wh-shortcuts-evt", function (ev) {
-      var d = ev && ev.detail;
-      if (!d) return;
-      if (d.type === "island-prefs") {
-        applyIslandPrefs(d.prefs || {});
-        failStreak = 0;
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        void loop();
-        return;
-      }
-    });
-
-    // Host 可能晚于 boot 才广播 prefs；先拉一次（若 bridge 无此命令则忽略）
-    try {
-      if (h.invoke) {
-        /* no-op */
-      }
-    } catch (_) {}
   }
 
   if (document.readyState === "loading") {

@@ -406,6 +406,79 @@ fn read_settings_raw(plugin_id: &str) -> Result<Value, String> {
     Ok(found.unwrap_or_else(|| Value::Object(serde_json::Map::new())))
 }
 
+pub fn plugin_declares_setting(plugin_id: &str, key: &str) -> bool {
+    settings_fields(plugin_id)
+        .ok()
+        .map(|fields| {
+            fields
+                .iter()
+                .any(|f| f.get("key").and_then(|k| k.as_str()) == Some(key))
+        })
+        .unwrap_or(false)
+}
+
+/// Persist one settings key without emitting (migration / host-side writes).
+pub fn write_setting_value(plugin_id: &str, key: &str, value: Value) -> Result<Value, String> {
+    assert_capability(plugin_id, "storage")?;
+    let fields = settings_fields(plugin_id)?;
+    let field = fields
+        .iter()
+        .find(|f| f.get("key").and_then(|k| k.as_str()) == Some(key))
+        .ok_or_else(|| format!("unknown settings key: {key}"))?
+        .clone();
+    validate_setting_value(&field, &value)?;
+    let mut all = hub_settings_get_all(plugin_id.to_string())?;
+    if let Some(obj) = all.as_object_mut() {
+        obj.insert(key.to_string(), value);
+    }
+    crate::db::with_conn(|c| crate::db::plugin_set_system(c, plugin_id, SETTINGS_KEY, &all))?;
+    if key == "openTrayKey" {
+        clear_legacy_open_tray_key(plugin_id);
+    }
+    Ok(all)
+}
+
+/// Clear legacy Host scenarioGates.openTrayKey after settings owns the binding.
+pub fn clear_legacy_open_tray_key(plugin_id: &str) {
+    let Ok(Some(mut row)) = crate::db::with_conn(|c| crate::db::island_get(c)) else {
+        return;
+    };
+    let Ok(mut gates) = serde_json::from_str::<Value>(&row.scenario_gates_json) else {
+        return;
+    };
+    let Some(obj) = gates.as_object_mut() else {
+        return;
+    };
+    let Some(gate) = obj.get_mut(plugin_id).and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    let cur = gate
+        .get("openTrayKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if cur.is_empty() {
+        return;
+    }
+    gate.insert("openTrayKey".into(), Value::String(String::new()));
+    // Drop empty gate entries (no trays/windows/open).
+    let tray_empty = gate
+        .get("trayKeys")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(true);
+    let win_empty = gate
+        .get("windowKeys")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(true);
+    if tray_empty && win_empty {
+        obj.remove(plugin_id);
+    }
+    row.scenario_gates_json = gates.to_string();
+    let _ = crate::db::with_conn(|c| crate::db::island_set(c, &row));
+}
+
 /// Resolved settings (defaults + stored). Requires `storage`.
 #[tauri::command]
 pub fn hub_settings_get_all(plugin_id: String) -> Result<Value, String> {
@@ -445,9 +518,12 @@ pub fn hub_settings_set(
     validate_setting_value(&field, &value)?;
     let mut all = hub_settings_get_all(plugin_id.clone())?;
     if let Some(obj) = all.as_object_mut() {
-        obj.insert(key, value);
+        obj.insert(key.clone(), value);
     }
     crate::db::with_conn(|c| crate::db::plugin_set_system(c, &plugin_id, SETTINGS_KEY, &all))?;
+    if key == "openTrayKey" {
+        clear_legacy_open_tray_key(&plugin_id);
+    }
     let _ = app.emit(
         "plugin-settings-changed",
         serde_json::json!({ "pluginId": plugin_id, "settings": all }),
@@ -658,6 +734,10 @@ pub fn hub_init_script(plugin_id: &str) -> String {
           }}),
         ),
       clearBar: () => invoke("hub_island_clear_bar", withPlugin()),
+      claimScenario: () => invoke("hub_island_claim_scenario", withPlugin()),
+      releaseScenario: () => invoke("hub_island_release_scenario", withPlugin()),
+      getBoundTray: () => invoke("hub_island_get_bound_tray", withPlugin()),
+      openBoundTray: () => invoke("hub_island_open_bound_tray", withPlugin()),
     }},
     fetch: (url, opts) =>
       invoke(

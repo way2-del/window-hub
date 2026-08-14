@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+﻿import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -7,8 +7,11 @@ import {
   setIslandPrefs,
   type IslandPrefs,
 } from "./islandPrefs";
+import {
+  getScenarioGate,
+} from "./scenarioGates";
 import { listPanelProviders } from "./plugins/panelProviders";
-import { listBarResidentProviders } from "./plugins/islandSlots";
+import { listBarResidentProviders, listScenarioProviders } from "./plugins/islandSlots";
 import { pluginRegistry } from "./plugins/registry";
 import {
   bootstrapPlugins,
@@ -382,6 +385,8 @@ export default function SettingsApp() {
   const [dockMsg, setDockMsg] = useState("");
   const [dockBusy, setDockBusy] = useState(false);
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
+  /** scenario pluginId → whether openTrayKey is bound (plugin settings). */
+  const [scenarioOpenBound, setScenarioOpenBound] = useState<Record<string, boolean>>({});
   const [shortcutsExclusiveId, setShortcutsExclusiveId] = useState<string>("");
   const [installed, setInstalled] = useState<InstalledPluginDto[]>([]);
   const [pluginMsg, setPluginMsg] = useState("");
@@ -427,6 +432,47 @@ export default function SettingsApp() {
   const barResidentOptions = useMemo(() => {
     return listBarResidentProviders();
   }, [installed, bumpRegistry]);
+
+  const scenarioOptions = useMemo(() => {
+    return listScenarioProviders();
+  }, [installed, bumpRegistry]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ids = scenarioOptions.map((o) => o.id);
+    void (async () => {
+      const next: Record<string, boolean> = {};
+      await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const key = await invoke<string | null>("hub_island_get_bound_tray", {
+              pluginId: id,
+            });
+            next[id] = typeof key === "string" && key.trim().length > 0;
+          } catch {
+            next[id] = false;
+          }
+        }),
+      );
+      if (!cancelled) setScenarioOpenBound(next);
+    })();
+    let un: (() => void) | undefined;
+    void listen<{ pluginId?: string; settings?: Record<string, unknown> }>(
+      "plugin-settings-changed",
+      (ev) => {
+        const pid = ev.payload?.pluginId;
+        if (!pid || !ids.includes(pid)) return;
+        const key = String(ev.payload?.settings?.openTrayKey ?? "").trim();
+        setScenarioOpenBound((prev) => ({ ...prev, [pid]: Boolean(key) }));
+      },
+    ).then((fn) => {
+      un = fn;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [scenarioOptions]);
 
   const pluginEntries = useMemo<PluginMarketEntry[]>(
     () =>
@@ -1037,8 +1083,8 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>岛栏常驻</h2>
                 <p className="card-desc">
-                  折叠态岛栏默认展示哪个插件的摘要。列表来自已启用、声明 capability/slot
-                  island.bar、且未设 excludeFromBarResident 的插件（如天气）。中转站有条目时仍会临时覆盖，清空后回到常驻。
+                  折叠态岛栏默认展示哪个插件的摘要。列表来自已启用、声明 island.bar、且非情景临时 /
+                  excludeFromBarResident 的插件（如天气）。中转站有条目时仍会临时覆盖；情景插件健康时也会暂代，结束后回到此处选择。
                 </p>
                 <div className="mode-list">
                   <button
@@ -1061,6 +1107,60 @@ export default function SettingsApp() {
                     </button>
                   ))}
                 </div>
+              </section>
+              <section className="settings-card">
+                <h2>情景临时</h2>
+                <p className="card-desc">
+                  启用后，满足条件时自动暂代岛栏摘要与下拉内容（不改动上方常驻/下拉设置）；条件结束（如停播或服务关闭）后自动归还。中转站有暂存条目时仍优先于情景。点进插件可配置存在条件；打开应用绑定在插件设置里。
+                </p>
+                {scenarioOptions.length === 0 ? (
+                  <p className="settings-lead">暂无已启用的情景插件</p>
+                ) : (
+                  <div className="tray-settings-list">
+                    {scenarioOptions.map((item) => {
+                      const gate = getScenarioGate(islandPrefs.scenarioGates, item.id);
+                      const gateCount = gate.trayKeys.length + gate.windowKeys.length;
+                      const openBound = Boolean(scenarioOpenBound[item.id]);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className="tray-settings-item"
+                          onClick={() => {
+                            setFocusPluginId(item.id);
+                            setNav("plugins");
+                          }}
+                        >
+                          <span className="tray-settings-icon tray-settings-fallback">
+                            {item.label.charAt(0)}
+                          </span>
+                          <span className="tray-settings-meta">
+                            <span className="tray-settings-name">{item.label}</span>
+                            <span className="tray-settings-sub">
+                              {[
+                                gateCount > 0
+                                  ? `存在条件 ${gateCount} 项`
+                                  : "未限制存在条件",
+                                openBound ? "已绑定打开托盘" : "未绑定打开托盘",
+                              ].join(" · ")}
+                            </span>
+                          </span>
+                          <span className="tray-settings-chevron" aria-hidden>
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                              <path
+                                d="M6 4l4 4-4 4"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </section>
               <section className="settings-card">
                 <h2>自动沉浸</h2>

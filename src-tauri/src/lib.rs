@@ -3,6 +3,7 @@ mod companion_scripts;
 mod db;
 mod dock;
 mod ecs;
+mod hub_fetch_guard;
 mod plugin_hub;
 mod plugin_install;
 mod staging;
@@ -510,6 +511,10 @@ pub fn run() {
             commands::hub_staging_start_drag,
             commands::hub_island_set_bar,
             commands::hub_island_clear_bar,
+            commands::hub_island_claim_scenario,
+            commands::hub_island_release_scenario,
+            commands::hub_island_get_bound_tray,
+            commands::hub_island_open_bound_tray,
             commands::hub_panel_open_session,
             commands::hub_panel_close_session,
             commands::hub_media_send_key,

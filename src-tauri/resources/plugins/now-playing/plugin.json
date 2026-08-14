@@ -2,10 +2,10 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.now-playing",
   "name": "正在播放",
-  "version": "1.0.3",
+  "version": "1.2.3",
   "official": true,
   "logo": "icon.svg",
-  "description": "对接本机 Now Playing 服务：岛栏滚动歌词，下拉迷你播放器（封面 / 进度 / 媒体键）。设置在本插件页配置 API 地址。",
+  "description": "情景临时：本机 Now Playing 服务正常且有曲目时暂代岛栏歌词与下拉播放器；停播或服务关闭后自动归还。设置中可绑定托盘，面板右下角打开对应应用。",
   "homepage": "https://github.com/Widdit/now-playing-service",
   "entry": {
     "shortcuts": "shortcuts.html",
@@ -19,15 +19,19 @@
       "action": "command",
       "manage": "none"
     },
+    "island.scenario": {
+      "order": 10
+    },
     "island.bar": {
       "order": 10,
       "adaptiveWidth": true,
       "minWidth": 260,
-      "maxWidth": 520
+      "maxWidth": 520,
+      "excludeFromBarResident": true
     },
     "island.panel": {
       "defaultSize": { "w": 400, "h": 200 },
-      "excludeFromPullContent": false
+      "excludeFromPullContent": true
     }
   },
   "settings": [
@@ -61,6 +65,15 @@
         { "value": "title", "label": "歌名 · 歌手" },
         { "value": "both", "label": "歌词优先，无则歌名" }
       ]
+    },
+    {
+      "key": "openTrayKey",
+      "type": "string",
+      "label": "打开应用（绑定托盘）",
+      "description": "面板「打开应用」左键该托盘",
+      "default": "",
+      "maxLength": 512,
+      "uiHidden": true
     }
   ],
   "capabilities": [
@@ -75,4 +88,3 @@
     "network": ["127.0.0.1", "localhost"]
   }
 }
-

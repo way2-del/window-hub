@@ -551,6 +551,13 @@ fn surfaces_from_manifest(manifest: &Value) -> Vec<PluginSurfacePreview> {
             detail: "可占用折叠岛中间摘要文案".into(),
         });
     }
+    if slots.and_then(|s| s.get("island.scenario")).is_some() {
+        out.push(PluginSurfacePreview {
+            id: "island.scenario".into(),
+            label: "情景临时".into(),
+            detail: "健康时可暂代岛栏与下拉，结束后归还常驻/下拉设置".into(),
+        });
+    }
     if slots.and_then(|s| s.get("island.drop")).is_some() {
         out.push(PluginSurfacePreview {
             id: "island.drop".into(),

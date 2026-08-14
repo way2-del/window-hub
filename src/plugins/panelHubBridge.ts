@@ -25,6 +25,10 @@ const ALLOWED_CMDS = new Set([
   "hub_staging_start_drag",
   "hub_island_set_bar",
   "hub_island_clear_bar",
+  "hub_island_claim_scenario",
+  "hub_island_release_scenario",
+  "hub_island_get_bound_tray",
+  "hub_island_open_bound_tray",
   "hub_panel_open_session",
   "hub_panel_close_session",
   "hub_windows_list",
@@ -127,7 +131,13 @@ export function panelHubBootstrapScript(pluginId: string): string {
           title: opts && opts.title
         }));
       },
-      clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }
+      clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); },
+      claimScenario: function () { return invoke("hub_island_claim_scenario", withPlugin()); },
+      releaseScenario: function () { return invoke("hub_island_release_scenario", withPlugin()); },
+      /** Plugin settings openTrayKey — null if unbound. */
+      getBoundTray: function () { return invoke("hub_island_get_bound_tray", withPlugin()); },
+      /** Left-click the bound tray icon (open app). */
+      openBoundTray: function () { return invoke("hub_island_open_bound_tray", withPlugin()); }
     },
     fetch: function (url, opts) {
       return invoke("hub_fetch", withPlugin({ url: url, opts: opts || null }));

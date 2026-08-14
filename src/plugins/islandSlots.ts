@@ -45,19 +45,56 @@ export function listIslandBarPlugins() {
     );
 }
 
-/** 全局设置「岛栏常驻」候选：已启用 + island.bar 能力/槽位，且未 excludeFromBarResident */
+/** 全局设置「岛栏常驻」候选：已启用 + island.bar，且非 excludeFromBarResident、非情景临时 */
 export function listBarResidentProviders(): {
   id: string;
   label: string;
   description: string;
 }[] {
   return listIslandBarPlugins()
-    .filter((p) => !p.manifest.slots?.["island.bar"]?.excludeFromBarResident)
+    .filter(
+      (p) =>
+        !p.manifest.slots?.["island.bar"]?.excludeFromBarResident &&
+        !p.manifest.slots?.["island.scenario"],
+    )
     .map((p) => ({
       id: p.pluginId,
       label: p.manifest.name,
       description: p.manifest.description ?? "岛栏摘要",
     }));
+}
+
+/** 已启用的情景临时插件（只读列表用） */
+export function listScenarioProviders(): {
+  id: string;
+  label: string;
+  description: string;
+}[] {
+  return pluginRegistry
+    .listAll()
+    .filter(
+      (p) =>
+        p.enabled &&
+        p.manifest.slots?.["island.scenario"] &&
+        p.manifest.slots?.["island.bar"] &&
+        p.manifest.slots?.["island.panel"] &&
+        (p.manifest.capabilities ?? []).includes("island.bar") &&
+        (p.manifest.capabilities ?? []).includes("island.panel"),
+    )
+    .sort((a, b) => {
+      const oa = a.manifest.slots?.["island.scenario"]?.order ?? 100;
+      const ob = b.manifest.slots?.["island.scenario"]?.order ?? 100;
+      return oa - ob;
+    })
+    .map((p) => ({
+      id: p.pluginId,
+      label: p.manifest.name,
+      description: p.manifest.description ?? "情景临时接管岛栏与下拉",
+    }));
+}
+
+export function pluginHasScenario(pluginId: string): boolean {
+  return Boolean(pluginRegistry.get(pluginId)?.manifest.slots?.["island.scenario"]);
 }
 
 export function getPluginManifest(pluginId: string): PluginManifest | undefined {

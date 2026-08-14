@@ -92,9 +92,19 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 高度硬顶：内容区不得超过 `getBounds().height`（= `SHORTCUTS_HEIGHT`）。
 
+## Hover 开 popup
+
+悬停打开管理/设置弹窗时 **必须 dwell**，禁止一划过就 `popup.open`。
+
+| Token | 推荐值 | 说明 |
+|-------|--------|------|
+| `HOVER_OPEN_MS` | **450** | `pointerenter` → `setTimeout` → `hub.popup.open`；`pointerleave` 取消 |
+
+点击仍可立即开/关（toggle）。官方窗口组 / 应用库 / 成语与 Host 回退 chip 均用此值。
+
 ## 允许
 
-- 插件网页横向 chip / 分隔线 / 绿点 / 悬停开 popup
+- 插件网页横向 chip / 分隔线 / 绿点 / 悬停开 popup（见上 dwell）
 - 按 `manage` 三态画或不画 2×2（见上表）
 - `hub.shortcuts.getBounds()` 读状态栏/条几何
 - `hub.shortcuts.requestSize({ width })` 通知 Host 条宽

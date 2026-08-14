@@ -21,7 +21,7 @@ pub use migrate::migrate_legacy_files;
 /// Official weather plugin id (settings / storage live in `plugin_kv`).
 pub const WEATHER_PLUGIN_ID: &str = "com.window-hub.weather";
 
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 const PLUGIN_KEY_MAX_BYTES: usize = 512 * 1024;
 const PLUGIN_TOTAL_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SYSTEM_KEY_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -169,6 +169,12 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
+    if ver < 9 {
+        add_prefs_island_scenario_gates(conn)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| e.to_string())?;
+    }
+
     // Additive host tables for installs already past schema bumps.
     conn.execute_batch(
         r#"
@@ -185,6 +191,9 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| e.to_string())?;
+
+    // Idempotent column add for installs that already bumped past v9 path oddly.
+    add_prefs_island_scenario_gates(conn)?;
 
     Ok(())
 }
@@ -305,6 +314,43 @@ fn add_prefs_island_bar_resident(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         r#"
         ALTER TABLE prefs_island ADD COLUMN bar_resident TEXT NOT NULL DEFAULT 'com.window-hub.weather';
+        "#,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn add_prefs_island_scenario_gates(conn: &Connection) -> Result<(), String> {
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='prefs_island'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has == 0 {
+        return Ok(());
+    }
+    let has_col: i64 = conn
+        .prepare("PRAGMA table_info(prefs_island)")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            let mut n = 0i64;
+            for row in rows {
+                if row.ok().as_deref() == Some("scenario_gates_json") {
+                    n = 1;
+                    break;
+                }
+            }
+            Ok(n)
+        })
+        .unwrap_or(0);
+    if has_col != 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        ALTER TABLE prefs_island ADD COLUMN scenario_gates_json TEXT NOT NULL DEFAULT '{}';
         "#,
     )
     .map_err(|e| e.to_string())?;

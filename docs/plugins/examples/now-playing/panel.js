@@ -40,6 +40,7 @@
     waveformCanvas: document.getElementById("waveform-canvas"),
     prevBtn: document.getElementById("prev-btn"),
     nextBtn: document.getElementById("next-btn"),
+    openAppBtn: document.getElementById("open-app-btn"),
   };
   const ctx = dom.waveformCanvas ? dom.waveformCanvas.getContext("2d") : null;
 
@@ -81,7 +82,7 @@
   async function apiGet(path) {
     const res = await hub().fetch(joinUrl(settings.apiBase, path), {
       method: "GET",
-      timeoutMs: failStreak > 0 ? 800 : 2000,
+      timeoutMs: failStreak > 0 ? 400 : 1200,
     });
     if (!res || !res.ok) throw new Error("HTTP " + (res && res.status));
     return JSON.parse(res.body || "{}");
@@ -410,7 +411,9 @@
 
   function nextDelay() {
     if (failStreak <= 0) return settings.pollMs;
-    return Math.min(30000, settings.pollMs * Math.pow(2, failStreak));
+    // Park after sustained offline so opening the panel cannot spam Host.
+    if (failStreak >= 5) return 60000;
+    return Math.min(30000, Math.max(2500, settings.pollMs * Math.pow(2, failStreak)));
   }
 
   function schedule() {
@@ -471,6 +474,64 @@
     tap(dom.prevBtn, "previous");
     tap(dom.nextBtn, "next");
     tap(dom.playPauseBtn, "play_pause");
+
+    if (dom.openAppBtn) {
+      const openApp = function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (dom.openAppBtn.classList.contains("is-unbound")) return;
+        dom.openAppBtn.classList.add("animating");
+        window.setTimeout(function () {
+          dom.openAppBtn.classList.remove("animating");
+        }, 280);
+        void openBoundApp();
+      };
+      dom.openAppBtn.addEventListener("click", openApp);
+      dom.openAppBtn.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") openApp(e);
+      });
+    }
+  }
+
+  async function refreshOpenAppBtn() {
+    if (!dom.openAppBtn) return;
+    let key = null;
+    try {
+      const h = hub();
+      if (h.island && h.island.getBoundTray) {
+        key = await h.island.getBoundTray();
+      }
+    } catch (err) {
+      console.warn("[now-playing] getBoundTray", err);
+      key = null;
+    }
+    const bound = typeof key === "string" && key.trim().length > 0;
+    // Always show the control; muted when unbound so users notice the affordance.
+    dom.openAppBtn.hidden = false;
+    dom.openAppBtn.removeAttribute("hidden");
+    dom.openAppBtn.classList.toggle("is-unbound", !bound);
+    dom.openAppBtn.title = bound ? "打开应用" : "请先在插件详情中绑定打开应用托盘";
+    dom.openAppBtn.setAttribute("aria-disabled", bound ? "false" : "true");
+  }
+
+  async function openBoundApp() {
+    try {
+      const h = hub();
+      if (!h.island || !h.island.openBoundTray) return;
+      if (dom.openAppBtn && dom.openAppBtn.classList.contains("is-unbound")) {
+        await refreshOpenAppBtn();
+        if (dom.openAppBtn.classList.contains("is-unbound")) return;
+      }
+      await h.island.openBoundTray();
+      if (h.panel && h.panel.close) {
+        try {
+          h.panel.close();
+        } catch (_) {}
+      }
+    } catch (err) {
+      console.warn("[now-playing] openBoundTray", err);
+      void refreshOpenAppBtn();
+    }
   }
 
   async function boot() {
@@ -478,6 +539,7 @@
     bindControls();
     startWave();
     await updateUI(null, { silentIcon: true });
+    await refreshOpenAppBtn();
 
     const h = hub();
     if (h.panel && h.panel.onEnter) {
@@ -486,6 +548,7 @@
         schedule();
         startWave();
         window.setTimeout(checkTitleScroll, 50);
+        void refreshOpenAppBtn();
       });
     }
     if (h.panel && h.panel.onLeave) {
@@ -496,8 +559,14 @@
     if (h.settings && h.settings.subscribe) {
       h.settings.subscribe(function () {
         void refreshSettings();
+        void refreshOpenAppBtn();
       });
     }
+    window.addEventListener("message", function (ev) {
+      var d = ev && ev.data;
+      if (!d || d.channel !== "island-prefs-fwd") return;
+      void refreshOpenAppBtn();
+    });
     window.addEventListener("resize", function () {
       checkTitleScroll();
       drawWaveform();

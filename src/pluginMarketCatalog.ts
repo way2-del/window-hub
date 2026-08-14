@@ -101,10 +101,10 @@ export const MARKET_PLUGINS: MarketPlugin[] = [
     exampleId: "now-playing",
     pluginId: "com.window-hub.now-playing",
     name: "正在播放",
-    version: "1.0.3",
+    version: "1.1.0",
     description:
-      "对接本机 Now Playing 服务：岛栏滚动歌词，下拉迷你播放器（封面 / 进度 / 媒体键）。",
-    summary: "岛栏歌词与播放器",
+      "情景临时：本机 Now Playing 服务正常且有曲目时暂代岛栏歌词与下拉播放器；停播或服务关闭后自动归还。",
+    summary: "情景临时 · 岛栏歌词",
     categoryId: "island",
     tint: "#bf5af2",
     letter: "播",

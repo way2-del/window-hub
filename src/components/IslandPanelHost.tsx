@@ -171,6 +171,20 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
   useEffect(() => {
     if (!pluginId || !enabled) return;
     let un: (() => void) | undefined;
+    void listen("island-prefs", () => {
+      iframeRef.current?.contentWindow?.postMessage(
+        { channel: "island-prefs-fwd", pluginId },
+        "*",
+      );
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un?.();
+  }, [pluginId, enabled]);
+
+  useEffect(() => {
+    if (!pluginId || !enabled) return;
+    let un: (() => void) | undefined;
     void listen("staging-changed", (ev) => {
       const { pluginId: pid, summary } = normalizeStagingChanged(
         ev.payload as Parameters<typeof normalizeStagingChanged>[0],

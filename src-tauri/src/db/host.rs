@@ -127,16 +127,24 @@ pub struct IslandPrefsRow {
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
+    /// JSON object: pluginId → { trayKeys, windowKeys }
+    #[serde(default = "default_scenario_gates_json")]
+    pub scenario_gates_json: String,
 }
 
 fn default_bar_resident() -> String {
     "com.window-hub.weather".into()
 }
 
+fn default_scenario_gates_json() -> String {
+    "{}".into()
+}
+
 pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
     conn.query_row(
         "SELECT auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
-                COALESCE(bar_resident, 'com.window-hub.weather')
+                COALESCE(bar_resident, 'com.window-hub.weather'),
+                COALESCE(scenario_gates_json, '{}')
          FROM prefs_island WHERE id = 1",
         [],
         |r| {
@@ -148,6 +156,7 @@ pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
                 msg_notify_text: r.get(4)?,
                 msg_notify_sec: r.get::<_, i64>(5)? as u32,
                 bar_resident: r.get(6)?,
+                scenario_gates_json: r.get(7)?,
             })
         },
     )
@@ -158,8 +167,9 @@ pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
 pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
     conn.execute(
         "INSERT INTO prefs_island(
-            id, auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec, bar_resident, updated_at
-         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)
+            id, auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
+            bar_resident, scenario_gates_json, updated_at
+         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9)
          ON CONFLICT(id) DO UPDATE SET
            auto_immerse=excluded.auto_immerse,
            immerse_idle_sec=excluded.immerse_idle_sec,
@@ -168,6 +178,7 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
            msg_notify_text=excluded.msg_notify_text,
            msg_notify_sec=excluded.msg_notify_sec,
            bar_resident=excluded.bar_resident,
+           scenario_gates_json=excluded.scenario_gates_json,
            updated_at=excluded.updated_at",
         params![
             p.auto_immerse as i64,
@@ -177,6 +188,7 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
             p.msg_notify_text,
             p.msg_notify_sec as i64,
             p.bar_resident,
+            p.scenario_gates_json,
             now_ms(),
         ],
     )
@@ -316,6 +328,7 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           msg_notify_text TEXT NOT NULL,
           msg_notify_sec INTEGER NOT NULL,
           bar_resident TEXT NOT NULL DEFAULT 'com.window-hub.weather',
+          scenario_gates_json TEXT NOT NULL DEFAULT '{}',
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS script_launchers (

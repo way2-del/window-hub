@@ -59,6 +59,8 @@ export type PluginSettingField = {
   max?: number;
   step?: number;
   maxLength?: number;
+  /** Host custom UI (e.g. tray picker); skip generic PluginSettingsForm row. */
+  uiHidden?: boolean;
 };
 
 export type PluginManifest = {
@@ -93,6 +95,11 @@ export type PluginManifest = {
       maxWidth?: number;
     };
     "island.drop"?: { order?: number };
+    /**
+     * 情景临时：健康时可暂代岛栏 + 下拉，不改常驻/下拉 prefs。
+     * 有此槽位的插件不出现在「岛栏常驻 / 下拉内容」竞选列表。
+     */
+    "island.scenario"?: { order?: number };
     "island.panel"?: {
       defaultSize?: { w: number; h: number };
       minSize?: { w: number; h: number };

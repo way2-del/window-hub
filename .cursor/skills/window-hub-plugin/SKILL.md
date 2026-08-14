@@ -35,6 +35,7 @@ description: >-
 | 快捷区（状态菜单左侧） | `shortcuts` | `entry.shortcuts` → iframe 自画 | `shortcuts` + 常用 `storage`/`popup`/`windows.*` |
 | 灵动岛下拉面板 | `island.panel` | `entry.panel` | `island.panel` |
 | 岛栏摘要 | `island.bar` | （无独立入口；API / Host 同步） | **capability + slot** `island.bar`；全局设置「岛栏常驻」竞选；`excludeFromBarResident` 仅临时条；**`adaptiveWidth`** 折叠岛宽随文案（见下） |
+| 情景临时 | `island.scenario` | （无独立入口） | 与 bar+panel 同用；`claimScenario`/`releaseScenario` 暂代岛栏+下拉，不改 prefs；Host 配存在门禁；`settings.openTrayKey` → `openBoundTray` |
 | 岛上拖放 | `island.drop` | （Host DnD） | **必须** `island.drop` + `staging` |
 | 岛通知横幅 | `island.notify` | （无独立 iframe；`hub.notify`） | `notify` |
 | 托管弹窗 | — | `entry.popup` | `popup` |
@@ -51,7 +52,7 @@ description: >-
 | 快捷区入口 + 可自建应用库 | **应用库** | `docs/plugins/examples/app-library/`（`manage=custom`） |
 | 拖放暂存 + 岛栏 + 矮面板 | **中转站** | `docs/plugins/examples/transfer-station/` |
 | 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/`（shortcuts `manage=none`） |
-| 岛栏歌词自适应宽 + 迷你播放器 | **正在播放** | `docs/plugins/examples/now-playing/`（`island.bar.adaptiveWidth`） |
+| 岛栏歌词自适应宽 + 迷你播放器 | **正在播放** | `docs/plugins/examples/now-playing/`（`island.scenario` + `adaptiveWidth`；健康 claim） |
 | 快捷区成语 chip + 历史弹窗 + 带调拼音 | **成语** | `docs/plugins/examples/idiom/`（`manage=custom`；`pinyin-pro.min.js`） |
 | 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
@@ -123,7 +124,7 @@ my-plugin/
 | `network` | `hub.fetch(url, opts?)` + `permissions.network` 白名单 | 是 |
 | `clipboard.*` | **仅 schema 占位，无实现** — 勿调用 | 是（若声明） |
 
-**槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。
+**槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。`claimScenario` / `releaseScenario` 需 `slots["island.scenario"]`（且 bar+panel）。
 
 **岛栏宽自适应（基座能力）：** 在 `slots["island.bar"]` 声明即可，**无需**新 capability：
 

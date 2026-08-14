@@ -9,7 +9,9 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import PluginSettingsForm from "./components/PluginSettingsForm";
+import ScenarioGateSettings from "./components/ScenarioGateSettings";
 import { describeCapabilities } from "./plugins/capGate";
+import { pluginHasScenario } from "./plugins/islandSlots";
 import type { PluginCapability, PluginSettingField } from "./plugins/types";
 import {
   MARKET_CATEGORIES,
@@ -668,6 +670,12 @@ export default function PluginsMarketPanel({
               pluginId={installedDetail.id}
               fields={installedDetail.settings}
               description={installedDetail.settingsIntro}
+            />
+          ) : null}
+          {pluginHasScenario(installedDetail.id) ? (
+            <ScenarioGateSettings
+              pluginId={installedDetail.id}
+              enabled={installedDetail.enabled}
             />
           ) : null}
           <div className="pm-detail-actions">

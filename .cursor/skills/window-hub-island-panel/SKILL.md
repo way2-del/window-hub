@@ -41,12 +41,17 @@ Slot：`island.panel`。展开内容由插件 Web 入口提供（iframe）；**�
 6. **尺寸只在插件 `settings[]` / `defaultSize`**：如 `panelWidth`、`panelHeight`，禁止放全局设置或 Host 壳型枚举。
 7. **禁止 iframe 再套圆角**：`.panel-plugin-frame` 始终 `border-radius: 0`；预览/卡片圆角由插件内层（如镜子 `.mirror-frame`）自绘，避免 Host 底角大圆角把上下裁成不一致。
 8. **`excludeFromPullContent: true`** 的面板不进「下拉内容」；`panelOverride` / `hub.panel.openSession` 仅拖入或点岛栏时临时打开，收起必须清会话。
-9. **槽位门控**：DnD → `resolveIslandDropPluginId()`（需 `island.drop` + `staging`）；岛栏 → `hub.island.setBar`（需 capability+slot `island.bar`）；全局 `barResident` 决定常驻层，其它插件为临时覆盖层；`excludeFromBarResident` 不进设置列表。
-10. **折叠岛宽自适应**：`slots["island.bar"].adaptiveWidth: true`（可选 `minWidth`/`maxWidth`）。Host 按摘要文案测量并改折叠宽（默认约 220–560）；长歌词等用此能力，**勿**在插件内改岛壳几何。源码：`resolveIslandBarAdaptive` / `measureIslandBarLabelWidth`（`islandSlots.ts`）+ `App.tsx` `liveCollapsed`。
+9. **槽位门控**：DnD → `resolveIslandDropPluginId()`（需 `island.drop` + `staging`）；岛栏 → `hub.island.setBar`（需 capability+slot `island.bar`）；全局 `barResident` 决定常驻层；`excludeFromBarResident` 不进设置列表。
+10. **情景临时**（`slots["island.scenario"]`）：`claimScenario` / `releaseScenario` 暂代岛栏 + 下拉，**不改** prefs。优先级：staging overlay > scenario > resident；pull：scenario > session > prefs。有 scenario 槽的插件不进常驻/下拉竞选。Host **存在门禁**与 **打开应用托盘** 在「已安装插件详情」统一配置（全局「情景临时」仅跳转入口）。示例：正在播放。
+11. **折叠岛宽自适应**：`slots["island.bar"].adaptiveWidth: true`（可选 `minWidth`/`maxWidth`）。Host 按摘要文案测量并改折叠宽（默认约 220–560）；长歌词等用此能力，**勿**在插件内改岛壳几何。源码：`resolveIslandBarAdaptive` / `measureIslandBarLabelWidth`（`islandSlots.ts`）+ `App.tsx` `liveCollapsed`。
 
 ## 生命周期
 
 ```ts
+hub.island.claimScenario()
+hub.island.releaseScenario()
+hub.island.getBoundTray()   // → pin_key | null（插件 settings.openTrayKey）
+hub.island.openBoundTray()  // 左键绑定托盘，打开对应应用
 hub.island.setBar({ text, title? })
 hub.island.clearBar()
 hub.panel.openSession()
@@ -57,6 +62,8 @@ hub.panel.onLeave(cb)   // 收起一开始（摄像头等重资源必须在此 s
 ```
 
 **摄像头 / 媒体：** 禁止在面板脚本加载时 `getUserMedia`；只在 `onEnter` 打开，`onLeave` 关闭。折叠态 Host 不发 enter。
+
+**打开应用：** 仅 `island.scenario` 插件。绑定写在插件 `settings.openTrayKey`（插件详情自定义下拉，`uiHidden`）；面板调 `openBoundTray`。
 
 ## 尺寸
 
@@ -71,7 +78,7 @@ hub.panel.onLeave(cb)   // 收起一开始（摄像头等重资源必须在此 s
 |------|-----|------|
 | 天气 | `com.window-hub.weather` | `island.bar` + `island.panel`；配置在 `settings[]`；数据 `hub.storage` |
 | 镜子 | `com.window-hub.mirror` | 仅 `island.panel`；`onEnter` 开摄像头 / `onLeave` 关；iframe `allow="camera"` |
-| 正在播放 | `com.window-hub.now-playing` | `island.bar.adaptiveWidth` + `island.panel`；歌词 `setBar` |
+| 正在播放 | `com.window-hub.now-playing` | `island.scenario` + `island.bar.adaptiveWidth` + `island.panel`；健康时 claim 暂代岛栏/下拉 |
 
 示例目录：`docs/plugins/examples/{weather,mirror,now-playing}/`（资源镜像 `src-tauri/resources/plugins/`）。首次启动缺失则 `ensure_official_plugins` 安装，不覆盖已装版本。
 

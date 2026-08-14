@@ -1906,6 +1906,101 @@ pub fn hub_island_clear_bar(app: AppHandle, plugin_id: String) -> Result<(), Str
     Ok(())
 }
 
+/// Temporary scenario takeover of island bar + pull panel (does not mutate prefs).
+#[tauri::command]
+pub fn hub_island_claim_scenario(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
+    crate::plugin_hub::assert_capability(&plugin_id, "island.panel")?;
+    crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.scenario")?;
+    crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.bar")?;
+    crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.panel")?;
+    let _ = app.emit(
+        "island-scenario",
+        serde_json::json!({ "action": "claim", "pluginId": plugin_id }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn hub_island_release_scenario(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.scenario")?;
+    let _ = app.emit(
+        "island-scenario",
+        serde_json::json!({ "action": "release", "pluginId": plugin_id }),
+    );
+    Ok(())
+}
+
+/// Bound tray pin_key from plugin settings `openTrayKey` (scenario panel open-app).
+fn plugin_open_tray_key(plugin_id: &str) -> Result<Option<String>, String> {
+    let declares = crate::plugin_hub::plugin_declares_setting(plugin_id, "openTrayKey");
+    let from_settings = crate::plugin_hub::hub_settings_get_all(plugin_id.to_string())
+        .ok()
+        .and_then(|all| {
+            all.get("openTrayKey")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    if let Some(key) = from_settings {
+        crate::plugin_hub::clear_legacy_open_tray_key(plugin_id);
+        return Ok(Some(key));
+    }
+
+    let prefs = get_island_prefs();
+    let legacy = prefs
+        .scenario_gates
+        .get(plugin_id)
+        .map(|g| g.open_tray_key.trim().to_string())
+        .filter(|k| !k.is_empty());
+
+    if declares {
+        if let Some(key) = legacy {
+            // One-shot migrate into settings so empty settings = unbound afterwards.
+            let _ = crate::plugin_hub::write_setting_value(
+                plugin_id,
+                "openTrayKey",
+                serde_json::Value::String(key.clone()),
+            );
+            return Ok(Some(key));
+        }
+        return Ok(None);
+    }
+
+    Ok(legacy)
+}
+
+/// Bound tray pin_key for this scenario plugin (plugin settings `openTrayKey`).
+#[tauri::command]
+pub fn hub_island_get_bound_tray(plugin_id: String) -> Result<Option<String>, String> {
+    crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.scenario")?;
+    plugin_open_tray_key(&plugin_id)
+}
+
+/// Left-click the tray icon bound in plugin settings (`openTrayKey`).
+#[tauri::command]
+pub fn hub_island_open_bound_tray(plugin_id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.scenario")?;
+    let key = plugin_open_tray_key(&plugin_id)?
+        .ok_or_else(|| "未绑定打开用托盘（插件详情 → 打开应用）".to_string())?;
+    let icons = crate::win32::tray::list_icons();
+    let icon = icons
+        .iter()
+        .find(|i| {
+            let pk = i.pin_key.trim();
+            (!pk.is_empty() && pk == key) || i.id == key
+        })
+        .ok_or_else(|| "绑定的托盘当前不在系统托盘中".to_string())?;
+    crate::win32::tray::invoke_icon_by_id(
+        Some(icon.id.clone()),
+        icon.hwnd,
+        icon.callback_msg,
+        icon.uid,
+        icon.version,
+        crate::win32::tray::TrayClick::Left,
+    )
+}
+
 #[tauri::command]
 pub fn hub_panel_open_session(app: AppHandle, plugin_id: String) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "island.panel")?;
@@ -2028,6 +2123,11 @@ pub fn hub_fetch(
     if !crate::plugin_hub::url_allowed_by_network_list(&url, &allow) {
         return Err(format!("url not allowed by permissions.network: {url}"));
     }
+
+    // Isolate dead backends: concurrency cap + per-origin circuit breaker.
+    crate::hub_fetch_guard::check_circuit(&plugin_id, &url)?;
+    let _slot = crate::hub_fetch_guard::try_acquire_slot()?;
+
     let opts = opts.unwrap_or(HubFetchOpts {
         method: None,
         headers: None,
@@ -2046,8 +2146,9 @@ pub fn hub_fetch(
     ) {
         return Err(format!("unsupported method: {method}"));
     }
+    // Cap default timeout lower so a hung localhost cannot hold invoke threads for 15s.
     let timeout = std::time::Duration::from_millis(
-        opts.timeout_ms.unwrap_or(15_000).clamp(300, 60_000),
+        opts.timeout_ms.unwrap_or(5_000).clamp(200, 30_000),
     );
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let mut req = match method.as_str() {
@@ -2071,8 +2172,20 @@ pub fn hub_fetch(
         req.send_string(&body)
     } else {
         req.call()
-    }
-    .map_err(|e| format!("fetch failed: {e}"))?;
+    };
+    let resp = match resp {
+        Ok(r) => {
+            crate::hub_fetch_guard::record_success(&plugin_id, &url);
+            r
+        }
+        Err(e) => {
+            let msg = format!("fetch failed: {e}");
+            if crate::hub_fetch_guard::is_transport_error(&msg) {
+                crate::hub_fetch_guard::record_failure(&plugin_id, &url);
+            }
+            return Err(msg);
+        }
+    };
 
     let status = resp.status();
     let mut headers = serde_json::Map::new();
@@ -2099,6 +2212,18 @@ pub fn hub_fetch(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ScenarioGateDto {
+    #[serde(default)]
+    pub tray_keys: Vec<String>,
+    #[serde(default)]
+    pub window_keys: Vec<String>,
+    /// Stable tray pin_key for `hub.island.openBoundTray` (legacy; prefer plugin settings `openTrayKey`).
+    #[serde(default)]
+    pub open_tray_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IslandPrefsDto {
     pub auto_immerse: bool,
     pub immerse_idle_sec: u32,
@@ -2108,6 +2233,9 @@ pub struct IslandPrefsDto {
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
+    /// pluginId → presence gates (stable tray pin_key / window exe key)
+    #[serde(default)]
+    pub scenario_gates: std::collections::HashMap<String, ScenarioGateDto>,
 }
 
 fn default_bar_resident_pref() -> String {
@@ -2124,8 +2252,60 @@ impl Default for IslandPrefsDto {
             msg_notify: true,
             msg_notify_text: "收到一条消息".into(),
             msg_notify_sec: 4,
+            scenario_gates: std::collections::HashMap::new(),
         }
     }
+}
+
+fn parse_scenario_gates_json(raw: &str) -> std::collections::HashMap<String, ScenarioGateDto> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+fn scenario_gates_to_json(gates: &std::collections::HashMap<String, ScenarioGateDto>) -> String {
+    serde_json::to_string(gates).unwrap_or_else(|_| "{}".into())
+}
+
+fn normalize_scenario_gates(
+    gates: std::collections::HashMap<String, ScenarioGateDto>,
+) -> std::collections::HashMap<String, ScenarioGateDto> {
+    let mut out = std::collections::HashMap::new();
+    for (pid, g) in gates {
+        let plugin_id = pid.trim().to_string();
+        if plugin_id.is_empty() {
+            continue;
+        }
+        let mut tray = Vec::new();
+        let mut seen_t = std::collections::HashSet::new();
+        for k in g.tray_keys {
+            let t = k.trim().to_string();
+            if t.is_empty() || !seen_t.insert(t.clone()) {
+                continue;
+            }
+            tray.push(t);
+        }
+        let mut win = Vec::new();
+        let mut seen_w = std::collections::HashSet::new();
+        for k in g.window_keys {
+            let t = k.trim().to_string();
+            if t.is_empty() || !seen_w.insert(t.clone()) {
+                continue;
+            }
+            win.push(t);
+        }
+        let open_tray_key = g.open_tray_key.trim().to_string();
+        if tray.is_empty() && win.is_empty() && open_tray_key.is_empty() {
+            continue;
+        }
+        out.insert(
+            plugin_id,
+            ScenarioGateDto {
+                tray_keys: tray,
+                window_keys: win,
+                open_tray_key,
+            },
+        );
+    }
+    out
 }
 
 impl From<crate::db::IslandPrefsRow> for IslandPrefsDto {
@@ -2138,6 +2318,7 @@ impl From<crate::db::IslandPrefsRow> for IslandPrefsDto {
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text,
             msg_notify_sec: p.msg_notify_sec,
+            scenario_gates: parse_scenario_gates_json(&p.scenario_gates_json),
         }
     }
 }
@@ -2152,6 +2333,7 @@ impl From<&IslandPrefsDto> for crate::db::IslandPrefsRow {
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text.clone(),
             msg_notify_sec: p.msg_notify_sec,
+            scenario_gates_json: scenario_gates_to_json(&p.scenario_gates),
         }
     }
 }
@@ -2183,6 +2365,7 @@ fn normalize_island_prefs(mut p: IslandPrefsDto) -> IslandPrefsDto {
     p.msg_notify_sec = p.msg_notify_sec.clamp(2, 30);
     p.pull_content = normalize_pull_content(&p.pull_content);
     p.bar_resident = normalize_bar_resident(&p.bar_resident);
+    p.scenario_gates = normalize_scenario_gates(p.scenario_gates);
     p.msg_notify_text = {
         let t = p.msg_notify_text.trim().to_string();
         if t.is_empty() {
@@ -2211,6 +2394,38 @@ pub fn get_island_prefs() -> IslandPrefsDto {
 
 #[tauri::command]
 pub fn set_island_prefs(app: AppHandle, prefs: IslandPrefsDto) -> Result<IslandPrefsDto, String> {
+    // FE no longer writes openTrayKey (plugin settings). Migrate any leftover Host
+    // values into settings before dropping them from island prefs.
+    let prev = get_island_prefs();
+    for (pid, old) in &prev.scenario_gates {
+        let legacy = old.open_tray_key.trim();
+        if legacy.is_empty() {
+            continue;
+        }
+        if !crate::plugin_hub::plugin_declares_setting(pid, "openTrayKey") {
+            continue;
+        }
+        let already = crate::plugin_hub::hub_settings_get_all(pid.clone())
+            .ok()
+            .and_then(|all| {
+                all.get("openTrayKey")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
+        if already.is_some() {
+            continue;
+        }
+        let _ = crate::plugin_hub::write_setting_value(
+            pid,
+            "openTrayKey",
+            serde_json::Value::String(legacy.to_string()),
+        );
+    }
+    let mut prefs = prefs;
+    for g in prefs.scenario_gates.values_mut() {
+        g.open_tray_key.clear();
+    }
     let next = normalize_island_prefs(prefs);
     let row = crate::db::IslandPrefsRow::from(&next);
     crate::db::with_conn(|c| crate::db::island_set(c, &row))?;
@@ -2230,6 +2445,9 @@ pub fn detach_plugin_from_island_prefs(app: &AppHandle, plugin_id: &str) {
     }
     if next.bar_resident == plugin_id {
         next.bar_resident.clear();
+        changed = true;
+    }
+    if next.scenario_gates.remove(plugin_id).is_some() {
         changed = true;
     }
     if !changed {

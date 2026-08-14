@@ -35,7 +35,8 @@ import { WH_SHORTCUTS_EVT } from "../plugins/shortcutsHubBridge";
 import "./ShortcutsHost.css";
 
 const POPUP_GAP = 8;
-const HOVER_OPEN_MS = 140;
+/** Intentional dwell before hover-opens popup — short values flash on every pass. */
+const HOVER_OPEN_MS = 450;
 const DEFAULT_STRIP_W = 28;
 const MIN_STRIP_W = 28;
 

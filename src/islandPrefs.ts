@@ -1,6 +1,7 @@
 /** 灵动岛偏好（设置窗 ↔ 主顶栏通过 SQLite + Tauri 事件同步） */
 
 import { invoke } from "@tauri-apps/api/core";
+import { parseScenarioGates, type ScenarioGatesMap } from "./scenarioGates";
 
 /** 下拉展开内容：`plugin:{id}`（legacy weather|mirror 会迁移） */
 export type PullContent = string;
@@ -23,6 +24,11 @@ export type IslandPrefs = {
   msgNotifyText: string;
   /** 提示展示时长（秒）——仅作插件 notify 默认 TTL；托盘提示仍常驻 */
   msgNotifySec: number;
+  /**
+   * 情景临时存在门禁：pluginId → trayKeys / windowKeys（Host）。
+   * 打开应用托盘绑定在插件 settings.openTrayKey。
+   */
+  scenarioGates: ScenarioGatesMap;
 };
 
 const LS_AUTO = "wh-island-auto-immerse";
@@ -63,6 +69,7 @@ const DEFAULTS: IslandPrefs = {
   msgNotify: true,
   msgNotifyText: "收到一条消息",
   msgNotifySec: 4,
+  scenarioGates: {},
 };
 
 const IDLE_MIN = 2;
@@ -70,7 +77,7 @@ const IDLE_MAX = 300;
 const MSG_SEC_MIN = 2;
 const MSG_SEC_MAX = 30;
 
-let cache: IslandPrefs = { ...DEFAULTS };
+let cache: IslandPrefs = { ...DEFAULTS, scenarioGates: {} };
 let hydrated = false;
 
 function clampIdle(sec: number) {
@@ -102,11 +109,9 @@ export function clampStagingPanelH(h: number): number {
 }
 
 function parsePullContent(raw: string | null | undefined): PullContent {
-  // null/undefined = missing field → default; "" / none / off = explicit「无」
   if (raw == null) return DEFAULTS.pullContent;
   const t = String(raw).trim();
   if (!t || t === "none" || t === "off") return "";
-  // Legacy Host builtins → official plugins
   if (t === "weather") return "plugin:com.window-hub.weather";
   if (t === "mirror") return "plugin:com.window-hub.mirror";
   if (t.startsWith("plugin:")) return t;
@@ -117,7 +122,6 @@ function parseBarResident(raw: string | null | undefined): string {
   if (raw == null) return DEFAULTS.barResident;
   const t = String(raw).trim();
   if (!t || t === "none" || t === "off") return "";
-  // Accept legacy pullContent-style ids
   if (t.startsWith("plugin:")) return t.slice("plugin:".length);
   return t;
 }
@@ -145,6 +149,7 @@ function readLegacyLocalStorage(): IslandPrefs | null {
       msgNotify: msgRaw == null ? DEFAULTS.msgNotify : msgRaw === "1" || msgRaw === "true",
       msgNotifyText: parseMsgText(msgTextRaw),
       msgNotifySec: msgSecRaw == null ? DEFAULTS.msgNotifySec : clampMsgSec(Number(msgSecRaw)),
+      scenarioGates: {},
     };
   } catch {
     return null;
@@ -164,7 +169,8 @@ function mergePrefs(prev: IslandPrefs, partial: Partial<IslandPrefs>): IslandPre
     autoImmerse: partial.autoImmerse ?? prev.autoImmerse,
     immerseIdleSec:
       partial.immerseIdleSec != null ? clampIdle(partial.immerseIdleSec) : prev.immerseIdleSec,
-    pullContent: partial.pullContent != null ? parsePullContent(partial.pullContent) : prev.pullContent,
+    pullContent:
+      partial.pullContent != null ? parsePullContent(partial.pullContent) : prev.pullContent,
     barResident:
       partial.barResident != null ? parseBarResident(partial.barResident) : prev.barResident,
     msgNotify: partial.msgNotify ?? prev.msgNotify,
@@ -172,6 +178,10 @@ function mergePrefs(prev: IslandPrefs, partial: Partial<IslandPrefs>): IslandPre
       partial.msgNotifyText != null ? parseMsgText(partial.msgNotifyText) : prev.msgNotifyText,
     msgNotifySec:
       partial.msgNotifySec != null ? clampMsgSec(partial.msgNotifySec) : prev.msgNotifySec,
+    scenarioGates:
+      partial.scenarioGates != null
+        ? parseScenarioGates(partial.scenarioGates)
+        : (prev.scenarioGates ?? {}),
   };
 }
 
@@ -185,14 +195,14 @@ export async function hydrateIslandPrefs(): Promise<IslandPrefs> {
   try {
     const legacy = readLegacyLocalStorage();
     if (legacy) {
-      cache = await invoke<IslandPrefs>("set_island_prefs", { prefs: legacy });
+      cache = mergePrefs(DEFAULTS, await invoke<IslandPrefs>("set_island_prefs", { prefs: legacy }));
       clearLegacyLocalStorage();
     } else {
       const raw = await invoke<IslandPrefs>("get_island_prefs");
       cache = mergePrefs(DEFAULTS, raw);
     }
   } catch {
-    cache = { ...DEFAULTS };
+    cache = { ...DEFAULTS, scenarioGates: {} };
   }
   hydrated = true;
   window.dispatchEvent(new Event("wh-island-prefs"));
@@ -205,7 +215,7 @@ export async function setIslandPrefs(partial: Partial<IslandPrefs>): Promise<Isl
   }
   const next = mergePrefs(cache, partial);
   try {
-    cache = await invoke<IslandPrefs>("set_island_prefs", { prefs: next });
+    cache = mergePrefs(DEFAULTS, await invoke<IslandPrefs>("set_island_prefs", { prefs: next }));
   } catch {
     cache = next;
   }

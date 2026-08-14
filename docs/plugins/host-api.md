@@ -23,6 +23,9 @@
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。  
 设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。  
+`slots["island.scenario"]` → **情景临时**：`claimScenario` / `releaseScenario` 暂代岛栏 + 下拉（**不改** SQLite 常驻/下拉 prefs）；有此槽位的插件不出现在常驻/下拉竞选列表。  
+显示优先级：**中转站 overlay > 情景临时 > 岛栏常驻**；下拉：**情景 pull > panelOverride > 设置下拉内容**。折叠岛不清情景。  
+**存在门禁（Host）** / **打开应用（插件 settings）**：在 **已安装插件详情**（设置 → 插件市场 → 已安装 → 情景插件）统一配置；全局「情景临时」列表仅作跳转入口。`trayKeys` / `windowKeys` 写在岛 prefs `scenarioGates`；`openTrayKey` 写在插件 `settings`（`hub.island.openBoundTray`）。  
 `slots["island.bar"].adaptiveWidth: true` → Host 按摘要文案自适应折叠岛宽（`minWidth`/`maxWidth`，默认 220–560）；长歌词等勿再靠 ellipsis 硬裁。
 
 ## 共享 WindowsService
@@ -53,14 +56,18 @@ Rust 单例轮询（默认 250ms），事件 `hub-windows-changed`。多插件 `
 
 | 方法 | 说明 |
 |------|------|
-| `island.setBar({ text, title? })` | 需 `island.bar`；若 slot `adaptiveWidth`，Host 按文案调折叠岛宽 |
-| `island.clearBar()` | 需 `island.bar`；折叠宽回到默认 300 |
+| `island.setBar({ text, title? })` | 需 `island.bar`；常驻主人 / 情景主人 / exclude overlay 可写对应层；若 `adaptiveWidth`，Host 按文案调折叠岛宽 |
+| `island.clearBar()` | 需 `island.bar`；清本插件所在层 |
+| `island.claimScenario()` | 需 `island.scenario` + bar + panel；接管岛栏与下拉（后 claim 顶替前者）。Host 另按设置的托盘/窗口存在门禁拦截 |
+| `island.releaseScenario()` | 需 `island.scenario`；仅主人可释放，恢复用户常驻/下拉 |
+| `island.getBoundTray()` | 需 `island.scenario`；返回插件 settings `openTrayKey`（`string \| null`） |
+| `island.openBoundTray()` | 需 `island.scenario`；左键绑定托盘以打开对应应用（未绑定 / 托盘不在则报错） |
 | `island.onBarClick(cb)` | Shortcuts iframe：岛栏摘要被点击时回调（无 panel 也可） |
 | `panel.openSession()` | 需 `island.panel`；临时展开该插件面板 |
 | `panel.closeSession()` | 清会话并收起 |
 | `panel.close()` | 面板内关闭 |
 
-DnD → `island.drop` 赢家。`excludeFromPullContent: true` → 不进下拉内容列表。
+DnD → `island.drop` 赢家。`excludeFromPullContent: true` → 不进下拉内容列表。`island.scenario` 插件自动不进常驻/下拉列表。
 
 ## `hub.shortcuts.*`（快捷区 iframe）
 

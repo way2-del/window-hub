@@ -7,7 +7,8 @@ const hub = () => {
   return window.hub;
 };
 
-const HOVER_OPEN_MS = 180;
+/** Dwell before hover-opens manage popup (avoid flash on every pass). */
+const HOVER_OPEN_MS = 450;
 
 const state = {
   store: { version: 1, apps: [] },

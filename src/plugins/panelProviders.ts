@@ -25,6 +25,7 @@ export function listPanelProviders(
       (m) =>
         m.slots?.["island.panel"] &&
         !m.slots["island.panel"]?.excludeFromPullContent &&
+        !m.slots?.["island.scenario"] &&
         (m.entry?.panel || m.entry?.development?.panel),
     )
     .map((m) => ({

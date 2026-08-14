@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { PluginSettingField } from "../plugins/types";
+import { OPEN_TRAY_SETTING_KEY } from "../scenarioGates";
+import OpenTraySetting from "./OpenTraySetting";
 
 type Props = {
   pluginId: string;
@@ -72,6 +74,21 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
     <div className="plugin-settings">
       {description ? <p className="plugin-settings-desc">{description}</p> : null}
       {fields.map((field) => {
+        if (field.key === OPEN_TRAY_SETTING_KEY) {
+          return (
+            <OpenTraySetting
+              key={field.key}
+              pluginId={pluginId}
+              label={field.label}
+              description={
+                field.description ||
+                "面板右下角「打开应用」会左键该托盘"
+              }
+              disabled={busy}
+            />
+          );
+        }
+        if (field.uiHidden) return null;
         const value = values[field.key] ?? field.default;
         const desc = field.description;
         if (field.type === "boolean") {

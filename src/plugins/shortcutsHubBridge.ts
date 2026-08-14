@@ -155,6 +155,10 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
         }));
       },
       clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); },
+      claimScenario: function () { return invoke("hub_island_claim_scenario", withPlugin()); },
+      releaseScenario: function () { return invoke("hub_island_release_scenario", withPlugin()); },
+      getBoundTray: function () { return invoke("hub_island_get_bound_tray", withPlugin()); },
+      openBoundTray: function () { return invoke("hub_island_open_bound_tray", withPlugin()); },
       /** Fired when user clicks the island bar summary for this plugin. */
       onBarClick: function (cb) {
         function onEvt(ev) {

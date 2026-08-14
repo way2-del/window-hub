@@ -42,8 +42,14 @@ import {
 } from "./plugins/islandSlots";
 import { parsePluginPanelId } from "./plugins/panelProviders";
 import { pluginRegistry } from "./plugins/registry";
+import {
+  scenarioPresenceOk,
+  trayKeyOf,
+  windowKeyOf,
+} from "./scenarioGates";
 import { hideChromeHoverTip, hostTipPointerProps, installChromeHoverTipGlobalDismiss } from "./chromeHoverTip";
 import "./App.css";
+import type { WindowInfo } from "./types";
 
 /** 默认插件面板展开尺寸（非中转站） */
 const VIEW_W_DEFAULT = 380;
@@ -506,11 +512,19 @@ function App() {
   const shellPanelHRef = useRef(shellPanelH);
   /** 常驻层：仅全局设置选中的 barResident 插件可写 */
   const [residentBar, setResidentBar] = useState<IslandBarState | null>(null);
-  /** 临时层：中转站等；有内容时盖住常驻 */
+  /** 临时层：中转站等；有内容时盖住常驻与情景 */
   const [overlayBar, setOverlayBar] = useState<IslandBarState | null>(null);
-  const islandBar = overlayBar ?? residentBar;
+  /** 情景临时：claimScenario 后写入；释放后回到常驻 */
+  const [scenarioOwner, setScenarioOwner] = useState<string | null>(null);
+  const [scenarioBar, setScenarioBar] = useState<IslandBarState | null>(null);
+  const [scenarioPull, setScenarioPull] = useState<string | null>(null);
+  const islandBar = overlayBar ?? scenarioBar ?? residentBar;
   const residentBarRef = useRef(residentBar);
   const overlayBarRef = useRef(overlayBar);
+  const scenarioOwnerRef = useRef(scenarioOwner);
+  const scenarioBarRef = useRef(scenarioBar);
+  const liveTrayKeysRef = useRef<string[]>([]);
+  const liveWindowKeysRef = useRef<string[]>([]);
   const barStagingTextRef = useRef<HTMLSpanElement>(null);
   const collapsedSizeTimer = useRef<number | null>(null);
   const syncCollapsedIslandWidthRef = useRef<(nextW: number) => void>(() => undefined);
@@ -519,6 +533,44 @@ function App() {
   >(() => ISLAND_COLLAPSED_W_DEFAULT);
   residentBarRef.current = residentBar;
   overlayBarRef.current = overlayBar;
+  scenarioOwnerRef.current = scenarioOwner;
+  scenarioBarRef.current = scenarioBar;
+
+  function clearScenarioLayer() {
+    scenarioOwnerRef.current = null;
+    setScenarioOwner(null);
+    setScenarioBar(null);
+    setScenarioPull(null);
+  }
+
+  function scenarioGateAllows(pluginId: string): boolean {
+    return scenarioPresenceOk(
+      pluginId,
+      islandPrefsRef.current.scenarioGates,
+      liveTrayKeysRef.current,
+      liveWindowKeysRef.current,
+    );
+  }
+
+  function refreshPresenceKeys(
+    trays?: Array<{ id: string; pin_key?: string }>,
+    windows?: WindowInfo[],
+  ) {
+    if (trays) {
+      liveTrayKeysRef.current = trays
+        .map((t) => trayKeyOf(t))
+        .filter(Boolean);
+    }
+    if (windows) {
+      liveWindowKeysRef.current = windows
+        .map((w) => windowKeyOf(w))
+        .filter(Boolean);
+    }
+    const owner = scenarioOwnerRef.current;
+    if (owner && !scenarioGateAllows(owner)) {
+      clearScenarioLayer();
+    }
+  }
 
   /** 折叠岛宽：即时 paintDom 居中变宽；debounce 的是 React size（ShortcutsHost 用） */
   function syncCollapsedIslandWidth(nextW: number) {
@@ -630,10 +682,12 @@ function App() {
   /** 按当前岛栏文案重算折叠尺寸（收起结束时用，避免 liveCollapsed 过期导致错位） */
   function snapCollapsedFromBar(): IslandSize {
     const overlay = overlayBarRef.current;
+    const scenario = scenarioBarRef.current;
     const resident = residentBarRef.current;
     const dropId = dropPluginIdRef.current;
-    const text = String(overlay?.text ?? resident?.text ?? "");
-    const pluginId = overlay?.pluginId ?? resident?.pluginId ?? null;
+    const text = String(overlay?.text ?? scenario?.text ?? resident?.text ?? "");
+    const pluginId =
+      overlay?.pluginId ?? scenario?.pluginId ?? resident?.pluginId ?? null;
     const showDot = Boolean(
       pluginId &&
         pluginRegistry.get(pluginId)?.manifest.slots?.["island.bar"]
@@ -670,6 +724,33 @@ function App() {
         if (!prev) return prev;
         return barOk(prev.pluginId) ? prev : null;
       });
+      setScenarioOwner((owner) => {
+        if (!owner) return owner;
+        const rec = pluginRegistry.get(owner);
+        const ok =
+          Boolean(rec?.enabled) &&
+          Boolean(rec?.manifest.slots?.["island.scenario"]) &&
+          barOk(owner);
+        if (ok) return owner;
+        setScenarioBar(null);
+        setScenarioPull(null);
+        return null;
+      });
+      setScenarioBar((prev) => {
+        if (!prev) return prev;
+        return barOk(prev.pluginId) &&
+          scenarioOwnerRef.current === prev.pluginId
+          ? prev
+          : null;
+      });
+      setScenarioPull((prev) => {
+        if (!prev?.startsWith("plugin:")) return prev;
+        const pid = prev.slice("plugin:".length);
+        return pluginRegistry.get(pid)?.enabled &&
+          scenarioOwnerRef.current === pid
+          ? prev
+          : null;
+      });
       setPanelOverride((prev) => {
         if (!prev?.startsWith("plugin:")) return prev;
         const pid = prev.slice("plugin:".length);
@@ -689,6 +770,21 @@ function App() {
         const wantBar = islandPrefsRef.current.barResident;
         if (wantBar && !pluginRegistry.get(wantBar)) {
           void setIslandPrefs({ barResident: "" }).catch(() => undefined);
+        } else if (
+          wantBar &&
+          pluginRegistry.get(wantBar)?.manifest.slots?.["island.scenario"]
+        ) {
+          // Scenario plugins are not permanent 常驻 — drop stale selection.
+          void setIslandPrefs({ barResident: "" }).catch(() => undefined);
+        }
+        if (pull.startsWith("plugin:")) {
+          const pid = pull.slice("plugin:".length);
+          if (
+            pid &&
+            pluginRegistry.get(pid)?.manifest.slots?.["island.scenario"]
+          ) {
+            void setIslandPrefs({ pullContent: "" }).catch(() => undefined);
+          }
         }
       }
     };
@@ -1503,9 +1599,11 @@ function App() {
     };
   }, [ambient.r, ambient.g, ambient.b, ambient.png_base64, ambient.width]);
 
-  /** 当前会话 / 投放插件：同步面板壳尺寸（defaultSize 或 staging settings） */
+  /** 当前会话 / 投放 / 情景插件：同步面板壳尺寸 */
   const sizePluginId =
-    parsePluginPanelId(panelOverride ?? islandPrefs.pullContent) ?? dropPluginId;
+    parsePluginPanelId(
+      scenarioPull ?? panelOverride ?? islandPrefs.pullContent,
+    ) ?? dropPluginId;
 
   useEffect(() => {
     if (!sizePluginId) return;
@@ -1567,6 +1665,7 @@ function App() {
     let unlistenPluginNotify: (() => void) | undefined;
     let unlistenStaging: (() => void) | undefined;
     let unlistenBar: (() => void) | undefined;
+    let unlistenScenario: (() => void) | undefined;
     let unlistenSession: (() => void) | undefined;
     let unsubPlugins = () => {};
     void bootstrapPlugins();
@@ -1649,35 +1748,84 @@ function App() {
       const residentId = islandPrefsRef.current.barResident;
       const rec = pluginRegistry.get(p.pluginId);
       const tempOnly = Boolean(rec?.manifest.slots?.["island.bar"]?.excludeFromBarResident);
-      // 常驻层：仅当前选中的常驻插件可写
+      const isScenarioOwner = scenarioOwnerRef.current === p.pluginId;
+      const hasScenario = Boolean(rec?.manifest.slots?.["island.scenario"]);
+      const adaptive = resolveIslandBarAdaptive(p.pluginId).enabled;
+
+      // Visible layer for DOM paint: overlay > scenario > resident
+      const paintVisibleBar = (text: string, pluginId: string | null, showDot: boolean) => {
+        if (overlayBarRef.current) return;
+        if (barStagingTextRef.current) {
+          barStagingTextRef.current.textContent = text;
+        }
+        if (!text.trim()) {
+          if (!scenarioBarRef.current && !residentBarRef.current) {
+            syncCollapsedIslandWidthRef.current(ISLAND_COLLAPSED_W_DEFAULT);
+          }
+          return;
+        }
+        syncCollapsedIslandWidthRef.current(
+          widthForBarLabelRef.current(text, pluginId, showDot, false),
+        );
+      };
+
+      // 情景层：claim 主人，或 scenario 槽插件 setBar 时自动晋升（避免 claim/setBar 竞态）
+      if (hasScenario && (isScenarioOwner || next)) {
+        if (next && !scenarioGateAllows(p.pluginId)) {
+          if (isScenarioOwner) clearScenarioLayer();
+          return;
+        }
+        if (next && scenarioOwnerRef.current !== p.pluginId) {
+          scenarioOwnerRef.current = p.pluginId;
+          setScenarioOwner(p.pluginId);
+          setScenarioPull(`plugin:${p.pluginId}`);
+        }
+        const prev = scenarioBarRef.current;
+        if (adaptive && next && prev && prev.pluginId === next.pluginId) {
+          scenarioBarRef.current = next;
+          paintVisibleBar(next.text, next.pluginId, false);
+          return;
+        }
+        if (adaptive && !next && prev) {
+          scenarioBarRef.current = null;
+          setScenarioBar(null);
+          const fallback = residentBarRef.current;
+          paintVisibleBar(fallback?.text ?? "", fallback?.pluginId ?? null, false);
+          return;
+        }
+        setScenarioBar(next);
+        return;
+      }
+      if (isScenarioOwner && !next) {
+        setScenarioBar(null);
+        const fallback = residentBarRef.current;
+        paintVisibleBar(fallback?.text ?? "", fallback?.pluginId ?? null, false);
+        return;
+      }
+
+      // 常驻层
       if (residentId && p.pluginId === residentId) {
-        const adaptive = resolveIslandBarAdaptive(p.pluginId).enabled;
         const prev = residentBarRef.current;
-        // adaptive：同插件仅改文案时不 setState，只改 DOM + 岛宽，避免歌词拖垮整机
         if (adaptive && next && prev && prev.pluginId === next.pluginId) {
           residentBarRef.current = next;
-          if (barStagingTextRef.current && !overlayBarRef.current) {
-            barStagingTextRef.current.textContent = next.text;
+          if (!scenarioBarRef.current) {
+            paintVisibleBar(next.text, next.pluginId, false);
           }
-          const showDot = Boolean(
-            rec?.manifest.slots?.["island.bar"]?.excludeFromBarResident,
-          );
-          syncCollapsedIslandWidthRef.current(
-            widthForBarLabelRef.current(next.text, next.pluginId, showDot, false),
-          );
           return;
         }
         if (adaptive && !next && prev) {
           residentBarRef.current = null;
-          if (barStagingTextRef.current && !overlayBarRef.current) {
-            barStagingTextRef.current.textContent = "";
+          setResidentBar(null);
+          if (!scenarioBarRef.current) {
+            paintVisibleBar("", null, false);
           }
-          syncCollapsedIslandWidthRef.current(ISLAND_COLLAPSED_W_DEFAULT);
+          return;
         }
         setResidentBar(next);
         return;
       }
-      // 临时层：仅 excludeFromBarResident 插件（中转站等）
+
+      // 临时层：中转站等
       if (tempOnly) {
         setOverlayBar((prev) => {
           if (cleared) return prev?.pluginId === p.pluginId ? null : prev;
@@ -1685,9 +1833,30 @@ function App() {
         });
         return;
       }
-      // 未当选的常驻型插件（如天气在「无」时）→ 忽略 setBar，避免盖回岛栏
     }).then((fn) => {
       unlistenBar = fn;
+    });
+    void listen<{ action?: string; pluginId?: string }>("island-scenario", (ev) => {
+      const action = ev.payload?.action;
+      const pluginId = typeof ev.payload?.pluginId === "string" ? ev.payload.pluginId : "";
+      if (!pluginId) return;
+      if (action === "claim") {
+        if (!scenarioGateAllows(pluginId)) {
+          clearScenarioLayer();
+          return;
+        }
+        scenarioOwnerRef.current = pluginId;
+        setScenarioOwner(pluginId);
+        setScenarioPull(`plugin:${pluginId}`);
+        setScenarioBar((prev) => (prev?.pluginId === pluginId ? prev : null));
+        return;
+      }
+      if (action === "release") {
+        if (scenarioOwnerRef.current !== pluginId) return;
+        clearScenarioLayer();
+      }
+    }).then((fn) => {
+      unlistenScenario = fn;
     });
     void listen<{ action?: string; pluginId?: string }>("island-session", (ev) => {
       const action = ev.payload?.action;
@@ -1710,6 +1879,7 @@ function App() {
     });
     type TrayIconFlash = {
       id: string;
+      pin_key?: string;
       tooltip: string;
       process: string;
       icon_png_base64: string;
@@ -1719,13 +1889,31 @@ function App() {
       version?: number;
       flashing?: boolean;
     };
+    const syncPresenceFromTrays = (icons: TrayIconFlash[]) => {
+      refreshPresenceKeys(icons, undefined);
+      syncFlashingTrayBanner(icons);
+    };
     void listen<TrayIconFlash[]>("tray-icons", (ev) => {
-      syncFlashingTrayBanner(ev.payload ?? []);
+      syncPresenceFromTrays(ev.payload ?? []);
     }).then((fn) => {
       unlistenTrayIcons = fn;
     });
     void invoke<TrayIconFlash[]>("list_tray_icons")
-      .then((icons) => syncFlashingTrayBanner(icons ?? []))
+      .then((icons) => syncPresenceFromTrays(icons ?? []))
+      .catch(() => undefined);
+
+    let unlistenWindows: (() => void) | undefined;
+    const syncWindows = (list: WindowInfo[]) => {
+      refreshPresenceKeys(undefined, list);
+    };
+    void listen<{ windows?: WindowInfo[] }>("hub-windows-changed", (ev) => {
+      const list = ev.payload?.windows;
+      if (Array.isArray(list)) syncWindows(list);
+    }).then((fn) => {
+      unlistenWindows = fn;
+    });
+    void invoke<WindowInfo[]>("list_open_windows")
+      .then((list) => syncWindows(list ?? []))
       .catch(() => undefined);
     void listen<{
       pluginId: string;
@@ -1764,13 +1952,28 @@ function App() {
       unlistenPrefs?.();
       unlistenAttn?.();
       unlistenTrayIcons?.();
+      unlistenWindows?.();
       unlistenPluginNotify?.();
       unlistenStaging?.();
       unlistenBar?.();
+      unlistenScenario?.();
       unlistenSession?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Prefs 变更（含 scenarioGates）时复查当前情景主人
+  useEffect(() => {
+    const owner = scenarioOwnerRef.current;
+    if (owner && !scenarioPresenceOk(
+      owner,
+      islandPrefs.scenarioGates,
+      liveTrayKeysRef.current,
+      liveWindowKeysRef.current,
+    )) {
+      clearScenarioLayer();
+    }
+  }, [islandPrefs.scenarioGates]);
 
   useEffect(() => {
     // 收起后：补挂 bus 上已有、或仍在 flashing 的托盘通知
@@ -1829,6 +2032,7 @@ function App() {
     dropTarget,
     // 只看「有谁占栏」，勿依赖文案：歌词 setBar 每秒变 text 会反复清/排 immerse 定时器 → 整机卡
     overlayBar?.pluginId,
+    scenarioBar?.pluginId,
     residentBar?.pluginId,
     islandPrefs.autoImmerse,
     islandPrefs.immerseIdleSec,
@@ -1838,7 +2042,7 @@ function App() {
   ]);
 
   const effectivePullContent = (() => {
-    const raw = panelOverride ?? islandPrefs.pullContent;
+    const raw = scenarioPull ?? panelOverride ?? islandPrefs.pullContent;
     const pid = parsePluginPanelId(raw);
     if (!pid) return raw || "";
     return pluginRegistry.get(pid)?.enabled ? raw : "";
@@ -1856,11 +2060,12 @@ function App() {
     dropTarget && dropPluginId
       ? `${dropPluginName} · 松开存入`
       : islandBar?.title || stagingBar || "打开面板";
-  /** 绿点仅中转站等临时摘要 / 拖放提示；歌词·天气等常驻摘要不要点 */
+  /** 绿点仅中转站等临时摘要 / 拖放提示；情景临时与常驻摘要不要点 */
   const showBarStagingDot =
     dropTarget ||
     Boolean(
-      barPluginId &&
+      overlayBar &&
+        barPluginId &&
         pluginRegistry.get(barPluginId)?.manifest.slots?.["island.bar"]
           ?.excludeFromBarResident,
     );

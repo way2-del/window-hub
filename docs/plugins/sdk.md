@@ -32,6 +32,8 @@ hub.windows.list/get/focus/subscribe
 // Panel + Popup：
 hub.staging.*          // 需 staging
 hub.island.setBar/clearBar
+hub.island.claimScenario/releaseScenario   // 需 island.scenario
+hub.island.getBoundTray/openBoundTray       // 插件 settings.openTrayKey → 左键托盘
 hub.island.onBarClick(cb)   // Shortcuts：岛栏摘要点击（无 panel 时仍触发）
 hub.panel.openSession/closeSession/close
 
