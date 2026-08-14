@@ -32,7 +32,7 @@ import {
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
-type NavId = "general" | "theme" | "dock" | "tray" | "plugins" | "developer";
+type NavId = "general" | "theme" | "dock" | "sousou" | "tray" | "plugins" | "developer";
 
 type DockDisplayMode =
   | "default"
@@ -81,12 +81,18 @@ type DockPrefs = {
   bounceOnClick: boolean;
   /** Icon slot size (28–56). */
   iconSize: number;
+  /** Gap between icons (4–24). */
+  iconGap: number;
   /** Apple-style peek strip while auto-hidden. */
   showTriggerStrip: boolean;
   /** Show unpinned running apps after a separator. */
   showRunningApps: boolean;
   /** Running indicator: bar | dot */
   indicatorStyle: "bar" | "dot" | string;
+  /** Hot corner: bottom-right → show desktop. */
+  cornerShowDesktop: boolean;
+  /** Hot corner: bottom-left → Start menu. */
+  cornerOpenStart: boolean;
 };
 
 const DOCK_ACTIVATION_POSITIONS: {
@@ -119,7 +125,12 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
     activationPosition:
       dp?.activationPosition === "dockBottom" ? "dockBottom" : "screenBottom",
     activationThicknessPx: Math.min(64, Math.max(4, Number(dp?.activationThicknessPx) || 20)),
-    bottomOffsetPx: Math.min(400, Math.max(0, Number(dp?.bottomOffsetPx) || 0)),
+    bottomOffsetPx: (() => {
+      const n = Number(dp?.bottomOffsetPx);
+      // Undo accidental screen-lift defaults from earlier builds.
+      if (n === 28 || n === 36) return 4;
+      return Math.min(400, Math.max(0, Number.isFinite(n) ? n : 4));
+    })(),
     hideLingerMs: Math.min(10000, Math.max(200, Number(dp?.hideLingerMs) || 800)),
     magnification: Math.min(
       2.5,
@@ -136,9 +147,15 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
       56,
       Math.max(28, Number.isFinite(Number(dp?.iconSize)) ? Number(dp?.iconSize) : 40),
     ),
+    iconGap: Math.min(
+      24,
+      Math.max(4, Number.isFinite(Number(dp?.iconGap)) ? Number(dp?.iconGap) : 10),
+    ),
     showTriggerStrip: dp?.showTriggerStrip !== false,
     showRunningApps: dp?.showRunningApps !== false,
     indicatorStyle: dp?.indicatorStyle === "dot" ? "dot" : "bar",
+    cornerShowDesktop: dp?.cornerShowDesktop !== false,
+    cornerOpenStart: dp?.cornerOpenStart !== false,
   };
 }
 
@@ -310,6 +327,17 @@ const NAV: { id: NavId; label: string; tint: string; icon: ReactNode }[] = [
     ),
   },
   {
+    id: "sousou",
+    label: "搜搜",
+    tint: "#3ecf8e",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="11" cy="11" r="7" />
+        <path d="M20 20l-3.5-3.5" />
+      </svg>
+    ),
+  },
+  {
     id: "tray",
     label: "托盘",
     tint: "#30d158",
@@ -388,6 +416,16 @@ export default function SettingsApp() {
   const [dockPrefs, setDockPrefs] = useState<DockPrefs>(() => normalizeDockPrefs(null));
   const [dockMsg, setDockMsg] = useState("");
   const [dockBusy, setDockBusy] = useState(false);
+  const [sousouPrefs, setSousouPrefs] = useState({
+    enabled: true,
+    hotkeyEnabled: true,
+    doubleCtrlMs: 350,
+    everythingExe: String.raw`D:\app\Everything\Everything.exe`,
+    esExe: String.raw`D:\app\Everything\es.exe`,
+  });
+  const [sousouMsg, setSousouMsg] = useState("");
+  const [sousouBusy, setSousouBusy] = useState(false);
+  const [sousouEvStatus, setSousouEvStatus] = useState("");
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
   const [openAtLogin, setOpenAtLogin] = useState(false);
   const [openAtLoginBusy, setOpenAtLoginBusy] = useState(false);
@@ -699,6 +737,26 @@ export default function SettingsApp() {
       try {
         const dp = await invoke<DockPrefs>("get_dock_prefs");
         setDockPrefs(normalizeDockPrefs(dp));
+      } catch {
+        /* noop */
+      }
+      try {
+        const sp = await invoke<{
+          enabled: boolean;
+          hotkeyEnabled: boolean;
+          doubleCtrlMs: number;
+          everythingExe: string;
+          esExe: string;
+        }>("sousou_get_config");
+        setSousouPrefs({
+          enabled: sp.enabled,
+          hotkeyEnabled: sp.hotkeyEnabled,
+          doubleCtrlMs: sp.doubleCtrlMs,
+          everythingExe: sp.everythingExe,
+          esExe: sp.esExe,
+        });
+        const st = await invoke<{ running: boolean; message: string }>("sousou_everything_status");
+        setSousouEvStatus(st.running ? "Everything 运行中" : st.message);
       } catch {
         /* noop */
       }
@@ -1712,7 +1770,7 @@ export default function SettingsApp() {
                   <span className="pref-row-text">
                     <span className="pref-row-label">Dock 底边偏移</span>
                     <span className="pref-row-desc">
-                      Dock 底边距屏幕底的间距；0 = 底边贴屏幕底（默认）
+                      Dock 底边距屏幕底的间距（贴底默认 4，可设 0）
                     </span>
                   </span>
                   <input
@@ -1729,11 +1787,51 @@ export default function SettingsApp() {
                       setDockPrefs((p) => ({ ...p, bottomOffsetPx: n }));
                     }}
                     onBlur={(e) => {
-                      const n = Math.min(400, Math.max(0, Number(e.target.value) || 0));
+                      const n = Math.min(400, Math.max(0, Number(e.target.value) || 4));
                       void persistDockPrefs({ bottomOffsetPx: n });
                     }}
                     style={{ width: 72, textAlign: "right" }}
                   />
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">右下角 → 显示桌面</span>
+                    <span className="pref-row-desc">
+                      鼠标移到屏幕最右下角时，切换显示桌面（Win+D）
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.cornerShowDesktop ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.cornerShowDesktop}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() =>
+                      void persistDockPrefs({ cornerShowDesktop: !dockPrefs.cornerShowDesktop })
+                    }
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">左下角 → 开始菜单</span>
+                    <span className="pref-row-desc">
+                      鼠标移到屏幕最左下角时，打开 Windows 开始菜单
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.cornerOpenStart ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.cornerOpenStart}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() =>
+                      void persistDockPrefs({ cornerOpenStart: !dockPrefs.cornerOpenStart })
+                    }
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
                 </label>
                 <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
                   <span className="pref-row-text">
@@ -1860,6 +1958,40 @@ export default function SettingsApp() {
                     />
                     <span style={{ minWidth: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                       {dockPrefs.iconSize}
+                    </span>
+                  </span>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">图标间距</span>
+                    <span className="pref-row-desc">
+                      图标之间的间隔（4–24，默认 10）。放大时过小容易重叠
+                    </span>
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="range"
+                      min={4}
+                      max={24}
+                      step={1}
+                      value={dockPrefs.iconGap}
+                      disabled={!dockPrefs.enabled || dockBusy}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (!Number.isFinite(n)) return;
+                        setDockPrefs((p) => ({ ...p, iconGap: n }));
+                      }}
+                      onPointerUp={(e) => {
+                        const n = Math.min(
+                          24,
+                          Math.max(4, Number((e.target as HTMLInputElement).value) || 10),
+                        );
+                        void persistDockPrefs({ iconGap: n });
+                      }}
+                      style={{ width: 120 }}
+                    />
+                    <span style={{ minWidth: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {dockPrefs.iconGap}
                     </span>
                   </span>
                 </label>
@@ -2092,6 +2224,188 @@ export default function SettingsApp() {
                 )}
               </section>
             </>
+          )}
+
+          {nav === "sousou" && (
+            <section className="settings-card">
+              <h2>搜搜</h2>
+              <p className="card-desc">
+                Host 内置桌面搜索启动器。默认双击 Ctrl 唤起；文件索引依赖 Everything（推荐
+                D:\app\Everything）。配置保存在数据库 `prefs_sousou`，会随「开发者选项 →
+                备份 / 恢复」一并导出。窗口为 Win10 浅色实底。
+              </p>
+              <label className="pref-row">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">启用搜搜</span>
+                  <span className="pref-row-desc">关闭后不再响应双击 Ctrl</span>
+                </span>
+                <button
+                  type="button"
+                  className={`pref-switch${sousouPrefs.enabled ? " is-on" : ""}`}
+                  role="switch"
+                  aria-checked={sousouPrefs.enabled}
+                  disabled={sousouBusy}
+                  onClick={() => {
+                    const next = { ...sousouPrefs, enabled: !sousouPrefs.enabled };
+                    setSousouPrefs(next);
+                    setSousouBusy(true);
+                    void invoke("sousou_get_config")
+                      .then((full: unknown) =>
+                        invoke("sousou_set_config", {
+                          prefs: { ...(full as object), ...next },
+                        }),
+                      )
+                      .then(() => setSousouMsg("已保存"))
+                      .catch((e) => setSousouMsg(String(e)))
+                      .finally(() => setSousouBusy(false));
+                  }}
+                >
+                  <span className="pref-switch-knob" />
+                </button>
+              </label>
+              <label className="pref-row">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">双击 Ctrl 热键</span>
+                  <span className="pref-row-desc">连续两次松开 Ctrl 唤起/隐藏</span>
+                </span>
+                <button
+                  type="button"
+                  className={`pref-switch${sousouPrefs.hotkeyEnabled ? " is-on" : ""}`}
+                  role="switch"
+                  aria-checked={sousouPrefs.hotkeyEnabled}
+                  disabled={sousouBusy || !sousouPrefs.enabled}
+                  onClick={() => {
+                    const next = { ...sousouPrefs, hotkeyEnabled: !sousouPrefs.hotkeyEnabled };
+                    setSousouPrefs(next);
+                    setSousouBusy(true);
+                    void invoke("sousou_get_config")
+                      .then((full: unknown) =>
+                        invoke("sousou_set_config", {
+                          prefs: { ...(full as object), ...next },
+                        }),
+                      )
+                      .then(() => setSousouMsg("已保存"))
+                      .catch((e) => setSousouMsg(String(e)))
+                      .finally(() => setSousouBusy(false));
+                  }}
+                >
+                  <span className="pref-switch-knob" />
+                </button>
+              </label>
+              <label className="pref-row">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">双击间隔 (ms)</span>
+                  <span className="pref-row-desc">两次 Ctrl 松开的最大间隔</span>
+                </span>
+                <input
+                  className="pref-select"
+                  type="number"
+                  min={100}
+                  max={2000}
+                  value={sousouPrefs.doubleCtrlMs}
+                  disabled={sousouBusy}
+                  onChange={(e) =>
+                    setSousouPrefs((p) => ({
+                      ...p,
+                      doubleCtrlMs: Number(e.target.value) || 350,
+                    }))
+                  }
+                  onBlur={() => {
+                    setSousouBusy(true);
+                    void invoke("sousou_get_config")
+                      .then((full: unknown) =>
+                        invoke("sousou_set_config", {
+                          prefs: { ...(full as object), ...sousouPrefs },
+                        }),
+                      )
+                      .then(() => setSousouMsg("已保存"))
+                      .catch((e) => setSousouMsg(String(e)))
+                      .finally(() => setSousouBusy(false));
+                  }}
+                />
+              </label>
+              <label className="pref-row">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">Everything.exe</span>
+                </span>
+                <input
+                  className="pref-select"
+                  style={{ minWidth: 280 }}
+                  value={sousouPrefs.everythingExe}
+                  disabled={sousouBusy}
+                  onChange={(e) =>
+                    setSousouPrefs((p) => ({ ...p, everythingExe: e.target.value }))
+                  }
+                  onBlur={() => {
+                    setSousouBusy(true);
+                    void invoke("sousou_get_config")
+                      .then((full: unknown) =>
+                        invoke("sousou_set_config", {
+                          prefs: { ...(full as object), ...sousouPrefs },
+                        }),
+                      )
+                      .then(() => setSousouMsg("已保存"))
+                      .catch((e) => setSousouMsg(String(e)))
+                      .finally(() => setSousouBusy(false));
+                  }}
+                />
+              </label>
+              <label className="pref-row">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">es.exe</span>
+                </span>
+                <input
+                  className="pref-select"
+                  style={{ minWidth: 280 }}
+                  value={sousouPrefs.esExe}
+                  disabled={sousouBusy}
+                  onChange={(e) => setSousouPrefs((p) => ({ ...p, esExe: e.target.value }))}
+                  onBlur={() => {
+                    setSousouBusy(true);
+                    void invoke("sousou_get_config")
+                      .then((full: unknown) =>
+                        invoke("sousou_set_config", {
+                          prefs: { ...(full as object), ...sousouPrefs },
+                        }),
+                      )
+                      .then(() => setSousouMsg("已保存"))
+                      .catch((e) => setSousouMsg(String(e)))
+                      .finally(() => setSousouBusy(false));
+                  }}
+                />
+              </label>
+              <p className="card-desc">{sousouEvStatus || "检测中…"}</p>
+              <div className="plugin-actions" style={{ marginTop: 10, marginBottom: 0 }}>
+                <button
+                  type="button"
+                  className="settings-ghost-btn"
+                  disabled={sousouBusy}
+                  onClick={() => {
+                    setSousouBusy(true);
+                    void invoke<{ running: boolean; message: string }>("sousou_ensure_everything")
+                      .then((st) => {
+                        setSousouEvStatus(st.running ? "Everything 运行中" : st.message);
+                        setSousouMsg(st.running ? "已启动" : st.message);
+                      })
+                      .catch((e) => setSousouMsg(String(e)))
+                      .finally(() => setSousouBusy(false));
+                  }}
+                >
+                  启动 / 检测 Everything
+                </button>
+                <button
+                  type="button"
+                  className="settings-ghost-btn"
+                  disabled={sousouBusy}
+                  onClick={() => {
+                    void invoke("sousou_open").catch((e) => setSousouMsg(String(e)));
+                  }}
+                >
+                  打开搜搜窗口
+                </button>
+              </div>
+              {sousouMsg && <p className="card-desc">{sousouMsg}</p>}
+            </section>
           )}
 
           {nav === "tray" && (

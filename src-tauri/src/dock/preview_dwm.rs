@@ -20,6 +20,27 @@ pub const PREVIEW_PAD: f64 = 10.0;
 pub const PREVIEW_GAP: f64 = 8.0;
 pub const PREVIEW_CARD_W: f64 = 168.0;
 pub const PREVIEW_THUMB_H: f64 = 100.0;
+/// Reserved top pad — per-card × lives under thumbs (title row), not a global header.
+/// Keep in sync with `.dock-preview-shell` padding-top.
+pub const PREVIEW_HEADER: f64 = 10.0;
+
+/// Destination rects (physical px) for N cards inside the preview client area.
+pub fn thumb_dest_rects(count: usize, scale: f64) -> Vec<(i32, i32, i32, i32)> {
+    let n = count.max(1).min(6);
+    let mut out = Vec::with_capacity(n);
+    let pad = (PREVIEW_PAD * scale).round() as i32;
+    let gap = (PREVIEW_GAP * scale).round() as i32;
+    let card_w = (PREVIEW_CARD_W * scale).round() as i32;
+    let thumb_h = (PREVIEW_THUMB_H * scale).round() as i32;
+    let header = (PREVIEW_HEADER * scale).round() as i32;
+    let mut x = pad;
+    let y = header;
+    for _ in 0..n {
+        out.push((x, y, x + card_w, y + thumb_h));
+        x += card_w + gap;
+    }
+    out
+}
 
 /// Unregister every live thumbnail (call on preview close / hide).
 pub fn clear_thumbnails() {
@@ -38,23 +59,6 @@ pub fn clear_thumbnails() {
         let mut guard = active_thumbs().lock().unwrap_or_else(|e| e.into_inner());
         guard.clear();
     }
-}
-
-/// Destination rects (physical px) for N cards inside the preview client area.
-pub fn thumb_dest_rects(count: usize, scale: f64) -> Vec<(i32, i32, i32, i32)> {
-    let n = count.max(1).min(6);
-    let mut out = Vec::with_capacity(n);
-    let pad = (PREVIEW_PAD * scale).round() as i32;
-    let gap = (PREVIEW_GAP * scale).round() as i32;
-    let card_w = (PREVIEW_CARD_W * scale).round() as i32;
-    let thumb_h = (PREVIEW_THUMB_H * scale).round() as i32;
-    let mut x = pad;
-    let y = pad;
-    for _ in 0..n {
-        out.push((x, y, x + card_w, y + thumb_h));
-        x += card_w + gap;
-    }
-    out
 }
 
 /// Register live DWM thumbnails from `sources` into `dest_hwnd`.

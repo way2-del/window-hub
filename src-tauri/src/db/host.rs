@@ -92,6 +92,14 @@ pub fn dock_set(conn: &Connection, value: &Value) -> Result<(), String> {
     singleton_set_json(conn, "prefs_dock", value)
 }
 
+pub fn sousou_get(conn: &Connection) -> Result<Option<Value>, String> {
+    singleton_get_json(conn, "prefs_sousou")
+}
+
+pub fn sousou_set(conn: &Connection, value: &Value) -> Result<(), String> {
+    singleton_set_json(conn, "prefs_sousou", value)
+}
+
 // ── prefs_ambient ────────────────────────────────────────────────────
 
 pub fn ambient_get(conn: &Connection) -> Result<Option<String>, String> {
@@ -327,6 +335,11 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS prefs_dock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prefs_sousou (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL

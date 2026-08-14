@@ -11,7 +11,7 @@ type Props = {
   onMenuOpenChange: (open: boolean) => void;
 };
 
-const STATUS_MENU_W = 200;
+const STATUS_MENU_W = 220;
 const STATUS_MENU_GAP = 8;
 
 function truncateLabel(s: string, maxChars = 10): string {

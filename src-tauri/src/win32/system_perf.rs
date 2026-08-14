@@ -206,9 +206,14 @@ pub fn collect_net() -> (u64, u64, u64, u64) {
 
 /// Heavy thermal probe — only from TemperatureService background thread.
 pub fn collect_temperatures() -> (Option<u8>, Option<u8>) {
-    let (cpu, gpu_fallback) = thermal_via_powershell();
-    let gpu = gpu_temp_nvidia_smi().or(gpu_fallback);
-    (cpu, gpu)
+    // Dedicated ACPI one-liner (CPU zones) + nvidia-smi (GPU). LHM only fills gaps.
+    let cpu = cpu_temp_acpi_powershell();
+    let gpu = gpu_temp_nvidia_smi();
+    if cpu.is_some() && gpu.is_some() {
+        return (cpu, gpu);
+    }
+    let (lhm_cpu, lhm_gpu) = thermal_via_lhm_powershell();
+    (cpu.or(lhm_cpu), gpu.or(lhm_gpu))
 }
 
 fn parse_temp_c(raw: &str) -> Option<u8> {
@@ -223,6 +228,40 @@ fn parse_temp_c(raw: &str) -> Option<u8> {
     } else {
         Some(c)
     }
+}
+
+fn powershell_exe() -> &'static str {
+    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+}
+
+/// MSAcpi thermal zones → °C (max zone). Works without LibreHardwareMonitor.
+fn cpu_temp_acpi_powershell() -> Option<u8> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // Tiny script: the old combined ACPI+LHM script often left CPU empty in-app
+    // while nvidia-smi still filled GPU.
+    let script = concat!(
+        "$ErrorActionPreference='SilentlyContinue';",
+        "$vals=@();",
+        "Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | ",
+        "ForEach-Object {",
+        "  $c=[int]($_.CurrentTemperature/10-273);",
+        "  if($c -ge 0 -and $c -le 120){$vals+=$c}",
+        "};",
+        "if($vals.Count -gt 0){($vals|Measure-Object -Maximum).Maximum}",
+    );
+
+    let output = Command::new(powershell_exe())
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_temp_c(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn gpu_temp_nvidia_smi() -> Option<u8> {
@@ -250,38 +289,31 @@ fn gpu_temp_nvidia_smi() -> Option<u8> {
     None
 }
 
-fn thermal_via_powershell() -> (Option<u8>, Option<u8>) {
+/// Optional LibreHardwareMonitor / OpenHardwareMonitor package sensors (best CPU die reading).
+fn thermal_via_lhm_powershell() -> (Option<u8>, Option<u8>) {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let script = r#"
-$ErrorActionPreference='SilentlyContinue'
+$ErrorActionPreference='Stop'
 $out = @()
-$zones = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature
-foreach ($z in $zones) {
-  $k10 = [int]$z.CurrentTemperature
-  if ($k10 -gt 2730) {
-    $c = [int](($k10 / 10) - 273)
-    if ($c -ge 0 -and $c -le 120) {
-      $out += ("ACPI|{0}|{1}" -f ([string]$z.InstanceName), $c)
-    }
-  }
-}
 foreach ($ns in @('root/LibreHardwareMonitor','root/OpenHardwareMonitor')) {
-  $sensors = Get-CimInstance -Namespace $ns -ClassName Sensor |
-    Where-Object { $_.SensorType -eq 'Temperature' }
-  foreach ($s in $sensors) {
-    $c = [int][math]::Round([double]$s.Value)
-    if ($c -ge 0 -and $c -le 120) {
-      $out += ("LHM|{0}|{1}" -f ([string]$s.Name), $c)
+  try {
+    $sensors = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop |
+      Where-Object { $_.SensorType -eq 'Temperature' }
+    foreach ($s in $sensors) {
+      $c = [int][math]::Round([double]$s.Value)
+      if ($c -ge 0 -and $c -le 120) {
+        $out += ("LHM|{0}|{1}" -f ([string]$s.Name), $c)
+      }
     }
-  }
+  } catch {}
 }
 $out -join "`n"
 "#;
 
-    let Ok(output) = Command::new("powershell")
+    let Ok(output) = Command::new(powershell_exe())
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -297,6 +329,9 @@ $out -join "`n"
     for line in text.lines() {
         let mut parts = line.splitn(3, '|');
         let Some(kind) = parts.next() else { continue };
+        if kind != "LHM" {
+            continue;
+        }
         let Some(name) = parts.next() else { continue };
         let Some(temp) = parts.next() else { continue };
         let Some(c) = parse_temp_c(temp) else { continue };
@@ -306,7 +341,6 @@ $out -join "`n"
             || low.contains("video")
             || low.contains("hot spot")
             || low.contains("hotspot");
-        // LHM / OHM: package / Tctl / CCD / die are common CPU package sensors.
         let looks_cpu = low.contains("cpu")
             || low.contains("core")
             || low.contains("package")
@@ -315,30 +349,10 @@ $out -join "`n"
             || low.contains("ccd")
             || low.contains("cpu die")
             || low.contains("cpu (tctl");
-        match kind {
-            "LHM" if looks_gpu && gpu.is_none() => gpu = Some(c),
-            "LHM" if !looks_gpu && cpu.is_none() && looks_cpu => {
-                cpu = Some(c);
-            }
-            "ACPI" if looks_gpu && gpu.is_none() => gpu = Some(c),
-            "ACPI" if !looks_gpu && cpu.is_none() => cpu = Some(c),
-            _ => {}
-        }
-    }
-    if cpu.is_none() {
-        for line in text.lines() {
-            let mut parts = line.splitn(3, '|');
-            let Some(kind) = parts.next() else { continue };
-            if kind != "ACPI" {
-                continue;
-            }
-            let _ = parts.next();
-            if let Some(temp) = parts.next() {
-                if let Some(c) = parse_temp_c(temp) {
-                    cpu = Some(c);
-                    break;
-                }
-            }
+        if looks_gpu && gpu.is_none() {
+            gpu = Some(c);
+        } else if looks_cpu && cpu.is_none() {
+            cpu = Some(c);
         }
     }
     (cpu, gpu)

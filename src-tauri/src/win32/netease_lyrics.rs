@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
+    IsWindowVisible,
 };
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -46,6 +47,8 @@ struct SmtcClock {
     song_key: String,
     origin_ms: u64,
     synced_at: Instant,
+    /// 暂停时冻结的进度（ms）；Some 则不再用墙钟推进
+    frozen_ms: Option<u64>,
 }
 
 static API_LYRIC_CACHE: Mutex<Option<ApiLyricCache>> = Mutex::new(None);
@@ -55,6 +58,8 @@ static LAST_SONG_KEY: Mutex<String> = Mutex::new(String::new());
 /// 切歌后作废进行中的旧 LRC 拉取，避免把上一首歌词写进缓存。
 static LRC_FETCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LRC_FETCH_BUSY: AtomicBool = AtomicBool::new(false);
+/// 乐观播放态：面板点暂停时冻结本地 LRC 钟；切歌 / 下一首会恢复。
+static PLAYING: AtomicBool = AtomicBool::new(true);
 
 fn wide_to_string(buf: &[u16]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
@@ -153,6 +158,115 @@ fn find_netease_hwnds() -> (Option<HWND>, Option<HWND>) {
     (ctx.main_visible.or(ctx.main_any), ctx.lyric)
 }
 
+struct TextCollectCtx {
+    texts: Vec<String>,
+}
+
+unsafe extern "system" fn text_collect_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let ctx = &mut *(lparam.0 as *mut TextCollectCtx);
+    let t = hwnd_title(hwnd);
+    if !t.is_empty() {
+        ctx.texts.push(t);
+    }
+    BOOL(1)
+}
+
+fn collect_hwnd_texts(root: HWND) -> Vec<String> {
+    let mut out = Vec::new();
+    let root_t = hwnd_title(root);
+    if !root_t.is_empty() {
+        out.push(root_t);
+    }
+    let mut ctx = TextCollectCtx { texts: Vec::new() };
+    unsafe {
+        let _ = EnumChildWindows(root, Some(text_collect_proc), LPARAM(&mut ctx as *mut _ as isize));
+    }
+    out.extend(ctx.texts);
+    out
+}
+
+fn is_desktop_lyric_chrome(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower == "desktoplyrics"
+        || t == "桌面歌词"
+        || t == "网易云音乐"
+        || lower == "cloudmusic"
+        || is_unlock_noise(t)
+}
+
+/// 从桌面歌词窗读当前行（暂停时网易云会停住标题/子控件文本，不会自己往前跑）。
+fn read_desktop_lyric_line(lyric_hwnd: HWND) -> Option<String> {
+    let mut best: Option<String> = None;
+    for t in collect_hwnd_texts(lyric_hwnd) {
+        let t = t.trim().to_string();
+        if is_desktop_lyric_chrome(&t) || is_lrc_credit_line(&t) {
+            continue;
+        }
+        // 偏好更长的一行（主歌词通常比进度/副标长）
+        if best.as_ref().map(|b| t.chars().count() > b.chars().count()).unwrap_or(true) {
+            best = Some(t);
+        }
+    }
+    best
+}
+
+/// 面板多媒体键回调：暂停冻结本地 LRC 钟，播放/切歌解冻。
+pub fn note_media_transport(action: &str) {
+    let a = action.trim().to_ascii_lowercase();
+    match a.as_str() {
+        "prev" | "previous" | "previoustrack" | "next" | "nexttrack" => {
+            PLAYING.store(true, Ordering::Release);
+            unfreeze_clock();
+        }
+        "play" => {
+            PLAYING.store(true, Ordering::Release);
+            unfreeze_clock();
+        }
+        "pause" => {
+            freeze_clock_now();
+            PLAYING.store(false, Ordering::Release);
+        }
+        "play-pause" | "playpause" | "toggle" => {
+            if PLAYING.load(Ordering::Acquire) {
+                freeze_clock_now();
+                PLAYING.store(false, Ordering::Release);
+            } else {
+                PLAYING.store(true, Ordering::Release);
+                unfreeze_clock();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn freeze_clock_now() {
+    if let Ok(mut guard) = SMTC_CLOCK.lock() {
+        if let Some(clock) = guard.as_mut() {
+            if clock.frozen_ms.is_none() {
+                let pos = clock
+                    .origin_ms
+                    .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
+                clock.frozen_ms = Some(pos);
+            }
+        }
+    }
+}
+
+fn unfreeze_clock() {
+    if let Ok(mut guard) = SMTC_CLOCK.lock() {
+        if let Some(clock) = guard.as_mut() {
+            if let Some(pos) = clock.frozen_ms.take() {
+                clock.origin_ms = pos;
+                clock.synced_at = Instant::now();
+            }
+        }
+    }
+}
+
 fn song_key(title: Option<&str>, artist: Option<&str>) -> String {
     format!("{}|{}", title.unwrap_or(""), artist.unwrap_or(""))
 }
@@ -199,6 +313,7 @@ fn on_song_changed(new_key: &str) {
         return;
     }
     LRC_FETCH_GEN.fetch_add(1, Ordering::AcqRel);
+    PLAYING.store(true, Ordering::Release);
     let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
     let _ = SMTC_CLOCK.lock().map(|mut g| *g = None);
     // 旧歌 LRC 缓存可留着（按 key 区分）；但若当前缓存 key 不是新歌则不影响 peek
@@ -311,27 +426,37 @@ fn playback_position_ms(expect_title: Option<&str>) -> u64 {
     if key.is_empty() {
         return 0;
     }
+    let playing = PLAYING.load(Ordering::Acquire);
     if let Ok(mut guard) = SMTC_CLOCK.lock() {
         match guard.as_mut() {
-            Some(clock) if clock.song_key == key => {}
+            Some(clock) if clock.song_key == key => {
+                if !playing && clock.frozen_ms.is_none() {
+                    let pos = clock
+                        .origin_ms
+                        .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
+                    clock.frozen_ms = Some(pos);
+                }
+            }
             _ => {
                 *guard = Some(SmtcClock {
                     song_key: key,
                     origin_ms: 0,
                     synced_at: Instant::now(),
+                    frozen_ms: if playing { None } else { Some(0) },
                 });
             }
         }
+        let Some(clock) = guard.as_ref() else {
+            return 0;
+        };
+        if let Some(pos) = clock.frozen_ms {
+            return pos;
+        }
+        return clock
+            .origin_ms
+            .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
     }
-    let Ok(guard) = SMTC_CLOCK.lock() else {
-        return 0;
-    };
-    let Some(clock) = guard.as_ref() else {
-        return 0;
-    };
-    clock
-        .origin_ms
-        .saturating_add(clock.synced_at.elapsed().as_millis() as u64)
+    0
 }
 
 fn parse_lrc(raw: &str) -> Vec<(u64, String)> {
@@ -564,8 +689,17 @@ fn snapshot_uncached() -> NeteaseNowPlaying {
 
     if out.desktop_lyrics {
         out.active = true;
-        // 开了桌面歌词才用官方 LRC 对齐选句（跟听网易云桌面歌词，不是关了还自己播）
-        if let Some(title) = out.title.clone() {
+        // 优先跟听桌面歌词窗文本（暂停时网易云停住，岛栏不会自己往前跑）
+        let desk_line = lyric_hwnd.and_then(read_desktop_lyric_line);
+        if let Some(line) = desk_line {
+            out.lyric = Some(line);
+            out.source = Some("desktop-lyrics".into());
+            // 用桌面行校准本地钟，避免短暂读空时 api-lrc 乱跳
+            if let Some(title) = out.title.as_deref() {
+                sync_clock_to_line(title, out.artist.as_deref(), out.lyric.as_deref().unwrap_or(""));
+            }
+        } else if let Some(title) = out.title.clone() {
+            // 桌面窗读不到字时才用官方 LRC + 本地钟（尊重 PLAYING 冻结）
             if let Some(line) = lyric_from_cached_lrc(&title, out.artist.as_deref()) {
                 out.lyric = Some(line);
                 out.source = Some("api-lrc".into());
@@ -584,6 +718,39 @@ fn snapshot_uncached() -> NeteaseNowPlaying {
     }
     apply_sticky(&mut out);
     out
+}
+
+/// 桌面歌词当前行 → 把本地钟钉到该 LRC 时间戳，暂停/短暂丢字时不乱进。
+fn sync_clock_to_line(title: &str, artist: Option<&str>, line: &str) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Some(lines) = peek_cached_lrc(title, artist) else {
+        return;
+    };
+    let Some((ms, _)) = lines.iter().find(|(_, s)| s.trim() == line) else {
+        return;
+    };
+    let key = title.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return;
+    }
+    // 选句时会再加 LYRIC_LEAD_MS，这里反推 origin
+    let origin = ms.saturating_sub(LYRIC_LEAD_MS);
+    if let Ok(mut guard) = SMTC_CLOCK.lock() {
+        let frozen = if PLAYING.load(Ordering::Acquire) {
+            None
+        } else {
+            Some(origin)
+        };
+        *guard = Some(SmtcClock {
+            song_key: key,
+            origin_ms: origin,
+            synced_at: Instant::now(),
+            frozen_ms: frozen,
+        });
+    }
 }
 
 #[cfg(test)]

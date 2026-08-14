@@ -19,8 +19,8 @@
 
 `hub.media.neteaseNowPlaying`（仅桌面歌词开启时写岛栏）：
 
-1. 桌面歌词窗口标题 / 可见性  
-2. 官方 LRC + 本地播放时钟选句  
+1. 桌面歌词窗口标题 / 子控件文本（优先；暂停时随网易云停住）  
+2. 官方 LRC + 本地播放时钟选句（读不到桌面字时的回退；面板点暂停会冻结时钟）  
 3. HTTP 拉 LRC 仅在后台  
 
 `hub.media.transport("prev"|"next"|"play-pause")`：发送系统多媒体键（不经 SMTC）。

@@ -27,6 +27,7 @@ const ALLOWED_CMDS = new Set([
   "hub_island_set_bar",
   "hub_island_clear_bar",
   "hub_netease_now_playing",
+  "hub_media_transport",
   "hub_panel_open_session",
   "hub_panel_close_session",
   "hub_windows_list",
@@ -151,6 +152,9 @@ export function panelHubBootstrapScript(pluginId: string): string {
     media: {
       neteaseNowPlaying: function () {
         return invoke("hub_netease_now_playing", withPlugin());
+      },
+      transport: function (action) {
+        return invoke("hub_media_transport", withPlugin({ action: String(action || "") }));
       }
     },
     fetch: function (url, opts) {

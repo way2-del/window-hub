@@ -17,9 +17,9 @@ use windows::core::s;
 use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR,
-    DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWM_SYSTEMBACKDROP_TYPE,
-    DWM_WINDOW_CORNER_PREFERENCE,
+    DWMWA_CAPTION_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_TEXT_COLOR,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DWMWCP_ROUND, DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
@@ -409,13 +409,17 @@ fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
             &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
             std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
+        // Light theme + ROUND leaves a default white border unless all chrome
+        // color attrs are cleared (classic L-shaped frame around dock-glass).
         let border = DWMWA_COLOR_NONE;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border as *const u32 as *const c_void,
-            std::mem::size_of::<u32>() as u32,
-        );
+        for attr in [DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR] {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &border as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
     }
 }
 
@@ -475,15 +479,22 @@ pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(
     }
 }
 
+/// Icons layer must NEVER carry SystemBackdrop / SWCA / DWM border.
+/// HWND size matches the CSS pill; any NC/DWM fringe paints the classic white frame.
 pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
     clear_vibrancy(window);
     let hwnd = hwnd_of(window)?;
     disable_system_backdrop(hwnd);
-    // Icons HWND must stay fully clear — opaque fill paints the magnification /
-    // preview headroom as a solid "white bar" above the glass strip.
     let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
     clear_webview_fill(window);
+    let _ = window.set_shadow(false);
     unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_BORDER, WS_CAPTION,
+            WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_STATICEDGE, WS_EX_WINDOWEDGE,
+            WS_SYSMENU, WS_THICKFRAME,
+        };
         if let Some(d) = dark {
             let v: u32 = u32::from(d);
             let _ = DwmSetWindowAttribute(
@@ -493,6 +504,43 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
                 std::mem::size_of::<u32>() as u32,
             );
         }
+        // Never call DwmExtendFrameIntoClientArea(-1) here — on transparent
+        // WebView2 it paints the exact white rectangular outline around the dock.
+        let style = GetWindowLongW(hwnd, GWL_STYLE);
+        let strip = (WS_BORDER.0 | WS_DLGFRAME.0 | WS_THICKFRAME.0 | WS_CAPTION.0 | WS_SYSMENU.0)
+            as i32;
+        if style & strip != 0 {
+            let _ = SetWindowLongW(hwnd, GWL_STYLE, style & !strip);
+        }
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let ex_strip = (WS_EX_WINDOWEDGE.0
+            | WS_EX_CLIENTEDGE.0
+            | WS_EX_STATICEDGE.0
+            | WS_EX_DLGMODALFRAME.0) as i32;
+        if ex & ex_strip != 0 {
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, ex & !ex_strip);
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        // Undo ExtendFrame(-1) if a previous build applied it (white outline).
+        {
+            use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+            use windows::Win32::UI::Controls::MARGINS;
+            let margins = MARGINS {
+                cxLeftWidth: 0,
+                cxRightWidth: 0,
+                cyTopHeight: 0,
+                cyBottomHeight: 0,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        }
         let corner = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -501,29 +549,49 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
             std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
         let border = DWMWA_COLOR_NONE;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border as *const u32 as *const c_void,
-            std::mem::size_of::<u32>() as u32,
-        );
+        for attr in [DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR] {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &border as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
     }
-    let _ = dark; // theme lives on dock-glass + CSS chrome
+    let _ = dark;
     Ok(())
 }
 
-/// Dock glass strip: material + rounded corners (Apple / MyDockFinder pill).
-pub fn apply_dock_glass_corners(window: &WebviewWindow) {
-    // DWMWA_WINDOW_CORNER_PREFERENCE / DWMWCP_ROUND is Win11+. On Win10 it is a
-    // no-op or can leave a rectangular frame artifact — skip entirely.
-    if is_hard_safe() {
-        return;
-    }
+/// Clip a dock HWND (icons or glass) to the CSS pill so DWM cannot draw a
+/// sharp rectangular white outline around transparent bounds.
+pub fn apply_dock_pill_region(window: &WebviewWindow, radius_logical: f64) {
     let Ok(hwnd) = hwnd_of(window) else {
         return;
     };
     unsafe {
-        let corner = DWMWCP_ROUND;
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+        let mut rc = RECT::default();
+        if GetClientRect(hwnd, &mut rc).is_err() {
+            return;
+        }
+        let w = rc.right - rc.left;
+        let h = rc.bottom - rc.top;
+        if w <= 0 || h <= 0 {
+            return;
+        }
+
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let scale = f64::from(dpi) / 96.0;
+        let radius = radius_logical.clamp(8.0, 28.0);
+        let r = ((radius * scale).round() as i32).clamp(4, h.max(8));
+        let hrgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, r * 2, r * 2);
+        let _ = SetWindowRgn(hwnd, hrgn, true);
+
+        let corner = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -531,12 +599,38 @@ pub fn apply_dock_glass_corners(window: &WebviewWindow) {
             std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
         let border = DWMWA_COLOR_NONE;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border as *const u32 as *const c_void,
-            std::mem::size_of::<u32>() as u32,
-        );
+        for attr in [DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR] {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &border as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
+/// Dock glass strip: clip HWND to the CSS pill radius (legacy helper).
+pub fn apply_dock_glass_shape(window: &WebviewWindow, radius_logical: f64) {
+    if is_hard_safe() {
+        return;
+    }
+    apply_dock_pill_region(window, radius_logical);
+}
+
+/// Re-assert icons-clear after place/resize.
+/// Do NOT SetWindowRgn on the icons HWND — a round clip makes edge icons
+/// (esp. the rightmost ephemeral app) ignore clicks in the clipped corners.
+pub fn refresh_dock_layers(
+    icons: &WebviewWindow,
+    glass: Option<&WebviewWindow>,
+    radius_logical: f64,
+) {
+    let _ = apply_dock_icons_layer(icons, None);
+    if let Some(g) = glass {
+        if !is_hard_safe() {
+            apply_dock_glass_shape(g, radius_logical);
+        }
     }
 }
 
@@ -595,23 +689,25 @@ pub fn apply_effect(
     alpha: u8,
 ) -> Result<(), String> {
     ensure_hard_safe_detected();
+    // REGRESSION: never apply mica/acrylic to the icons HWND — it is larger than
+    // the CSS pill; SystemBackdrop paints a rectangular white frame around the dock.
     if window.label() == "dock" {
         return apply_dock_icons_layer(window, dark);
     }
 
+    // Dock glass: never apply Win11 SWCA / mica / acrylic.
+    // Material rectangle edges show as white frames beside the CSS pill.
+    // Frost is painted by `.dock-chrome` on the icons layer instead.
+    if window.label() == "dock-glass" {
+        clear_vibrancy(window);
+        let hwnd = hwnd_of(window)?;
+        let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
+        disable_system_backdrop(hwnd);
+        clear_webview_fill(window);
+        return Ok(());
+    }
+
     if is_hard_safe() {
-        // dock-glass must stay clear in compat mode — an opaque slab wider/taller
-        // than the CSS chrome pill is the classic "mysterious background" behind icons.
-        // Win10 can't do acrylic here; the icons-layer `.dock-chrome` is the visible pill.
-        if window.label() == "dock-glass" {
-            clear_vibrancy(window);
-            let hwnd = hwnd_of(window)?;
-            let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
-            disable_system_backdrop(hwnd);
-            clear_webview_fill(window);
-            // Do NOT call apply_dock_glass_corners — DWMWCP_ROUND is Win11-only.
-            return Ok(());
-        }
         // Dock preview: always dark opaque — light system theme painted a blank white box.
         if window.label() == "dock-preview" {
             return apply_opaque_solid(window, Some(true));
@@ -678,19 +774,10 @@ pub fn apply_effect(
     };
 
     match result {
-        Ok(()) => {
-            if window.label() == "dock-glass" {
-                apply_dock_glass_corners(window);
-            }
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(e) => {
             arm_hard_safe(&e);
-            let r = apply_opaque_solid(window, dark);
-            if window.label() == "dock-glass" {
-                apply_dock_glass_corners(window);
-            }
-            r
+            apply_opaque_solid(window, dark)
         }
     }
 }

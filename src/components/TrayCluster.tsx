@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, memo, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -284,7 +284,7 @@ function tempBarFill(c: number) {
   return Math.max(8, Math.min(100, Math.round(((c - 28) / 67) * 100)));
 }
 
-/** 温度计 + 旁侧：有双温时上 CPU / 下 GPU；仅一侧有值时单行显示并标注来源 */
+/** 温度计 + 旁侧：固定上 CPU / 下 GPU（无读数时显示 —） */
 function TempMeter({
   cpuTempC,
   gpuTempC,
@@ -316,39 +316,6 @@ function TempMeter({
   if (!hasCpu && !hasGpu) titleParts.push("温度暂不可用");
   const title = titleParts.join(" · ");
 
-  let body: ReactNode;
-  if (hasCpu && hasGpu) {
-    body = (
-      <span className="tray-perf-temps">
-        <span className="tray-perf-num is-cpu">
-          <span className="tray-perf-tag">C</span>
-          {cpuTempC}°
-        </span>
-        <span className="tray-perf-num is-gpu">
-          <span className="tray-perf-tag">G</span>
-          {gpuTempC}°
-        </span>
-      </span>
-    );
-  } else if (hasCpu || hasGpu) {
-    const alone = hasCpu ? cpuTempC! : gpuTempC!;
-    const tag = hasCpu ? "C" : "G";
-    body = (
-      <span className="tray-perf-temps is-single">
-        <span className="tray-perf-num">
-          <span className="tray-perf-tag">{tag}</span>
-          {alone}°
-        </span>
-      </span>
-    );
-  } else {
-    body = (
-      <span className="tray-perf-temps is-single">
-        <span className="tray-perf-num is-empty">—</span>
-      </span>
-    );
-  }
-
   return (
     <span className="tray-perf-temp" title={title} aria-label={title}>
       <span className="tray-perf-thermo" aria-hidden>
@@ -357,7 +324,16 @@ function TempMeter({
         </span>
         <span className="tray-perf-bulb" />
       </span>
-      {body}
+      <span className="tray-perf-temps">
+        <span className={`tray-perf-num is-cpu${!hasCpu ? " is-empty" : ""}`}>
+          <span className="tray-perf-tag">C</span>
+          {hasCpu ? `${cpuTempC}°` : "—"}
+        </span>
+        <span className={`tray-perf-num is-gpu${!hasGpu ? " is-empty" : ""}`}>
+          <span className="tray-perf-tag">G</span>
+          {hasGpu ? `${gpuTempC}°` : "—"}
+        </span>
+      </span>
     </span>
   );
 }
@@ -377,15 +353,34 @@ function MemMeter({ percent }: { percent: number }) {
   );
 }
 
-function formatRate(bps: number): string {
-  if (!Number.isFinite(bps) || bps < 0) return "0";
-  if (bps < 1024) return `${Math.round(bps)}`;
+/** 托盘网速：数值 + 单位拆开，避免三位数把单位挤没 */
+function formatRateParts(bps: number): { n: string; u: string } {
+  if (!Number.isFinite(bps) || bps < 0) return { n: "0", u: "B" };
+  if (bps < 1024) return { n: `${Math.round(bps)}`, u: "B" };
   if (bps < 1024 * 1024) {
     const kb = bps / 1024;
-    return kb >= 100 ? `${Math.round(kb)}K` : `${kb.toFixed(kb >= 10 ? 0 : 1)}K`;
+    if (kb >= 10) return { n: `${Math.round(kb)}`, u: "K" };
+    return { n: kb.toFixed(1), u: "K" };
   }
   const mb = bps / (1024 * 1024);
-  return mb >= 100 ? `${Math.round(mb)}M` : `${mb.toFixed(mb >= 10 ? 1 : 2)}M`;
+  if (mb >= 100) return { n: `${Math.round(mb)}`, u: "M" };
+  if (mb >= 10) return { n: mb.toFixed(1), u: "M" };
+  return { n: mb.toFixed(2), u: "M" };
+}
+
+function formatRate(bps: number): string {
+  const { n, u } = formatRateParts(bps);
+  return `${n}${u}`;
+}
+
+function NetRateNum({ bps }: { bps: number }) {
+  const { n, u } = formatRateParts(bps);
+  return (
+    <span className="tray-net-num">
+      <span className="tray-net-val">{n}</span>
+      <span className="tray-net-unit">{u}</span>
+    </span>
+  );
 }
 
 /** 上行 / 下行速率芯片 */
@@ -397,13 +392,13 @@ function NetMeter({ downBps, upBps }: { downBps: number; upBps: number }) {
         <span className="tray-net-arrow" aria-hidden>
           ↑
         </span>
-        <span className="tray-net-num">{formatRate(upBps)}</span>
+        <NetRateNum bps={upBps} />
       </span>
       <span className="tray-net-line is-down">
         <span className="tray-net-arrow" aria-hidden>
           ↓
         </span>
-        <span className="tray-net-num">{formatRate(downBps)}</span>
+        <NetRateNum bps={downBps} />
       </span>
     </span>
   );
@@ -523,6 +518,9 @@ export default function TrayCluster({
             p: snap?.power?.percent,
             i: snap?.ime?.mark,
             c: snap?.perf?.cpuPercent,
+            ct: snap?.perf?.cpuTempC ?? null,
+            gt: snap?.perf?.gpuTempC ?? null,
+            mp: snap?.perf?.memPercent,
             nd: Math.round((snap?.perf?.downBps ?? 0) / 256),
             nu: Math.round((snap?.perf?.upBps ?? 0) / 256),
           });
@@ -601,6 +599,9 @@ export default function TrayCluster({
               p: snap.power?.percent,
               i: snap.ime?.mark,
               c: snap.perf?.cpuPercent,
+              ct: snap.perf?.cpuTempC ?? null,
+              gt: snap.perf?.gpuTempC ?? null,
+              mp: snap.perf?.memPercent,
               nd: Math.round((snap.perf?.downBps ?? 0) / 256),
               nu: Math.round((snap.perf?.upBps ?? 0) / 256),
             });

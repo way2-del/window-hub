@@ -82,7 +82,6 @@ const PRODUCT_MARKERS: &[&str] = &[
     "\\dingtalk\\",
     "\\feishu\\",
     "\\lark\\",
-    "\\tencent\\",
     "\\wemeet\\",
     "\\spotify\\",
     "\\discord\\",
@@ -104,6 +103,7 @@ const GENERIC_ROOTS: &[&str] = &[
     "locallow",
     "common files",
     "programdata",
+    "programs",
 ];
 
 fn candidate_exe_keys(item: &DockItem) -> Vec<String> {
@@ -233,6 +233,20 @@ fn same_install_tree(pin_path: &str, run_path: &str) -> bool {
                 return false;
             }
         }
+        // Different exe names only merge when they belong to a known suite
+        // (WPS editor ↔ launcher). Otherwise Local\Programs\A vs B falsely match.
+        let mut in_suite = false;
+        for family in SUITE_FAMILIES {
+            let pin_hit = family.iter().any(|e| *e == pin_exe.as_str());
+            let run_hit = family.iter().any(|e| *e == run_exe.as_str());
+            if pin_hit && run_hit {
+                in_suite = true;
+                break;
+            }
+        }
+        if !in_suite {
+            return false;
+        }
     }
 
     let a = path_components(pin_path);
@@ -260,16 +274,29 @@ fn same_install_tree(pin_path: &str, run_path: &str) -> bool {
         .iter()
         .filter(|c| !is_generic_component(c))
         .count();
-    if meaningful == 0 {
-        return false;
-    }
-    // At least 2 directory levels, or 1 meaningful + another level.
-    meaningful >= 1 && n >= 2
+    // Require 2 meaningful segments so "Users\foo\AppData\Local\Programs" alone
+    // cannot merge unrelated apps.
+    meaningful >= 2 && n >= 3
 }
 
 fn same_product_marker(a: &str, b: &str) -> bool {
     let al = a.to_ascii_lowercase().replace('/', "\\");
     let bl = b.to_ascii_lowercase().replace('/', "\\");
+    let a_exe = normalize_exe_key(&file_name_lower(a));
+    let b_exe = normalize_exe_key(&file_name_lower(b));
+    // Marker alone is too weak across vendors; require same exe or shared suite.
+    if !a_exe.is_empty() && !b_exe.is_empty() && a_exe != b_exe {
+        let mut in_suite = false;
+        for family in SUITE_FAMILIES {
+            if in_suite_family(&a_exe, family) && in_suite_family(&b_exe, family) {
+                in_suite = true;
+                break;
+            }
+        }
+        if !in_suite {
+            return false;
+        }
+    }
     for m in PRODUCT_MARKERS {
         if al.contains(m) && bl.contains(m) {
             return true;
@@ -352,13 +379,10 @@ pub fn matching_windows(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowIn
                     return true;
                 }
             }
-            // Soft title fallback for suite pins only (e.g. "Java.docx - WPS Office").
+            // Soft title fallback for WPS suite only (e.g. "Java.docx - WPS Office").
+            // Generic label⊂title wrongly merges unrelated windows into a pin.
             if !suites.is_empty() {
                 let title = w.title.to_ascii_lowercase();
-                let label = item.label.to_ascii_lowercase();
-                if !label.is_empty() && label.len() >= 3 && title.contains(&label) {
-                    return true;
-                }
                 if suites.iter().any(|f| f[0] == "wps.exe")
                     && (title.contains("wps") || title.contains("金山"))
                 {
@@ -378,21 +402,54 @@ pub fn launch_or_focus(item: &DockItem) -> Result<(), String> {
         "separator" => Ok(()),
         _ => {
             let wins = list_windows(None);
-            let matched = matching_windows(item, &wins);
+            let mut matched = matching_windows(item, &wins);
+            // Broader fallback: exe filename only (helps Cursor when pin path/heal lags).
             if matched.is_empty() {
-                launch_app(item)
-            } else {
-                let hwnds: Vec<isize> = matched.iter().map(|w| w.hwnd).collect();
-                match focus_or_minimize_group(&hwnds) {
-                    Err(e) if e.contains("SetForegroundWindow") => Ok(()),
-                    other => other,
-                }
+                matched = windows_by_exe_stem(item, &wins);
             }
+            if !matched.is_empty() {
+                // Taskbar toggle: frontmost → minimize; else restore/focus.
+                let hwnds: Vec<isize> = matched.iter().map(|w| w.hwnd).collect();
+                return focus_or_minimize_group(&hwnds);
+            }
+            launch_app(item)
         }
     }
 }
 
-fn open_start_menu() -> Result<(), String> {
+/// Match running windows by exe stem from pin paths / match_exe / label.
+fn windows_by_exe_stem(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowInfo> {
+    let mut stems = Vec::new();
+    let push = |out: &mut Vec<String>, raw: &str| {
+        let k = normalize_exe_key(&file_name_lower(raw));
+        if !k.is_empty() && !out.iter().any(|e| e == &k) {
+            out.push(k);
+        }
+    };
+    push(&mut stems, &item.match_exe);
+    push(&mut stems, &item.real_path);
+    push(&mut stems, &item.launch_path);
+    let label = item.label.trim().to_ascii_lowercase();
+    if !label.is_empty() {
+        // "Cursor" → cursor.exe
+        let guess = format!("{label}.exe");
+        push(&mut stems, &guess);
+    }
+    if stems.is_empty() {
+        return Vec::new();
+    }
+    windows
+        .iter()
+        .filter(|w| {
+            let n = normalize_exe_key(w.exe_name.as_deref().unwrap_or(""));
+            let base = normalize_exe_key(&file_name_lower(w.exe.as_deref().unwrap_or("")));
+            stems.iter().any(|s| s == &n || s == &base)
+        })
+        .cloned()
+        .collect()
+}
+
+pub fn open_start_menu() -> Result<(), String> {
     #[cfg(windows)]
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -431,6 +488,10 @@ fn launch_app(item: &DockItem) -> Result<(), String> {
     } else {
         return Err("no launch path".into());
     };
+    shell_open(path, None)
+}
+
+pub fn shell_open_path(path: &str) -> Result<(), String> {
     shell_open(path, None)
 }
 

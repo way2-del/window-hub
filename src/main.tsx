@@ -10,6 +10,7 @@ import SystemFlyoutApp from "./SystemFlyoutApp";
 import DockApp from "./DockApp";
 import DockItemMenuApp from "./DockItemMenuApp";
 import DockPreviewApp from "./DockPreviewApp";
+import SousouApp from "./SousouApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
@@ -28,6 +29,7 @@ declare global {
     __WH_IS_DOCK_ITEM_MENU__?: boolean;
     __WH_IS_DOCK_PREVIEW__?: boolean;
     __WH_IS_DOCK_TRIGGER__?: boolean;
+    __WH_IS_SOUSOU__?: boolean;
     __WH_PLUGIN_ID__?: string;
   }
 }
@@ -43,9 +45,11 @@ type WindowKind =
   | "dock-glass"
   | "dock-item-menu"
   | "dock-preview"
-  | "dock-trigger";
+  | "dock-trigger"
+  | "sousou";
 
 function resolveWindowKind(): WindowKind {
+  if (window.__WH_IS_SOUSOU__ === true) return "sousou";
   if (window.__WH_IS_DOCK_TRIGGER__ === true) return "dock-trigger";
   if (window.__WH_IS_DOCK_PREVIEW__ === true) return "dock-preview";
   if (window.__WH_IS_DOCK_ITEM_MENU__ === true) return "dock-item-menu";
@@ -58,6 +62,7 @@ function resolveWindowKind(): WindowKind {
   if (window.__WH_IS_SETTINGS__ === true) return "settings";
   try {
     const label = getCurrentWindow().label;
+    if (label === "sousou") return "sousou";
     if (label === "dock-trigger") return "dock-trigger";
     if (label === "dock-preview") return "dock-preview";
     if (label === "dock-item-menu") return "dock-item-menu";
@@ -72,6 +77,7 @@ function resolveWindowKind(): WindowKind {
     /* ignore */
   }
   const q = new URLSearchParams(window.location.search).get("window");
+  if (q === "sousou") return "sousou";
   if (q === "dock-trigger") return "dock-trigger";
   if (q === "dock-preview") return "dock-preview";
   if (q === "dock-item-menu") return "dock-item-menu";
@@ -100,7 +106,10 @@ const overlayOpaque =
     kind === "dock-preview");
 
 // Win10 hard-safe: never force transparent over opaque HWND (white zombie).
-if (!overlayOpaque) {
+if (kind === "sousou") {
+  document.documentElement.style.background = "#f3f4f6";
+  document.body.style.background = "#f3f4f6";
+} else if (!overlayOpaque) {
   document.documentElement.style.background = "transparent";
   document.body.style.background = "transparent";
 } else {
@@ -114,42 +123,46 @@ if (!overlayOpaque) {
 }
 
 document.body.classList.add(
-  kind === "settings"
-    ? "is-settings"
-    : kind === "tray"
-      ? "is-tray-popup"
-      : kind === "system-flyout"
-        ? "is-system-flyout"
-        : kind === "status-menu"
-          ? "is-status-menu-popup"
-          : kind === "plugin-popup"
-            ? "is-plugin-popup"
-            : kind === "dock-item-menu"
-              ? "is-dock-item-menu"
-              : kind === "dock-preview"
-                ? "is-dock-preview"
-                : kind === "dock" || kind === "dock-glass" || kind === "dock-trigger"
-                  ? "is-dock"
-                  : "is-island",
+  kind === "sousou"
+    ? "is-sousou"
+    : kind === "settings"
+      ? "is-settings"
+      : kind === "tray"
+        ? "is-tray-popup"
+        : kind === "system-flyout"
+          ? "is-system-flyout"
+          : kind === "status-menu"
+            ? "is-status-menu-popup"
+            : kind === "plugin-popup"
+              ? "is-plugin-popup"
+              : kind === "dock-item-menu"
+                ? "is-dock-item-menu"
+                : kind === "dock-preview"
+                  ? "is-dock-preview"
+                  : kind === "dock" || kind === "dock-glass" || kind === "dock-trigger"
+                    ? "is-dock"
+                    : "is-island",
 );
 document.title =
-  kind === "settings"
-    ? "灵动岛设置"
-    : kind === "tray"
-      ? "已收纳"
-      : kind === "system-flyout"
-        ? "系统面板"
-        : kind === "status-menu"
-          ? "状态菜单"
-          : kind === "plugin-popup"
-            ? "插件"
-            : kind === "dock-item-menu"
-              ? "Dock 菜单"
-              : kind === "dock-preview"
-                ? "Dock 预览"
-                : kind === "dock-trigger" || kind === "dock-glass" || kind === "dock"
-                  ? ""
-                  : "灵动岛";
+  kind === "sousou"
+    ? "搜搜"
+    : kind === "settings"
+      ? "灵动岛设置"
+      : kind === "tray"
+        ? "已收纳"
+        : kind === "system-flyout"
+          ? "系统面板"
+          : kind === "status-menu"
+            ? "状态菜单"
+            : kind === "plugin-popup"
+              ? "插件"
+              : kind === "dock-item-menu"
+                ? "Dock 菜单"
+                : kind === "dock-preview"
+                  ? "Dock 预览"
+                  : kind === "dock-trigger" || kind === "dock-glass" || kind === "dock"
+                    ? ""
+                    : "灵动岛";
 
 const root = document.getElementById("root") as HTMLElement;
 if (kind === "settings") {
@@ -169,7 +182,9 @@ if (
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    {kind === "settings" ? (
+    {kind === "sousou" ? (
+      <SousouApp />
+    ) : kind === "settings" ? (
       <SettingsApp />
     ) : kind === "tray" ? (
       <TrayPopupApp />

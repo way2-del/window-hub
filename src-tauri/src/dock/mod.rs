@@ -8,9 +8,11 @@ mod shortcut;
 mod visibility;
 
 pub use icon::resolve_item_icon_png;
+pub use icon::resolve_launcher_icon_png;
 pub use icon::resolve_small_icon_png;
 pub use ini::parse_dockico_ini;
 pub use launch::launch_or_focus;
+pub use shortcut::resolve_lnk_target;
 pub use visibility::DockVisibility;
 
 use serde::{Deserialize, Serialize};
@@ -95,8 +97,8 @@ pub struct DockPrefs {
     /// Logical px height of the bottom hot zone (default 12).
     #[serde(default = "default_activation_thickness_px")]
     pub activation_thickness_px: u32,
-    /// Logical px gap between dock bottom and monitor bottom (default 0 = flush).
-    #[serde(default)]
+    /// Logical px gap between dock bottom and monitor bottom.
+    #[serde(default = "default_bottom_offset_px")]
     pub bottom_offset_px: u32,
     /// After pointer leaves Dock/activation strip, wait this many ms before hiding.
     #[serde(default = "default_hide_linger_ms")]
@@ -119,6 +121,9 @@ pub struct DockPrefs {
     /// Icon slot size in logical px (28–56). Chrome height follows.
     #[serde(default = "default_icon_size")]
     pub icon_size: u32,
+    /// Gap between icon slots in logical px (4–24). Wider reduces magnification overlap.
+    #[serde(default = "default_icon_gap")]
+    pub icon_gap: u32,
     /// When auto/smart-hide tucks the dock, show a thin Apple-style peek strip.
     #[serde(default = "default_true")]
     pub show_trigger_strip: bool,
@@ -128,6 +133,12 @@ pub struct DockPrefs {
     /// Running indicator: `bar` (Apple white dash) or `dot`.
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
+    /// Hot corner: bottom-right → show desktop (Win+D / ToggleDesktop).
+    #[serde(default = "default_true")]
+    pub corner_show_desktop: bool,
+    /// Hot corner: bottom-left → open Start menu.
+    #[serde(default = "default_true")]
+    pub corner_open_start: bool,
 }
 
 fn default_hotkey() -> String {
@@ -140,6 +151,10 @@ fn default_activation_position() -> String {
 
 fn default_activation_thickness_px() -> u32 {
     20
+}
+
+fn default_bottom_offset_px() -> u32 {
+    4
 }
 
 fn default_hide_linger_ms() -> u32 {
@@ -160,6 +175,10 @@ fn default_corner_radius() -> u32 {
 
 fn default_icon_size() -> u32 {
     40
+}
+
+fn default_icon_gap() -> u32 {
+    10
 }
 
 fn default_indicator_style() -> String {
@@ -200,7 +219,7 @@ impl Default for DockPrefs {
             hotkey: default_hotkey(),
             activation_position: default_activation_position(),
             activation_thickness_px: default_activation_thickness_px(),
-            bottom_offset_px: 0,
+            bottom_offset_px: default_bottom_offset_px(),
             hide_linger_ms: default_hide_linger_ms(),
             magnification: default_magnification(),
             show_preview: true,
@@ -208,9 +227,12 @@ impl Default for DockPrefs {
             corner_radius: default_corner_radius(),
             bounce_on_click: true,
             icon_size: default_icon_size(),
+            icon_gap: default_icon_gap(),
             show_trigger_strip: true,
             show_running_apps: true,
             indicator_style: default_indicator_style(),
+            corner_show_desktop: true,
+            corner_open_start: true,
         }
     }
 }
@@ -228,20 +250,30 @@ impl DockPrefs {
         self.icon_size.clamp(28, 56) as f64
     }
 
-    /// Visible pill height (icon + padding + running dot).
+    pub fn icon_gap_px(&self) -> f64 {
+        self.icon_gap.clamp(4, 24) as f64
+    }
+
+    /// Visible pill: icon + top pad + bottom strip for the running mark.
     pub fn chrome_height(&self) -> f64 {
-        self.icon_slot() + 16.0
+        self.icon_slot() + 18.0
     }
 
     fn normalize(mut self) -> Self {
         self.display_mode = self.mode().as_str().into();
         self.activation_position = self.activation().as_str().into();
         self.activation_thickness_px = self.activation_thickness_px.clamp(4, 64);
-        self.bottom_offset_px = self.bottom_offset_px.min(400);
+        // Earlier builds wrongly raised the whole dock off the screen edge (28/36).
+        // Restore flush-bottom defaults for those accidental values only.
+        if self.bottom_offset_px == 28 || self.bottom_offset_px == 36 {
+            self.bottom_offset_px = default_bottom_offset_px();
+        }
+        self.bottom_offset_px = self.bottom_offset_px.clamp(0, 400);
         self.hide_linger_ms = self.hide_linger_ms.clamp(200, 10_000);
         self.magnification = clamp_magnification(self.magnification);
         self.corner_radius = self.corner_radius.clamp(8, 28);
         self.icon_size = self.icon_size.clamp(28, 56);
+        self.icon_gap = self.icon_gap.clamp(4, 24);
         let style = self.indicator_style.trim().to_ascii_lowercase();
         self.indicator_style = if style == "dot" {
             "dot".into()
@@ -321,8 +353,7 @@ fn with_icons(mut prefs: DockPrefs) -> DockPrefs {
     prefs
 }
 
-const DOCK_GAP: f64 = 5.0;
-const DOCK_PAD_X: f64 = 8.0;
+const DOCK_PAD_X: f64 = 22.0;
 const DOCK_SEP: f64 = 8.0;
 pub(crate) const DOCK_TRIGGER_H: f64 = 3.0;
 const DOCK_GLASS_LABEL: &str = "dock-glass";
@@ -350,11 +381,11 @@ fn clamp_magnification(m: f64) -> f64 {
 }
 
 /// Base content width (unscaled icon slots).
-pub(crate) fn dock_content_width(items: &[DockItem], icon: f64) -> f64 {
+pub(crate) fn dock_content_width(items: &[DockItem], icon: f64, gap: f64) -> f64 {
     let mut w = DOCK_PAD_X * 2.0;
     for (i, it) in items.iter().enumerate() {
         if i > 0 {
-            w += DOCK_GAP;
+            w += gap;
         }
         if it.kind == "separator" {
             w += DOCK_SEP;
@@ -365,53 +396,27 @@ pub(crate) fn dock_content_width(items: &[DockItem], icon: f64) -> f64 {
     w.max(100.0)
 }
 
-/// Window width including fan-out room when magnification is on.
+/// Window width = pill content only (pinned + running extras).
+///
+/// Do NOT add magnification fan pad: an oversized transparent HWND paints a
+/// white rectangular outline around the CSS capsule on Win11 (WebView2/DWM).
 pub(crate) fn dock_window_width(prefs: &DockPrefs) -> f64 {
     let icon = prefs.icon_slot();
-    let base = dock_content_width(&prefs.items, icon)
-        + f64::from(runtime_extra_width().load(std::sync::atomic::Ordering::Relaxed));
-    // Win10: keep fan pad modest — wide transparent frames look like a slab.
-    #[cfg(windows)]
-    if crate::win32::blur_glass::is_hard_safe() {
-        let mag = clamp_magnification(prefs.magnification);
-        let fan = if mag > 1.001 {
-            icon * (mag - 1.0) * 2.0
-        } else {
-            0.0
-        };
-        return (base + fan).max(100.0);
-    }
-    let mag = clamp_magnification(prefs.magnification);
-    let fan = icon * (mag - 1.0) * 4.0;
-    (base + fan).max(100.0)
+    dock_content_width(&prefs.items, icon, prefs.icon_gap_px())
+        .max(100.0)
+        + f64::from(runtime_extra_width().load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Window height = chrome + fan headroom only.
-/// Preview / context menu use separate popups — never a permanent tall outlined box.
-///
-/// At rest (no extra_headroom): chrome-only on Win10 so no floating light band.
-/// While magnifying, frontend may set extra_headroom; chrome CSS fills that band
-/// (opaque), so icons can enlarge without a hollow "条子".
+/// Window height = chrome + transparent mag headroom (icons grow above the pill).
 pub(crate) fn dock_window_height(prefs: &DockPrefs) -> f64 {
     let chrome = prefs.chrome_height();
     let extra = f64::from(extra_headroom().load(std::sync::atomic::Ordering::Relaxed));
-    #[cfg(windows)]
-    if crate::win32::blur_glass::is_hard_safe() {
-        return chrome + extra;
-    }
-    let icon = prefs.icon_slot();
-    let mag = clamp_magnification(prefs.magnification);
-    let mut head = 0.0_f64;
-    if mag > 1.001 {
-        head = icon * (mag - 1.0);
-    }
-    head += extra;
-    chrome + head
+    chrome + extra
 }
 
 /// Full pill width including runtime running-app extras (glass strip).
 pub(crate) fn dock_glass_width(prefs: &DockPrefs) -> f64 {
-    dock_content_width(&prefs.items, prefs.icon_slot())
+    dock_content_width(&prefs.items, prefs.icon_slot(), prefs.icon_gap_px())
         + f64::from(runtime_extra_width().load(std::sync::atomic::Ordering::Relaxed))
 }
 
@@ -457,10 +462,8 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     let glass_w = dock_glass_width(prefs);
     let glass = app.get_webview_window(DOCK_GLASS_LABEL);
 
-    #[cfg(windows)]
-    let glass_disabled = crate::win32::blur_glass::is_hard_safe();
-    #[cfg(not(windows))]
-    let glass_disabled = false;
+    // Always hide dock-glass: SWCA/mica white frames at capsule ends (see ensure_dock).
+    let glass_disabled = true;
 
     // Win10: never sleep on a place path that can contend with UI/WebView2 init —
     // animated slides previously painted the whole app as "未响应".
@@ -535,6 +538,17 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
                         win32_dock_clear_frame(gh);
                     }
                 }
+                // DWM can restore borders after SetWindowPos — re-clear icons layer
+                // and re-clip glass to the CSS pill so white side boxes cannot return.
+                crate::win32::blur_glass::refresh_dock_layers(
+                    &win,
+                    if glass_disabled {
+                        None
+                    } else {
+                        glass.as_ref()
+                    },
+                    f64::from(prefs.corner_radius),
+                );
                 // Trigger strip uses Tauri build — must stay outside the place lock.
                 sync_trigger_strip(app, prefs, shown);
                 return;
@@ -612,6 +626,18 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
             let _ = win.hide();
         }
         let _ = win.set_ignore_cursor_events(!shown);
+    }
+    #[cfg(windows)]
+    {
+        crate::win32::blur_glass::refresh_dock_layers(
+            &win,
+            if glass_disabled {
+                None
+            } else {
+                glass.as_ref()
+            },
+            f64::from(prefs.corner_radius),
+        );
     }
     sync_trigger_strip(app, prefs, shown);
 }
@@ -695,6 +721,29 @@ fn win32_dock_set_click_through(hwnd_raw: isize, through: bool) {
     }
 }
 
+/// Keep dock-preview above other top-level windows (so × isn't covered).
+#[cfg(windows)]
+fn win32_preview_topmost(hwnd_raw: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
+    let hwnd = dock_root_hwnd(hwnd_raw);
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn win32_preview_topmost(_hwnd_raw: isize) {}
+
 /// Kill the rectangular DWM / classic frame outline around dock HWNDs.
 /// Also strips caption so focus never reveals a "Dock" title bar / blue accent ring.
 /// Sets WS_EX_NOACTIVATE so clicks don't steal activation (blue focus chrome + flaky launch).
@@ -719,7 +768,8 @@ fn win32_dock_clear_frame(hwnd_raw: isize) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_BORDER, WS_CAPTION,
-        WS_DLGFRAME, WS_EX_NOACTIVATE, WS_SYSMENU, WS_THICKFRAME,
+        WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
+        WS_EX_WINDOWEDGE, WS_SYSMENU, WS_THICKFRAME,
     };
     use std::ffi::c_void;
     let hwnd = dock_root_hwnd(hwnd_raw);
@@ -731,7 +781,11 @@ fn win32_dock_clear_frame(hwnd_raw: isize) {
             let _ = SetWindowLongW(hwnd, GWL_STYLE, style & !strip);
         }
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let ex_next = ex | (WS_EX_NOACTIVATE.0 as i32);
+        let ex_strip = (WS_EX_WINDOWEDGE.0
+            | WS_EX_CLIENTEDGE.0
+            | WS_EX_STATICEDGE.0
+            | WS_EX_DLGMODALFRAME.0) as i32;
+        let ex_next = (ex & !ex_strip) | (WS_EX_NOACTIVATE.0 as i32);
         if ex_next != ex {
             let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, ex_next);
         }
@@ -744,6 +798,18 @@ fn win32_dock_clear_frame(hwnd_raw: isize) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
+        // Reset any prior ExtendFrame(-1) that left a white outline on this HWND.
+        {
+            use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+            use windows::Win32::UI::Controls::MARGINS;
+            let margins = MARGINS {
+                cxLeftWidth: 0,
+                cxRightWidth: 0,
+                cyTopHeight: 0,
+                cyBottomHeight: 0,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        }
         let none = DWMWA_COLOR_NONE;
         for attr in [DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR] {
             let _ = DwmSetWindowAttribute(
@@ -760,6 +826,11 @@ fn win32_dock_clear_frame(hwnd_raw: isize) {
             &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
             std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
         );
+        // Drop any leftover round region from older builds (white outline / dead clicks).
+        {
+            use windows::Win32::Graphics::Gdi::{SetWindowRgn, HRGN};
+            let _ = SetWindowRgn(hwnd, HRGN::default(), true);
+        }
     }
 }
 
@@ -1209,6 +1280,16 @@ pub fn dock_launch_item(item_id: String) -> Result<(), String> {
     launch_or_focus(item)
 }
 
+/// Launch / reopen an arbitrary exe path (ephemeral running-app fallback).
+#[tauri::command]
+pub fn dock_launch_path(path: String) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("empty path".into());
+    }
+    launch::shell_open_path(path)
+}
+
 fn persist_and_emit(app: &AppHandle, mut prefs: DockPrefs) -> Result<DockPrefs, String> {
     prefs = prefs.normalize();
     prefs = with_icons(prefs);
@@ -1421,6 +1502,19 @@ fn close_hwnd(hwnd_raw: isize) -> bool {
     }
 }
 
+/// Close a single top-level window by HWND (dock preview × on each card).
+#[tauri::command]
+pub fn dock_close_hwnd(hwnd: isize) -> Result<(), String> {
+    if hwnd == 0 {
+        return Err("invalid hwnd".into());
+    }
+    if close_hwnd(hwnd) {
+        Ok(())
+    } else {
+        Err("WM_CLOSE failed".into())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockPreviewFrame {
@@ -1578,9 +1672,15 @@ pub struct DockPreviewPayload {
 
 fn preview_window_size(n: usize) -> (f64, f64) {
     let count = n.max(1).min(6) as f64;
-    let w = DOCK_PREVIEW_PAD * 2.0 + count * DOCK_PREVIEW_CARD_W + (count - 1.0).max(0.0) * DOCK_PREVIEW_GAP;
-    let h = DOCK_PREVIEW_PAD * 2.0 + DOCK_PREVIEW_CARD_H;
-    (w.clamp(160.0, 920.0), h.clamp(120.0, 160.0))
+    let w = preview_dwm::PREVIEW_PAD * 2.0
+        + count * preview_dwm::PREVIEW_CARD_W
+        + (count - 1.0).max(0.0) * preview_dwm::PREVIEW_GAP;
+    // Thumb + bottom pad + title/close row.
+    let h = preview_dwm::PREVIEW_HEADER
+        + preview_dwm::PREVIEW_THUMB_H
+        + preview_dwm::PREVIEW_PAD
+        + 28.0;
+    (w.clamp(160.0, 920.0), h.clamp(150.0, 220.0))
 }
 
 /// Keep the preview popup on the same monitor as the dock, clamped to edges.
@@ -1699,8 +1799,18 @@ pub async fn open_dock_preview(
             let _ = existing.hide();
             return Ok(());
         }
+        let _ = crate::win32::blur_glass::apply_dock_icons_layer(&existing, None);
+        if let Ok(hwnd) = existing.hwnd() {
+            win32_dock_clear_frame(hwnd.0 as isize);
+            crate::win32::blur_glass::apply_dock_pill_region(&existing, 14.0);
+        }
         let _ = existing.unminimize();
+        let _ = existing.set_always_on_top(true);
         let _ = existing.show();
+        #[cfg(windows)]
+        if let Ok(hwnd) = existing.hwnd() {
+            win32_preview_topmost(hwnd.0 as isize);
+        }
     } else {
         let init = r#"
       window.__WH_IS_DOCK_PREVIEW__ = true;
@@ -1741,17 +1851,24 @@ pub async fn open_dock_preview(
         .map_err(|e| format!("open dock-preview failed: {e}"))?;
 
         let _ = win.set_position(LogicalPosition::new(x, y));
-        apply_saved_material_pub(&win, &state);
+        // No SWCA/mica on preview — transparent + material paints the white rectangular frame.
+        let _ = crate::win32::blur_glass::apply_dock_icons_layer(&win, None);
         if let Ok(hwnd) = win.hwnd() {
             crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
             win32_dock_clear_frame(hwnd.0 as isize);
+            crate::win32::blur_glass::apply_dock_pill_region(&win, 14.0);
         }
         let _ = app.emit("dock-preview", &payload);
         if preview_epoch().load(std::sync::atomic::Ordering::SeqCst) != epoch {
             let _ = win.hide();
             return Ok(());
         }
+        let _ = win.set_always_on_top(true);
         let _ = win.show();
+        #[cfg(windows)]
+        if let Ok(hwnd) = win.hwnd() {
+            win32_preview_topmost(hwnd.0 as isize);
+        }
     }
 
     // Windows taskbar style: DWM live thumbnails (instant, correct). JPEG only if DWM fails.
@@ -1820,7 +1937,8 @@ pub async fn close_dock_preview(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn dock_set_extra_headroom(app: AppHandle, px: u32) -> Result<(), String> {
-    let next = px.min(120);
+    // Transparent headroom above the pill so magnified icons can rise out.
+    let next = px.min(160);
     let prev = extra_headroom().swap(next, std::sync::atomic::Ordering::Relaxed);
     if prev == next {
         return Ok(());
@@ -1875,7 +1993,13 @@ pub async fn dock_set_runtime_extra_width(app: AppHandle, extra: f64) -> Result<
     if prefs.enabled {
         let app2 = app.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            position_dock_window(&app2, &prefs);
+            // Must resize even while auto-hide animation marks visibility "busy",
+            // otherwise unpinned running icons stay clipped outside the HWND.
+            let shown = app2
+                .try_state::<Arc<DockVisibility>>()
+                .map(|v| v.ui_shown())
+                .unwrap_or(true);
+            place_dock_window(&app2, &prefs, shown, false);
         })
         .await;
     }
@@ -1937,7 +2061,8 @@ pub async fn open_dock_item_menu(
     y: f64,
 ) -> Result<(), String> {
     let _ = close_dock_preview(app.clone()).await;
-    let prefs = with_icons(load_dock_prefs());
+    // Never call with_icons here — re-extracting every dock icon blocks the menu.
+    let prefs = load_dock_prefs();
     let item = prefs
         .items
         .iter()
@@ -1969,8 +2094,9 @@ pub async fn open_dock_item_menu(
         windows: windows.clone(),
     };
 
-    let menu_w = 200.0_f64;
-    let menu_h = (56.0 + windows.len().min(6) as f64 * 28.0 + 160.0).clamp(200.0, 360.0);
+    let menu_w = 196.0_f64;
+    // Tighter row height (~24) so more actions fit without feeling sparse.
+    let menu_h = (48.0 + windows.len().min(6) as f64 * 24.0 + 148.0).clamp(180.0, 340.0);
 
     if let Some(existing) = app.get_webview_window(DOCK_ITEM_MENU_LABEL) {
         let _ = existing.set_size(LogicalSize::new(menu_w, menu_h));
@@ -2178,10 +2304,11 @@ async fn ensure_dock_window_inner(
     let chrome_h = prefs.chrome_height();
     let glass_w = dock_glass_width(prefs);
 
-    #[cfg(windows)]
-    let skip_glass = crate::win32::blur_glass::is_hard_safe();
-    #[cfg(not(windows))]
-    let skip_glass = false;
+    // Always skip SWCA/mica glass HWND for the dock pill.
+    // Win11 material (mica-alt / blurbehind) paints a rectangular slab whose edges
+    // show as white vertical frames past the CSS border-radius — SetWindowRgn cannot
+    // reliably kill the fringe. Visible frost is CSS `.dock-chrome` only.
+    let skip_glass = true;
 
     // Glass strip first (below icons): owns SWCA material at chrome height.
     // Win10: skip entirely — transparent glass HWND still paints a rectangular frame.
@@ -2220,16 +2347,10 @@ async fn ensure_dock_window_inner(
             win32_dock_clear_frame(hwnd.0 as isize);
         }
     } else if skip_glass {
-        // Hide via Win32 only — Tauri hide can deadlock with place_dock_window.
+        // Destroy leftover glass HWND from older builds — a hidden SWCA window can
+        // still composite a white rectangular outline behind/around the CSS pill.
         if let Some(g) = app.get_webview_window(DOCK_GLASS_LABEL) {
-            #[cfg(windows)]
-            if let Ok(hwnd) = g.hwnd() {
-                win32_dock_show(hwnd.0 as isize, false);
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = g.hide();
-            }
+            let _ = g.close();
         }
     } else if let Some(glass) = app.get_webview_window(DOCK_GLASS_LABEL) {
         let _ = glass.set_ignore_cursor_events(true);
@@ -2250,6 +2371,28 @@ async fn ensure_dock_window_inner(
 
     let init = r#"
       window.__WH_IS_DOCK__ = true;
+      (function () {
+        function clearOpaque() {
+          try {
+            var r = document.documentElement;
+            r.style.setProperty("background", "transparent", "important");
+            if (document.body) {
+              document.body.style.setProperty("background", "transparent", "important");
+            }
+            var root = document.getElementById("root");
+            if (root) root.style.setProperty("background", "transparent", "important");
+            var s = document.getElementById("wh-glass-compat-boot");
+            if (s) {
+              s.textContent =
+                "html,body,#root,html[data-glass-compat='1'],html[data-glass-compat='1'] body,html[data-glass-compat='1'] #root{background:transparent!important;}";
+            }
+          } catch (e) {}
+        }
+        clearOpaque();
+        document.addEventListener("DOMContentLoaded", clearOpaque);
+        setTimeout(clearOpaque, 0);
+        setTimeout(clearOpaque, 50);
+      })();
     "#;
 
     let win = WebviewWindowBuilder::new(
@@ -2268,6 +2411,7 @@ async fn ensure_dock_window_inner(
     // headroom as a solid white slab above the glass strip.
     .transparent(true)
     .background_color(tauri::utils::config::Color(0, 0, 0, 0))
+    .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
@@ -2277,7 +2421,7 @@ async fn ensure_dock_window_inner(
     .build()
     .map_err(|e| format!("open dock failed: {e}"))?;
 
-    // Icons layer: clear material (glass sibling owns acrylic).
+    // Icons layer: clear material / border (never mica).
     apply_saved_material_pub(&win, state);
     #[cfg(windows)]
     if let Ok(hwnd) = win.hwnd() {
@@ -2335,11 +2479,18 @@ pub fn bootstrap_dock(app: &AppHandle) {
             }
             position_dock_window(&app3, &prefs3);
             let state = app3.state::<MaterialState>();
+            // Material only on dock-glass; icons layer must stay clear (no mica slab).
             if let Some(g) = app3.get_webview_window(DOCK_GLASS_LABEL) {
                 apply_saved_material_pub(&g, &*state);
             }
             if let Some(w) = app3.get_webview_window("dock") {
+                // apply_prefs routes label "dock" → apply_dock_icons_layer (never mica).
                 apply_saved_material_pub(&w, &*state);
+                crate::win32::blur_glass::refresh_dock_layers(
+                    &w,
+                    app3.get_webview_window(DOCK_GLASS_LABEL).as_ref(),
+                    f64::from(prefs3.corner_radius),
+                );
             }
         });
     });

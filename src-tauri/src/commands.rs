@@ -10,7 +10,8 @@ use crate::ecs::resources::{HubCommand, KeyKindDto, PointerKindDto};
 use crate::ecs::EcsHandle;
 use crate::plugin_hub::hub_init_script;
 use crate::win32::enum_windows::{
-    focus_or_minimize_window, focus_window, parse_window_id, WindowInfo,
+    focus_or_minimize_group, focus_or_minimize_window, focus_window, list_windows, parse_window_id,
+    WindowInfo,
 };
 use crate::windows_service::WindowsService;
 
@@ -74,16 +75,49 @@ pub fn get_open_window(
     svc.get(&id)
 }
 
+/// Soft-fail SetForegroundWindow so dock clicks still count as success when the
+/// OS blocks foreground (Electron often needs a follow-up ShellExecute).
 #[tauri::command]
 pub fn focus_open_window(id: String) -> Result<(), String> {
     let hwnd = parse_window_id(&id)?;
-    focus_window(hwnd)
+    match focus_window(hwnd) {
+        Err(e) if e.contains("SetForegroundWindow") => Err(e),
+        other => other,
+    }
 }
 
 /// Dock icon click: focus, or minimize when already frontmost (taskbar toggle).
+/// Expands to same-PID siblings so multi-window Electron (Cursor) toggles correctly
+/// when the dock icon only cached one HWND.
 #[tauri::command]
 pub fn focus_or_minimize_open_window(id: String) -> Result<(), String> {
     let hwnd = parse_window_id(&id)?;
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+        let mut pid = 0u32;
+        unsafe {
+            let h = HWND(hwnd as *mut _);
+            if IsWindow(h).as_bool() {
+                GetWindowThreadProcessId(h, Some(&mut pid));
+            }
+        }
+        if pid != 0 {
+            let mut hwnds: Vec<isize> = list_windows(None)
+                .into_iter()
+                .filter(|w| w.pid == pid)
+                .map(|w| w.hwnd)
+                .collect();
+            if !hwnds.iter().any(|&h| h == hwnd) {
+                hwnds.insert(0, hwnd);
+            }
+            return match focus_or_minimize_group(&hwnds) {
+                Err(e) if e.contains("SetForegroundWindow") => Ok(()),
+                other => other,
+            };
+        }
+    }
     match focus_or_minimize_window(hwnd) {
         Err(e) if e.contains("SetForegroundWindow") => Ok(()),
         other => other,
@@ -1192,8 +1226,8 @@ pub async fn set_process_net_blocked(
 }
 
 const STATUS_MENU_POPUP_W: f64 = 220.0;
-/// Fits settings + system tools + taskbar/desktop + restart/exit (with seps).
-const STATUS_MENU_POPUP_H: f64 = 560.0;
+/// Initial height; frontend measures content and resizes (pad 12 + 13×~32.25 + 3×11).
+const STATUS_MENU_POPUP_H: f64 = 465.0;
 
 /// 左侧状态菜单弹窗：与插件/托盘共用 MicaAlt 材质与深浅色。
 #[tauri::command]
@@ -2313,6 +2347,10 @@ pub fn hub_netease_now_playing(plugin_id: String) -> Result<serde_json::Value, S
 #[tauri::command]
 pub fn hub_media_transport(plugin_id: String, action: String) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
+    #[cfg(windows)]
+    {
+        crate::win32::netease_lyrics::note_media_transport(&action);
+    }
     crate::win32::input::media_transport(&action)
 }
 

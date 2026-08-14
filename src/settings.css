@@ -290,12 +290,12 @@ a {
 .pref-row-label {
   font-size: 13px;
   font-weight: 600;
-  color: #f3f4f6;
+  color: var(--glass-fg, #f3f4f6);
 }
 
 .pref-row-desc {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--glass-fg-muted, #9ca3af);
   line-height: 1.35;
 }
 
@@ -416,7 +416,7 @@ a {
 
 .section-hint {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--glass-fg-muted, #9ca3af);
 }
 
 .mode-list {

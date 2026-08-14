@@ -60,6 +60,42 @@ pub fn resolve_small_icon_png(launch_path: &str) -> Option<String> {
     }
 }
 
+/// Sharp launcher icons (~128 CSS px headroom → crisp at 40–48px UI).
+pub fn resolve_launcher_icon_png(launch_path: &str) -> Option<String> {
+    let launch = launch_path.trim();
+    if launch.is_empty() {
+        return None;
+    }
+    // Prefer 256px shell / SHDefExtractIcon. Never fall back to 32px SHGFI —
+    // upscaling that for 48px UI looks blurry.
+    resolve_item_icon_png("", launch).or_else(|| resolve_bare_exe_icon(launch))
+}
+
+/// `calc.exe` / `notepad.exe` style names → System32 (or SysWOW64) full path.
+fn resolve_bare_exe_icon(name: &str) -> Option<String> {
+    if name.contains('\\') || name.contains('/') {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        let windir = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+        for dir in ["System32", "SysWOW64"] {
+            let p = Path::new(&windir).join(dir).join(name);
+            if p.exists() {
+                if let Some(b) = extract_shell_icon_png(&p) {
+                    return Some(b);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        None
+    }
+}
+
 fn try_icon_location(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -240,17 +276,162 @@ fn load_image_file_png(path: &Path) -> Option<String> {
 }
 
 fn encode_rgba_png(pixels: &[u8], w: u32, h: u32) -> Option<String> {
+    let (pixels, w, h) = trim_rgba_padding(pixels, w, h);
+    let (pixels, w, h) = upscale_small_icon(pixels, w, h);
     let mut buf = Vec::new();
     let enc = image::codecs::png::PngEncoder::new(&mut buf);
     use image::ImageEncoder;
-    enc.write_image(pixels, w, h, image::ExtendedColorType::Rgba8)
+    enc.write_image(&pixels, w, h, image::ExtendedColorType::Rgba8)
         .ok()?;
     Some(B64.encode(buf))
 }
 
+/// After trim, tiny rasters (32px glyph on a dock/sousou tile) look soft when CSS
+/// upscales — bring them to a crisp intermediate size with nearest-neighbor.
+fn upscale_small_icon(pixels: Vec<u8>, w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+    const TARGET: u32 = 128;
+    let long = w.max(h);
+    if long == 0 || long >= 96 {
+        return (pixels, w, h);
+    }
+    let scale = (TARGET as f32 / long as f32).ceil().clamp(2.0, 4.0) as u32;
+    if scale <= 1 {
+        return (pixels, w, h);
+    }
+    let nw = w.saturating_mul(scale);
+    let nh = h.saturating_mul(scale);
+    let mut out = vec![0u8; (nw as usize) * (nh as usize) * 4];
+    for y in 0..nh {
+        let sy = y / scale;
+        for x in 0..nw {
+            let sx = x / scale;
+            let si = ((sy * w + sx) * 4) as usize;
+            let di = ((y * nw + x) * 4) as usize;
+            out[di..di + 4].copy_from_slice(&pixels[si..si + 4]);
+        }
+    }
+    (out, nw, nh)
+}
+
+#[inline]
+fn rgba_at(pixels: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+    let i = ((y * w + x) * 4) as usize;
+    [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+}
+
+#[inline]
+fn rgba_dist2(a: [u8; 4], b: [u8; 4]) -> u32 {
+    let dr = a[0] as i32 - b[0] as i32;
+    let dg = a[1] as i32 - b[1] as i32;
+    let db = a[2] as i32 - b[2] as i32;
+    (dr * dr + dg * dg + db * db) as u32
+}
+
+/// Crop large transparent *or* solid-color margins so logos centered in a
+/// 256 canvas (common for Store / IME / OEM / Shell-padded icons) fill the UI tile.
+///
+/// Soft drop-shadows (low alpha rings) used to inflate the bbox and leave the
+/// real glyph tiny — ignore faint pixels when finding the core content.
+fn trim_rgba_padding(pixels: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+    let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+    if w == 0 || h == 0 || pixels.len() < need {
+        return (pixels.to_vec(), w, h);
+    }
+
+    // Sample corners to decide if opaque padding shares one background color.
+    let corners = [
+        rgba_at(pixels, w, 0, 0),
+        rgba_at(pixels, w, w - 1, 0),
+        rgba_at(pixels, w, 0, h - 1),
+        rgba_at(pixels, w, w - 1, h - 1),
+    ];
+    let opaque_corners: Vec<[u8; 4]> = corners.iter().copied().filter(|c| c[3] > 40).collect();
+    let bg = if opaque_corners.len() >= 3 {
+        let refc = opaque_corners[0];
+        let agree = opaque_corners
+            .iter()
+            .all(|c| rgba_dist2(*c, refc) <= 48 * 48 * 3);
+        if agree {
+            Some(refc)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Alpha ≥ 96 ≈ solid glyph; skip soft shadows that pad Shell 256 canvases.
+    const CORE_ALPHA: u8 = 96;
+    let is_content = |x: u32, y: u32| -> bool {
+        let p = rgba_at(pixels, w, x, y);
+        if p[3] < CORE_ALPHA {
+            return false;
+        }
+        match bg {
+            // Near-white / solid canvas around a small logo (WeChat IME etc.).
+            Some(b) => rgba_dist2(p, b) > 24 * 24 * 3,
+            None => true,
+        }
+    };
+
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut any = false;
+    let step = if w >= 128 { 2u32 } else { 1u32 };
+    for y in (0..h).step_by(step as usize) {
+        for x in (0..w).step_by(step as usize) {
+            if is_content(x, y) {
+                any = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if !any {
+        return (pixels.to_vec(), w, h);
+    }
+    // Expand by step so coarse sampling doesn't clip.
+    min_x = min_x.saturating_sub(step);
+    min_y = min_y.saturating_sub(step);
+    max_x = (max_x + step).min(w.saturating_sub(1));
+    max_y = (max_y + step).min(h.saturating_sub(1));
+    let cw = max_x - min_x + 1;
+    let ch = max_y - min_y + 1;
+    // Skip when already filling most of the canvas (avoid clipping normal icons).
+    let fill = (cw as f32 / w as f32).max(ch as f32 / h as f32);
+    if fill >= 0.92 {
+        return (pixels.to_vec(), w, h);
+    }
+    // Keep a thin margin so anti-aliased edges aren't clipped.
+    let pad = ((cw.max(ch) as f32) * 0.06).ceil() as u32;
+    let x0 = min_x.saturating_sub(pad);
+    let y0 = min_y.saturating_sub(pad);
+    let x1 = (max_x + 1 + pad).min(w);
+    let y1 = (max_y + 1 + pad).min(h);
+    let nw = x1 - x0;
+    let nh = y1 - y0;
+    if nw == 0 || nh == 0 || (nw == w && nh == h) {
+        return (pixels.to_vec(), w, h);
+    }
+    let mut out = vec![0u8; (nw as usize) * (nh as usize) * 4];
+    for y in 0..nh {
+        let src = ((y0 + y) * w + x0) as usize * 4;
+        let dst = (y * nw) as usize * 4;
+        let row = (nw as usize) * 4;
+        out[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
+    }
+    (out, nw, nh)
+}
+
 #[cfg(windows)]
 fn extract_shell_icon_png(path: &Path) -> Option<String> {
-    extract_via_shell_item(path).or_else(|| extract_via_shgfi_fallback(path))
+    extract_via_shell_item(path)
+        .or_else(|| extract_via_shdef(path, 0, SHELL_ICON_PX))
+        .or_else(|| extract_via_shgfi_fallback(path))
 }
 
 /// High-quality path: shell image factory (jumbo / scaled icon, not 32px SHGFI).
@@ -283,20 +464,24 @@ fn extract_via_shell_item_wide(wide: &[u16]) -> Option<String> {
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{
         IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+        SIIGBF_SCALEUP,
     };
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+        let size = SIZE {
+            cx: SHELL_ICON_PX,
+            cy: SHELL_ICON_PX,
+        };
+        // SCALEUP + BIGGERSIZEOK: fill the 256 canvas instead of leaving a tiny
+        // 32px glyph centered on transparent padding (Dock/Sousou "tiny icon" bug).
+        let flags = SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | SIIGBF_SCALEUP;
         let hbmp = factory
-            .GetImage(
-                SIZE {
-                    cx: SHELL_ICON_PX,
-                    cy: SHELL_ICON_PX,
-                },
-                SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
-            )
+            .GetImage(size, flags)
+            .or_else(|_| factory.GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK))
+            .or_else(|_| factory.GetImage(size, SIIGBF_ICONONLY))
             .ok()?;
         let png = hbitmap_to_png_b64(hbmp);
         let _ = DeleteObject(hbmp);
@@ -335,7 +520,8 @@ fn extract_via_shdef(path: &Path, index: i32, size: i32) -> Option<String> {
             }
             return None;
         }
-        let png = hicon_to_png_b64(large, size);
+        // Encode at real bitmap size — never DrawIconEx-upscale 32→256.
+        let png = hicon_to_png_native(large, size);
         let _ = DestroyIcon(large);
         if !small.is_invalid() {
             let _ = DestroyIcon(small);
@@ -383,10 +569,53 @@ fn extract_via_shgfi_sized(path: &Path, size: i32) -> Option<String> {
             return None;
         }
         let hicon = fi.hIcon;
-        let png = hicon_to_png_b64(hicon, size);
+        let png = hicon_to_png_native(hicon, size);
         let _ = DestroyIcon(hicon);
         png
     }
+}
+
+#[cfg(windows)]
+fn hicon_pixel_size(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<i32> {
+    use windows::Win32::Graphics::Gdi::{DeleteObject, GetObjectW, BITMAP};
+    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+
+    unsafe {
+        let mut ii = ICONINFO::default();
+        GetIconInfo(hicon, &mut ii).ok()?;
+        let hbmp = if !ii.hbmColor.is_invalid() {
+            ii.hbmColor
+        } else {
+            ii.hbmMask
+        };
+        let mut bm = BITMAP::default();
+        let got = GetObjectW(
+            hbmp,
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bm as *mut _ as *mut _),
+        );
+        if !ii.hbmColor.is_invalid() {
+            let _ = DeleteObject(ii.hbmColor);
+        }
+        if !ii.hbmMask.is_invalid() {
+            let _ = DeleteObject(ii.hbmMask);
+        }
+        if got == 0 {
+            return None;
+        }
+        Some(bm.bmWidth.max(1))
+    }
+}
+
+/// Rasterize HICON at its real size (cap at `max_size`). Avoids soft 32→256 upscales.
+#[cfg(windows)]
+fn hicon_to_png_native(
+    hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
+    max_size: i32,
+) -> Option<String> {
+    let native = hicon_pixel_size(hicon).unwrap_or(max_size);
+    let size = native.clamp(16, max_size.clamp(16, 256));
+    hicon_to_png_b64(hicon, size)
 }
 
 #[cfg(windows)]

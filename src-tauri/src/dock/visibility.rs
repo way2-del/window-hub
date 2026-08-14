@@ -38,6 +38,11 @@ struct VisInner {
     activation_thickness_px: u32,
     bottom_offset_px: u32,
     hide_linger_ms: u32,
+    corner_show_desktop: bool,
+    corner_open_start: bool,
+    /// Last hot-corner fire (debounce + edge trigger).
+    corner_armed: bool,
+    last_corner_at: Option<Instant>,
     /// Latest wanted visibility (may differ from `shown` while animating).
     desired: bool,
     /// Matches HWND rest pose after place completes.
@@ -66,6 +71,10 @@ impl DockVisibility {
                 activation_thickness_px: 20,
                 bottom_offset_px: 0,
                 hide_linger_ms: 800,
+                corner_show_desktop: true,
+                corner_open_start: true,
+                corner_armed: true,
+                last_corner_at: None,
                 desired: false,
                 shown: false,
                 busy: false,
@@ -120,6 +129,10 @@ impl DockVisibility {
             prefs.bottom_offset_px,
             prefs.hide_linger_ms,
         );
+        if let Ok(mut g) = self.inner.lock() {
+            g.corner_show_desktop = prefs.corner_show_desktop;
+            g.corner_open_start = prefs.corner_open_start;
+        }
     }
 
     pub fn toggle_hotkey(&self) {
@@ -224,6 +237,7 @@ impl DockVisibility {
     }
 
     fn tick(self: &Arc<Self>, app: &AppHandle) {
+        self.poll_hot_corners(app);
         let near = self.poll_pointer(app);
         let (want, reason) = self.compute_want(app, near);
 
@@ -408,6 +422,96 @@ impl DockVisibility {
                     (false, "notDesktop".into())
                 }
             }
+        }
+    }
+
+    /// Screen-corner gestures: BL → Start, BR → Show Desktop.
+    fn poll_hot_corners(&self, app: &AppHandle) {
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::POINT;
+            use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+            let (show_desk, open_start, armed, last_at) = {
+                let Ok(g) = self.inner.lock() else {
+                    return;
+                };
+                (
+                    g.corner_show_desktop,
+                    g.corner_open_start,
+                    g.corner_armed,
+                    g.last_corner_at,
+                )
+            };
+            if !show_desk && !open_start {
+                return;
+            }
+
+            unsafe {
+                let mut pt = POINT::default();
+                if GetCursorPos(&mut pt).is_err() {
+                    return;
+                }
+                let Some((mi, scale)) = dock_monitor_info(app) else {
+                    return;
+                };
+                if !point_in_monitor(&mi, pt.x, pt.y) {
+                    return;
+                }
+
+                let corner = ((14.0_f64 * scale).round() as i32).max(10);
+                let near_bottom = pt.y >= mi.rcMonitor.bottom - corner;
+                let near_left = pt.x <= mi.rcMonitor.left + corner;
+                let near_right = pt.x >= mi.rcMonitor.right - corner;
+                let in_bl = near_bottom && near_left;
+                let in_br = near_bottom && near_right;
+                let in_corner = in_bl || in_br;
+
+                if !in_corner {
+                    if let Ok(mut g) = self.inner.lock() {
+                        g.corner_armed = true;
+                    }
+                    return;
+                }
+
+                let cooldown = Duration::from_millis(900);
+                if !armed {
+                    return;
+                }
+                if last_at.is_some_and(|t| t.elapsed() < cooldown) {
+                    return;
+                }
+
+                let action = if in_br && show_desk {
+                    Some("desktop")
+                } else if in_bl && open_start {
+                    Some("start")
+                } else {
+                    None
+                };
+                let Some(action) = action else {
+                    return;
+                };
+
+                if let Ok(mut g) = self.inner.lock() {
+                    g.corner_armed = false;
+                    g.last_corner_at = Some(Instant::now());
+                }
+
+                match action {
+                    "desktop" => {
+                        let _ = crate::win32::status_menu::show_desktop();
+                    }
+                    "start" => {
+                        let _ = super::launch::open_start_menu();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = app;
         }
     }
 

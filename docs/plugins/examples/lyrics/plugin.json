@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.lyrics",
   "name": "歌词",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "official": true,
   "logo": "icon.svg",
   "description": "监听网易云「桌面歌词」可见窗；下拉面板可上一首 / 下一首 / 播放暂停。",

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -92,7 +92,6 @@ export default function DockPreviewApp() {
       }),
     );
 
-    // JPEG fallback only — DWM live thumbs don't need fast polling.
     refreshRef.current = window.setInterval(() => {
       const id = itemIdRef.current;
       if (!id) return;
@@ -101,11 +100,17 @@ export default function DockPreviewApp() {
           const frames = await invoke<DockPreviewFrame[]>("dock_capture_item_previews", {
             itemId: id,
           });
-          if (!frames.length) return;
+          if (!frames.length) {
+            setPayload(null);
+            await closeSelf();
+            return;
+          }
           setPayload((prev) => {
             if (!prev || prev.itemId !== id) return prev;
             const hadJpeg = prev.frames.some((f) => f.jpegBase64);
-            if (!hadJpeg && !frames.some((f) => f.jpegBase64)) return prev;
+            if (!hadJpeg && !frames.some((f) => f.jpegBase64)) {
+              return { ...prev, frames };
+            }
             const merged = frames.map((f, i) => {
               if (f.jpegBase64) return f;
               const old = prev.frames.find((p) => p.hwnd === f.hwnd) ?? prev.frames[i];
@@ -129,6 +134,25 @@ export default function DockPreviewApp() {
     };
   }, []);
 
+  async function closeFrame(e: MouseEvent, hwnd: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await invoke("dock_close_hwnd", { hwnd });
+    } catch (err) {
+      console.error(err);
+    }
+    setPayload((prev) => {
+      if (!prev) return prev;
+      const frames = prev.frames.filter((f) => f.hwnd !== hwnd);
+      if (!frames.length) {
+        void closeSelf();
+        return null;
+      }
+      return { ...prev, frames };
+    });
+  }
+
   if (!payload || payload.frames.length === 0) {
     return <div className="dock-preview-shell dock-preview-loading" aria-hidden />;
   }
@@ -145,39 +169,59 @@ export default function DockPreviewApp() {
     >
       <div className="dock-preview-row">
         {payload.frames.map((f) => (
-          <button
-            key={f.hwnd}
-            type="button"
-            className="dock-preview-card"
-            title={f.title || payload.label}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              void (async () => {
-                try {
-                  await invoke("focus_open_window", { id: `hwnd:${f.hwnd}` });
-                } catch (e) {
-                  console.error(e);
-                } finally {
-                  await closeSelf();
-                }
-              })();
-            }}
-          >
-            <span className={`dock-preview-thumb-wrap${f.jpegBase64 ? "" : " is-live"}`}>
-              {f.jpegBase64 ? (
-                <img
-                  className="dock-preview-thumb"
-                  style={thumbStyle(f)}
-                  src={`data:image/jpeg;base64,${f.jpegBase64}`}
-                  alt=""
-                  draggable={false}
-                />
-              ) : (
-                <span className="dock-preview-live-slot" aria-hidden />
-              )}
-            </span>
-            <span className="dock-preview-title">{f.title || payload.label || "窗口"}</span>
-          </button>
+          <div key={f.hwnd} className="dock-preview-card">
+            <button
+              type="button"
+              className="dock-preview-thumb-btn"
+              title={f.title || payload.label}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                void (async () => {
+                  try {
+                    await invoke("focus_open_window", { id: `hwnd:${f.hwnd}` });
+                  } catch (e) {
+                    console.error(e);
+                  } finally {
+                    await closeSelf();
+                  }
+                })();
+              }}
+            >
+              <span className={`dock-preview-thumb-wrap${f.jpegBase64 ? "" : " is-live"}`}>
+                {f.jpegBase64 ? (
+                  <img
+                    className="dock-preview-thumb"
+                    style={thumbStyle(f)}
+                    src={`data:image/jpeg;base64,${f.jpegBase64}`}
+                    alt=""
+                    draggable={false}
+                  />
+                ) : (
+                  <span className="dock-preview-live-slot" aria-hidden />
+                )}
+              </span>
+            </button>
+            <div className="dock-preview-meta">
+              <span className="dock-preview-title">{f.title || payload.label || "窗口"}</span>
+              <button
+                type="button"
+                className="dock-preview-card-close"
+                aria-label="关闭窗口"
+                title="关闭窗口"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => void closeFrame(e, f.hwnd)}
+              >
+                <svg viewBox="0 0 12 12" width="8" height="8" aria-hidden>
+                  <path
+                    d="M2.5 2.5l7 7M9.5 2.5l-7 7"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
         ))}
       </div>
     </div>

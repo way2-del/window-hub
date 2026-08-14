@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
 import "./components/StatusMenu.css";
+
+/** Keep in sync with `STATUS_MENU_POPUP_W` in commands.rs */
+const STATUS_MENU_W = 220;
 
 async function closeSelf() {
   try {
@@ -29,6 +32,41 @@ async function run(action: () => Promise<void>) {
 
 export default function StatusMenuPopupApp() {
   const [taskbarVisible, setTaskbarVisible] = useState(true);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const lastFitH = useRef(0);
+
+  /** Shrink/grow the HWND to the menu content so the glass panel has no empty tail. */
+  useLayoutEffect(() => {
+    const el = shellRef.current;
+    if (!el) return;
+
+    const fit = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height);
+      if (h <= 0 || h === lastFitH.current) return;
+      lastFitH.current = h;
+      void getCurrentWindow()
+        .setSize(new LogicalSize(STATUS_MENU_W, h))
+        .catch(() => undefined);
+    };
+
+    fit();
+    const ro = new ResizeObserver(() => fit());
+    ro.observe(el);
+
+    let unlisten: (() => void) | undefined;
+    void listen("status-menu-popup-opened", () => {
+      lastFitH.current = 0;
+      // After Rust restores the initial size, re-measure on next frame.
+      requestAnimationFrame(fit);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      ro.disconnect();
+      unlisten?.();
+    };
+  }, [taskbarVisible]);
 
   useEffect(() => {
     void (async () => {
@@ -101,7 +139,7 @@ export default function StatusMenuPopupApp() {
   }, []);
 
   return (
-    <div className="status-menu-shell" role="menu">
+    <div ref={shellRef} className="status-menu-shell" role="menu">
       <button
         type="button"
         className="status-menu-item"

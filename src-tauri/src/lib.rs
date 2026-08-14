@@ -6,6 +6,7 @@ mod dock;
 mod ecs;
 mod plugin_hub;
 mod plugin_install;
+mod sousou;
 mod staging;
 mod win32;
 mod windows_service;
@@ -255,6 +256,7 @@ pub fn run() {
             spawn_tray_watcher(app.handle().clone());
             crate::companion_scripts::start_hub_associated_launchers();
             crate::dock::bootstrap_dock(app.handle());
+            crate::sousou::bootstrap(app.handle());
             // Warm popup webviews in background so first open isn't a cold create.
             crate::commands::warm_popup_windows(app.handle().clone());
             #[cfg(windows)]
@@ -568,11 +570,13 @@ pub fn run() {
             dock::pick_dockico_file,
             dock::pick_dock_app_file,
             dock::dock_launch_item,
+            dock::dock_launch_path,
             dock::dock_add_app,
             dock::dock_add_separator,
             dock::dock_remove_item,
             dock::dock_list_item_windows,
             dock::dock_close_item_windows,
+            dock::dock_close_hwnd,
             dock::dock_capture_item_previews,
             dock::dock_capture_exe_previews,
             dock::open_dock_preview,
@@ -590,6 +594,25 @@ pub fn run() {
             commands::open_system_tool,
             commands::restart_app,
             commands::exit_app,
+            sousou::sousou_toggle,
+            sousou::sousou_open,
+            sousou::sousou_hide,
+            sousou::sousou_get_config,
+            sousou::sousou_set_config,
+            sousou::sousou_ensure_everything,
+            sousou::sousou_everything_status,
+            sousou::sousou_list_apps,
+            sousou::sousou_list_recent,
+            sousou::sousou_search,
+            sousou::sousou_open_path,
+            sousou::sousou_open_system,
+            sousou::sousou_refresh_apps,
+            sousou::sousou_pick_folder,
+            sousou::sousou_first_folder,
+            sousou::sousou_paths_to_shortcuts,
+            sousou::sousou_list_dir,
+            sousou::sousou_resolve_icon,
+            sousou::sousou_seed_tabs,
             commands::hub_staging_list,
             commands::hub_staging_summary,
             commands::hub_staging_add_text,

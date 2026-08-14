@@ -27,6 +27,8 @@ type DockItem = {
   iconPng?: string | null;
   /** Ephemeral running-app entry (not persisted). */
   ephemeral?: boolean;
+  /** Live HWND for ephemeral focus (stable across title changes). */
+  hwnd?: number | null;
 };
 
 type DockPrefs = {
@@ -41,6 +43,8 @@ type DockPrefs = {
   cornerRadius?: number;
   bounceOnClick?: boolean;
   iconSize?: number;
+  /** Gap between icon slots (4–24). */
+  iconGap?: number;
   showTriggerStrip?: boolean;
   showRunningApps?: boolean;
   indicatorStyle?: string;
@@ -50,12 +54,17 @@ type HubWindow = {
   id: string;
   hwnd: number;
   title: string;
+  /** Win32 class — snake_case from Rust WindowInfo. */
+  class_name?: string | null;
+  className?: string | null;
   exe?: string | null;
+  /** Prefer snake_case (`exe_name`); camelCase kept for resilience. */
+  exe_name?: string | null;
   exeName?: string | null;
 };
 
-const STATUS_MENU_W = 200;
-const STATUS_MENU_H = 248;
+const STATUS_MENU_W = 220;
+const STATUS_MENU_H = 465;
 const STATUS_MENU_GAP = 8;
 const STATUS_MENU_MARGIN = 8;
 const MAG_RANGE = 2.25;
@@ -76,7 +85,28 @@ const SKIP_EXE = new Set([
   "sihost.exe",
   "runtimebroker.exe",
   "taskmgr.exe",
+  // Suite / browser helpers — not real user windows (Rust also filters these).
+  "wpscloudsvr.exe",
+  "ksolaunch.exe",
+  "ksomisc.exe",
+  "wpscenter.exe",
+  "wpsofficeboot.exe",
+  "spotifylauncher.exe",
+  "dingtalk_launcher.exe",
+  "feishulauncher.exe",
+  "updat.exe",
+  "crashpad_handler.exe",
+  "msedgewebview2.exe",
+  "widgetservice.exe",
+  "widgets.exe",
+  "phoneexperiencehost.exe",
+  "gamebar.exe",
+  "gamebarftserver.exe",
+  "xboxgamebar.exe",
 ]);
+
+/** Explorer folder windows only — desktop/tray hosts must not light the pin. */
+const EXPLORER_FOLDER_CLASSES = new Set(["cabinetwclass", "explorewclass"]);
 
 /** This host process — hide from dock pins + running extras. */
 const HOST_EXE = new Set([
@@ -92,6 +122,14 @@ function isHostExeName(name: string): boolean {
   if (!n) return false;
   const withExt = n.endsWith(".exe") ? n : `${n}.exe`;
   return HOST_EXE.has(withExt);
+}
+
+function windowExeName(w: HubWindow): string {
+  return (w.exe_name || w.exeName || "").trim();
+}
+
+function windowClassName(w: HubWindow): string {
+  return (w.class_name || w.className || "").trim();
 }
 
 function clampMagnification(raw: unknown): number {
@@ -110,6 +148,12 @@ function clampIconSize(raw: unknown): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return 40;
   return Math.min(56, Math.max(28, Math.round(n)));
+}
+
+function clampIconGap(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 10;
+  return Math.min(24, Math.max(4, Math.round(n)));
 }
 
 function fanScale(distancePx: number, maxScale: number, iconSlot: number): number {
@@ -215,7 +259,6 @@ const PRODUCT_MARKERS = [
   "\\dingtalk\\",
   "\\feishu\\",
   "\\lark\\",
-  "\\tencent\\",
   "\\wemeet\\",
   "\\spotify\\",
   "\\discord\\",
@@ -234,6 +277,7 @@ const GENERIC_ROOTS = new Set([
   "locallow",
   "common files",
   "programdata",
+  "programs",
 ]);
 
 function normExeKey(raw: string): string {
@@ -254,6 +298,14 @@ function pathParts(path: string): string[] {
     .filter(Boolean);
 }
 
+function inSuiteTogether(pinExe: string, runExe: string): boolean {
+  if (!pinExe || !runExe) return false;
+  for (const family of SUITE_FAMILIES) {
+    if (family.includes(pinExe) && family.includes(runExe)) return true;
+  }
+  return false;
+}
+
 function sameInstallTree(pinPath: string, runPath: string): boolean {
   const pinExe = normExeKey(pinPath);
   const runExe = normExeKey(runPath);
@@ -261,6 +313,8 @@ function sameInstallTree(pinPath: string, runPath: string): boolean {
     for (const group of DISTINCT_APPS) {
       if (group.includes(pinExe) && group.includes(runExe)) return false;
     }
+    // Different exe names only merge inside a known suite (WPS editor ↔ launcher).
+    if (!inSuiteTogether(pinExe, runExe)) return false;
   }
   const a = pathParts(pinPath);
   const b = pathParts(runPath);
@@ -271,7 +325,19 @@ function sameInstallTree(pinPath: string, runPath: string): boolean {
   while (n < aDirs.length && n < bDirs.length && aDirs[n] === bDirs[n]) n += 1;
   if (n === 0) return false;
   const meaningful = aDirs.slice(0, n).filter((c) => !GENERIC_ROOTS.has(c)).length;
-  return meaningful >= 1 && n >= 2;
+  // Require 2 meaningful segments so Local\Programs alone cannot merge unrelated apps.
+  return meaningful >= 2 && n >= 3;
+}
+
+function sameProductMarker(pinPath: string, runPath: string): boolean {
+  const pinExe = normExeKey(pinPath);
+  const runExe = normExeKey(runPath);
+  if (pinExe && runExe && pinExe !== runExe && !inSuiteTogether(pinExe, runExe)) {
+    return false;
+  }
+  const real = pinPath.toLowerCase().replace(/\//g, "\\");
+  const path = runPath.toLowerCase().replace(/\//g, "\\");
+  return PRODUCT_MARKERS.some((m) => real.includes(m) && path.includes(m));
 }
 
 function collectItemKeys(item: DockItem): Set<string> {
@@ -329,11 +395,23 @@ function itemSuites(item: DockItem, keys: Set<string>): string[][] {
 }
 
 function exeMatches(item: DockItem, w: HubWindow): boolean {
-  const name = normExeKey(w.exeName || "");
+  const name = normExeKey(windowExeName(w));
   const path = (w.exe || "").toLowerCase().replace(/\//g, "\\");
   const pathBase = normExeKey(path.split("\\").pop() || "");
+  const className = windowClassName(w).toLowerCase();
   const keys = collectItemKeys(item);
   const suites = itemSuites(item, keys);
+
+  // explorer.exe: only real folder windows light the pin / count as running.
+  if (name === "explorer.exe" || pathBase === "explorer.exe") {
+    if (!EXPLORER_FOLDER_CLASSES.has(className)) return false;
+    const pinLooksExplorer =
+      keys.has("explorer.exe") ||
+      (item.label || "").toLowerCase().includes("explorer") ||
+      (item.label || "").includes("资源管理器") ||
+      (item.matchExe || "").toLowerCase().includes("explorer");
+    return pinLooksExplorer;
+  }
 
   if (name && keys.has(name)) return true;
   if (pathBase && keys.has(pathBase)) return true;
@@ -350,9 +428,13 @@ function exeMatches(item: DockItem, w: HubWindow): boolean {
       !rd.includes("\\system32") &&
       !rd.includes("\\syswow64")
     ) {
-      return true;
+      const pinExe = normExeKey(real);
+      // Same folder: same exe, or suite pair (launcher + editor).
+      if (!pathBase || pinExe === pathBase || inSuiteTogether(pinExe, pathBase)) {
+        return true;
+      }
     }
-    if (PRODUCT_MARKERS.some((m) => real.includes(m) && path.includes(m))) return true;
+    if (sameProductMarker(real, path)) return true;
     if (sameInstallTree(real, path)) return true;
   }
   // Also try launch path as tree root when real_path empty.
@@ -363,13 +445,45 @@ function exeMatches(item: DockItem, w: HubWindow): boolean {
     if (name && family.includes(name)) return true;
     if (pathBase && family.includes(pathBase)) return true;
   }
-  if (suites.length) {
+  // Soft title match only for WPS document titles — generic label⊂title
+  // wrongly absorbs unrelated windows into pins (hides unpinned extras).
+  if (suites.some((f) => f[0] === "wps.exe")) {
     const title = (w.title || "").toLowerCase();
-    const label = (item.label || "").toLowerCase();
-    if (label.length >= 3 && title.includes(label)) return true;
-    if (suites.some((f) => f[0] === "wps.exe") && (title.includes("wps") || title.includes("金山"))) {
-      return true;
-    }
+    if (title.includes("wps") || title.includes("金山")) return true;
+  }
+  return false;
+}
+
+/**
+ * Strict pin occupancy check for ephemeral running-apps.
+ * Tree / marker / soft-title matching must NOT hide unpinned apps from the dock.
+ */
+function pinOwnsWindow(item: DockItem, w: HubWindow): boolean {
+  const name = normExeKey(windowExeName(w));
+  const path = (w.exe || "").toLowerCase().replace(/\//g, "\\");
+  const pathBase = normExeKey(path.split("\\").pop() || "");
+  const className = windowClassName(w).toLowerCase();
+  const keys = collectItemKeys(item);
+
+  if (name === "explorer.exe" || pathBase === "explorer.exe") {
+    if (!EXPLORER_FOLDER_CLASSES.has(className)) return false;
+    return (
+      keys.has("explorer.exe") ||
+      (item.label || "").toLowerCase().includes("explorer") ||
+      (item.label || "").includes("资源管理器") ||
+      (item.matchExe || "").toLowerCase().includes("explorer")
+    );
+  }
+
+  if (name && keys.has(name)) return true;
+  if (pathBase && keys.has(pathBase)) return true;
+  const real = (item.realPath || "").toLowerCase().replace(/\//g, "\\");
+  if (real && path && real === path) return true;
+
+  const suites = itemSuites(item, keys);
+  for (const family of suites) {
+    if (name && family.includes(name)) return true;
+    if (pathBase && family.includes(pathBase)) return true;
   }
   return false;
 }
@@ -381,11 +495,22 @@ function itemLabel(item: DockItem): string {
 }
 
 function normalizeExeName(w: HubWindow): string {
-  const name = (w.exeName || "").trim().toLowerCase();
+  const name = windowExeName(w).toLowerCase();
   if (name) return name.endsWith(".exe") ? name : `${name}.exe`;
   const path = (w.exe || "").replace(/\\/g, "/");
   const base = path.split("/").pop() || "";
   return base.toLowerCase();
+}
+
+/** UWP host: keep one ephemeral slot keyed by title stem, not by ApplicationFrameHost. */
+function ephemeralKey(w: HubWindow): string {
+  const exeName = normalizeExeName(w);
+  if (exeName === "applicationframehost.exe") {
+    const stem =
+      (w.title || "").split(/[-—|·]/)[0]?.trim().toLowerCase() || "uwp";
+    return `uwp:${stem}`;
+  }
+  return (w.exe || exeName).toLowerCase();
 }
 
 async function openStatusMenuAtClientPoint(clientX: number, clientY: number) {
@@ -508,6 +633,14 @@ export default function DockApp() {
     void listen<{ windows: HubWindow[] }>("hub-windows-changed", (e) => {
       if (!cancelled) setWindows(e.payload?.windows ?? []);
     }).then((u) => unsubs.push(u));
+    // Backup poll — event may coalesce/miss while Dock HWND is placing.
+    const pollWindows = window.setInterval(() => {
+      void invoke<HubWindow[]>("list_open_windows")
+        .then((list) => {
+          if (!cancelled) setWindows(list);
+        })
+        .catch(() => undefined);
+    }, 1200);
     void listen("material-prefs", () => {
       void applyMaterial();
     }).then((u) => unsubs.push(u));
@@ -531,6 +664,7 @@ export default function DockApp() {
       cancelled = true;
       window.clearTimeout(retryA);
       window.clearTimeout(retryB);
+      window.clearInterval(pollWindows);
       for (const u of unsubs) u();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (previewOpenTimer.current) window.clearTimeout(previewOpenTimer.current);
@@ -545,13 +679,15 @@ export default function DockApp() {
   const magOn = maxScale > 1.001;
   const showPreview = prefs?.showPreview !== false;
   const bounceOnClick = prefs?.bounceOnClick !== false;
-  const showRunningApps = prefs?.showRunningApps !== false;
+  const showRunningApps =
+    (prefs as DockPrefs & { show_running_apps?: boolean })?.showRunningApps !== false &&
+    (prefs as DockPrefs & { show_running_apps?: boolean })?.show_running_apps !== false;
   const indicatorStyle = prefs?.indicatorStyle === "dot" ? "dot" : "bar";
   const cornerRadius = clampRadius(prefs?.cornerRadius);
   const iconSlot = clampIconSize(prefs?.iconSize);
-  const iconPx = Math.round(iconSlot * 0.8);
-  const gap = Math.max(4, Math.round(iconSlot / 8));
-  const padX = 8;
+  const iconPx = Math.round(iconSlot * 0.9);
+  const gap = clampIconGap(prefs?.iconGap);
+  const padX = 22;
   const sepW = 8;
 
   const activeIds = useMemo(() => {
@@ -564,39 +700,48 @@ export default function DockApp() {
     return set;
   }, [prefs, windows]);
 
+  /** First-seen order for ephemeral icons — do not reshuffle when EnumWindows z-order changes. */
+  const ephemeralOrderRef = useRef<string[]>([]);
+
   const runningExtras = useMemo(() => {
     if (!prefs || !showRunningApps) return [] as DockItem[];
     const pinned = prefs.items.filter((i) => i.kind === "app");
-    const seen = new Set<string>();
-    const out: DockItem[] = [];
+    const byKey = new Map<string, DockItem>();
     for (const w of windows) {
       const exeName = normalizeExeName(w);
       if (!exeName || SKIP_EXE.has(exeName) || isHostExeName(exeName)) continue;
-      if (isHostExeName(w.exeName || "") || isHostExeName(w.exe?.split(/[/\\]/).pop() || "")) {
+      if (isHostExeName(windowExeName(w)) || isHostExeName(w.exe?.split(/[/\\]/).pop() || "")) {
         continue;
       }
-      if (pinned.some((item) => exeMatches(item, w))) continue;
-      const key = (w.exe || exeName).toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (pinned.some((item) => pinOwnsWindow(item, w))) continue;
+      const key = ephemeralKey(w);
+      if (byKey.has(key)) continue;
+      const isUwp = exeName === "applicationframehost.exe";
       const label =
         (w.title || "").split(/[-—|·]/)[0]?.trim() ||
-        (w.exeName || exeName.replace(/\.exe$/i, ""));
-      out.push({
-        id: `running:${exeName}`,
+        (windowExeName(w) || exeName.replace(/\.exe$/i, ""));
+      byKey.set(key, {
+        id: `running:${key}`,
         kind: "app",
         label,
-        matchExe: exeName,
+        matchExe: isUwp ? "" : exeName,
         launchPath: w.exe || "",
         realPath: w.exe || "",
         virtualPath: "",
         iconPath: "",
-        uwp: false,
+        uwp: isUwp,
         iconPng: exeIcons[key] || exeIcons[exeName] || null,
         ephemeral: true,
+        hwnd: w.hwnd,
       });
     }
-    return out;
+    const alive = new Set(byKey.keys());
+    const order = ephemeralOrderRef.current.filter((k) => alive.has(k));
+    for (const k of byKey.keys()) {
+      if (!order.includes(k)) order.push(k);
+    }
+    ephemeralOrderRef.current = order;
+    return order.map((k) => byKey.get(k)!);
   }, [prefs, windows, showRunningApps, exeIcons]);
 
   // Resolve icons for ephemeral running apps — deferred so first paint stays responsive.
@@ -705,19 +850,16 @@ export default function DockApp() {
     return map;
   }, [displayItems, magOn, localX, maxScale, centers, iconSlot]);
 
-  // Fixed pill + static max-mag headroom (set once). Never resize HWND on pointer move.
-  // Icons rise into transparent headroom so magnification is not clipped.
-  const chromeBase = Math.round(iconSlot + 16);
-  const reserve = magOn ? Math.round(iconSlot * Math.max(0, maxScale - 1)) : 0;
+  // Pill = icon + pads (bottom reserves room for green mark).
+  // Transparent headroom above so magnification can rise out of the pill.
+  const chromeBase = Math.round(iconSlot + 18);
   const chromeH = chromeBase;
-  const stackH = chromeBase + reserve;
+  const magHead = magOn ? Math.ceil(iconSlot * (maxScale - 1) * 1.1) : 0;
+  const stackH = chromeBase + magHead;
 
   useEffect(() => {
-    const t = window.setTimeout(() => {
-      void invoke("dock_set_extra_headroom", { px: reserve }).catch(() => undefined);
-    }, 30);
-    return () => window.clearTimeout(t);
-  }, [reserve]);
+    void invoke("dock_set_extra_headroom", { px: magHead }).catch(() => undefined);
+  }, [magHead]);
 
   const closePreviewSoon = useCallback(() => {
     if (previewOpenTimer.current) {
@@ -816,7 +958,7 @@ export default function DockApp() {
     previewItemId.current = null;
     previewPointerInside.current = false;
     previewSuppressUntil.current = Date.now() + 700;
-    // Don't await — preview teardown must not block launch.
+    // Fire-and-forget teardown — never block launch on preview/menu IPC.
     void invoke("close_dock_preview").catch(() => undefined);
     void invoke("close_dock_item_menu").catch(() => undefined);
     if (bounceOnClick) {
@@ -827,17 +969,35 @@ export default function DockApp() {
     try {
       if (item.ephemeral) {
         const want = (item.matchExe || "").toLowerCase();
+        const key = item.id.replace(/^running:/, "");
+        // Prefer stored HWND — EnumWindows order / title changes must not drop the click.
         const matched =
+          (item.hwnd != null
+            ? windows.find((w) => w.hwnd === item.hwnd) || {
+                id: `hwnd:${item.hwnd}`,
+                hwnd: item.hwnd,
+                title: item.label,
+              }
+            : null) ||
+          windows.find((w) => ephemeralKey(w) === key) ||
           windows.find((w) => exeMatches(item, w)) ||
           windows.find((w) => {
             const n = normalizeExeName(w);
-            return !!want && (n === want || n === want.replace(/\.exe$/, "") + ".exe");
+            return !!want && (n === want || n === `${want.replace(/\.exe$/i, "")}.exe`);
           });
-        if (matched) {
-          await invoke("focus_or_minimize_open_window", { id: matched.id });
+        // Focus / minimize toggle — never ShellExecute while a window exists
+        // (Cursor / Electron would open a brand-new window).
+        if (matched?.id) {
+          void invoke("focus_or_minimize_open_window", { id: matched.id }).catch((e) =>
+            console.error(e),
+          );
+        } else if (item.realPath) {
+          void invoke("dock_launch_path", { path: item.realPath }).catch((e) => console.error(e));
+        } else {
+          console.error("ephemeral click: no hwnd and no path", item);
         }
       } else {
-        await invoke("dock_launch_item", { itemId: item.id });
+        void invoke("dock_launch_item", { itemId: item.id }).catch((e) => console.error(e));
       }
     } catch (e) {
       console.error(e);
@@ -916,9 +1076,9 @@ export default function DockApp() {
             const running = item.ephemeral || activeIds.has(item.id);
             const scale = scales.get(item.id) ?? 1;
             const label = itemLabel(item);
-            // Keep hit box width = iconSlot; fan spacing via margin so the indicator
-            // stays locked to the icon center (width:scale was shifting the bar).
-            const grow = Math.max(0, iconSlot * (scale - 1));
+            // Mild neighbor spacing only — large margins push edge icons past the pill.
+            // Overflow is clipped by .dock-stack; keep grow small so clips rarely happen.
+            const grow = Math.max(0, iconSlot * (scale - 1) * 0.35);
             const style = {
               ["--dock-scale" as string]: String(scale),
               width: `${iconSlot}px`,
@@ -935,17 +1095,9 @@ export default function DockApp() {
                 }${bounceId === item.id ? " is-bounce" : ""}`}
                 style={style}
                 onPointerDown={(e) => {
-                  // Prevent native button/webview focus chrome (Win10 light-blue slab).
-                  e.preventDefault();
+                  if (e.button !== 0) return;
+                  // Fire on press — pointerup misses when mag scale moves the target under the cursor.
                   e.stopPropagation();
-                  try {
-                    (document.activeElement as HTMLElement | null)?.blur();
-                  } catch {
-                    /* noop */
-                  }
-                  void invoke("dock_touch_noactivate").catch(() => undefined);
-                }}
-                onClick={() => {
                   try {
                     (document.activeElement as HTMLElement | null)?.blur();
                   } catch {

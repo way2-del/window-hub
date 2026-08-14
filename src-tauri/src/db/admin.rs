@@ -19,6 +19,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "prefs_ambient",
     "prefs_island",
     "prefs_dock",
+    "prefs_sousou",
     "script_launchers",
     "plugin_kv",
 ];
@@ -39,7 +40,8 @@ fn table_pks(table: &str) -> &'static [&'static str] {
         | "prefs_shortcuts"
         | "prefs_ambient"
         | "prefs_island"
-        | "prefs_dock" => &["id"],
+        | "prefs_dock"
+        | "prefs_sousou" => &["id"],
         "script_launchers" => &["id"],
         "plugin_kv" => &["plugin_id", "key"],
         _ => &[],
@@ -49,7 +51,7 @@ fn table_pks(table: &str) -> &'static [&'static str] {
 fn table_columns(table: &str) -> &'static [&'static str] {
     match table {
         "schema_meta" => &["key", "value_json", "updated_at"],
-        "prefs_material" | "prefs_tray" | "prefs_shortcuts" | "prefs_dock" => {
+        "prefs_material" | "prefs_tray" | "prefs_shortcuts" | "prefs_dock" | "prefs_sousou" => {
             &["id", "data_json", "updated_at"]
         }
         "prefs_ambient" => &["id", "mode", "updated_at"],

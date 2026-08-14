@@ -14,14 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use host::{
     ambient_get, ambient_set, dock_get, dock_set, island_get, island_set, launchers_list,
     launchers_replace_all, material_get, material_set, meta_get, meta_set, shortcuts_get,
-    shortcuts_set, tray_get, tray_set, IslandPrefsRow, LauncherRow,
+    shortcuts_set, sousou_get, sousou_set, tray_get, tray_set, IslandPrefsRow, LauncherRow,
 };
 pub use migrate::migrate_legacy_files;
 
 /// Official weather plugin id (settings / storage live in `plugin_kv`).
 pub const WEATHER_PLUGIN_ID: &str = "com.window-hub.weather";
 
-const SCHEMA_VERSION: i32 = 11;
+const SCHEMA_VERSION: i32 = 12;
 const PLUGIN_KEY_MAX_BYTES: usize = 512 * 1024;
 const PLUGIN_TOTAL_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SYSTEM_KEY_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -177,6 +177,19 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
 
     if ver < 11 {
         add_prefs_island_bar_priority(conn)?;
+    }
+
+    if ver < 12 {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS prefs_sousou (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              data_json TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| e.to_string())?;
     }
@@ -190,6 +203,11 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS prefs_dock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prefs_sousou (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL

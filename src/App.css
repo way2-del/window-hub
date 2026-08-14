@@ -81,7 +81,13 @@ body.is-dock,
 body.is-dock #root {
   background: transparent !important;
   color: var(--glass-fg, #f4f4f5);
-  overflow: hidden;
+  /* Allow magnified icons to rise above the pill into transparent headroom. */
+  overflow: visible !important;
+}
+
+html:has(body.is-dock),
+html[data-glass-compat="1"]:has(body.is-dock) {
+  background: transparent !important;
 }
 
 button {
@@ -963,7 +969,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  height: 15px;
+  height: 18px;
 }
 
 .tray-perf-thermo {
@@ -971,12 +977,12 @@ button {
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
-  height: 15px;
+  height: 16px;
   gap: 0;
 }
 
 .tray-perf-thermo .tray-perf-bar {
-  height: 10px;
+  height: 11px;
   border-radius: 1px 1px 0 0;
   border-bottom: none;
 }
@@ -996,9 +1002,9 @@ button {
   display: inline-flex;
   flex-direction: column;
   justify-content: center;
-  gap: 0;
+  gap: 1px;
   line-height: 1;
-  min-width: 18px;
+  min-width: 22px;
 }
 
 .tray-perf-temps.is-single {
@@ -1056,6 +1062,7 @@ button {
   letter-spacing: -0.03em;
   line-height: 1.05;
   opacity: 0.95;
+  white-space: nowrap;
 }
 
 .tray-perf-num.is-cpu {
@@ -1098,7 +1105,7 @@ button {
 }
 
 .tray-net-btn {
-  min-width: 34px;
+  min-width: 42px;
   padding: 0 2px !important;
 }
 
@@ -1108,8 +1115,9 @@ button {
   justify-content: center;
   gap: 0;
   line-height: 1;
-  min-width: 30px;
+  min-width: 36px;
   user-select: none;
+  white-space: nowrap;
 }
 
 .tray-net-line {
@@ -1120,10 +1128,11 @@ button {
 }
 
 .tray-net-arrow {
-  font-size: 7px;
+  font-size: 8px;
   font-weight: 700;
   opacity: 0.75;
   width: 7px;
+  flex-shrink: 0;
 }
 
 .tray-net-line.is-up .tray-net-arrow {
@@ -1135,10 +1144,25 @@ button {
 }
 
 .tray-net-num {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  min-width: 28px;
+  flex-shrink: 0;
+}
+
+.tray-net-val {
+  font-variant-numeric: tabular-nums;
+}
+
+.tray-net-unit {
   font-size: 7px;
   font-weight: 700;
-  letter-spacing: -0.03em;
-  min-width: 20px;
+  opacity: 0.88;
+  margin-left: 0.5px;
+  flex-shrink: 0;
 }
 
 .tray-sys-btn:hover,
