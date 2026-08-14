@@ -24,22 +24,25 @@ pub struct ForegroundApp {
 mod win {
     use super::ForegroundApp;
     use windows::core::{s, GUID};
-    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::Shell::{
         IShellDispatch4, SHAppBarMessage, ABS_AUTOHIDE, ABM_GETSTATE, ABM_SETSTATE, APPBARDATA,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowA, FindWindowExA, GetAncestor, GetClassNameW, GetForegroundWindow,
-        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-        ShowWindow, GA_ROOT, SW_HIDE, SW_SHOWNA,
+        AllowSetForegroundWindow, FindWindowA, FindWindowExA, GetAncestor, GetClassNameW,
+        GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
+        GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SendMessageW,
+        SetForegroundWindow, SetWindowPos, ShowWindow, GA_ROOT, HWND_BOTTOM, SC_TASKLIST,
+        SM_CYVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SW_HIDE,
+        SW_SHOWNA, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SYSCOMMAND,
     };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -284,6 +287,9 @@ mod win {
     static TASKBAR_OVERRIDE: Mutex<Option<TaskbarOverride>> = Mutex::new(None);
     static TASKBAR_KEEP_HIDDEN: AtomicBool = AtomicBool::new(false);
 
+    /// BM_CLICK — start button.
+    const BM_CLICK: u32 = 0x00F5;
+
     fn appbar_get_state() -> u32 {
         let mut data = APPBARDATA {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
@@ -304,12 +310,37 @@ mod win {
         }
     }
 
-    fn hide_taskbars_once() {
-        for_each_taskbar(|hwnd| unsafe {
-            // Only hide when visible — avoids needless Show/Hide churn.
-            if IsWindowVisible(hwnd).as_bool() {
+    /// Park the taskbar below the virtual desktop so tray-flash / Explorer
+    /// re-shows land off-screen (plain SW_HIDE fights blinking icons → white bar flicker).
+    fn exile_taskbar(hwnd: HWND) {
+        unsafe {
+            let mut rc = RECT::default();
+            if GetWindowRect(hwnd, &mut rc).is_err() {
                 let _ = ShowWindow(hwnd, SW_HIDE);
+                return;
             }
+            let w = (rc.right - rc.left).max(1);
+            let h = (rc.bottom - rc.top).max(1);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN)
+                + GetSystemMetrics(SM_CYVIRTUALSCREEN)
+                + 120;
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_BOTTOM,
+                rc.left,
+                y,
+                w,
+                h,
+                SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+            );
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
+    fn hide_taskbars_once() {
+        for_each_taskbar(|hwnd| {
+            // Always re-exile: Explorer may SW_SHOW for tray blink while still "visible".
+            exile_taskbar(hwnd);
         });
     }
 
@@ -330,7 +361,8 @@ mod win {
                         appbar_set_state(primary, st | ABS_AUTOHIDE);
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                // Faster than 400ms — tray attention blinks ~2Hz and otherwise flashes a white bar.
+                std::thread::sleep(std::time::Duration::from_millis(80));
             }
         });
     }
@@ -350,8 +382,8 @@ mod win {
     }
 
     /// Hide system taskbar while Dock owns the bottom edge.
-    /// Auto-hide reclaims work area; a light keep-hidden loop only calls
-    /// `SW_HIDE` when Explorer re-shows the bar (no SetWindowPos exile).
+    /// Auto-hide reclaims work area; keep-hidden loop exiles the bar off-screen
+    /// so tray flash / Explorer re-show cannot paint a white strip at the bottom.
     pub fn set_taskbar_visible(visible: bool) -> Result<(), String> {
         let primary = shell_tray_hwnd().ok_or_else(|| "找不到系统任务栏".to_string())?;
 
@@ -364,6 +396,7 @@ mod win {
                 }
             }
             for_each_taskbar(|hwnd| unsafe {
+                // Explorer repositions on show — no need to restore our exile coords.
                 let _ = ShowWindow(hwnd, SW_SHOWNA);
             });
             return Ok(());
@@ -392,13 +425,117 @@ mod win {
         Ok(())
     }
 
-    pub fn show_desktop() -> Result<(), String> {
-        // Prefer Win+D via SendInput — ToggleDesktop COM often fails on background
-        // dock visibility threads (wrong apartment / no shell affinity).
-        if crate::win32::input::chord_win_d().is_ok() {
-            return Ok(());
-        }
+    /// Open Start — background dock poller is not foreground, so Win key is filtered.
+    /// Prefer shell tray Start button / SC_TASKLIST, then AttachThreadInput + Win.
+    pub fn open_start_menu() -> Result<(), String> {
+        run_shell_action(|| {
+            unsafe {
+                let _ = AllowSetForegroundWindow(u32::MAX);
+            }
+            if click_start_button().is_ok() {
+                return Ok(());
+            }
+            if post_tasklist().is_ok() {
+                return Ok(());
+            }
+            tap_win_attached()
+        })
+    }
 
+    pub fn show_desktop() -> Result<(), String> {
+        // Prefer shell COM. SendInput Win+D from the dock visibility poller is often filtered.
+        run_shell_action(|| {
+            unsafe {
+                let _ = AllowSetForegroundWindow(u32::MAX);
+            }
+            if toggle_desktop_com().is_ok() {
+                return Ok(());
+            }
+            if click_show_desktop_button().is_ok() {
+                return Ok(());
+            }
+            chord_win_d_attached()
+        })
+    }
+
+    fn run_shell_action(f: impl FnOnce() -> Result<(), String> + Send + 'static) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv()
+            .unwrap_or_else(|_| Err("shell action worker died".into()))
+    }
+
+    fn post_tasklist() -> Result<(), String> {
+        let tray = shell_tray_hwnd().ok_or_else(|| "no explorer tray".to_string())?;
+        unsafe {
+            // SendMessage is more reliable than Post when the tray is SW_HIDE / exiled.
+            let _ = SendMessageW(
+                tray,
+                WM_SYSCOMMAND,
+                WPARAM(SC_TASKLIST as usize),
+                LPARAM(0),
+            );
+            let _ = PostMessageW(
+                tray,
+                WM_SYSCOMMAND,
+                WPARAM(SC_TASKLIST as usize),
+                LPARAM(0),
+            );
+        }
+        Ok(())
+    }
+
+    fn click_start_button() -> Result<(), String> {
+        let tray = shell_tray_hwnd().ok_or_else(|| "no explorer tray".to_string())?;
+        unsafe {
+            let start = FindWindowExA(tray, None, s!("Start"), None)
+                .or_else(|_| FindWindowA(s!("Button"), s!("Start")))
+                .map_err(|_| "no Start button".to_string())?;
+            let _ = AllowSetForegroundWindow(u32::MAX);
+            let _ = SetForegroundWindow(tray);
+            let _ = SendMessageW(start, BM_CLICK, WPARAM(0), LPARAM(0));
+        }
+        Ok(())
+    }
+
+    /// Attach to explorer's input queue so SendInput is not UIPI-filtered.
+    fn with_explorer_input<F>(f: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let tray = shell_tray_hwnd().ok_or_else(|| "no explorer tray".to_string())?;
+        unsafe {
+            let mut explorer_pid = 0u32;
+            let explorer_tid = GetWindowThreadProcessId(tray, Some(&mut explorer_pid));
+            let our_tid = GetCurrentThreadId();
+            if explorer_pid != 0 {
+                let _ = AllowSetForegroundWindow(explorer_pid);
+            } else {
+                let _ = AllowSetForegroundWindow(u32::MAX);
+            }
+            let attached = explorer_tid != 0
+                && explorer_tid != our_tid
+                && AttachThreadInput(our_tid, explorer_tid, true).as_bool();
+            let _ = SetForegroundWindow(tray);
+            let result = f();
+            if attached {
+                let _ = AttachThreadInput(our_tid, explorer_tid, false);
+            }
+            result
+        }
+    }
+
+    fn tap_win_attached() -> Result<(), String> {
+        with_explorer_input(|| crate::win32::input::tap_win_key())
+    }
+
+    fn chord_win_d_attached() -> Result<(), String> {
+        with_explorer_input(|| crate::win32::input::chord_win_d())
+    }
+
+    fn toggle_desktop_com() -> Result<(), String> {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED)
                 .ok()
@@ -420,6 +557,18 @@ mod win {
             shell
                 .ToggleDesktop()
                 .map_err(|e| format!("ToggleDesktop: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Click the taskbar "Show desktop" peek button when present (Win10).
+    fn click_show_desktop_button() -> Result<(), String> {
+        let tray = shell_tray_hwnd().ok_or_else(|| "no explorer tray".to_string())?;
+        unsafe {
+            let btn = FindWindowExA(tray, None, s!("TrayShowDesktopButtonWClass"), None)
+                .map_err(|_| "no Show Desktop button".to_string())?;
+            let _ = SendMessageW(btn, WM_LBUTTONDOWN, WPARAM(0), LPARAM(0));
+            let _ = SendMessageW(btn, WM_LBUTTONUP, WPARAM(0), LPARAM(0));
         }
         Ok(())
     }
@@ -507,7 +656,8 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    foreground_app, is_taskbar_visible, open_system_tool, set_taskbar_visible, show_desktop,
+    foreground_app, is_taskbar_visible, open_start_menu, open_system_tool, set_taskbar_visible,
+    show_desktop,
 };
 
 #[cfg(not(windows))]
@@ -535,6 +685,11 @@ pub fn set_taskbar_visible(_visible: bool) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn show_desktop() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn open_start_menu() -> Result<(), String> {
     Err("Windows only".into())
 }
 

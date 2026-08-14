@@ -123,6 +123,8 @@ export type IslandBarState = {
   pluginId: string;
   text: string;
   title?: string;
-  /** data-URL image (desktop lyric mirror, etc.) */
+  /** data-URL image (desktop lyric PNG mirror) */
   image?: string;
+  /** DWM live mirror slot (Host paints DesktopLyrics into bar) */
+  mirror?: boolean;
 };

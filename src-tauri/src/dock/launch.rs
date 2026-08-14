@@ -490,7 +490,8 @@ fn windows_by_exe_stem(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowInf
 pub fn open_start_menu() -> Result<(), String> {
     #[cfg(windows)]
     {
-        crate::win32::input::tap_win_key()
+        // Shell SC_TASKLIST — SendInput Win is often filtered from dock threads.
+        crate::win32::status_menu::open_start_menu()
     }
     #[cfg(not(windows))]
     {

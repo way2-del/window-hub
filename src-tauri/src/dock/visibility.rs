@@ -43,6 +43,8 @@ struct VisInner {
     /// Last hot-corner fire (debounce + edge trigger).
     corner_armed: bool,
     last_corner_at: Option<Instant>,
+    /// When the pointer first entered a hot corner (dwell before fire).
+    corner_enter_at: Option<Instant>,
     /// Latest wanted visibility (may differ from `shown` while animating).
     desired: bool,
     /// Matches HWND rest pose after place completes.
@@ -75,6 +77,7 @@ impl DockVisibility {
                 corner_open_start: true,
                 corner_armed: true,
                 last_corner_at: None,
+                corner_enter_at: None,
                 desired: false,
                 shown: false,
                 busy: false,
@@ -433,7 +436,7 @@ impl DockVisibility {
             use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
             use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-            let (show_desk, open_start, armed, last_at) = {
+            let (show_desk, open_start, armed, last_at, enter_at) = {
                 let Ok(g) = self.inner.lock() else {
                     return;
                 };
@@ -442,6 +445,7 @@ impl DockVisibility {
                     g.corner_open_start,
                     g.corner_armed,
                     g.last_corner_at,
+                    g.corner_enter_at,
                 )
             };
             if !show_desk && !open_start {
@@ -460,25 +464,27 @@ impl DockVisibility {
                     return;
                 };
 
-                // ~24 CSS px; slightly larger than dock reveal so corners are easy to hit.
-                let corner = ((24.0_f64 * scale).round() as i32).max(16);
+                let corner = hot_corner_pad_px(scale);
                 // rcMonitor.right/bottom are exclusive; still accept == edge (Windows
                 // sometimes reports the exclusive boundary when jammed into a corner).
                 let near_bottom = pt.y >= mi.rcMonitor.bottom - corner;
                 let near_left = pt.x <= mi.rcMonitor.left + corner;
                 let near_right = pt.x >= mi.rcMonitor.right - corner;
-                let in_bl = near_bottom && near_left;
-                let in_br = near_bottom && near_right;
+                let in_bl = near_bottom && near_left && open_start;
+                let in_br = near_bottom && near_right && show_desk;
                 let in_corner = in_bl || in_br;
 
                 if !in_corner {
                     if let Ok(mut g) = self.inner.lock() {
                         g.corner_armed = true;
+                        g.corner_enter_at = None;
                     }
                     return;
                 }
 
-                let cooldown = Duration::from_millis(900);
+                let cooldown = Duration::from_millis(700);
+                // Short dwell — long enough to ignore flyovers, short enough to feel instant.
+                let dwell = Duration::from_millis(45);
                 if !armed {
                     return;
                 }
@@ -486,31 +492,43 @@ impl DockVisibility {
                     return;
                 }
 
-                let action = if in_br && show_desk {
-                    Some("desktop")
-                } else if in_bl && open_start {
-                    Some("start")
-                } else {
-                    None
+                let entered = match enter_at {
+                    Some(t) => t,
+                    None => {
+                        if let Ok(mut g) = self.inner.lock() {
+                            g.corner_enter_at = Some(Instant::now());
+                        }
+                        return;
+                    }
                 };
-                let Some(action) = action else {
+                if entered.elapsed() < dwell {
+                    return;
+                }
+
+                let action = if in_br {
+                    "desktop"
+                } else if in_bl {
+                    "start"
+                } else {
                     return;
                 };
 
                 if let Ok(mut g) = self.inner.lock() {
                     g.corner_armed = false;
+                    g.corner_enter_at = None;
                     g.last_corner_at = Some(Instant::now());
                 }
 
-                match action {
+                // Fire off-thread so the visibility poller never blocks on Shell/COM.
+                std::thread::spawn(move || match action {
                     "desktop" => {
                         let _ = crate::win32::status_menu::show_desktop();
                     }
                     "start" => {
-                        let _ = super::launch::open_start_menu();
+                        let _ = crate::win32::status_menu::open_start_menu();
                     }
                     _ => {}
-                }
+                });
             }
         }
         #[cfg(not(windows))]
@@ -554,8 +572,26 @@ impl DockVisibility {
                     pointer_in_dock_area(app, &mi, scale, bottom_off, pt.x, pt.y)
                         || pointer_over_dock_hwnd(app, pt)
                 } else {
-                    // Hidden: thin bottom strip only.
+                    // Hidden: thin bottom strip only — hot corners are reserved (no dock reveal).
+                    let (reserve_bl, reserve_br) = {
+                        let Ok(g) = self.inner.lock() else {
+                            return false;
+                        };
+                        (g.corner_open_start, g.corner_show_desktop)
+                    };
                     let reveal_thick = thick_log.max(REVEAL_THICK_MIN);
+                    if (reserve_bl || reserve_br)
+                        && point_in_hot_corner(
+                            &mi,
+                            scale,
+                            pt.x,
+                            pt.y,
+                            reserve_bl,
+                            reserve_br,
+                        )
+                    {
+                        return false;
+                    }
                     point_on_activation_strip(
                         app,
                         &mi,
@@ -641,6 +677,32 @@ fn point_in_monitor(mi: &windows::Win32::Graphics::Gdi::MONITORINFO, x: i32, y: 
         && x < mi.rcMonitor.right
         && y >= mi.rcMonitor.top
         && y < mi.rcMonitor.bottom
+}
+
+/// Hot-corner pad in physical px (~48 CSS) — larger than dock reveal so corners are easy to hit.
+#[cfg(windows)]
+fn hot_corner_pad_px(scale: f64) -> i32 {
+    ((48.0_f64 * scale).round() as i32).max(32)
+}
+
+/// Bottom-left / bottom-right pads reserved for Start / Show Desktop (not dock reveal).
+#[cfg(windows)]
+fn point_in_hot_corner(
+    mi: &windows::Win32::Graphics::Gdi::MONITORINFO,
+    scale: f64,
+    x: i32,
+    y: i32,
+    allow_bl: bool,
+    allow_br: bool,
+) -> bool {
+    let corner = hot_corner_pad_px(scale);
+    let near_bottom = y >= mi.rcMonitor.bottom - corner;
+    if !near_bottom {
+        return false;
+    }
+    let near_left = x <= mi.rcMonitor.left + corner;
+    let near_right = x >= mi.rcMonitor.right - corner;
+    (allow_bl && near_left) || (allow_br && near_right)
 }
 
 #[cfg(windows)]

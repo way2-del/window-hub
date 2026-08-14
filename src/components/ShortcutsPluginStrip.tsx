@@ -180,6 +180,11 @@ export default function ShortcutsPluginStrip({
     if (!iframe) return;
     try {
       syncChromeToIframe();
+      // command = 隐形 worker（歌词/天气）：禁止按内容撑宽，否则歌词会跑进左侧快捷区
+      if (action === "command") {
+        onRequestWidthRef.current(pluginId, 1);
+        return;
+      }
       const doc = iframe.contentDocument;
       if (!doc) return;
       const bar = doc.getElementById("bar") ?? doc.body;
@@ -187,7 +192,7 @@ export default function ShortcutsPluginStrip({
       const measured = Math.ceil(
         Math.max(bar.scrollWidth, bar.getBoundingClientRect().width),
       );
-      // 勿强行抬到 28：天气/歌词 worker 仅 1px；图标 chip 约 22
+      // 勿强行抬到 28：图标 chip 约 22
       if (measured > 0) onRequestWidthRef.current(pluginId, measured);
     } catch {
       /* sandbox / not ready */

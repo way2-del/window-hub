@@ -158,7 +158,8 @@ export function panelHubBootstrapScript(pluginId: string): string {
         return invoke("hub_island_set_bar", withPlugin({
           text: (opts && opts.text) || "",
           title: opts && opts.title,
-          image: opts && opts.image
+          image: opts && opts.image,
+          mirror: !!(opts && opts.mirror)
         }));
       },
       clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }

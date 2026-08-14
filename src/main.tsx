@@ -211,10 +211,10 @@ ReactDOM.createRoot(root).render(
           padding: 0,
           border: "none",
           borderRadius: 999,
+          // Subtle edge hint — avoid opaque white slab that reads as a second taskbar.
           background:
-            "linear-gradient(180deg, rgba(255,255,255,0.72) 0%, rgba(255,255,255,0.38) 100%)",
-          boxShadow:
-            "0 0 10px rgba(0,0,0,0.22), 0 0.5px 0 rgba(255,255,255,0.55) inset",
+            "linear-gradient(180deg, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.08) 100%)",
+          boxShadow: "0 0 6px rgba(0,0,0,0.18)",
           pointerEvents: "none",
         }}
       />

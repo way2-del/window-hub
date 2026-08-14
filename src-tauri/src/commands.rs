@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
@@ -2490,9 +2490,12 @@ pub struct IslandBarDto {
     pub plugin_id: String,
     pub text: String,
     pub title: Option<String>,
-    /// Optional data-URL image (e.g. desktop lyric mirror JPEG).
+    /// Optional data-URL image (desktop lyric PNG mirror).
     #[serde(default)]
     pub image: Option<String>,
+    /// DWM 实时映射占位：岛栏留槽，由 Host 把 DesktopLyrics 映上去。
+    #[serde(default)]
+    pub mirror: bool,
 }
 
 #[tauri::command]
@@ -2502,6 +2505,7 @@ pub fn hub_island_set_bar(
     text: String,
     title: Option<String>,
     image: Option<String>,
+    mirror: Option<bool>,
 ) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
     crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.bar")?;
@@ -2509,8 +2513,7 @@ pub fn hub_island_set_bar(
     let image = image
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    // Always include plugin_id so Host can clear only that plugin's layer
-    // (resident vs temporary overlay) without wiping the other.
+    let mirror = mirror.unwrap_or(false);
     let _ = app.emit(
         "island-bar-changed",
         IslandBarDto {
@@ -2518,6 +2521,7 @@ pub fn hub_island_set_bar(
             text,
             title,
             image,
+            mirror,
         },
     );
     Ok(())
@@ -2527,6 +2531,10 @@ pub fn hub_island_set_bar(
 pub fn hub_island_clear_bar(app: AppHandle, plugin_id: String) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
     crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.bar")?;
+    #[cfg(windows)]
+    {
+        crate::win32::lyric_mirror::clear();
+    }
     let _ = app.emit(
         "island-bar-changed",
         IslandBarDto {
@@ -2534,8 +2542,58 @@ pub fn hub_island_clear_bar(app: AppHandle, plugin_id: String) -> Result<(), Str
             text: String::new(),
             title: None,
             image: None,
+            mirror: false,
         },
     );
+    Ok(())
+}
+
+/// 前端上报岛栏歌词槽位（逻辑像素，相对窗口内容区）→ Host 转物理像素做 DWM 映射。
+#[tauri::command]
+pub fn hub_lyric_mirror_set_slot(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        let Some(win) = app.get_webview_window("main") else {
+            return Ok(false);
+        };
+        let Ok(hwnd) = win.hwnd() else {
+            return Ok(false);
+        };
+        let scale = win.scale_factor().unwrap_or(1.0);
+        let px = (x * scale).round() as i32;
+        let py = (y * scale).round() as i32;
+        let pw = (w * scale).round().max(1.0) as i32;
+        let ph = (h * scale).round().max(1.0) as i32;
+        crate::win32::lyric_mirror::set_dest_slot(hwnd.0 as isize, px, py, pw, ph);
+        // 立刻跟一次当前桌面歌词窗
+        let src = crate::win32::netease_lyrics::desktop_lyrics_hwnd();
+        if src != 0 {
+            let crop = {
+                use windows::Win32::Foundation::HWND;
+                crate::win32::netease_lyrics::ink_source_crop(HWND(src as _))
+            };
+            return Ok(crate::win32::lyric_mirror::sync(src, crop));
+        }
+        Ok(crate::win32::lyric_mirror::has_dest_slot())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, x, y, w, h);
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn hub_lyric_mirror_clear() -> Result<(), String> {
+    #[cfg(windows)]
+    crate::win32::lyric_mirror::clear();
     Ok(())
 }
 
@@ -2557,7 +2615,8 @@ pub fn hub_netease_now_playing(plugin_id: String) -> Result<serde_json::Value, S
             "lyric": null,
             "source": null,
             "desktopLyrics": false,
-            "lyricImage": null
+            "lyricImage": null,
+            "mirrorLive": false
         }))
     }
 }

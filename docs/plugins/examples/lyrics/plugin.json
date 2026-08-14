@@ -2,10 +2,10 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.lyrics",
   "name": "歌词",
-  "version": "1.4.1",
+  "version": "1.4.6",
   "official": true,
   "logo": "icon.svg",
-  "description": "镜像网易云桌面歌词到灵动岛（缩小贴上，对齐 MyDockFinder）；下拉可切歌 / 暂停 / 打开网易云。",
+  "description": "折叠岛栏 DWM 映射网易云桌面歌词；合格截屏作兜底。下拉可切歌 / 暂停 / 打开网易云。",
   "entry": {
     "shortcuts": "shortcuts.html",
     "panel": "panel.html"
@@ -21,7 +21,7 @@
       "order": 10
     },
     "island.panel": {
-      "defaultSize": { "w": 380, "h": 196 },
+      "defaultSize": { "w": 380, "h": 220 },
       "excludeFromPullContent": false
     }
   },

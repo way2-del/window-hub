@@ -450,6 +450,8 @@ function App() {
   const svgRef = useRef<SVGSVGElement>(null);
   const shapeLayerRef = useRef<HTMLDivElement>(null);
   const islandUiRef = useRef<HTMLDivElement>(null);
+  const lyricSlotRef = useRef<HTMLElement | null>(null);
+  const lyricPanelSlotRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const lastWinH = useRef(winHeight(ISLAND_COLLAPSED.height));
   const idleTimer = useRef<number | null>(null);
@@ -1373,7 +1375,9 @@ function App() {
       const p = ev.payload;
       if (!p?.pluginId) return;
       const cleared =
-        !String(p.text ?? "").trim() && !String(p.image ?? "").trim();
+        !String(p.text ?? "").trim() &&
+        !String(p.image ?? "").trim() &&
+        !p.mirror;
       const next = cleared
         ? null
         : {
@@ -1381,6 +1385,7 @@ function App() {
             text: p.text,
             title: p.title,
             image: p.image,
+            mirror: !!p.mirror,
           };
       const rec = pluginRegistry.get(p.pluginId);
       if (
@@ -1412,7 +1417,8 @@ function App() {
           cur &&
           cur.text === next!.text &&
           (cur.title ?? "") === (next!.title ?? "") &&
-          (cur.image ?? "") === (next!.image ?? "")
+          (cur.image ?? "") === (next!.image ?? "") &&
+          !!cur.mirror === !!next!.mirror
         ) {
           return prev;
         }
@@ -1565,12 +1571,73 @@ function App() {
   const activePanelPluginId = parsePluginPanelId(effectivePullContent);
   const stagingBar = islandBar?.text ?? "";
   const stagingImage = islandBar?.image ?? "";
-  const showStagingBar = !!(stagingBar.trim() || stagingImage.trim());
+  const stagingMirror = !!islandBar?.mirror;
+  const showStagingBar = !!(
+    stagingBar.trim() ||
+    stagingImage.trim() ||
+    stagingMirror
+  );
+
   const activePanelExcluded =
     !!activePanelPluginId &&
     !!pluginRegistry.get(activePanelPluginId)?.manifest.slots?.["island.panel"]
       ?.excludeFromPullContent;
   const showPanelTags = panelTabs.length >= 2 && !activePanelExcluded;
+
+  // DWM 目的矩形必须相对「主窗客户区」(getBoundingClientRect)，不能减 island 原点。
+  // 否则会画在顶栏最左侧（快捷区旁），而不是灵动岛胶囊里。
+  useLayoutEffect(() => {
+    if (!stagingMirror || !showStagingBar) {
+      void invoke("hub_lyric_mirror_clear").catch(() => undefined);
+      return;
+    }
+
+    let x = 0;
+    let y = 0;
+    let w = 0;
+    let h = 0;
+
+    if (
+      expanded &&
+      lyricPanelSlotRef.current &&
+      islandBar?.pluginId &&
+      activePanelPluginId === islandBar.pluginId
+    ) {
+      // 下拉：映到 Host 专属槽（在面板 iframe 之上），避免和插件文案叠字
+      const er = lyricPanelSlotRef.current.getBoundingClientRect();
+      x = er.left;
+      y = er.top;
+      w = er.width;
+      h = er.height;
+    } else if (!expanded) {
+      const el = lyricSlotRef.current;
+      if (!el) return;
+      const er = el.getBoundingClientRect();
+      x = er.left;
+      y = er.top;
+      w = er.width;
+      h = er.height;
+    } else {
+      // 展开但当前不是歌词面板：先清掉，避免映在别的面板上
+      void invoke("hub_lyric_mirror_clear").catch(() => undefined);
+      return;
+    }
+
+    if (w < 4 || h < 4) return;
+    void invoke("hub_lyric_mirror_set_slot", { x, y, w, h }).catch(() => undefined);
+  }, [
+    showStagingBar,
+    stagingMirror,
+    stagingBar,
+    stagingImage,
+    size.width,
+    size.height,
+    expanded,
+    msgBanner,
+    showPanelTags,
+    activePanelPluginId,
+  ]);
+
   const tabExtraH = showPanelTags ? PANEL_TAB_ROW_H : 0;
   const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
   const viewH = (activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT) + tabExtraH;
@@ -1971,7 +2038,7 @@ function App() {
               <div className={`bar-weather${msgBanner ? " is-exiting" : ""}`}>
                 {showStagingBar ? (
                   <div
-                    className={`bar-staging${stagingImage ? " has-lyric-img" : ""}`}
+                    className={`bar-staging${stagingImage || stagingMirror ? " has-lyric-img" : ""}`}
                     role="button"
                     tabIndex={0}
                     title={islandBar?.title || "打开面板"}
@@ -2006,8 +2073,12 @@ function App() {
                       if (!expandedRef.current) void expand();
                     }}
                   >
-                    {stagingImage ? (
+                    {stagingMirror ? (
+                      // DWM 映在槽位上；ref 挂槽本身，保证目的矩形铺满岛栏并垂直居中
+                      <span ref={lyricSlotRef} className="bar-lyric-slot" aria-hidden />
+                    ) : stagingImage ? (
                       <img
+                        ref={lyricSlotRef}
                         className="bar-lyric-img"
                         src={stagingImage}
                         alt={islandBar?.title || stagingBar || "歌词"}
@@ -2134,6 +2205,15 @@ function App() {
                     );
                   })}
                 </div>
+              ) : null}
+              {stagingMirror &&
+              islandBar?.pluginId &&
+              activePanelPluginId === islandBar.pluginId ? (
+                <div
+                  ref={lyricPanelSlotRef}
+                  className="island-lyric-dwm-slot"
+                  aria-hidden
+                />
               ) : null}
               <div className="island-panel-body">
                 <IslandPanelHost

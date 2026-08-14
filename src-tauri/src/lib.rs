@@ -645,6 +645,8 @@ pub fn run() {
             commands::hub_staging_pick_folders,
             commands::hub_island_set_bar,
             commands::hub_island_clear_bar,
+            commands::hub_lyric_mirror_set_slot,
+            commands::hub_lyric_mirror_clear,
             commands::hub_netease_now_playing,
             commands::hub_media_transport,
             commands::hub_media_open_netease,

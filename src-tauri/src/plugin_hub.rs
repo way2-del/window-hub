@@ -715,6 +715,7 @@ pub fn hub_init_script(plugin_id: &str) -> String {
             text: (opts && opts.text) || "",
             title: opts && opts.title,
             image: opts && opts.image,
+            mirror: !!(opts && opts.mirror),
           }}),
         ),
       clearBar: () => invoke("hub_island_clear_bar", withPlugin()),

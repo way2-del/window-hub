@@ -42,6 +42,16 @@
     }
 
     const image = String(now.lyricImage || "").trim();
+    // DWM 由 Host 画在面板上方专属槽；这里不要再写提示/叠字
+    if (now.mirrorLive) {
+      wrap.hidden = true;
+      img.removeAttribute("src");
+      lastImg = "";
+      lineEl.hidden = true;
+      lineEl.textContent = "";
+      metaEl.textContent = "来源：DWM 实时映射 · 与桌面同步";
+      return;
+    }
     if (image) {
       if (image !== lastImg) {
         img.src = image;

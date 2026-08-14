@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -34,6 +34,9 @@ pub struct NeteaseNowPlaying {
     pub desktop_lyrics: bool,
     /// `data:image/png;base64,...` 桌面歌词有字区域裁切（透明底）
     pub lyric_image: Option<String>,
+    /// DWM 实时映射已接通（岛栏可走 live thumb，不必依赖截屏）
+    #[serde(default)]
+    pub mirror_live: bool,
 }
 
 struct ImageCache {
@@ -107,7 +110,6 @@ struct EnumCtx {
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let ctx = &mut *(lparam.0 as *mut EnumCtx);
     let class = hwnd_class(hwnd);
-    let class_l = class.to_ascii_lowercase();
     let visible = IsWindowVisible(hwnd).as_bool();
 
     if class == "OrpheusBrowserHost" {
@@ -117,10 +119,8 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         if ctx.main_any.is_none() {
             ctx.main_any = Some(hwnd);
         }
-    } else if class == "DesktopLyrics"
-        || class_l == "desktoplyrics"
-        || class_l.contains("desktoplyric")
-    {
+    } else if class == "DesktopLyrics" {
+        // 只要正式桌面歌词窗；Unlock 小钮 / 模糊匹配易截错
         if visible {
             ctx.lyric = Some(hwnd);
         }
@@ -218,67 +218,25 @@ fn capture_lyric_bgra(hwnd: HWND) -> Option<(Vec<u8>, u32, u32)> {
             Some((bgra, w as u32, h as u32))
         };
 
-        // PrintWindow：只要歌词窗像素（透明区多为黑，后面抠掉）
-        {
-            let hdc_win = GetDC(hwnd);
-            if !hdc_win.is_invalid() {
-                let hdc_mem = CreateCompatibleDC(hdc_win);
-                if !hdc_mem.is_invalid() {
-                    let hbmp = CreateCompatibleBitmap(hdc_win, fw, fh);
-                    if !hbmp.is_invalid() {
-                        let old = SelectObject(hdc_mem, hbmp);
-                        let ok = PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(0x2)).as_bool();
-                        let out = if ok {
-                            read_dib(hdc_mem, hbmp, fw, fh)
-                        } else {
-                            None
-                        };
-                        SelectObject(hdc_mem, old);
-                        let _ = DeleteObject(hbmp);
-                        let _ = DeleteDC(hdc_mem);
-                        ReleaseDC(hwnd, hdc_win);
-                        if out.is_some() {
-                            return out;
-                        }
-                    } else {
-                        let _ = DeleteDC(hdc_mem);
-                        ReleaseDC(hwnd, hdc_win);
-                    }
-                } else {
-                    ReleaseDC(hwnd, hdc_win);
-                }
-            }
-        }
-
-        // 回退：屏上 BitBlt（可能带壁纸，仍靠裁切有字区）
-        let hdc_screen = GetDC(HWND::default());
-        if hdc_screen.is_invalid() {
+        // 只用 PrintWindow。屏上 BitBlt 会透过分层透明歌词窗，截到背后的网易云主界面（专辑墙等）。
+        let hdc_win = GetDC(hwnd);
+        if hdc_win.is_invalid() {
             return None;
         }
-        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        let hdc_mem = CreateCompatibleDC(hdc_win);
         if hdc_mem.is_invalid() {
-            ReleaseDC(HWND::default(), hdc_screen);
+            ReleaseDC(hwnd, hdc_win);
             return None;
         }
-        let hbmp = CreateCompatibleBitmap(hdc_screen, fw, fh);
+        let hbmp = CreateCompatibleBitmap(hdc_win, fw, fh);
         if hbmp.is_invalid() {
             let _ = DeleteDC(hdc_mem);
-            ReleaseDC(HWND::default(), hdc_screen);
+            ReleaseDC(hwnd, hdc_win);
             return None;
         }
         let old = SelectObject(hdc_mem, hbmp);
-        let ok = BitBlt(
-            hdc_mem,
-            0,
-            0,
-            fw,
-            fh,
-            hdc_screen,
-            frame.left,
-            frame.top,
-            SRCCOPY,
-        )
-        .is_ok();
+        let ok = PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(0x2)).as_bool()
+            || PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(0)).as_bool();
         let out = if ok {
             read_dib(hdc_mem, hbmp, fw, fh)
         } else {
@@ -287,7 +245,7 @@ fn capture_lyric_bgra(hwnd: HWND) -> Option<(Vec<u8>, u32, u32)> {
         SelectObject(hdc_mem, old);
         let _ = DeleteObject(hbmp);
         let _ = DeleteDC(hdc_mem);
-        ReleaseDC(HWND::default(), hdc_screen);
+        ReleaseDC(hwnd, hdc_win);
         out
     }
 }
@@ -333,8 +291,15 @@ fn crop_ink_to_rgba(bgra: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> 
     if cw < 4 || ch < 4 {
         return None;
     }
+    // 单行歌词应偏扁；接近方块/大色块多半是截到了主界面
+    if ch > 140 || (cw as f64 / ch as f64) < 2.2 {
+        return None;
+    }
 
     let mut rgba = vec![0u8; cw * ch * 4];
+    let mut ink_n = 0usize;
+    let mut color_bins = [0u8; 512]; // 粗量化色桶占用标记
+    let mut distinct = 0usize;
     for y in 0..ch {
         for x in 0..cw {
             let si = ((y0 + y) * w + (x0 + x)) * 4;
@@ -343,10 +308,15 @@ fn crop_ink_to_rgba(bgra: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> 
             let g = bgra[si + 1];
             let r = bgra[si + 2];
             if is_ink(r, g, b) {
+                ink_n += 1;
+                let bin = (((r as usize) >> 5) << 6) | (((g as usize) >> 5) << 3) | ((b as usize) >> 5);
+                if color_bins[bin] == 0 {
+                    color_bins[bin] = 1;
+                    distinct += 1;
+                }
                 rgba[di] = r;
                 rgba[di + 1] = g;
                 rgba[di + 2] = b;
-                // 半透明描边：略提 alpha，避免硬边
                 let a = ((luma(r, g, b) - INK_LUMA).min(200) as u8).saturating_add(55);
                 rgba[di + 3] = a.max(90);
             } else {
@@ -356,6 +326,10 @@ fn crop_ink_to_rgba(bgra: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> 
                 rgba[di + 3] = 0;
             }
         }
+    }
+    // 专辑封面/推荐墙颜色很杂；单行歌词通常色相很少
+    if distinct > 56 || ink_n < 20 {
+        return None;
     }
     Some((rgba, cw as u32, ch as u32))
 }
@@ -368,8 +342,8 @@ fn rgba_to_png_data_url(rgba: &[u8], w: u32, h: u32) -> Option<String> {
 
     let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(w, h, rgba.to_vec())?;
 
-    // 岛栏显示高 ~22；源图高度压到 44～56，避免整窗竖条却又够清晰
-    const TARGET_H: u32 = 48;
+    // 岛栏显示高 ~26；源图高度压到 52～64，避免整窗竖条却又够清晰
+    const TARGET_H: u32 = 56;
     const MAX_W: u32 = 720;
     let (out_img, out_w, out_h) = if h > TARGET_H || w > MAX_W {
         let scale_h = TARGET_H as f64 / h as f64;
@@ -429,6 +403,121 @@ fn capture_lyric_image(hwnd: HWND) -> Option<String> {
     Some(data_url)
 }
 
+/// 有字区域在源窗客户区中的裁切矩形（物理像素），供 DWM rcSource。
+/// 只取「墨迹最多的一行带」，避免上下两句叠进岛栏。
+pub fn ink_source_crop(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
+    let (bgra, w, h) = capture_lyric_bgra(hwnd)?;
+    let w = w as usize;
+    let h = h as usize;
+    if w == 0 || h == 0 || bgra.len() < w * h * 4 {
+        return None;
+    }
+    let mut row_ink = vec![0usize; h];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if is_ink(bgra[i + 2], bgra[i + 1], bgra[i]) {
+                row_ink[y] += 1;
+            }
+        }
+    }
+    let thr = (w / 80).max(3);
+    // 连续有墨行 → 若干行带；优先「最矮且够密」的单行（当前句），避免两句粘成一条
+    let mut bands: Vec<(usize, usize, usize, f64)> = Vec::new(); // y0,y1,ink,density
+    let mut y = 0usize;
+    while y < h {
+        if row_ink[y] < thr {
+            y += 1;
+            continue;
+        }
+        let y0 = y;
+        let mut ink = 0usize;
+        while y < h && row_ink[y] >= thr {
+            ink += row_ink[y];
+            y += 1;
+        }
+        let y1 = y;
+        let hh = (y1 - y0).max(1);
+        let density = ink as f64 / hh as f64;
+        bands.push((y0, y1, ink, density));
+    }
+    if bands.is_empty() {
+        return None;
+    }
+    // 单行通常 ≤ 48px；过高的带拆成密度峰附近
+    let (band0, band1) = {
+        let mut best = &bands[0];
+        for b in &bands[1..] {
+            let best_tall = (best.1 - best.0) > 52;
+            let b_tall = (b.1 - b.0) > 52;
+            if best_tall != b_tall {
+                if !b_tall {
+                    best = b;
+                }
+                continue;
+            }
+            // 同档：密度优先，其次墨迹总量
+            if b.3 > best.3 * 1.05 || (b.3 >= best.3 * 0.95 && b.2 > best.2) {
+                best = b;
+            }
+        }
+        let (mut y0, mut y1, _, _) = *best;
+        if y1 - y0 > 56 {
+            // 过高：取行墨迹峰值附近 ± 半行
+            let mut peak_y = y0;
+            let mut peak_v = 0usize;
+            for yy in y0..y1 {
+                if row_ink[yy] > peak_v {
+                    peak_v = row_ink[yy];
+                    peak_y = yy;
+                }
+            }
+            let half = 22usize;
+            y0 = peak_y.saturating_sub(half).max(y0);
+            y1 = (peak_y + half + 1).min(y1);
+        }
+        (y0, y1)
+    };
+    let mut min_x = w;
+    let mut max_x = 0usize;
+    let mut min_y = h;
+    let mut max_y = 0usize;
+    let mut found = false;
+    for y in band0..band1 {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if is_ink(bgra[i + 2], bgra[i + 1], bgra[i]) {
+                found = true;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    let pad_x = 6usize;
+    let pad_y = 1usize;
+    let x0 = min_x.saturating_sub(pad_x) as i32;
+    let y0 = min_y.saturating_sub(pad_y) as i32;
+    let x1 = (max_x + pad_x + 1).min(w) as i32;
+    let y1 = (max_y + pad_y + 1).min(h) as i32;
+    if x1 - x0 < 4 || y1 - y0 < 4 {
+        return None;
+    }
+    Some((x0, y0, x1, y1))
+}
+
+/// 当前可见 DesktopLyrics 窗句柄（0 = 无）。
+pub fn desktop_lyrics_hwnd() -> isize {
+    find_netease_hwnds()
+        .1
+        .map(|h| h.0 as isize)
+        .unwrap_or(0)
+}
+
 pub fn snapshot() -> NeteaseNowPlaying {
     static CACHE: Mutex<Option<(Instant, NeteaseNowPlaying)>> = Mutex::new(None);
     if let Ok(guard) = CACHE.lock() {
@@ -464,14 +553,27 @@ fn snapshot_uncached() -> NeteaseNowPlaying {
     if out.desktop_lyrics {
         out.active = true;
         if let Some(hwnd) = lyric_hwnd {
-            if let Some(img) = capture_lyric_image(hwnd) {
-                out.lyric_image = Some(img);
+            let raw = hwnd.0 as isize;
+            let crop = ink_source_crop(hwnd);
+            // 折叠岛栏：DWM 实时映射（对齐 MyDockFinder）；截屏仅 PrintWindow，禁止 BitBlt 透底
+            let dwm_ok = crate::win32::lyric_mirror::has_dest_slot()
+                && crate::win32::lyric_mirror::sync(raw, crop);
+            out.mirror_live = dwm_ok;
+            out.lyric_image = capture_lyric_image(hwnd);
+            if dwm_ok || out.lyric_image.is_some() {
                 out.lyric = Some("♪".into());
-                out.source = Some("desktop-mirror".into());
+                out.source = Some(if dwm_ok {
+                    "desktop-dwm".into()
+                } else {
+                    "desktop-mirror".into()
+                });
+            } else if !dwm_ok {
+                crate::win32::lyric_mirror::clear();
             }
         }
     } else {
         let _ = IMAGE_CACHE.lock().map(|mut g| *g = None);
+        crate::win32::lyric_mirror::clear();
     }
 
     if out.title.is_some() || out.lyric_image.is_some() || out.desktop_lyrics {

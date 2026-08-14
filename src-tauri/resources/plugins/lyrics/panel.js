@@ -42,6 +42,16 @@
     }
 
     const image = String(now.lyricImage || "").trim();
+    // DWM 由 Host 画在面板上方专属槽；这里不要再写提示/叠字
+    if (now.mirrorLive) {
+      wrap.hidden = true;
+      img.removeAttribute("src");
+      lastImg = "";
+      lineEl.hidden = true;
+      lineEl.textContent = "";
+      metaEl.textContent = "";
+      return;
+    }
     if (image) {
       if (image !== lastImg) {
         img.src = image;
@@ -49,7 +59,7 @@
       }
       wrap.hidden = false;
       lineEl.hidden = true;
-      metaEl.textContent = "来源：桌面歌词镜像 · 与桌面同步";
+      metaEl.textContent = "";
       return;
     }
 

@@ -13,6 +13,8 @@ pub mod input;
 pub mod material;
 #[cfg(windows)]
 pub mod netease_lyrics;
+#[cfg(windows)]
+pub mod lyric_mirror;
 pub mod park;
 pub mod status_menu;
 pub mod switcher;

@@ -158,7 +158,7 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
       24,
       Math.max(4, Number.isFinite(Number(dp?.iconGap)) ? Number(dp?.iconGap) : 10),
     ),
-    showTriggerStrip: dp?.showTriggerStrip !== false,
+    showTriggerStrip: dp?.showTriggerStrip === true,
     showRunningApps: dp?.showRunningApps !== false,
     indicatorStyle: dp?.indicatorStyle === "dot" ? "dot" : "bar",
     cornerShowDesktop: dp?.cornerShowDesktop !== false,
@@ -2263,7 +2263,7 @@ export default function SettingsApp() {
                   <span className="pref-row-text">
                     <span className="pref-row-label">右下角 → 显示桌面</span>
                     <span className="pref-row-desc">
-                      鼠标移到屏幕最右下角时，切换显示桌面（Win+D）
+                      鼠标移到屏幕最右下角稍停即切换显示桌面（该角不会唤出 Dock）
                     </span>
                   </span>
                   <button
@@ -2283,7 +2283,7 @@ export default function SettingsApp() {
                   <span className="pref-row-text">
                     <span className="pref-row-label">左下角 → 开始菜单</span>
                     <span className="pref-row-desc">
-                      鼠标移到屏幕最左下角时，打开 Windows 开始菜单
+                      鼠标移到屏幕最左下角稍停即打开开始菜单（该角不会唤出 Dock）
                     </span>
                   </span>
                   <button
@@ -2330,7 +2330,7 @@ export default function SettingsApp() {
                   <span className="pref-row-text">
                     <span className="pref-row-label">显示触发条</span>
                     <span className="pref-row-desc">
-                      自动/智能隐藏收起后，在屏幕底边显示一条细白线（类似 macOS Dock）
+                      自动/智能隐藏收起后，在屏幕底边显示一条细提示线（默认关闭，避免底边白条）
                     </span>
                   </span>
                   <button

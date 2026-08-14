@@ -107,7 +107,10 @@ export function pickIslandContentBar(
   barPriority: string[],
 ): IslandBarState | null {
   const textOk = (b: IslandBarState | undefined) =>
-    !!b && (!!String(b.text ?? "").trim() || !!String(b.image ?? "").trim());
+    !!b &&
+    (!!String(b.text ?? "").trim() ||
+      !!String(b.image ?? "").trim() ||
+      !!b.mirror);
   const seen = new Set<string>();
   for (const id of barPriority) {
     const key = String(id ?? "").trim();

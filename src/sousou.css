@@ -1,6 +1,6 @@
-/* 搜搜 — 浅灰底 + 白卡片 + 薄荷绿 */
+/* 搜搜 — 白底 + 薄荷绿 */
 :root {
-  --ss-bg: #eef0f3;
+  --ss-bg: #ffffff;
   --ss-panel: #ffffff;
   --ss-panel-2: #f7f8fa;
   --ss-tile: #f2f3f5;
@@ -35,18 +35,15 @@ body.is-sousou {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background:
-    radial-gradient(1200px 420px at 50% -80px, rgba(62, 207, 142, 0.07), transparent 60%),
-    var(--ss-bg);
+  background: var(--ss-bg);
   box-sizing: border-box;
 }
 
 /* —— 顶栏：搜索为主，标签贴底 —— */
 .ss-chrome {
   flex-shrink: 0;
-  background: linear-gradient(180deg, #ffffff 0%, #fbfbfc 100%);
+  background: var(--ss-bg);
   border-bottom: 1px solid rgba(16, 24, 40, 0.06);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
 }
 
 .ss-header {
@@ -414,23 +411,23 @@ body.is-sousou {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px 72px;
-  background: transparent;
+  padding: 12px 16px 72px;
+  background: var(--ss-bg);
 }
 
 .ss-home {
   display: grid;
   grid-template-columns: 1.45fr 1fr;
   grid-template-rows: auto auto;
-  gap: 12px;
+  gap: 8px 16px;
 }
 
 .ss-card {
-  background: var(--ss-panel);
-  border: 1px solid rgba(16, 24, 40, 0.05);
-  border-radius: var(--ss-radius);
-  padding: 14px 14px 12px;
-  box-shadow: var(--ss-shadow-soft);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 8px 2px 4px;
+  box-shadow: none;
 }
 
 .ss-card-title {
@@ -463,11 +460,11 @@ body.is-sousou {
   grid-row: 2;
 }
 
-/* 标签页整页白底 */
+/* 标签页整页铺开，不再套白卡片 */
 .ss-card.ss-tab-page {
-  min-height: calc(100% - 4px);
-  padding: 12px 10px 52px;
-  border-radius: var(--ss-radius);
+  min-height: 100%;
+  padding: 4px 0 52px;
+  border-radius: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -779,11 +776,11 @@ html.ss-reordering * {
   display: flex;
   flex-direction: column;
   gap: 0;
-  background: var(--ss-panel);
-  border-radius: var(--ss-radius);
+  background: transparent;
+  border-radius: 0;
   overflow: hidden;
-  box-shadow: var(--ss-shadow-soft);
-  border: 1px solid rgba(16, 24, 40, 0.05);
+  box-shadow: none;
+  border: none;
 }
 
 .ss-file-row {

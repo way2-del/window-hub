@@ -132,8 +132,8 @@ pub struct DockPrefs {
     /// Gap between icon slots in logical px (4–24). Wider reduces magnification overlap.
     #[serde(default = "default_icon_gap")]
     pub icon_gap: u32,
-    /// When auto/smart-hide tucks the dock, show a thin Apple-style peek strip.
-    #[serde(default = "default_true")]
+    /// When auto/smart-hide tucks the dock, show a thin edge hint strip.
+    #[serde(default = "default_false")]
     pub show_trigger_strip: bool,
     /// Show unpinned running apps after a separator (macOS Dock behavior).
     #[serde(default = "default_true")]
@@ -175,6 +175,10 @@ fn default_magnification() -> f64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_corner_radius() -> u32 {
@@ -236,7 +240,7 @@ impl Default for DockPrefs {
             bounce_on_click: true,
             icon_size: default_icon_size(),
             icon_gap: default_icon_gap(),
-            show_trigger_strip: true,
+            show_trigger_strip: false,
             show_running_apps: true,
             indicator_style: default_indicator_style(),
             corner_show_desktop: true,
@@ -299,9 +303,22 @@ pub fn load_dock_prefs() -> DockPrefs {
     let Some(v) = raw else {
         return DockPrefs::default();
     };
-    serde_json::from_value::<DockPrefs>(v)
+    let mut prefs = serde_json::from_value::<DockPrefs>(v)
         .unwrap_or_default()
-        .normalize()
+        .normalize();
+    // One-shot: clear the old default white peek strip (felt like a second taskbar).
+    let migrated = crate::db::with_conn(|c| crate::db::meta_get(c, "dock_trigger_strip_v2"))
+        .ok()
+        .flatten()
+        .is_some();
+    if !migrated {
+        prefs.show_trigger_strip = false;
+        let _ = crate::db::with_conn(|c| {
+            crate::db::meta_set(c, "dock_trigger_strip_v2", &serde_json::json!(true))
+        });
+        let _ = save_dock_prefs(&prefs);
+    }
+    prefs
 }
 
 /// Fill `real_path` / `match_exe` / PWA `app_id` for `.lnk` pins.
