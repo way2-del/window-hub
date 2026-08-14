@@ -61,6 +61,7 @@ fn process_exe(pid: u32) -> (Option<String>, Option<String>) {
 pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
     use std::sync::Mutex;
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
         GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
@@ -68,11 +69,14 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
 
     struct Ctx {
         exclude: Option<isize>,
+        /// Host process — dock / island / preview must never appear as taskbar apps.
+        self_pid: u32,
         out: Mutex<Vec<WindowInfo>>,
     }
 
     let ctx = Box::new(Ctx {
         exclude: exclude_hwnd,
+        self_pid: unsafe { GetCurrentProcessId() },
         out: Mutex::new(Vec::new()),
     });
     let ctx_ptr = Box::into_raw(ctx);
@@ -94,26 +98,35 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
             return BOOL(1);
         }
 
-        let title_len = GetWindowTextLengthW(hwnd);
-        if title_len == 0 {
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        // Drop every top-level HWND we own (dock, preview, settings, glass, …).
+        if pid != 0 && pid == ctx.self_pid {
             return BOOL(1);
         }
 
-        let mut title_buf = vec![0u16; (title_len + 1) as usize];
-        let n = GetWindowTextW(hwnd, &mut title_buf);
-        title_buf.truncate(n as usize);
-        let title = String::from_utf16_lossy(&title_buf);
-        if title.trim().is_empty() {
-            return BOOL(1);
-        }
+        let title_len = GetWindowTextLengthW(hwnd);
+        let title = if title_len > 0 {
+            let mut title_buf = vec![0u16; (title_len + 1) as usize];
+            let n = GetWindowTextW(hwnd, &mut title_buf);
+            title_buf.truncate(n as usize);
+            String::from_utf16_lossy(&title_buf)
+        } else {
+            String::new()
+        };
 
         let mut class_buf = [0u16; 256];
         let cn = GetClassNameW(hwnd, &mut class_buf);
         let class_name = String::from_utf16_lossy(&class_buf[..cn as usize]);
 
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let (exe, exe_name) = process_exe(pid);
+
+        // Taskbar-like: allow empty title when we still have a real process image.
+        // (Previously title_len==0 dropped many legitimate top-level apps.)
+        if title.trim().is_empty() && exe.as_ref().map(|e| e.is_empty()).unwrap_or(true) {
+            return BOOL(1);
+        }
+
         let hwnd_i = hwnd.0 as isize;
 
         if let Ok(mut out) = ctx.out.lock() {
@@ -170,6 +183,130 @@ pub fn focus_window(hwnd: isize) -> Result<(), String> {
             Err("SetForegroundWindow was denied by the OS".into())
         }
     }
+}
+
+/// Dock / taskbar toggle: if `hwnd` (or another window of the same process) is
+/// already foreground → minimize it; if minimized → restore; otherwise focus.
+#[cfg(windows)]
+pub fn focus_or_minimize_window(hwnd: isize) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, ShowWindow,
+        SW_MINIMIZE,
+    };
+
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        if !IsWindow(h).as_bool() {
+            return Err("window no longer exists".into());
+        }
+        if IsIconic(h).as_bool() {
+            return focus_window(hwnd);
+        }
+
+        let fg = GetForegroundWindow();
+        let mut target_pid = 0u32;
+        let mut fg_pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut target_pid));
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        let fg_is_target = fg == h || (target_pid != 0 && target_pid == fg_pid);
+
+        if fg_is_target {
+            let _ = ShowWindow(h, SW_MINIMIZE);
+            return Ok(());
+        }
+    }
+    focus_window(hwnd)
+}
+
+/// Like [`focus_or_minimize_window`], but considers a group of related HWNDs
+/// (same dock app). Minimizes the foreground member when any is frontmost.
+#[cfg(windows)]
+pub fn focus_or_minimize_group(hwnds: &[isize]) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, ShowWindow,
+        SW_MINIMIZE,
+    };
+
+    if hwnds.is_empty() {
+        return Err("no windows".into());
+    }
+
+    unsafe {
+        let fg = GetForegroundWindow();
+        let fg_raw = fg.0 as isize;
+        let mut fg_pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+
+        let mut group_pids = Vec::new();
+        for &raw in hwnds {
+            let h = HWND(raw as *mut _);
+            if !IsWindow(h).as_bool() {
+                continue;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid != 0 {
+                group_pids.push(pid);
+            }
+        }
+
+        let fg_in_group = hwnds.contains(&fg_raw)
+            || (fg_pid != 0 && group_pids.iter().any(|p| *p == fg_pid));
+
+        if fg_in_group {
+            // Minimize the actual foreground window when it belongs to the app.
+            let minimize_target = if hwnds.contains(&fg_raw) {
+                fg_raw
+            } else {
+                hwnds
+                    .iter()
+                    .copied()
+                    .find(|&raw| {
+                        let h = HWND(raw as *mut _);
+                        let mut pid = 0u32;
+                        GetWindowThreadProcessId(h, Some(&mut pid));
+                        pid == fg_pid && !IsIconic(h).as_bool()
+                    })
+                    .unwrap_or(fg_raw)
+            };
+            let h = HWND(minimize_target as *mut _);
+            if IsWindow(h).as_bool() && !IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_MINIMIZE);
+                return Ok(());
+            }
+        }
+
+        // Prefer restoring a minimized member, else focus the first valid.
+        if let Some(&raw) = hwnds.iter().find(|&&raw| {
+            let h = HWND(raw as *mut _);
+            IsWindow(h).as_bool() && IsIconic(h).as_bool()
+        }) {
+            return focus_window(raw);
+        }
+        for &raw in hwnds {
+            let h = HWND(raw as *mut _);
+            if IsWindow(h).as_bool() {
+                return focus_window(raw);
+            }
+        }
+    }
+    Err("no valid window in group".into())
+}
+
+#[cfg(not(windows))]
+pub fn focus_or_minimize_window(hwnd: isize) -> Result<(), String> {
+    focus_window(hwnd)
+}
+
+#[cfg(not(windows))]
+pub fn focus_or_minimize_group(hwnds: &[isize]) -> Result<(), String> {
+    hwnds
+        .first()
+        .copied()
+        .ok_or_else(|| "no windows".into())
+        .and_then(focus_window)
 }
 
 /// Restore / focus the largest visible top-level window owned by `pid`

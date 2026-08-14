@@ -1192,7 +1192,7 @@ function App() {
           setChromeCenter(chromeTokens(center));
           setChromeRight(chromeTokens(right));
         })();
-      }, 180);
+      }, 80);
     };
 
     void (async () => {
@@ -1689,6 +1689,20 @@ function App() {
     return () => un?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 通知快捷区 iframe 同步 --wh-chrome-fg（CSS 变量本身进不了跨文档 iframe）
+  useEffect(() => {
+    window.dispatchEvent(
+      new CustomEvent("wh-chrome-changed", {
+        detail: {
+          left: chromeLeft.scheme,
+          center: chromeCenter.scheme,
+          right: chromeRight.scheme,
+          fg: chromeLeft.fg,
+        },
+      }),
+    );
+  }, [chromeLeft, chromeCenter, chromeRight]);
 
   const ambientCss = {
     ["--island-top-gap" as string]: `${TOP_GAP}px`,

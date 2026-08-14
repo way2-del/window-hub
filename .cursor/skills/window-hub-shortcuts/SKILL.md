@@ -1,10 +1,10 @@
 ---
-name: window-hub-shortcuts
+
+## name: window-hub-shortcuts
 description: >-
   Window Hub 快捷区 — Host iframe strips per plugin (entry.shortcuts),
   shortcutsHubBridge, getBounds bar height, exclusive prefs. setPins is
   deprecated. Use when implementing ShortcutsHost or shortcuts slot plugins.
----
 
 # 快捷区（状态菜单 · shortcuts）
 
@@ -15,17 +15,19 @@ description: >-
 Host 在顶栏快捷区几何内 **并排挂矮 iframe**（每插件一块）。插件用 HTML/CSS/JS 自画整条（入口 + 固定项等）。  
 **不要**用 `hub.shortcuts.setPins`（已废弃）。
 
-模式对齐岛 panel：`srcdoc` + [`shortcutsHubBridge`](../../../src/plugins/shortcutsHubBridge.ts)。
+模式对齐岛 panel：`srcdoc` + `[shortcutsHubBridge](../../../src/plugins/shortcutsHubBridge.ts)`。
 
 ## 状态栏高度（必须可读）
 
 状态菜单顶栏高度与快捷区 iframe 高度 **同一常量**：
 
-| Token | 值 | 来源 |
-|-------|-----|------|
-| `SHORTCUTS_HEIGHT` / `STATUS_MENU_BAR_HEIGHT` | **28** | [`shortcutsGeometry.ts`](../../../src/plugins/shortcutsGeometry.ts) |
-| CSS `--island-bar-h` | 28px | Host `.shell` |
-| 注入 `--wh-bar-h` | 同上 | Host → iframe `:root` |
+
+| Token                                         | 值      | 来源                                                                  |
+| --------------------------------------------- | ------ | ------------------------------------------------------------------- |
+| `SHORTCUTS_HEIGHT` / `STATUS_MENU_BAR_HEIGHT` | **28** | `[shortcutsGeometry.ts](../../../src/plugins/shortcutsGeometry.ts)` |
+| CSS `--island-bar-h`                          | 28px   | Host `.shell`                                                       |
+| 注入 `--wh-bar-h`                               | 同上     | Host → iframe `:root`                                               |
+
 
 插件 **禁止**写死 `28px` 做布局决策。应：
 
@@ -41,11 +43,13 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 拿到 `height` / `--wh-bar-h` 后，插件选择内容在条内的垂直对齐：
 
-| 对齐 | CSS 做法（示例） |
-|------|------------------|
+
+| 对齐                | CSS 做法（示例）                                                                       |
+| ----------------- | -------------------------------------------------------------------------------- |
 | **居中**（推荐常驻 chip） | `html, body, .bar { display:flex; align-items:center; height:var(--wh-bar-h); }` |
-| **顶对齐** | `align-items: flex-start` 或 `padding-top` |
-| **底对齐** | `align-items: flex-end` 或 `padding-bottom` |
+| **顶对齐**           | `align-items: flex-start` 或 `padding-top`                                        |
+| **底对齐**           | `align-items: flex-end` 或 `padding-bottom`                                       |
+
 
 官方窗口组：**全部元素垂直居中**（见 `window-hub-window-groups`）。
 
@@ -60,6 +64,10 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 - 无 `entry.shortcuts` 时回退 Host 入口 chip
 - 隐形 worker（`action: "command"`，如天气/歌词）条宽可为 1px，勿被 Host 抬到 28
 
+## 栏色 / 反色（Host → iframe）
+
+Host `.shell` 上的 `--chrome-left-fg` **不会**自动进 iframe。`ShortcutsPluginStrip` 在 `wh-chrome-changed`（及 shell `style` / `data-chrome-left`）时把色灌入 iframe `--wh-chrome-fg`。插件图标用 `currentColor` / `var(--wh-chrome-fg)`，**不要**写死白/黑。
+
 ## 禁止
 
 - 另开叠层 WebviewWindow 画快捷区
@@ -67,6 +75,7 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 - 自建置顶窗（用 `hub.popup.open`）
 - 继续依赖 `setPins` 让 Host 画 pin
 - 在插件里魔法数猜状态栏高度（必须用 `getBounds` / `--wh-bar-h`）
+- 快捷区图标写死 `#fff` / `#000`（须跟 chrome）
 
 ## Manifest
 
@@ -99,6 +108,7 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 ## 实现
 
-1. [`ShortcutsHost.tsx`](../../../src/components/ShortcutsHost.tsx) 并排 `ShortcutsPluginStrip`
-2. 几何：[`shortcutsGeometry.ts`](../../../src/plugins/shortcutsGeometry.ts)
-3. 官方示例：[`window-groups/shortcuts.*`](../../../docs/plugins/examples/window-groups/)
+1. `[ShortcutsHost.tsx](../../../src/components/ShortcutsHost.tsx)` 并排 `ShortcutsPluginStrip`
+2. 几何：`[shortcutsGeometry.ts](../../../src/plugins/shortcutsGeometry.ts)`
+3. 官方示例：`[window-groups/shortcuts.*](../../../docs/plugins/examples/window-groups/)`
+

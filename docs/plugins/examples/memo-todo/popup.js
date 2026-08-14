@@ -443,6 +443,8 @@
         void handleNotifyAction(ev).catch(console.error);
       });
     }
+    // Host inject 后立刻检查 #app；先同步画壳，再 await storage。
+    render();
     await load();
     render();
     await clearLegacyIslandBar();

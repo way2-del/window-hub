@@ -802,6 +802,156 @@ html[data-theme="light"] .bar-priority-btn {
   margin-bottom: 12px;
 }
 
+.dock-settings-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dock-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid transparent;
+}
+
+.dock-settings-row.is-missing-icon {
+  border-color: rgba(255, 159, 10, 0.35);
+  background: rgba(255, 159, 10, 0.06);
+}
+
+.dock-settings-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.dock-settings-icon,
+.dock-settings-icon-fallback {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
+.dock-settings-icon-fallback {
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e5e7eb;
+}
+
+.dock-settings-sep {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dock-settings-sep::after {
+  content: "";
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.dock-settings-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dock-settings-meta strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f3f4f6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-settings-meta span {
+  font-size: 11px;
+  color: #9ca3af;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-settings-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.dock-settings-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d1d5db;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dock-settings-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f9fafb;
+}
+
+.dock-settings-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.dock-settings-btn.is-danger:hover:not(:disabled) {
+  background: rgba(255, 69, 58, 0.18);
+  color: #ff6961;
+  border-color: rgba(255, 69, 58, 0.35);
+}
+
+html[data-theme="light"] .dock-settings-row {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+html[data-theme="light"] .dock-settings-meta strong {
+  color: #111827;
+}
+
+html[data-theme="light"] .dock-settings-meta span {
+  color: #6b7280;
+}
+
+html[data-theme="light"] .dock-settings-btn {
+  background: rgba(0, 0, 0, 0.04);
+  color: #374151;
+}
+
+html[data-theme="light"] .dock-settings-icon-fallback {
+  background: rgba(0, 0, 0, 0.06);
+  color: #111827;
+}
+
+html[data-theme="light"] .dock-settings-sep::after {
+  background: rgba(0, 0, 0, 0.18);
+}
+
 .settings-primary-btn,
 .settings-secondary-btn {
   height: 32px;

@@ -709,6 +709,8 @@ pub fn hub_init_script(plugin_id: &str) -> String {
     }},
     media: {{
       neteaseNowPlaying: () => invoke("hub_netease_now_playing", withPlugin()),
+      transport: (action) =>
+        invoke("hub_media_transport", withPlugin({{ action: String(action || "") }})),
     }},
     fetch: (url, opts) =>
       invoke(

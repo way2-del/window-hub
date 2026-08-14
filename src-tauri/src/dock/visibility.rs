@@ -572,8 +572,8 @@ fn dock_area_rect(
         .filter(|(_l, t, _r, _b)| *t < mi.rcMonitor.bottom - 4)
         .unwrap_or_else(|| {
             let prefs = super::load_dock_prefs();
-            let logical_w = super::dock_window_width(&prefs.items, prefs.magnification);
-            let logical_h = super::dock_window_height(prefs.magnification);
+            let logical_w = super::dock_window_width(&prefs);
+            let logical_h = super::dock_window_height(&prefs);
             dock_rest_pose_rect(mi, scale, bottom_off, logical_w, logical_h)
         })
 }
@@ -762,8 +762,8 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
                 1.0
             };
             let prefs = super::load_dock_prefs();
-            let logical_w = super::dock_window_width(&prefs.items, prefs.magnification);
-            let logical_h = super::dock_window_height(prefs.magnification);
+            let logical_w = super::dock_window_width(&prefs);
+            let logical_h = super::dock_window_height(&prefs);
             let (l, t, r, b) =
                 dock_rest_pose_rect(&mi, scale, prefs.bottom_offset_px, logical_w, logical_h);
 

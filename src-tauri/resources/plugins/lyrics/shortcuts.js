@@ -4,10 +4,10 @@
  */
 (function () {
   const CACHE_KEY = "cache";
-  const POLL_MS = 2000;
-  const POLL_HIDDEN_MS = 5000;
+  const POLL_MS = 400;
+  const POLL_HIDDEN_MS = 2000;
   /** 同曲短暂读空时保留上一句；切歌必须清掉，否则会串上一首 */
-  const HOLD_LYRIC_MS = 6000;
+  const HOLD_LYRIC_MS = 900;
 
   let settingsCache = null;
   let lastBarKey = "";
@@ -39,12 +39,15 @@
   }
 
   function desktopLyricsOn(now) {
-    if (!now) return false;
-    if (now.desktopLyrics === true) return true;
-    return now.source === "desktop-lyrics" || now.source === "api-lrc" || now.source === "memory";
+    // 只认 Host 检测到的「可见桌面歌词窗」，不要把 api-lrc 来源当成已开
+    return !!(now && now.desktopLyrics === true);
   }
 
   function resolveLyric(now, title, artist) {
+    if (!desktopLyricsOn(now)) {
+      held = { songKey: "", text: "", at: 0 };
+      return "";
+    }
     let lyric = String(now && now.lyric || "").trim();
     const songKey = title + "\0" + artist;
     if (held.songKey && held.songKey !== songKey) {
@@ -72,6 +75,10 @@
       }
       return null;
     }
+    if (!desktopLyricsOn(now)) {
+      held = { songKey: "", text: "", at: 0 };
+      return null;
+    }
     if (!now || !now.active) {
       held = { songKey: "", text: "", at: 0 };
       if (settings.showWhenIdle) {
@@ -83,10 +90,9 @@
     const artist = String(now.artist || "").trim();
     const song = [title, artist].filter(Boolean).join(" · ");
     const lyric = resolveLyric(now, title, artist);
-    const desk = desktopLyricsOn(now);
 
-    // preferLyric：有桌面歌词时绝不把岛栏主文案掉回歌名（短暂读空用 hold /「同步中」）
-    if (settings.preferLyric && desk) {
+    // preferLyric：桌面歌词开着时优先歌词行（短暂读空用 hold /「同步中」）
+    if (settings.preferLyric) {
       if (lyric) {
         return { text: truncate(lyric, 28), title: song || lyric };
       }

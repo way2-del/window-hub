@@ -6,6 +6,7 @@
 use serde::Serialize;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -441,6 +442,11 @@ pub fn scan_bluetooth() -> BluetoothSnapshot {
     };
     use windows::Win32::Foundation::HANDLE;
 
+    // 连接/断开进行中时不要并行 Enum（易导致设置页「程序错误」/协议栈异常）
+    let Ok(_bt_guard) = BT_API_LOCK.lock() else {
+        return empty_bt();
+    };
+
     unsafe {
         let params = BLUETOOTH_DEVICE_SEARCH_PARAMS {
             dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_SEARCH_PARAMS>() as u32,
@@ -530,12 +536,14 @@ fn read_bt_battery(addr_hex: &str) -> Option<u8> {
     None
 }
 
-fn bt_device_connected(addr_hex: &str) -> Option<bool> {
+fn bt_find_device_info(
+    radio: windows::Win32::Foundation::HANDLE,
+    addr_hex: &str,
+) -> Option<windows::Win32::Devices::Bluetooth::BLUETOOTH_DEVICE_INFO> {
     use windows::Win32::Devices::Bluetooth::{
         BluetoothFindDeviceClose, BluetoothFindFirstDevice, BluetoothFindNextDevice,
-        BLUETOOTH_DEVICE_INFO, BLUETOOTH_DEVICE_SEARCH_PARAMS,
+        BluetoothGetDeviceInfo, BLUETOOTH_DEVICE_INFO, BLUETOOTH_DEVICE_SEARCH_PARAMS,
     };
-    use windows::Win32::Foundation::HANDLE;
 
     let target = addr_hex.trim().to_ascii_uppercase();
     unsafe {
@@ -544,10 +552,11 @@ fn bt_device_connected(addr_hex: &str) -> Option<bool> {
             fReturnAuthenticated: true.into(),
             fReturnRemembered: true.into(),
             fReturnUnknown: false.into(),
+            // 必须包含未连接的已配对设备，否则「连接」时找不到目标
             fReturnConnected: true.into(),
             fIssueInquiry: false.into(),
             cTimeoutMultiplier: 0,
-            hRadio: HANDLE::default(),
+            hRadio: radio,
         };
         let mut info = BLUETOOTH_DEVICE_INFO {
             dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_INFO>() as u32,
@@ -557,9 +566,9 @@ fn bt_device_connected(addr_hex: &str) -> Option<bool> {
         let mut any = true;
         while any {
             if unsafe_bt_addr(&info).eq_ignore_ascii_case(&target) {
-                let connected = info.fConnected.as_bool();
+                let _ = BluetoothGetDeviceInfo(radio, &mut info);
                 let _ = BluetoothFindDeviceClose(find);
-                return Some(connected);
+                return Some(info);
             }
             info = BLUETOOTH_DEVICE_INFO {
                 dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_INFO>() as u32,
@@ -572,10 +581,47 @@ fn bt_device_connected(addr_hex: &str) -> Option<bool> {
     }
 }
 
-fn bt_service_state_ok(rc: u32) -> bool {
-    // ERROR_SUCCESS, or already in requested state (E_INVALIDARG / ERROR_INVALID_PARAMETER).
-    rc == 0 || rc == 0x8007_0057 || rc == 87
+fn bt_device_connected_radio(
+    radio: windows::Win32::Foundation::HANDLE,
+    addr_hex: &str,
+) -> Option<bool> {
+    bt_find_device_info(radio, addr_hex).map(|info| info.fConnected.as_bool())
 }
+
+fn bt_service_applied(rc: u32) -> bool {
+    // ERROR_SUCCESS only. 87 / E_INVALIDARG =「已是该状态」，对「连接」不可当作成功。
+    rc == 0
+}
+
+fn bt_service_toggle(
+    radio: windows::Win32::Foundation::HANDLE,
+    dev: &mut windows::Win32::Devices::Bluetooth::BLUETOOTH_DEVICE_INFO,
+    svc: &windows::core::GUID,
+    enable: bool,
+) -> bool {
+    use windows::Win32::Devices::Bluetooth::{
+        BluetoothGetDeviceInfo, BluetoothSetServiceState, BLUETOOTH_SERVICE_DISABLE,
+        BLUETOOTH_SERVICE_ENABLE,
+    };
+    unsafe {
+        // 每次调用前刷新 DEVICE_INFO，避免用过期结构触发 bthprops 异常
+        let _ = BluetoothGetDeviceInfo(radio, dev);
+        if enable {
+            // 连接：DISABLE → 稍等 → ENABLE（仅 ENABLE 常返回 87 且实际未连上）
+            let _ = BluetoothSetServiceState(radio, dev, svc, BLUETOOTH_SERVICE_DISABLE);
+            std::thread::sleep(std::time::Duration::from_millis(220));
+            let _ = BluetoothGetDeviceInfo(radio, dev);
+            let rc = BluetoothSetServiceState(radio, dev, svc, BLUETOOTH_SERVICE_ENABLE);
+            bt_service_applied(rc) || rc == 0x8007_0057 || rc == 87
+        } else {
+            let rc = BluetoothSetServiceState(radio, dev, svc, BLUETOOTH_SERVICE_DISABLE);
+            bt_service_applied(rc) || rc == 0x8007_0057 || rc == 87
+        }
+    }
+}
+
+/// 串行化蓝牙枚举 / 连接，避免与后台 scan 并发把协议栈打崩（设置页「程序错误」）。
+static BT_API_LOCK: Mutex<()> = Mutex::new(());
 
 /// Prefer A2DP / Handsfree / HID for reconnect nudge — toggling every installed
 /// service DISABLE→ENABLE causes multi-second PnP storms (flyout goes white).
@@ -605,34 +651,33 @@ fn bt_nudge_services(services: &[windows::core::GUID]) -> Vec<windows::core::GUI
     out
 }
 
-/// Connect or disconnect a remembered Bluetooth device via common service GUIDs.
+/// Connect or disconnect a remembered Bluetooth device via installed service GUIDs only.
 pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String> {
-    use windows::core::GUID;
-    use windows::Win32::Devices::Bluetooth::{
-        BluetoothEnumerateInstalledServices, BluetoothFindDeviceClose, BluetoothFindFirstDevice,
-        BluetoothFindFirstRadio, BluetoothFindNextDevice, BluetoothFindRadioClose,
-        BluetoothGetDeviceInfo, BluetoothSetServiceState, BLUETOOTH_DEVICE_INFO,
-        BLUETOOTH_DEVICE_SEARCH_PARAMS, BLUETOOTH_FIND_RADIO_PARAMS, BLUETOOTH_SERVICE_DISABLE,
-        BLUETOOTH_SERVICE_ENABLE,
-    };
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-
     let target = addr_hex.trim().to_ascii_uppercase();
     if target.is_empty() {
         return Err("device id empty".into());
     }
 
-    // Classic BT profiles commonly bound by Windows audio / HID stacks.
-    const SERVICES: [GUID; 8] = [
-        GUID::from_u128(0x0000110B_0000_1000_8000_00805F9B34FB), // AudioSink (A2DP)
-        GUID::from_u128(0x0000110A_0000_1000_8000_00805F9B34FB), // AudioSource
-        GUID::from_u128(0x0000111E_0000_1000_8000_00805F9B34FB), // Handsfree
-        GUID::from_u128(0x00001108_0000_1000_8000_00805F9B34FB), // Headset
-        GUID::from_u128(0x0000110C_0000_1000_8000_00805F9B34FB), // AVRCP Target
-        GUID::from_u128(0x0000110E_0000_1000_8000_00805F9B34FB), // AVRCP
-        GUID::from_u128(0x00001124_0000_1000_8000_00805F9B34FB), // HID
-        GUID::from_u128(0x00001200_0000_1000_8000_00805F9B34FB), // PnP
-    ];
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        set_bluetooth_device_inner(&target, connect)
+    }));
+    match result {
+        Ok(r) => r,
+        Err(_) => Err("蓝牙操作异常，请改用系统蓝牙设置".into()),
+    }
+}
+
+fn set_bluetooth_device_inner(target: &str, connect: bool) -> Result<(), String> {
+    use windows::core::GUID;
+    use windows::Win32::Devices::Bluetooth::{
+        BluetoothEnumerateInstalledServices, BluetoothFindFirstRadio, BluetoothFindRadioClose,
+        BluetoothGetDeviceInfo, BLUETOOTH_FIND_RADIO_PARAMS,
+    };
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+
+    let Ok(_bt_guard) = BT_API_LOCK.lock() else {
+        return Err("蓝牙正忙，请稍后重试".into());
+    };
 
     unsafe {
         let radio_params = BLUETOOTH_FIND_RADIO_PARAMS {
@@ -648,68 +693,27 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
         }
         let radio_handle = radio;
 
-        let params = BLUETOOTH_DEVICE_SEARCH_PARAMS {
-            dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_SEARCH_PARAMS>() as u32,
-            fReturnAuthenticated: true.into(),
-            fReturnRemembered: true.into(),
-            fReturnUnknown: false.into(),
-            fReturnConnected: true.into(),
-            fIssueInquiry: false.into(),
-            cTimeoutMultiplier: 0,
-            hRadio: radio_handle,
-        };
-        let mut info = BLUETOOTH_DEVICE_INFO {
-            dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_INFO>() as u32,
-            ..Default::default()
-        };
-        let find = match BluetoothFindFirstDevice(&params, &mut info) {
-            Ok(h) => h,
-            Err(e) => {
-                if let Some(rf) = radio_find {
-                    let _ = BluetoothFindRadioClose(rf);
-                }
-                let _ = CloseHandle(radio_handle);
-                return Err(format!("BluetoothFindFirstDevice: {e}"));
+        let cleanup = |rf: Option<_>, rh: HANDLE| {
+            if let Some(h) = rf {
+                let _ = BluetoothFindRadioClose(h);
             }
+            let _ = CloseHandle(rh);
         };
 
-        let mut found_info: Option<BLUETOOTH_DEVICE_INFO> = None;
-        let mut any = true;
-        while any {
-            let addr = unsafe_bt_addr(&info);
-            if addr.eq_ignore_ascii_case(&target) {
-                found_info = Some(info);
-                break;
-            }
-            info = BLUETOOTH_DEVICE_INFO {
-                dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_INFO>() as u32,
-                ..Default::default()
-            };
-            any = BluetoothFindNextDevice(find, &mut info).is_ok();
-        }
-        let _ = BluetoothFindDeviceClose(find);
-
-        let Some(mut dev) = found_info else {
-            if let Some(rf) = radio_find {
-                let _ = BluetoothFindRadioClose(rf);
-            }
-            let _ = CloseHandle(radio_handle);
+        let Some(mut dev) = bt_find_device_info(radio_handle, target)
+            .or_else(|| bt_find_device_info(HANDLE::default(), target))
+        else {
+            cleanup(radio_find, radio_handle);
             return Err("未找到该蓝牙设备".into());
         };
-
-        // Refresh cached fields — SetServiceState is picky about a full DEVICE_INFO.
         let _ = BluetoothGetDeviceInfo(radio_handle, &mut dev);
 
-        // Prefer services Windows already mapped for this device; fall back to common profiles.
-        let mut services: Vec<GUID> = {
+        // 只使用系统已为该设备安装的服务。乱 ENABLE 未映射 GUID 会触发驱动安装失败，
+        // 在「设置 → 蓝牙」里表现为「程序错误」。
+        let services: Vec<GUID> = {
             let mut count: u32 = 0;
-            let rc = BluetoothEnumerateInstalledServices(
-                radio_handle,
-                &dev,
-                &mut count,
-                None,
-            );
-            if (rc == 0 || rc == 234 /* ERROR_MORE_DATA */) && count > 0 && count < 64 {
+            let rc = BluetoothEnumerateInstalledServices(radio_handle, &dev, &mut count, None);
+            if (rc == 0 || rc == 234 /* ERROR_MORE_DATA */) && count > 0 && count < 32 {
                 let mut buf = vec![GUID::default(); count as usize];
                 let mut n = count;
                 let rc2 = BluetoothEnumerateInstalledServices(
@@ -728,119 +732,86 @@ pub fn set_bluetooth_device(addr_hex: &str, connect: bool) -> Result<(), String>
                 Vec::new()
             }
         };
+
         if services.is_empty() {
-            services.extend_from_slice(&SERVICES);
+            cleanup(radio_find, radio_handle);
+            return Err("该设备无已安装的蓝牙服务，请在系统蓝牙设置中连接".into());
         }
 
-        let mut touched = false;
-        if connect {
-            // Prefer a tiny service set. Enabling *every* installed profile (or
-            // full DISABLE→ENABLE) storms PnP and turns the mica flyout white.
-            let primary = bt_nudge_services(&services);
-            for svc in &primary {
-                let rc = BluetoothSetServiceState(
-                    radio_handle,
-                    &dev,
-                    svc,
-                    BLUETOOTH_SERVICE_ENABLE,
-                );
-                if bt_service_state_ok(rc) {
-                    touched = true;
-                }
-            }
+        let primary = bt_nudge_services(&services);
+        // 最多动 1 个优先服务，降低 PnP/驱动风暴
+        let focus: Vec<GUID> = primary.into_iter().take(1).collect();
 
-            // Give the stack a moment without hammering more profiles.
+        let ok_state = if connect {
+            for svc in &focus {
+                let _ = bt_service_toggle(radio_handle, &mut dev, svc, true);
+            }
             let mut connected_now = false;
-            for _ in 0..4 {
-                std::thread::sleep(std::time::Duration::from_millis(120));
-                if bt_device_connected(&target) == Some(true) {
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if bt_device_connected_radio(radio_handle, target) == Some(true) {
                     connected_now = true;
                     break;
                 }
             }
-
+            // 仍未连上：再试第二个已安装优先服务（若有），不再扫全表
             if !connected_now {
-                // ENABLE remaining installed services once — still no DISABLE.
-                for svc in &services {
-                    if primary.iter().any(|p| p == svc) {
-                        continue;
-                    }
-                    let rc = BluetoothSetServiceState(
-                        radio_handle,
-                        &dev,
-                        svc,
-                        BLUETOOTH_SERVICE_ENABLE,
-                    );
-                    if bt_service_state_ok(rc) {
-                        touched = true;
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                connected_now = bt_device_connected(&target) == Some(true);
-            }
-
-            // Last resort: single-profile DISABLE→ENABLE (not the full list).
-            if !connected_now {
-                if let Some(svc) = primary.first() {
-                    let _ = BluetoothSetServiceState(
-                        radio_handle,
-                        &dev,
-                        svc,
-                        BLUETOOTH_SERVICE_DISABLE,
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(80));
-                    let rc = BluetoothSetServiceState(
-                        radio_handle,
-                        &dev,
-                        svc,
-                        BLUETOOTH_SERVICE_ENABLE,
-                    );
-                    if bt_service_state_ok(rc) {
-                        touched = true;
+                let second = bt_nudge_services(&services);
+                if let Some(svc) = second.get(1) {
+                    let _ = bt_service_toggle(radio_handle, &mut dev, svc, true);
+                    for _ in 0..8 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        if bt_device_connected_radio(radio_handle, target) == Some(true) {
+                            connected_now = true;
+                            break;
+                        }
                     }
                 }
             }
+            connected_now
         } else {
-            // Disconnect: disable mapped services only; if we fell back to the full
-            // profile list, only touch the primary ones to avoid PnP white-out.
-            let to_disable = if services.len() > 4 {
-                bt_nudge_services(&services)
-            } else {
-                services.clone()
-            };
-            for svc in &to_disable {
-                let rc = BluetoothSetServiceState(
-                    radio_handle,
-                    &dev,
-                    svc,
-                    BLUETOOTH_SERVICE_DISABLE,
-                );
-                if bt_service_state_ok(rc) {
-                    touched = true;
+            for svc in &focus {
+                let _ = bt_service_toggle(radio_handle, &mut dev, svc, false);
+            }
+            // 断开时再禁 1～2 个其余已安装服务即可
+            let mut n = 0usize;
+            for svc in &services {
+                if focus.iter().any(|p| p == svc) {
+                    continue;
+                }
+                let _ = bt_service_toggle(radio_handle, &mut dev, svc, false);
+                n += 1;
+                if n >= 2 {
+                    break;
                 }
             }
-        }
+            let mut disconnected = false;
+            for _ in 0..8 {
+                std::thread::sleep(std::time::Duration::from_millis(160));
+                match bt_device_connected_radio(radio_handle, target) {
+                    Some(false) | None => {
+                        disconnected = true;
+                        break;
+                    }
+                    Some(true) => {}
+                }
+            }
+            disconnected
+        };
 
-        if let Some(rf) = radio_find {
-            let _ = BluetoothFindRadioClose(rf);
-        }
-        let _ = CloseHandle(radio_handle);
+        cleanup(radio_find, radio_handle);
 
+        // 锁外刷新列表，避免与 scan 死锁（scan 也要同一把锁）
+        drop(_bt_guard);
         crate::win32::system_monitor::invalidate_bluetooth();
-        if touched {
-            return Ok(());
-        }
-        if let Some(now) = bt_device_connected(&target) {
-            if now == connect {
-                return Ok(());
-            }
-        }
 
-        Err(if connect {
-            "无法连接（可在系统蓝牙设置中操作）".into()
+        if ok_state {
+            Ok(())
+        } else if connect {
+            Err("无法连接，请在系统蓝牙设置中重试".into())
         } else {
-            "无法断开（可在系统蓝牙设置中操作）".into()
-        })
+            Err("无法断开，请在系统蓝牙设置中重试".into())
+        }
     }
 }
 
@@ -1184,6 +1155,10 @@ pub fn connect_wifi_profile(ssid: &str) -> Result<(), String> {
 
 pub fn open_wifi_settings() -> Result<(), String> {
     open_uri("ms-settings:network-wifi")
+}
+
+pub fn open_network_settings() -> Result<(), String> {
+    open_uri("ms-settings:datausage")
 }
 
 pub fn open_bluetooth_settings() -> Result<(), String> {

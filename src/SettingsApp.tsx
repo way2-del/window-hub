@@ -54,6 +54,7 @@ type DockItemLite = {
   virtualPath?: string;
   iconPath?: string;
   uwp?: boolean;
+  iconPng?: string | null;
 };
 
 type DockPrefs = {
@@ -70,6 +71,22 @@ type DockPrefs = {
   hideLingerMs: number;
   /** Max icon scale on hover (1 = off, up to 2.5). */
   magnification: number;
+  /** Hover window thumbnails above running apps. */
+  showPreview: boolean;
+  /** Floating name label on hover. */
+  showHoverLabel: boolean;
+  /** Chrome corner radius (Apple pill). */
+  cornerRadius: number;
+  /** Bounce icon after click. */
+  bounceOnClick: boolean;
+  /** Icon slot size (28–56). */
+  iconSize: number;
+  /** Apple-style peek strip while auto-hidden. */
+  showTriggerStrip: boolean;
+  /** Show unpinned running apps after a separator. */
+  showRunningApps: boolean;
+  /** Running indicator: bar | dot */
+  indicatorStyle: "bar" | "dot" | string;
 };
 
 const DOCK_ACTIVATION_POSITIONS: {
@@ -108,6 +125,20 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
       2.5,
       Math.max(1, Number.isFinite(Number(dp?.magnification)) ? Number(dp?.magnification) : 1.6),
     ),
+    showPreview: dp?.showPreview !== false,
+    showHoverLabel: dp?.showHoverLabel === true,
+    cornerRadius: Math.min(
+      28,
+      Math.max(8, Number.isFinite(Number(dp?.cornerRadius)) ? Number(dp?.cornerRadius) : 16),
+    ),
+    bounceOnClick: dp?.bounceOnClick !== false,
+    iconSize: Math.min(
+      56,
+      Math.max(28, Number.isFinite(Number(dp?.iconSize)) ? Number(dp?.iconSize) : 40),
+    ),
+    showTriggerStrip: dp?.showTriggerStrip !== false,
+    showRunningApps: dp?.showRunningApps !== false,
+    indicatorStyle: dp?.indicatorStyle === "dot" ? "dot" : "bar",
   };
 }
 
@@ -130,6 +161,7 @@ type TrayPrefs = SharedTrayPrefs;
 
 const SYSTEM_CHIP_TOGGLES: { key: keyof SystemChipVisibility; label: string; desc: string }[] = [
   { key: "perf", label: "性能温度", desc: "CPU / GPU 温度与内存占用" },
+  { key: "network", label: "网速", desc: "上行 / 下行、进程网速与断网" },
   { key: "wifi", label: "Wi‑Fi", desc: "网络状态与无线列表" },
   { key: "bluetooth", label: "蓝牙", desc: "蓝牙开关与已配对设备" },
   { key: "volume", label: "声音", desc: "音量与输出设备" },
@@ -475,13 +507,20 @@ export default function SettingsApp() {
     void persistShortcutsVisible(next);
   };
 
+  const dockItemsPayload = (items: DockItemLite[]) =>
+    items.map(({ iconPng: _iconPng, ...rest }) => rest);
+
   const persistDockPrefs = async (patch: Partial<DockPrefs>) => {
     const next: DockPrefs = { ...dockPrefs, ...patch };
     setDockPrefs(next);
     setDockBusy(true);
     setDockMsg("");
     try {
-      const saved = await invoke<DockPrefs>("set_dock_prefs", { prefs: next });
+      const prefs = {
+        ...next,
+        items: dockItemsPayload(next.items) as DockItemLite[],
+      };
+      const saved = await invoke<DockPrefs>("set_dock_prefs", { prefs });
       setDockPrefs(normalizeDockPrefs(saved));
     } catch (err) {
       console.error(err);
@@ -510,6 +549,80 @@ export default function SettingsApp() {
     } finally {
       setDockBusy(false);
     }
+  };
+
+  const moveDockItem = (index: number, dir: -1 | 1) => {
+    const next = index + dir;
+    if (next < 0 || next >= dockPrefs.items.length) return;
+    const items = [...dockPrefs.items];
+    const tmp = items[index]!;
+    items[index] = items[next]!;
+    items[next] = tmp;
+    void persistDockPrefs({ items });
+  };
+
+  const removeDockItem = (id: string) => {
+    const items = dockPrefs.items.filter((i) => i.id !== id);
+    void persistDockPrefs({ items });
+  };
+
+  const addDockApp = async () => {
+    setDockBusy(true);
+    setDockMsg("");
+    try {
+      const path = await invoke<string | null>("pick_dock_app_file");
+      if (!path) {
+        setDockBusy(false);
+        return;
+      }
+      const saved = await invoke<DockPrefs>("dock_add_app", { path, afterId: null });
+      setDockPrefs(normalizeDockPrefs(saved));
+      setDockMsg("已添加应用");
+    } catch (err) {
+      setDockMsg(String(err));
+    } finally {
+      setDockBusy(false);
+    }
+  };
+
+  const addDockSeparator = async () => {
+    setDockBusy(true);
+    setDockMsg("");
+    try {
+      const saved = await invoke<DockPrefs>("dock_add_separator", { afterId: null });
+      setDockPrefs(normalizeDockPrefs(saved));
+      setDockMsg("已添加分隔线");
+    } catch (err) {
+      setDockMsg(String(err));
+    } finally {
+      setDockBusy(false);
+    }
+  };
+
+  const refreshDockIcons = async () => {
+    setDockBusy(true);
+    setDockMsg("");
+    try {
+      const prefs = {
+        ...dockPrefs,
+        items: dockItemsPayload(dockPrefs.items) as DockItemLite[],
+      };
+      const saved = await invoke<DockPrefs>("set_dock_prefs", { prefs });
+      setDockPrefs(normalizeDockPrefs(saved));
+      setDockMsg("已重新提取图标");
+    } catch (err) {
+      console.error(err);
+      setDockMsg(String(err));
+    } finally {
+      setDockBusy(false);
+    }
+  };
+
+  const dockItemLabel = (item: DockItemLite) => {
+    if (item.kind === "separator") return "分隔线";
+    if (item.kind === "startmenu") return item.label || "开始菜单";
+    if (item.kind === "trash") return item.label || "回收站";
+    return item.label || item.matchExe || item.id;
   };
 
   useEffect(() => {
@@ -1473,7 +1586,7 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>底部 Dock</h2>
                 <p className="card-desc">
-                  Host 自带底栏（非插件）。可导入 MyDockFinder 的 .dockico.ini；图标下方白点表示该应用正在运行。
+                  Host 自带底栏（非插件）。风格对齐 macOS Dock：圆角毛玻璃、悬停放大/预览、运行中小白条、未固定窗口分隔显示。
                 </p>
                 <label className="pref-row">
                   <span className="pref-row-text">
@@ -1626,7 +1739,7 @@ export default function SettingsApp() {
                   <span className="pref-row-text">
                     <span className="pref-row-label">离开后隐藏延迟</span>
                     <span className="pref-row-desc">
-                      鼠标离开 Dock / 激活条后，等待多久再收起（毫秒，默认 800）
+                      自动/智能隐藏：鼠标离开 Dock 后，等待多久再收起（毫秒，默认 800）
                     </span>
                   </span>
                   <input
@@ -1651,9 +1764,110 @@ export default function SettingsApp() {
                 </label>
                 <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
                   <span className="pref-row-text">
+                    <span className="pref-row-label">显示触发条</span>
+                    <span className="pref-row-desc">
+                      自动/智能隐藏收起后，在屏幕底边显示一条细白线（类似 macOS Dock）
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.showTriggerStrip ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.showTriggerStrip}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() =>
+                      void persistDockPrefs({ showTriggerStrip: !dockPrefs.showTriggerStrip })
+                    }
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+              </section>
+
+              <section className={`settings-card${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                <div className="section-head">
+                  <h2>外观与交互</h2>
+                  <span className="section-hint">放大 · 指示器 · 预览</span>
+                </div>
+                <p className="card-desc">
+                  悬停扇形放大时底栏胶囊会随之增高；运行中的应用用小白条标记，未固定窗口会出现在分隔线右侧。
+                </p>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">显示未固定窗口</span>
+                    <span className="pref-row-desc">
+                      类似 macOS：已打开但未钉在 Dock 上的应用，显示在分隔线右侧
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.showRunningApps ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.showRunningApps}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() =>
+                      void persistDockPrefs({ showRunningApps: !dockPrefs.showRunningApps })
+                    }
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">运行指示器</span>
+                    <span className="pref-row-desc">图标下方标记正在运行的应用</span>
+                  </span>
+                  <select
+                    className="pref-select"
+                    value={dockPrefs.indicatorStyle === "dot" ? "dot" : "bar"}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onChange={(e) =>
+                      void persistDockPrefs({
+                        indicatorStyle: e.target.value === "dot" ? "dot" : "bar",
+                      })
+                    }
+                  >
+                    <option value="bar">小白条（默认）</option>
+                    <option value="dot">圆点</option>
+                  </select>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">图标大小</span>
+                    <span className="pref-row-desc">图标槽位边长（28–56，默认 40）</span>
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="range"
+                      min={28}
+                      max={56}
+                      step={1}
+                      value={dockPrefs.iconSize}
+                      disabled={!dockPrefs.enabled || dockBusy}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (!Number.isFinite(n)) return;
+                        setDockPrefs((p) => ({ ...p, iconSize: n }));
+                      }}
+                      onPointerUp={(e) => {
+                        const n = Math.min(
+                          56,
+                          Math.max(28, Number((e.target as HTMLInputElement).value) || 40),
+                        );
+                        void persistDockPrefs({ iconSize: n });
+                      }}
+                      style={{ width: 120 }}
+                    />
+                    <span style={{ minWidth: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {dockPrefs.iconSize}
+                    </span>
+                  </span>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
                     <span className="pref-row-label">图标放大</span>
                     <span className="pref-row-desc">
-                      划过扇形放大（等比、可超出栏顶）；栏高不变。1.0 = 关闭，默认 1.6
+                      划过扇形放大；胶囊高度随放大增长。1.0 = 关闭，默认 1.6
                     </span>
                   </span>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -1683,7 +1897,76 @@ export default function SettingsApp() {
                     </span>
                   </span>
                 </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">窗口预览</span>
+                    <span className="pref-row-desc">
+                      悬停运行中的应用时，在图标上方显示窗口缩略图
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.showPreview ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.showPreview}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() => void persistDockPrefs({ showPreview: !dockPrefs.showPreview })}
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">点击弹跳</span>
+                    <span className="pref-row-desc">点击图标时轻微上跳反馈</span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.bounceOnClick ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.bounceOnClick}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() =>
+                      void persistDockPrefs({ bounceOnClick: !dockPrefs.bounceOnClick })
+                    }
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">圆角半径</span>
+                    <span className="pref-row-desc">底栏胶囊圆角（默认 16）</span>
+                  </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="range"
+                      min={8}
+                      max={28}
+                      step={1}
+                      value={dockPrefs.cornerRadius}
+                      disabled={!dockPrefs.enabled || dockBusy}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (!Number.isFinite(n)) return;
+                        setDockPrefs((p) => ({ ...p, cornerRadius: n }));
+                      }}
+                      onPointerUp={(e) => {
+                        const n = Math.min(
+                          28,
+                          Math.max(8, Number((e.target as HTMLInputElement).value) || 16),
+                        );
+                        void persistDockPrefs({ cornerRadius: n });
+                      }}
+                      style={{ width: 120 }}
+                    />
+                    <span style={{ minWidth: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {dockPrefs.cornerRadius}
+                    </span>
+                  </span>
+                </label>
               </section>
+
               <section className="settings-card">
                 <div className="section-head">
                   <h2>图标配置</h2>
@@ -1695,19 +1978,118 @@ export default function SettingsApp() {
                   </span>
                 </div>
                 <p className="card-desc">
-                  从 MyDockFinder 备份目录选择 `.dockico.ini` 导入。特殊项：开始菜单、回收站、分隔线。
+                  可直接添加应用 / 分隔线，或从 MyDockFinder 备份导入 `.dockico.ini`。右键 Dock
+                  图标也可移除、添加。特殊项：开始菜单、回收站、分隔线。
                 </p>
                 <div className="plugin-actions">
                   <button
                     type="button"
                     className="settings-primary-btn"
                     disabled={dockBusy}
+                    onClick={() => void addDockApp()}
+                  >
+                    添加应用…
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-ghost-btn"
+                    disabled={dockBusy}
+                    onClick={() => void addDockSeparator()}
+                  >
+                    添加分隔线
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-ghost-btn"
+                    disabled={dockBusy}
                     onClick={() => void importDockIni()}
                   >
                     {dockBusy ? "处理中…" : "导入 .dockico.ini"}
                   </button>
+                  <button
+                    type="button"
+                    className="settings-ghost-btn"
+                    disabled={dockBusy || dockPrefs.items.length === 0}
+                    onClick={() => void refreshDockIcons()}
+                  >
+                    刷新图标
+                  </button>
                 </div>
                 {dockMsg ? <p className="card-desc">{dockMsg}</p> : null}
+                {dockPrefs.items.length === 0 ? (
+                  <p className="tray-settings-empty">尚未配置图标，请添加应用或导入 .dockico.ini</p>
+                ) : (
+                  <div className="dock-settings-list">
+                    {dockPrefs.items.map((item, index) => {
+                      const label = dockItemLabel(item);
+                      const isSep = item.kind === "separator";
+                      const missingIcon = !isSep && !item.iconPng;
+                      return (
+                        <div
+                          key={item.id}
+                          className={`dock-settings-row${missingIcon ? " is-missing-icon" : ""}`}
+                        >
+                          <div className="dock-settings-item">
+                            {isSep ? (
+                              <span className="dock-settings-sep" aria-hidden />
+                            ) : item.iconPng ? (
+                              <img
+                                className="dock-settings-icon"
+                                src={`data:image/png;base64,${item.iconPng}`}
+                                alt=""
+                              />
+                            ) : (
+                              <span className="dock-settings-icon-fallback" aria-hidden>
+                                {(label || "?").charAt(0)}
+                              </span>
+                            )}
+                            <span className="dock-settings-meta">
+                              <strong>{label}</strong>
+                              <span>
+                                {isSep
+                                  ? "分隔线"
+                                  : missingIcon
+                                    ? "图标未解析 · 可刷新或删除"
+                                    : item.kind === "startmenu" || item.kind === "trash"
+                                      ? item.kind
+                                      : item.matchExe || item.launchPath || item.kind}
+                              </span>
+                            </span>
+                          </div>
+                          <div className="dock-settings-actions">
+                            <button
+                              type="button"
+                              className="dock-settings-btn"
+                              disabled={dockBusy || index === 0}
+                              title="上移"
+                              onClick={() => moveDockItem(index, -1)}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              className="dock-settings-btn"
+                              disabled={dockBusy || index >= dockPrefs.items.length - 1}
+                              title="下移"
+                              onClick={() => moveDockItem(index, 1)}
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              className="dock-settings-btn is-danger"
+                              disabled={dockBusy}
+                              title="删除"
+                              onClick={() => removeDockItem(item.id)}
+                            >
+                              删
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </section>
             </>
           )}

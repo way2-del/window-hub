@@ -274,6 +274,22 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Focused(focused) => {
+                    // Dock must never keep activation chrome — re-clear on any focus pulse.
+                    if window.label() == "dock" || window.label() == "dock-glass" {
+                        let app = window.app_handle().clone();
+                        let label = window.label().to_string();
+                        if let Some(w) = app.get_webview_window(&label) {
+                            let _ = w.set_focusable(false);
+                            if let Ok(hwnd) = w.hwnd() {
+                                crate::dock::reclear_dock_frame(hwnd.0 as isize);
+                            }
+                            if label == "dock" {
+                                let _ =
+                                    crate::win32::blur_glass::apply_dock_icons_layer(&w, None);
+                            }
+                        }
+                        let _ = focused;
+                    }
                     // 主岛获得焦点：关掉仍开着的弹窗（点岛栏空白/其它 chip 等常见关闭方式）
                     if window.label() == "main" && *focused {
                         let app = window.app_handle().clone();
@@ -427,6 +443,7 @@ pub fn run() {
             commands::list_open_windows,
             commands::get_open_window,
             commands::focus_open_window,
+            commands::focus_or_minimize_open_window,
             commands::attach_window,
             commands::detach_window,
             commands::set_roi,
@@ -455,6 +472,7 @@ pub fn run() {
             commands::get_wifi_password,
             commands::connect_wifi_network,
             commands::open_wifi_settings,
+            commands::open_network_settings,
             commands::open_bluetooth_settings,
             commands::set_bluetooth_device,
             commands::open_ime_picker,
@@ -469,6 +487,8 @@ pub fn run() {
             commands::list_memory_top,
             commands::purge_system_memory,
             commands::open_task_manager,
+            commands::list_network_top,
+            commands::set_process_net_blocked,
             commands::open_status_menu_popup,
             commands::close_status_menu_popup,
             commands::is_status_menu_popup_open,
@@ -540,16 +560,34 @@ pub fn run() {
             commands::clear_tray_attention,
             commands::open_notification_center,
             commands::get_foreground_app,
+            commands::is_system_taskbar_visible,
             commands::set_system_taskbar_visible,
             dock::get_dock_prefs,
             dock::set_dock_prefs,
             dock::import_dockico_ini,
             dock::pick_dockico_file,
+            dock::pick_dock_app_file,
             dock::dock_launch_item,
+            dock::dock_add_app,
+            dock::dock_add_separator,
+            dock::dock_remove_item,
+            dock::dock_list_item_windows,
+            dock::dock_close_item_windows,
+            dock::dock_capture_item_previews,
+            dock::dock_capture_exe_previews,
+            dock::open_dock_preview,
+            dock::close_dock_preview,
+            dock::dock_set_extra_headroom,
+            dock::dock_touch_noactivate,
+            dock::dock_set_runtime_extra_width,
+            dock::dock_resolve_exe_icon,
+            dock::open_dock_item_menu,
+            dock::close_dock_item_menu,
             dock::dock_set_mouse_near_bottom,
             dock::get_dock_visibility,
             dock::ensure_dock_window,
             commands::show_desktop,
+            commands::open_system_tool,
             commands::restart_app,
             commands::exit_app,
             commands::hub_staging_list,
@@ -571,6 +609,7 @@ pub fn run() {
             commands::hub_island_set_bar,
             commands::hub_island_clear_bar,
             commands::hub_netease_now_playing,
+            commands::hub_media_transport,
             commands::hub_panel_open_session,
             commands::hub_panel_close_session,
             commands::hub_notify,

@@ -40,6 +40,12 @@ export type PerfSnapshot = {
   cpuTempC?: number | null;
   gpuTempC?: number | null;
   gpuMemPercent?: number | null;
+  /** bytes/sec */
+  downBps?: number;
+  upBps?: number;
+  /** session totals since app start */
+  sessionRxBytes?: number;
+  sessionTxBytes?: number;
 };
 
 export type MemProcessRow = {
@@ -70,6 +76,22 @@ export type MemPurgeResult = {
   afterCommitUsedMb: number;
   commitFreedMb: number;
   trimmed: number;
+};
+
+export type NetProcessRow = {
+  pid: number;
+  name: string;
+  path: string;
+  downBps: number;
+  upBps: number;
+  connections: number;
+  blocked: boolean;
+  iconPng?: string | null;
+};
+
+export type NetProcSnapshot = {
+  processes: NetProcessRow[];
+  warmed: boolean;
 };
 
 export type SystemRadioSnapshot = {
@@ -104,7 +126,8 @@ export type FlyoutKind =
   | "ime"
   | "power"
   | "calendar"
-  | "memory";
+  | "memory"
+  | "network";
 
 function parseKind(raw: string | null | undefined): FlyoutKind {
   const v = (raw || "").toLowerCase();
@@ -114,7 +137,8 @@ function parseKind(raw: string | null | undefined): FlyoutKind {
     v === "ime" ||
     v === "power" ||
     v === "calendar" ||
-    v === "memory"
+    v === "memory" ||
+    v === "network"
   ) {
     return v;
   }
@@ -556,6 +580,17 @@ export default function SystemFlyoutApp() {
   const [refreshing, setRefreshing] = useState(false);
   const [memTop, setMemTop] = useState<MemTopSnapshot | null>(null);
   const [memBusy, setMemBusy] = useState(false);
+  const [netTop, setNetTop] = useState<NetProcSnapshot | null>(null);
+  const [netBusy, setNetBusy] = useState(false);
+  const [netHoverPath, setNetHoverPath] = useState<string | null>(null);
+  const [netMenu, setNetMenu] = useState<{
+    path: string;
+    name: string;
+    blocked: boolean;
+    x: number;
+    y: number;
+  } | null>(null);
+  const netPollRef = useRef(0);
   const draggingRef = useRef(false);
   const previewTimer = useRef(0);
   const wheelCommitTimer = useRef(0);
@@ -585,8 +620,13 @@ export default function SystemFlyoutApp() {
     setMsg("");
     setWifiMenu(null);
     setShowMenuPw(false);
+    setNetMenu(null);
+    setNetHoverPath(null);
     if (next === "memory") {
       void loadMemTop();
+    }
+    if (next === "network") {
+      void loadNetTop(true);
     }
   }
 
@@ -597,6 +637,54 @@ export default function SystemFlyoutApp() {
     } catch (e) {
       console.error(e);
       setMsg(String(e));
+    }
+  }
+
+  async function loadNetTop(resetMsg = false) {
+    try {
+      const top = await invoke<NetProcSnapshot>("list_network_top", { limit: 15 });
+      setNetTop(top);
+      if (resetMsg) setMsg("");
+    } catch (e) {
+      console.error(e);
+      setMsg(String(e));
+    }
+  }
+
+  function closeNetMenu() {
+    setNetMenu(null);
+  }
+
+  function openNetMenu(e: MouseEvent, row: NetProcessRow) {
+    e.preventDefault();
+    e.stopPropagation();
+    const shell = shellRef.current;
+    if (!shell) return;
+    const rect = shell.getBoundingClientRect();
+    const x = Math.min(Math.max(8, e.clientX - rect.left), rect.width - 168);
+    const y = Math.min(Math.max(8, e.clientY - rect.top), rect.height - 120);
+    setNetMenu({
+      path: row.path,
+      name: row.name,
+      blocked: row.blocked,
+      x,
+      y,
+    });
+  }
+
+  async function toggleNetBlock(path: string, blocked: boolean) {
+    if (!path.trim() || netBusy) return;
+    setNetBusy(true);
+    setMsg(blocked ? "正在禁止联网…" : "正在恢复联网…");
+    closeNetMenu();
+    try {
+      await invoke<NetProcessRow>("set_process_net_blocked", { path, blocked });
+      setMsg(blocked ? "已禁止该程序联网（防火墙规则）" : "已恢复该程序联网");
+      await loadNetTop();
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setNetBusy(false);
     }
   }
 
@@ -747,28 +835,28 @@ export default function SystemFlyoutApp() {
   async function toggleBt(id: string, connect: boolean) {
     setBusy(id);
     setMsg("");
-    // Optimistic UI — don't freeze the flyout waiting on a full radio rescan.
-    setSnap((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        bluetooth: {
-          ...prev.bluetooth,
-          devices: prev.bluetooth.devices.map((d) =>
-            d.id === id ? { ...d, connected: connect } : d,
-          ),
-        },
-      };
-    });
-    void invoke("suppress_system_flyout_blur", { ms: 1800 }).catch(() => undefined);
+    // 连接可能需数秒（DISABLE→ENABLE）；拉长失焦抑制，避免点连接后面板被点空白关掉
+    void invoke("suppress_system_flyout_blur", { ms: 4200 }).catch(() => undefined);
     try {
       await invoke("set_bluetooth_device", { id, connect });
       setMsg("");
+      // 仅在后端确认成功后再改 UI，避免「显示已连接实际没连上」
+      setSnap((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          bluetooth: {
+            ...prev.bluetooth,
+            devices: prev.bluetooth.devices.map((d) =>
+              d.id === id ? { ...d, connected: connect } : d,
+            ),
+          },
+        };
+      });
       requestSoftRefresh(["bluetooth"]);
-      // Deferred re-read — don't await here (keeps mica shell painting).
       window.setTimeout(() => {
         void refresh(false);
-      }, 700);
+      }, 500);
     } catch (e) {
       setMsg(String(e));
       requestSoftRefresh(["bluetooth"]);
@@ -839,6 +927,9 @@ export default function SystemFlyoutApp() {
       else if (next === "volume") requestSoftRefresh(["audio"]);
       else if (next === "power") requestSoftRefresh(["power"]);
       else if (next === "ime") requestSoftRefresh(["ime"]);
+      else if (next === "network" || next === "memory") requestSoftRefresh(["perf"]);
+      if (next === "network") void loadNetTop(true);
+      if (next === "memory") void loadMemTop();
     }).then((fn) => unsubs.push(fn));
     void listen<SystemRadioSnapshot>("system-status-updated", (ev) => {
       const next = ev.payload;
@@ -878,7 +969,27 @@ export default function SystemFlyoutApp() {
   }, []);
 
   useEffect(() => {
-    if (kind === "calendar" || kind === "volume") return;
+    window.clearInterval(netPollRef.current);
+    if (kind !== "network") return;
+    void loadNetTop();
+    requestSoftRefresh(["perf"]);
+    const warm = window.setTimeout(() => {
+      void loadNetTop();
+      requestSoftRefresh(["perf"]);
+    }, 600);
+    netPollRef.current = window.setInterval(() => {
+      void loadNetTop();
+      requestSoftRefresh(["perf"]);
+      void refresh(false);
+    }, 1000);
+    return () => {
+      window.clearTimeout(warm);
+      window.clearInterval(netPollRef.current);
+    };
+  }, [kind]);
+
+  useEffect(() => {
+    if (kind === "calendar" || kind === "volume" || kind === "network") return;
     // Cache reads are cheap; soft-refresh domains in background at a low cadence.
     const ms = kind === "ime" || kind === "power" ? 4000 : 8000;
     const domains =
@@ -1058,7 +1169,37 @@ export default function SystemFlyoutApp() {
               ? "日历"
               : kind === "memory"
                 ? "内存"
-                : "Wi‑Fi";
+                : kind === "network"
+                  ? "网速"
+                  : "Wi‑Fi";
+
+  function formatBytes(n: number): string {
+    if (!Number.isFinite(n) || n < 0) return "0 B";
+    if (n < 1024) return `${Math.round(n)} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(n >= 10240 ? 0 : 1)} KB`;
+    if (n < 1024 * 1024 * 1024) {
+      const mb = n / (1024 * 1024);
+      return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`;
+    }
+    const gb = n / (1024 * 1024 * 1024);
+    return `${gb.toFixed(gb >= 10 ? 1 : 2)} GB`;
+  }
+
+  function formatRateBps(bps: number): string {
+    // Backend clamps ~2.5 GB/s; anything far beyond is bad ESTATS / JSON noise.
+    if (!Number.isFinite(bps) || bps < 0 || bps > 4 * 1024 * 1024 * 1024) return "0 B/s";
+    if (bps < 1024) return `${Math.round(bps)} B/s`;
+    if (bps < 1024 * 1024) {
+      const kb = bps / 1024;
+      return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB/s`;
+    }
+    if (bps < 1024 * 1024 * 1024) {
+      const mb = bps / (1024 * 1024);
+      return `${mb.toFixed(mb >= 10 ? 1 : 2)} MB/s`;
+    }
+    const gb = bps / (1024 * 1024 * 1024);
+    return `${gb.toFixed(gb >= 10 ? 1 : 2)} GB/s`;
+  }
 
   const volLevel = volLocal ?? snap?.volume.level ?? 0;
   const volMuted = Boolean(snap?.volume.muted);
@@ -1098,27 +1239,36 @@ export default function SystemFlyoutApp() {
       <header className="system-flyout-head">
         <h1>{title}</h1>
         <div className="system-flyout-head-actions">
-          {(kind === "wifi" || kind === "bluetooth" || kind === "memory") && (
+          {(kind === "wifi" || kind === "bluetooth" || kind === "memory" || kind === "network") && (
             <button
               type="button"
               className="system-flyout-link"
-              disabled={refreshing || memBusy}
+              disabled={refreshing || memBusy || netBusy}
               title={
                 kind === "wifi"
                   ? "重新扫描无线网络"
                   : kind === "bluetooth"
                     ? "刷新蓝牙设备"
-                    : "刷新内存排行"
+                    : kind === "memory"
+                      ? "刷新内存排行"
+                      : "刷新进程网速"
               }
               onClick={() => {
                 if (kind === "memory") {
                   void loadMemTop();
                   return;
                 }
+                if (kind === "network") {
+                  void loadNetTop(true);
+                  requestSoftRefresh(["perf"]);
+                  return;
+                }
                 void manualRefresh();
               }}
             >
-              {refreshing || (kind === "memory" && memBusy) ? "刷新中…" : "刷新"}
+              {refreshing || (kind === "memory" && memBusy) || (kind === "network" && netBusy)
+                ? "刷新中…"
+                : "刷新"}
             </button>
           )}
           <button type="button" className="system-flyout-link" onClick={() => void closeSelf()}>
@@ -1539,6 +1689,168 @@ export default function SystemFlyoutApp() {
               </div>
             ) : null}
           </section>
+        </>
+      )}
+
+      {kind === "network" && (
+        <>
+          <button
+            type="button"
+            className="sf-pref-link"
+            onClick={() => void invoke("open_network_settings").catch(console.error)}
+          >
+            打开系统流量设置
+          </button>
+          <section className="system-flyout-card compact">
+            <div className="sf-net-rates sf-net-rates-row">
+              <div className="sf-net-rate is-up">
+                <span className="sf-net-k">上行</span>
+                <span className="sf-net-v">
+                  {formatRateBps(snap?.perf.upBps ?? 0)}
+                </span>
+              </div>
+              <div className="sf-net-rate is-down">
+                <span className="sf-net-k">下行</span>
+                <span className="sf-net-v">
+                  {formatRateBps(snap?.perf.downBps ?? 0)}
+                </span>
+              </div>
+            </div>
+            <div className="sf-net-session">
+              本次{" "}
+              <span className="mono">
+                ↑{formatBytes(snap?.perf.sessionTxBytes ?? 0)} · ↓
+                {formatBytes(snap?.perf.sessionRxBytes ?? 0)}
+              </span>
+            </div>
+          </section>
+          {msg && kind === "network" ? (
+            <div className="sf-mem-purge-msg" role="status">
+              {msg}
+            </div>
+          ) : null}
+          <div className="system-flyout-label">
+            进程网速
+            {!netTop?.warmed ? " · 采样中…" : ""}
+          </div>
+          <div className="system-flyout-list sf-mem-list sf-net-list">
+            {!netTop?.processes?.length ? (
+              <div className="system-flyout-empty">暂无活动连接</div>
+            ) : (
+              netTop.processes.map((p, i) => {
+                const total = p.downBps + p.upBps;
+                const maxTotal =
+                  netTop.processes.reduce((m, x) => Math.max(m, x.downBps + x.upBps), 0) || 1;
+                const bar = Math.max(4, Math.round((total / maxTotal) * 100));
+                const icon = p.iconPng?.trim();
+                const rowKey = p.path || `${p.name}-${p.pid}`;
+                const showAct = netHoverPath === rowKey;
+                return (
+                  <div
+                    key={`${rowKey}-${i}`}
+                    className={`system-flyout-item static sf-mem-row sf-net-row${p.blocked ? " is-blocked" : ""}`}
+                    title={`${p.name}${p.path ? `\n${p.path}` : ""}\n连接 ${p.connections} · 悬停或右键可禁止联网`}
+                    onMouseEnter={() => setNetHoverPath(rowKey)}
+                    onMouseLeave={() =>
+                      setNetHoverPath((cur) => (cur === rowKey ? null : cur))
+                    }
+                    onContextMenu={(e) => openNetMenu(e, p)}
+                  >
+                    {icon ? (
+                      <img
+                        className="sf-mem-icon"
+                        src={`data:image/png;base64,${icon}`}
+                        alt=""
+                        draggable={false}
+                      />
+                    ) : (
+                      <span className="sf-mem-icon sf-mem-icon-fallback" aria-hidden>
+                        {p.name.slice(0, 1).toUpperCase()}
+                      </span>
+                    )}
+                    <span className="sf-mem-meta">
+                      <span className="sf-mem-name" title={p.name}>
+                        {p.name}
+                        {p.blocked ? " · 已断网" : ""}
+                      </span>
+                      <span className="sf-mem-bar" aria-hidden>
+                        <span className="sf-mem-fill" style={{ width: `${bar}%` }} />
+                      </span>
+                    </span>
+                    {showAct && p.path ? (
+                      <button
+                        type="button"
+                        className={`sf-net-act${p.blocked ? " is-restore" : ""}`}
+                        disabled={netBusy}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void toggleNetBlock(p.path, !p.blocked);
+                        }}
+                      >
+                        {p.blocked ? "恢复" : "断网"}
+                      </button>
+                    ) : (
+                      <span className="sf-net-rate-cell">
+                        <span>↓{formatRateBps(p.downBps)}</span>
+                        <span>↑{formatRateBps(p.upBps)}</span>
+                      </span>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+          <p className="sf-net-note">
+            进程速率优先 TCP 扩展统计；不可用时按连接权重分摊整机流量（估算）。断网写入防火墙规则，可能弹出
+            UAC。整机流量含所有网卡（不含回环）。
+          </p>
+
+          {netMenu ? (
+            <>
+              <button
+                type="button"
+                className="sf-wifi-menu-backdrop"
+                aria-label="关闭菜单"
+                onClick={closeNetMenu}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  closeNetMenu();
+                }}
+              />
+              <div
+                className="sf-wifi-menu"
+                role="menu"
+                style={{ left: netMenu.x, top: netMenu.y }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="sf-wifi-menu-head">
+                  <div className="sf-wifi-menu-title">{netMenu.name}</div>
+                  <div className="sf-wifi-menu-sub">
+                    {netMenu.blocked ? "已禁止联网" : "允许联网"}
+                  </div>
+                </div>
+                <div className="sf-wifi-menu-actions">
+                  <button
+                    type="button"
+                    className={`sf-wifi-menu-btn${netMenu.blocked ? "" : " primary"}`}
+                    disabled={netBusy || !netMenu.path}
+                    onClick={() => void toggleNetBlock(netMenu.path, !netMenu.blocked)}
+                  >
+                    {netMenu.blocked ? "恢复联网" : "禁止联网"}
+                  </button>
+                  {netMenu.path ? (
+                    <button
+                      type="button"
+                      className="sf-wifi-menu-btn"
+                      onClick={() => void copyText(netMenu.path, "已复制路径")}
+                    >
+                      复制路径
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </>
+          ) : null}
         </>
       )}
 

@@ -50,6 +50,8 @@ pub struct SystemChipVisibility {
     #[serde(default = "default_true")]
     pub perf: bool,
     #[serde(default = "default_true")]
+    pub network: bool,
+    #[serde(default = "default_true")]
     pub wifi: bool,
     #[serde(default = "default_true")]
     pub bluetooth: bool,
@@ -74,6 +76,7 @@ impl Default for SystemChipVisibility {
     fn default() -> Self {
         Self {
             perf: true,
+            network: true,
             wifi: true,
             bluetooth: true,
             volume: true,

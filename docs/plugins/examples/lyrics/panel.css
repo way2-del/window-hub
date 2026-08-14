@@ -12,7 +12,7 @@ html, body {
   padding: 4px 2px 2px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -31,13 +31,53 @@ html, body {
 }
 .lx-line {
   flex: 1 1 auto;
-  min-height: 1.55em;
-  font-size: 16px;
+  min-height: 1.45em;
+  font-size: 15px;
   font-weight: 700;
   color: #fff;
-  line-height: 1.55;
+  line-height: 1.45;
   overflow: hidden;
   word-break: break-word;
+}
+.lx-transport {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 2px 0 0;
+}
+.lx-btn {
+  width: 36px;
+  height: 28px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease, transform 0.08s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.lx-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+.lx-btn:active {
+  transform: scale(0.94);
+  background: rgba(255, 255, 255, 0.24);
+}
+.lx-btn.is-main {
+  width: 44px;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 15px;
+}
+.lx-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .lx-meta {
   flex: 0 0 auto;

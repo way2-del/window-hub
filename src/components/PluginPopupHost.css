@@ -10,6 +10,16 @@
   transition: none;
 }
 
+/* Hot-swap / re-inject: cover clear→paint so HWND never flashes empty white. */
+.plugin-popup-root.is-loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.96));
+}
+
 .plugin-popup-root.is-enter,
 .plugin-popup-root.is-in {
   opacity: 1;

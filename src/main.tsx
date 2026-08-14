@@ -8,6 +8,8 @@ import StatusMenuPopupApp from "./StatusMenuPopupApp";
 import PluginPopupHost from "./components/PluginPopupHost";
 import SystemFlyoutApp from "./SystemFlyoutApp";
 import DockApp from "./DockApp";
+import DockItemMenuApp from "./DockItemMenuApp";
+import DockPreviewApp from "./DockPreviewApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
@@ -23,6 +25,9 @@ declare global {
     __WH_IS_PLUGIN_POPUP__?: boolean;
     __WH_IS_DOCK__?: boolean;
     __WH_IS_DOCK_GLASS__?: boolean;
+    __WH_IS_DOCK_ITEM_MENU__?: boolean;
+    __WH_IS_DOCK_PREVIEW__?: boolean;
+    __WH_IS_DOCK_TRIGGER__?: boolean;
     __WH_PLUGIN_ID__?: string;
   }
 }
@@ -35,9 +40,15 @@ type WindowKind =
   | "system-flyout"
   | "plugin-popup"
   | "dock"
-  | "dock-glass";
+  | "dock-glass"
+  | "dock-item-menu"
+  | "dock-preview"
+  | "dock-trigger";
 
 function resolveWindowKind(): WindowKind {
+  if (window.__WH_IS_DOCK_TRIGGER__ === true) return "dock-trigger";
+  if (window.__WH_IS_DOCK_PREVIEW__ === true) return "dock-preview";
+  if (window.__WH_IS_DOCK_ITEM_MENU__ === true) return "dock-item-menu";
   if (window.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
   if (window.__WH_IS_DOCK__ === true) return "dock";
   if (window.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
@@ -47,6 +58,9 @@ function resolveWindowKind(): WindowKind {
   if (window.__WH_IS_SETTINGS__ === true) return "settings";
   try {
     const label = getCurrentWindow().label;
+    if (label === "dock-trigger") return "dock-trigger";
+    if (label === "dock-preview") return "dock-preview";
+    if (label === "dock-item-menu") return "dock-item-menu";
     if (label === "dock-glass") return "dock-glass";
     if (label === "dock") return "dock";
     if (label === "plugin-popup") return "plugin-popup";
@@ -58,6 +72,9 @@ function resolveWindowKind(): WindowKind {
     /* ignore */
   }
   const q = new URLSearchParams(window.location.search).get("window");
+  if (q === "dock-trigger") return "dock-trigger";
+  if (q === "dock-preview") return "dock-preview";
+  if (q === "dock-item-menu") return "dock-item-menu";
   if (q === "dock-glass") return "dock-glass";
   if (q === "dock") return "dock";
   if (q === "plugin-popup") return "plugin-popup";
@@ -78,7 +95,9 @@ const overlayOpaque =
     kind === "tray" ||
     kind === "system-flyout" ||
     kind === "status-menu" ||
-    kind === "plugin-popup");
+    kind === "plugin-popup" ||
+    kind === "dock-item-menu" ||
+    kind === "dock-preview");
 
 // Win10 hard-safe: never force transparent over opaque HWND (white zombie).
 if (!overlayOpaque) {
@@ -105,9 +124,13 @@ document.body.classList.add(
           ? "is-status-menu-popup"
           : kind === "plugin-popup"
             ? "is-plugin-popup"
-            : kind === "dock" || kind === "dock-glass"
-              ? "is-dock"
-              : "is-island",
+            : kind === "dock-item-menu"
+              ? "is-dock-item-menu"
+              : kind === "dock-preview"
+                ? "is-dock-preview"
+                : kind === "dock" || kind === "dock-glass" || kind === "dock-trigger"
+                  ? "is-dock"
+                  : "is-island",
 );
 document.title =
   kind === "settings"
@@ -120,11 +143,13 @@ document.title =
           ? "状态菜单"
           : kind === "plugin-popup"
             ? "插件"
-            : kind === "dock-glass"
-              ? "Dock Glass"
-              : kind === "dock"
-                ? "Dock"
-                : "灵动岛";
+            : kind === "dock-item-menu"
+              ? "Dock 菜单"
+              : kind === "dock-preview"
+                ? "Dock 预览"
+                : kind === "dock-trigger" || kind === "dock-glass" || kind === "dock"
+                  ? ""
+                  : "灵动岛";
 
 const root = document.getElementById("root") as HTMLElement;
 if (kind === "settings") {
@@ -132,7 +157,13 @@ if (kind === "settings") {
   root.innerHTML =
     '<div style="padding:24px;color:var(--glass-fg,#f4f4f5);font-family:Segoe UI,sans-serif;background:var(--glass-panel-bg,rgba(32,32,34,0.55));min-height:100vh">正在加载设置…</div>';
 }
-if (kind === "dock" || kind === "dock-glass") {
+if (
+  kind === "dock" ||
+  kind === "dock-glass" ||
+  kind === "dock-trigger" ||
+  kind === "dock-item-menu" ||
+  kind === "dock-preview"
+) {
   applyGlassCss({ kind: "mica-alt", dark: true, acrylicAlpha: 125 });
 }
 
@@ -148,10 +179,32 @@ ReactDOM.createRoot(root).render(
       <StatusMenuPopupApp />
     ) : kind === "plugin-popup" ? (
       <PluginPopupHost />
+    ) : kind === "dock-item-menu" ? (
+      <DockItemMenuApp />
+    ) : kind === "dock-preview" ? (
+      <DockPreviewApp />
     ) : kind === "dock" ? (
       <DockApp />
+    ) : kind === "dock-trigger" ? (
+      <div
+        aria-hidden
+        className="dock-trigger-strip"
+        style={{
+          width: "100%",
+          height: "100%",
+          margin: 0,
+          padding: 0,
+          border: "none",
+          borderRadius: 999,
+          background:
+            "linear-gradient(180deg, rgba(255,255,255,0.72) 0%, rgba(255,255,255,0.38) 100%)",
+          boxShadow:
+            "0 0 10px rgba(0,0,0,0.22), 0 0.5px 0 rgba(255,255,255,0.55) inset",
+          pointerEvents: "none",
+        }}
+      />
     ) : kind === "dock-glass" ? (
-      // Empty — Host SWCA paints the 60px glass strip; icons live in `dock`.
+      // Empty — Host SWCA paints the glass strip; icons live in `dock`.
       <div
         aria-hidden
         style={{

@@ -1,6 +1,7 @@
 (function () {
-  const HOLD_MS = 6000;
+  const HOLD_MS = 900;
   let held = { songKey: "", lyric: "", at: 0 };
+  let busy = false;
 
   function hub() {
     if (!window.hub) throw new Error("window.hub missing");
@@ -19,6 +20,7 @@
       metaEl.textContent = "";
       return;
     }
+    const desk = now.desktopLyrics === true;
     const title = String(now.title || "").trim();
     const artist = String(now.artist || "").trim();
     const songKey = title + "\0" + artist;
@@ -26,6 +28,13 @@
       held = { songKey: "", lyric: "", at: 0 };
     }
     songEl.textContent = [title, artist].filter(Boolean).join(" · ") || "网易云 · 播放中";
+
+    if (!desk) {
+      held = { songKey: "", lyric: "", at: 0 };
+      lineEl.textContent = "未开启桌面歌词（请在网易云打开）";
+      metaEl.textContent = "桌面歌词：关 · 关后岛栏不显示歌词";
+      return;
+    }
 
     let lyric = String(now.lyric || "").trim();
     if (lyric) {
@@ -38,21 +47,58 @@
       lyric = held.lyric;
     }
 
-    const desk =
-      now.desktopLyrics === true ||
-      now.source === "desktop-lyrics" ||
-      now.source === "api-lrc" ||
-      now.source === "memory";
-    lineEl.textContent = lyric
-      ? lyric
-      : desk
-        ? "桌面歌词已开 · 正在同步"
-        : "未检测到桌面歌词窗口（请在网易云开启）";
+    lineEl.textContent = lyric ? lyric : "桌面歌词已开 · 正在同步";
     const bits = [];
     if (now.source) bits.push("来源：" + now.source);
-    bits.push(desk ? "桌面歌词：开" : "桌面歌词：关");
+    bits.push("桌面歌词：开");
     if (lyric && !String(now.lyric || "").trim()) bits.push("保持上一句");
     metaEl.textContent = bits.join(" · ");
+  }
+
+  async function transport(action) {
+    if (busy) return;
+    const h = hub();
+    if (!h.media || !h.media.transport) {
+      console.warn("[lyrics panel] hub.media.transport missing");
+      return;
+    }
+    busy = true;
+    try {
+      await h.media.transport(action);
+    } catch (err) {
+      console.warn("[lyrics panel] transport", action, err);
+    } finally {
+      setTimeout(function () {
+        busy = false;
+      }, 180);
+    }
+  }
+
+  function bindTransport() {
+    const prev = document.getElementById("btn-prev");
+    const toggle = document.getElementById("btn-toggle");
+    const next = document.getElementById("btn-next");
+    if (prev) {
+      prev.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        void transport("prev");
+      });
+    }
+    if (toggle) {
+      toggle.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        void transport("play-pause");
+      });
+    }
+    if (next) {
+      next.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        void transport("next");
+      });
+    }
   }
 
   async function tick() {
@@ -69,6 +115,7 @@
   }
 
   async function boot() {
+    bindTransport();
     await tick();
     let timer = 0;
     function arm() {

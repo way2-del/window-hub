@@ -239,6 +239,56 @@ pub fn open_notification_center() -> Result<(), String> {
     Ok(())
 }
 
+/// 系统多媒体键：上一首 / 下一首 / 播放暂停（不走 SMTC，避免 COM 死锁）。
+#[cfg(windows)]
+pub fn media_transport(action: &str) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE,
+        VK_MEDIA_PREV_TRACK,
+    };
+
+    let vk = match action.trim().to_ascii_lowercase().as_str() {
+        "prev" | "previous" | "previoustrack" => VK_MEDIA_PREV_TRACK,
+        "next" | "nexttrack" => VK_MEDIA_NEXT_TRACK,
+        "play-pause" | "playpause" | "toggle" | "pause" | "play" => VK_MEDIA_PLAY_PAUSE,
+        other => return Err(format!("unknown media action: {other}")),
+    };
+
+    unsafe fn stroke(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+        let mut flags = KEYEVENTF_EXTENDEDKEY;
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    unsafe {
+        let inputs = [stroke(vk, false), stroke(vk, true)];
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if sent as usize != inputs.len() {
+            return Err(format!("SendInput media key failed ({sent}/{})", inputs.len()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn media_transport(_action: &str) -> Result<(), String> {
+    Err("Windows only".into())
+}
+
 #[cfg(not(windows))]
 pub fn open_notification_center() -> Result<(), String> {
     Err("Windows only".into())

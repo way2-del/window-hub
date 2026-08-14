@@ -9,7 +9,9 @@ use crate::ecs::components::CaptureRoi;
 use crate::ecs::resources::{HubCommand, KeyKindDto, PointerKindDto};
 use crate::ecs::EcsHandle;
 use crate::plugin_hub::hub_init_script;
-use crate::win32::enum_windows::{focus_window, parse_window_id, WindowInfo};
+use crate::win32::enum_windows::{
+    focus_or_minimize_window, focus_window, parse_window_id, WindowInfo,
+};
 use crate::windows_service::WindowsService;
 
 #[derive(Deserialize)]
@@ -76,6 +78,16 @@ pub fn get_open_window(
 pub fn focus_open_window(id: String) -> Result<(), String> {
     let hwnd = parse_window_id(&id)?;
     focus_window(hwnd)
+}
+
+/// Dock icon click: focus, or minimize when already frontmost (taskbar toggle).
+#[tauri::command]
+pub fn focus_or_minimize_open_window(id: String) -> Result<(), String> {
+    let hwnd = parse_window_id(&id)?;
+    match focus_or_minimize_window(hwnd) {
+        Err(e) if e.contains("SetForegroundWindow") => Ok(()),
+        other => other,
+    }
 }
 
 #[tauri::command]
@@ -503,10 +515,12 @@ fn system_flyout_height(kind: &str) -> f64 {
         "volume" => 340.0,
         "ime" => 220.0,
         "power" => 200.0,
-        "calendar" => 320.0,
+        // 最多 6 行日期格 + 底栏日期摘要 +「打开通知中心」
+        "calendar" => 420.0,
         "wifi" => 420.0,
         "bluetooth" => 360.0,
         "memory" => 460.0,
+        "network" => 480.0,
         _ => 380.0,
     }
 }
@@ -528,7 +542,7 @@ fn push_flyout_kind_to_webview(win: &WebviewWindow, kind: &str) {
     let _ = win.eval(&script);
 }
 
-/// kind: wifi | bluetooth | volume | ime | power | calendar | memory
+/// kind: wifi | bluetooth | volume | ime | power | calendar | memory | network
 #[tauri::command]
 pub async fn open_system_flyout(
     app: AppHandle,
@@ -540,7 +554,7 @@ pub async fn open_system_flyout(
     let kind = kind.trim().to_ascii_lowercase();
     if !matches!(
         kind.as_str(),
-        "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar" | "memory"
+        "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar" | "memory" | "network"
     ) {
         return Err(format!("unknown system flyout kind: {kind}"));
     }
@@ -935,6 +949,18 @@ pub fn open_wifi_settings() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn open_network_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::win32::system_radio::open_network_settings()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
 pub fn open_bluetooth_settings() -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -948,8 +974,8 @@ pub fn open_bluetooth_settings() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn set_bluetooth_device(id: String, connect: bool) -> Result<(), String> {
-    // Short suppress only — long windows blocked outside-click close of the flyout.
-    suppress_system_flyout_blur(Some(1_200));
+    // Connect path may take a few seconds (service DISABLE→ENABLE + wait).
+    suppress_system_flyout_blur(Some(4_500));
     #[cfg(windows)]
     {
         tauri::async_runtime::spawn_blocking(move || {
@@ -1127,8 +1153,47 @@ pub fn open_task_manager() -> Result<(), String> {
     }
 }
 
-const STATUS_MENU_POPUP_W: f64 = 200.0;
-const STATUS_MENU_POPUP_H: f64 = 248.0;
+#[tauri::command]
+pub async fn list_network_top(
+    limit: Option<u32>,
+) -> Result<crate::win32::system_net_procs::NetProcSnapshot, String> {
+    #[cfg(windows)]
+    {
+        let lim = limit.unwrap_or(15) as usize;
+        tauri::async_runtime::spawn_blocking(move || crate::win32::system_net_procs::list_top(lim))
+            .await
+            .map_err(|e| format!("network list task: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = limit;
+        Err("Windows only".into())
+    }
+}
+
+#[tauri::command]
+pub async fn set_process_net_blocked(
+    path: String,
+    blocked: bool,
+) -> Result<crate::win32::system_net_procs::NetProcessRow, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::win32::system_net_procs::set_blocked(&path, blocked)
+        })
+        .await
+        .map_err(|e| format!("network block task: {e}"))?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, blocked);
+        Err("Windows only".into())
+    }
+}
+
+const STATUS_MENU_POPUP_W: f64 = 220.0;
+/// Fits settings + system tools + taskbar/desktop + restart/exit (with seps).
+const STATUS_MENU_POPUP_H: f64 = 560.0;
 
 /// 左侧状态菜单弹窗：与插件/托盘共用 MicaAlt 材质与深浅色。
 #[tauri::command]
@@ -1252,8 +1317,24 @@ fn schedule_plugin_popup_reveal_fallback(
     plugin_id: String,
 ) {
     let gen = arm_plugin_popup_reveal_fallback();
+    // Keep focus-close from killing mid-inject (was 280ms → empty white shell).
+    suppress_plugin_popup_blur(Some(1200));
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(900));
+        // Give Host a chance to inject; if it stalls, re-push load then show.
+        std::thread::sleep(std::time::Duration::from_millis(650));
+        if PLUGIN_FALLBACK_GEN.load(std::sync::atomic::Ordering::SeqCst) != gen {
+            return;
+        }
+        if !PLUGIN_AWAIT_REVEAL.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        // Re-request inject — bare show of an emptied #app is the classic 卡白.
+        push_plugin_popup_load(&win, &plugin_id, None);
+        let _ = app.emit(
+            "plugin-popup-load",
+            serde_json::json!({ "pluginId": plugin_id, "preferGroupId": null }),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(400));
         if PLUGIN_FALLBACK_GEN.load(std::sync::atomic::Ordering::SeqCst) != gen {
             return;
         }
@@ -1263,6 +1344,7 @@ fn schedule_plugin_popup_reveal_fallback(
         if win.is_visible().unwrap_or(false) {
             return;
         }
+        suppress_plugin_popup_blur(Some(280));
         let _ = win.show();
         let _ = win.set_focus();
         let _ = app.emit("plugin-popup-opened", &plugin_id);
@@ -1364,7 +1446,8 @@ pub async fn open_plugin_popup(
     force_open: Option<bool>,
 ) -> Result<(), String> {
     with_popup_ops(|| {
-        suppress_plugin_popup_blur(Some(280));
+        // Cover inject + reveal; shorter values let Focused(main) hide mid-clear → 卡白.
+        suppress_plugin_popup_blur(Some(1200));
         if let Some(tray) = app.get_webview_window("tray-popup") {
             let _ = tray.hide();
             let _ = app.emit("tray-popup-closed", ());
@@ -1561,6 +1644,7 @@ pub async fn reveal_plugin_popup(app: AppHandle) -> Result<(), String> {
         let Some(w) = app.get_webview_window("plugin-popup") else {
             return Ok(());
         };
+        suppress_plugin_popup_blur(Some(320));
         let _ = w.show();
         let _ = w.set_focus();
         if let Some(id) = popup_plugin_id_of(&w) {
@@ -1662,6 +1746,9 @@ fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::M
         "status-menu-popup",
         "dock",
         "dock-glass",
+        "dock-item-menu",
+        "dock-preview",
+        "dock-trigger",
     ] {
         if let Some(w) = app.get_webview_window(label) {
             let _ = crate::win32::material::apply_prefs(&w, prefs);
@@ -1967,6 +2054,11 @@ pub fn get_foreground_app(window: WebviewWindow) -> crate::win32::status_menu::F
 }
 
 #[tauri::command]
+pub fn is_system_taskbar_visible() -> bool {
+    crate::win32::status_menu::is_taskbar_visible()
+}
+
+#[tauri::command]
 pub fn set_system_taskbar_visible(visible: bool) -> Result<(), String> {
     crate::win32::status_menu::set_taskbar_visible(visible)
 }
@@ -1974,6 +2066,11 @@ pub fn set_system_taskbar_visible(visible: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn show_desktop() -> Result<(), String> {
     crate::win32::status_menu::show_desktop()
+}
+
+#[tauri::command]
+pub fn open_system_tool(kind: String) -> Result<(), String> {
+    crate::win32::status_menu::open_system_tool(&kind)
 }
 
 #[tauri::command]
@@ -2210,6 +2307,13 @@ pub fn hub_netease_now_playing(plugin_id: String) -> Result<serde_json::Value, S
             "desktopLyrics": false
         }))
     }
+}
+
+/// 系统多媒体键（上一首 / 下一首 / 播放暂停）。歌词等插件用，不经 SMTC。
+#[tauri::command]
+pub fn hub_media_transport(plugin_id: String, action: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
+    crate::win32::input::media_transport(&action)
 }
 
 #[tauri::command]

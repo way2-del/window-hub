@@ -1,9 +1,9 @@
 //! 网易云「正在播放 / 当前歌词」轻量读取。
 //!
-//! 不做进程堆扫 / RVA 探测 / UIA（3.1.36 上又慢又卡 UI）。
+//! 不做进程堆扫 / RVA 探测 / UIA / SMTC WinRT（后者易与 UI COM 死锁导致整窗未响应）。
 //! 策略：
-//! 1. 检测 `DesktopLyrics` + 主窗口标题（歌名 - 歌手）
-//! 2. 官方 LRC + 本地播放时钟选句（SMTC Position 在 3.1.x 常卡 0）
+//! 1. 检测 `DesktopLyrics` + 主窗口标题（含隐藏主窗）
+//! 2. 官方 LRC + 本地播放时钟选句
 //! 3. HTTP 拉 LRC 只在后台线程，热路径绝不阻塞
 
 use serde::Serialize;
@@ -46,7 +46,6 @@ struct SmtcClock {
     song_key: String,
     origin_ms: u64,
     synced_at: Instant,
-    last_raw_ms: u64,
 }
 
 static API_LYRIC_CACHE: Mutex<Option<ApiLyricCache>> = Mutex::new(None);
@@ -112,7 +111,8 @@ fn parse_title_artist(raw: &str) -> (Option<String>, Option<String>) {
 }
 
 struct EnumCtx {
-    main: Option<HWND>,
+    main_visible: Option<HWND>,
+    main_any: Option<HWND>,
     lyric: Option<HWND>,
 }
 
@@ -123,28 +123,34 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let visible = IsWindowVisible(hwnd).as_bool();
 
     if class == "OrpheusBrowserHost" {
-        if visible && ctx.main.is_none() {
-            ctx.main = Some(hwnd);
+        if visible && ctx.main_visible.is_none() {
+            ctx.main_visible = Some(hwnd);
+        }
+        if ctx.main_any.is_none() {
+            ctx.main_any = Some(hwnd);
         }
     } else if class == "DesktopLyrics"
         || class_l == "desktoplyrics"
         || class_l.contains("desktoplyric")
     {
-        // 桌面歌词可不开置顶；隐藏窗也算「开了桌面歌词」
-        ctx.lyric = Some(hwnd);
+        // 必须可见：用户关掉桌面歌词后窗体常仍存活但隐藏，不能再当「开着」
+        if visible {
+            ctx.lyric = Some(hwnd);
+        }
     }
     BOOL(1)
 }
 
 fn find_netease_hwnds() -> (Option<HWND>, Option<HWND>) {
     let mut ctx = EnumCtx {
-        main: None,
+        main_visible: None,
+        main_any: None,
         lyric: None,
     };
     unsafe {
         let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
     }
-    (ctx.main, ctx.lyric)
+    (ctx.main_visible.or(ctx.main_any), ctx.lyric)
 }
 
 fn song_key(title: Option<&str>, artist: Option<&str>) -> String {
@@ -212,14 +218,18 @@ fn apply_sticky(out: &mut NeteaseNowPlaying) {
         }
         return;
     }
-    if !out.active || !out.desktop_lyrics {
+    // 桌面歌词已关：立刻丢掉 sticky，禁止关窗后继续「自己播」
+    if !out.desktop_lyrics {
+        let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
+        return;
+    }
+    if !out.active {
         let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
         return;
     }
     if let Ok(g) = STICKY_LYRIC.lock() {
         if let Some(s) = g.as_ref() {
-            // 仅同曲且短窗口；切歌后 on_song_changed 已清空
-            if s.song_key == key && s.at.elapsed() < Duration::from_secs(6) {
+            if s.song_key == key && s.at.elapsed() < Duration::from_millis(800) {
                 out.lyric = Some(s.text.clone());
                 if out.source.as_deref() == Some("window-title") || out.source.is_none() {
                     out.source = Some("sticky".into());
@@ -289,156 +299,30 @@ fn pick_search_song_id(songs: &[serde_json::Value], title: &str, artist: Option<
     best.and_then(|(sc, id)| if sc >= 55 { Some(id) } else { None })
 }
 
-fn filetime_now_ticks() -> i64 {
-    use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
-    let ft = unsafe { GetSystemTimeAsFileTime() };
-    ((ft.dwHighDateTime as i64) << 32) | (ft.dwLowDateTime as i64)
-}
+/// 选句提前量（相对切歌后本地钟）。
+const LYRIC_LEAD_MS: u64 = 2800;
 
-fn ticks_to_ms(ticks: i64) -> u64 {
-    (ticks.max(0) as u64) / 10_000
-}
-
-struct SmtcSample {
-    song_key: String,
-    raw_ms: u64,
-    end_ms: Option<u64>,
-    playing: bool,
-}
-
-fn read_smtc_sample(expect_title: Option<&str>) -> Option<SmtcSample> {
-    use windows::Media::Control::{
-        GlobalSystemMediaTransportControlsSessionManager,
-        GlobalSystemMediaTransportControlsSessionPlaybackStatus,
-    };
-
-    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
-        .ok()?
-        .get()
-        .ok()?;
-
-    let mut best: Option<(i32, SmtcSample)> = None;
-    if let Ok(sessions) = manager.GetSessions() {
-        let n = sessions.Size().unwrap_or(0);
-        for i in 0..n {
-            let Ok(session) = sessions.GetAt(i) else {
-                continue;
-            };
-            let app = session
-                .SourceAppUserModelId()
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let mut score = 0;
-            if app.contains("cloudmusic") || app.contains("netease") {
-                score += 100;
-            }
-            let media_title = session
-                .TryGetMediaPropertiesAsync()
-                .ok()
-                .and_then(|op| op.get().ok())
-                .and_then(|p| p.Title().ok())
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            if let Some(want) = expect_title.filter(|s| !s.is_empty()) {
-                let w = want.to_ascii_lowercase();
-                let t = media_title.to_ascii_lowercase();
-                if !t.is_empty() && (t.contains(&w) || w.contains(&t)) {
-                    score += 40;
-                }
-            }
-            if score <= 0 {
-                continue;
-            }
-            let Ok(timeline) = session.GetTimelineProperties() else {
-                continue;
-            };
-            let Ok(pos) = timeline.Position() else {
-                continue;
-            };
-            let raw_ms = ticks_to_ms(pos.Duration);
-            let end_ms = timeline
-                .EndTime()
-                .ok()
-                .map(|e| ticks_to_ms(e.Duration))
-                .filter(|&ms| ms > 0);
-            // 轻外推：Position 卡 0 时仍可能靠 LastUpdated 无效，后面用本地钟
-            let _ = timeline.LastUpdatedTime().map(|last| {
-                let _ = filetime_now_ticks().saturating_sub(last.UniversalTime);
-            });
-            let playing = session
-                .GetPlaybackInfo()
-                .ok()
-                .and_then(|info| info.PlaybackStatus().ok())
-                .map(|s| s == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
-                .unwrap_or(true);
-            let song_key = expect_title
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or(media_title);
-            let sample = SmtcSample {
-                song_key,
-                raw_ms,
-                end_ms,
-                playing,
-            };
-            if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
-                best = Some((score, sample));
-            }
-        }
-    }
-    best.map(|(_, s)| s)
-}
-
-/// 播放进度（ms）。SMTC 卡 0 时用本地时钟推进。
-/// WinRT 采样最多约 2s 一次，热路径多数只做 Instant 加法，避免卡 UI。
+/// 播放进度（ms）。只用本地钟——禁止在热路径调 WinRT SMTC（易与 WebView2 COM 死锁 → 整窗未响应）。
 fn playback_position_ms(expect_title: Option<&str>) -> u64 {
-    static LAST_SMTC_POLL: Mutex<Option<Instant>> = Mutex::new(None);
-    let need_poll = LAST_SMTC_POLL
-        .lock()
-        .ok()
-        .and_then(|g| g.map(|t| t.elapsed() >= Duration::from_secs(2)))
-        .unwrap_or(true);
-
-    if need_poll {
-        if let Some(sample) = read_smtc_sample(expect_title) {
-            if let Ok(mut guard) = SMTC_CLOCK.lock() {
-                let reported = sample.raw_ms;
-                match guard.as_mut() {
-                    Some(clock) if clock.song_key == sample.song_key => {
-                        let delta = reported as i64 - clock.last_raw_ms as i64;
-                        if delta.abs() >= 1200
-                            || (reported > 0 && reported != clock.last_raw_ms && delta >= 400)
-                        {
-                            clock.origin_ms = reported;
-                            clock.synced_at = Instant::now();
-                        }
-                        clock.last_raw_ms = reported;
-                        if !sample.playing {
-                            let frozen = clock
-                                .origin_ms
-                                .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
-                            let frozen = sample.end_ms.map(|e| frozen.min(e)).unwrap_or(frozen);
-                            clock.origin_ms = frozen;
-                            clock.synced_at = Instant::now();
-                        }
-                    }
-                    _ => {
-                        *guard = Some(SmtcClock {
-                            song_key: sample.song_key,
-                            origin_ms: reported,
-                            synced_at: Instant::now(),
-                            last_raw_ms: reported,
-                        });
-                    }
-                }
-            }
-            if let Ok(mut g) = LAST_SMTC_POLL.lock() {
-                *g = Some(Instant::now());
+    let key = expect_title
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    if key.is_empty() {
+        return 0;
+    }
+    if let Ok(mut guard) = SMTC_CLOCK.lock() {
+        match guard.as_mut() {
+            Some(clock) if clock.song_key == key => {}
+            _ => {
+                *guard = Some(SmtcClock {
+                    song_key: key,
+                    origin_ms: 0,
+                    synced_at: Instant::now(),
+                });
             }
         }
     }
-
     let Ok(guard) = SMTC_CLOCK.lock() else {
         return 0;
     };
@@ -635,7 +519,7 @@ fn schedule_lrc_fetch(title: String, artist: Option<String>) {
 
 fn lyric_from_cached_lrc(title: &str, artist: Option<&str>) -> Option<String> {
     let lines = peek_cached_lrc(title, artist)?;
-    let pos = playback_position_ms(Some(title));
+    let pos = playback_position_ms(Some(title)).saturating_add(LYRIC_LEAD_MS);
     lyric_line_at(&lines, pos)
 }
 
@@ -659,18 +543,18 @@ pub fn snapshot() -> NeteaseNowPlaying {
 fn snapshot_uncached() -> NeteaseNowPlaying {
     let (main, lyric_hwnd) = find_netease_hwnds();
     let mut out = NeteaseNowPlaying::default();
+    // 仅「可见」的 DesktopLyrics 才算开启——监听网易云桌面歌词开关，不自创通道
     out.desktop_lyrics = lyric_hwnd.is_some();
 
     if let Some(hwnd) = main {
-        let _ = unsafe { IsWindowVisible(hwnd) };
         out.active = true;
         let title_raw = hwnd_title(hwnd);
         let (title, artist) = parse_title_artist(&title_raw);
         out.title = title;
         out.artist = artist;
-        out.source = Some("window-title".into());
-    } else if lyric_hwnd.is_some() {
-        out.active = true;
+        if out.title.is_some() {
+            out.source = Some("window-title".into());
+        }
     }
 
     let key = song_key(out.title.as_deref(), out.artist.as_deref());
@@ -678,9 +562,9 @@ fn snapshot_uncached() -> NeteaseNowPlaying {
         on_song_changed(&key);
     }
 
-    // 不再用桌面歌词窗标题当歌词（置顶时是「解锁」，也易串）
-
     if out.desktop_lyrics {
+        out.active = true;
+        // 开了桌面歌词才用官方 LRC 对齐选句（跟听网易云桌面歌词，不是关了还自己播）
         if let Some(title) = out.title.clone() {
             if let Some(line) = lyric_from_cached_lrc(&title, out.artist.as_deref()) {
                 out.lyric = Some(line);
@@ -689,6 +573,10 @@ fn snapshot_uncached() -> NeteaseNowPlaying {
                 schedule_lrc_fetch(title, out.artist.clone());
             }
         }
+    } else {
+        // 关桌面歌词：清空歌词与 sticky，岛栏应让位
+        out.lyric = None;
+        let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
     }
 
     if out.title.is_some() || out.lyric.is_some() || out.desktop_lyrics {

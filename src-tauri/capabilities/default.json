@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for main + settings windows",
-  "windows": ["main", "settings", "tray-popup", "plugin-popup", "status-menu-popup", "dock"],
+  "windows": ["main", "settings", "tray-popup", "plugin-popup", "status-menu-popup", "dock", "dock-glass", "dock-item-menu", "dock-preview", "dock-trigger"],
   "permissions": [
     "core:default",
     "core:event:default",

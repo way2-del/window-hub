@@ -27,6 +27,7 @@ export type TrayPrefs = {
 
 export type SystemChipVisibility = {
   perf: boolean;
+  network: boolean;
   wifi: boolean;
   bluetooth: boolean;
   volume: boolean;
@@ -38,6 +39,7 @@ export type SystemChipVisibility = {
 
 export const DEFAULT_SYSTEM_CHIPS: SystemChipVisibility = {
   perf: true,
+  network: true,
   wifi: true,
   bluetooth: true,
   volume: true,
@@ -375,6 +377,38 @@ function MemMeter({ percent }: { percent: number }) {
   );
 }
 
+function formatRate(bps: number): string {
+  if (!Number.isFinite(bps) || bps < 0) return "0";
+  if (bps < 1024) return `${Math.round(bps)}`;
+  if (bps < 1024 * 1024) {
+    const kb = bps / 1024;
+    return kb >= 100 ? `${Math.round(kb)}K` : `${kb.toFixed(kb >= 10 ? 0 : 1)}K`;
+  }
+  const mb = bps / (1024 * 1024);
+  return mb >= 100 ? `${Math.round(mb)}M` : `${mb.toFixed(mb >= 10 ? 1 : 2)}M`;
+}
+
+/** 上行 / 下行速率芯片 */
+function NetMeter({ downBps, upBps }: { downBps: number; upBps: number }) {
+  const title = `↑ ${formatRate(upBps)}/s · ↓ ${formatRate(downBps)}/s · 点击查看流量`;
+  return (
+    <span className="tray-net" title={title} aria-label={title}>
+      <span className="tray-net-line is-up">
+        <span className="tray-net-arrow" aria-hidden>
+          ↑
+        </span>
+        <span className="tray-net-num">{formatRate(upBps)}</span>
+      </span>
+      <span className="tray-net-line is-down">
+        <span className="tray-net-arrow" aria-hidden>
+          ↓
+        </span>
+        <span className="tray-net-num">{formatRate(downBps)}</span>
+      </span>
+    </span>
+  );
+}
+
 function GamepadGlyph() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -459,6 +493,7 @@ export default function TrayCluster({
   const powerRef = useRef<HTMLButtonElement>(null);
   const imeRef = useRef<HTMLButtonElement>(null);
   const memRef = useRef<HTMLButtonElement>(null);
+  const netRef = useRef<HTMLButtonElement>(null);
   const togglingRef = useRef(false);
   const radioSigRef = useRef("");
 
@@ -488,6 +523,8 @@ export default function TrayCluster({
             p: snap?.power?.percent,
             i: snap?.ime?.mark,
             c: snap?.perf?.cpuPercent,
+            nd: Math.round((snap?.perf?.downBps ?? 0) / 256),
+            nu: Math.round((snap?.perf?.upBps ?? 0) / 256),
           });
         }
       } catch {
@@ -564,6 +601,8 @@ export default function TrayCluster({
               p: snap.power?.percent,
               i: snap.ime?.mark,
               c: snap.perf?.cpuPercent,
+              nd: Math.round((snap.perf?.downBps ?? 0) / 256),
+              nu: Math.round((snap.perf?.upBps ?? 0) / 256),
             });
             if (sig === radioSigRef.current) return;
             radioSigRef.current = sig;
@@ -671,7 +710,15 @@ export default function TrayCluster({
   }
 
   async function toggleFlyout(
-    kind: "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar" | "memory",
+    kind:
+      | "wifi"
+      | "bluetooth"
+      | "volume"
+      | "ime"
+      | "power"
+      | "calendar"
+      | "memory"
+      | "network",
     anchor: HTMLElement | null,
   ) {
     if (!anchor || togglingRef.current) return;
@@ -739,6 +786,24 @@ export default function TrayCluster({
               <MemMeter percent={perf?.memPercent ?? 0} />
             </button>
           </div>
+        ) : null}
+
+        {systemChips.network ? (
+          <button
+            ref={netRef}
+            type="button"
+            className={`tray-sys-btn tray-net-btn${flyoutKind === "network" ? " is-open" : ""}`}
+            title={`↑ ${formatRate(perf?.upBps ?? 0)}/s · ↓ ${formatRate(perf?.downBps ?? 0)}/s`}
+            aria-label="网速"
+            aria-expanded={flyoutKind === "network"}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              void invoke("suppress_system_flyout_blur", { ms: 400 });
+            }}
+            onClick={() => void toggleFlyout("network", netRef.current)}
+          >
+            <NetMeter downBps={perf?.downBps ?? 0} upBps={perf?.upBps ?? 0} />
+          </button>
         ) : null}
 
         {systemChips.wifi ? (

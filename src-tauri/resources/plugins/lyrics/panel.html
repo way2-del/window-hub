@@ -10,6 +10,23 @@
     <div class="lx-panel" id="root">
       <div class="lx-song" id="song">未检测到网易云</div>
       <div class="lx-line" id="line">开启桌面歌词后，岛栏会显示当前行</div>
+      <div class="lx-transport" role="group" aria-label="播放控制">
+        <button type="button" class="lx-btn" id="btn-prev" title="上一首" aria-label="上一首">
+          ⏮
+        </button>
+        <button
+          type="button"
+          class="lx-btn is-main"
+          id="btn-toggle"
+          title="播放 / 暂停"
+          aria-label="播放或暂停"
+        >
+          ⏯
+        </button>
+        <button type="button" class="lx-btn" id="btn-next" title="下一首" aria-label="下一首">
+          ⏭
+        </button>
+      </div>
       <div class="lx-meta" id="meta"></div>
     </div>
     <script src="./panel.js"></script>

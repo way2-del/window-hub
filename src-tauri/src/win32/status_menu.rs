@@ -38,8 +38,8 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowA, FindWindowExA, GetAncestor, GetClassNameW, GetForegroundWindow,
-        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, ShowWindow, GA_ROOT,
-        SW_HIDE, SW_SHOWNA,
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+        ShowWindow, GA_ROOT, SW_HIDE, SW_SHOWNA,
     };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -305,7 +305,6 @@ mod win {
     }
 
     fn hide_taskbars_once() {
-        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
         for_each_taskbar(|hwnd| unsafe {
             // Only hide when visible — avoids needless Show/Hide churn.
             if IsWindowVisible(hwnd).as_bool() {
@@ -338,6 +337,16 @@ mod win {
 
     fn stop_keep_hidden() {
         TASKBAR_KEEP_HIDDEN.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether we are currently forcing the system taskbar hidden.
+    pub fn is_taskbar_visible() -> bool {
+        if TASKBAR_KEEP_HIDDEN.load(Ordering::SeqCst) {
+            return false;
+        }
+        shell_tray_hwnd()
+            .map(|hwnd| unsafe { IsWindowVisible(hwnd).as_bool() })
+            .unwrap_or(true)
     }
 
     /// Hide system taskbar while Dock owns the bottom edge.
@@ -406,10 +415,92 @@ mod win {
         }
         Ok(())
     }
+
+    /// 状态菜单常用系统工具：taskmgr / shells(runas) / control-panel …
+    pub fn open_system_tool(kind: &str) -> Result<(), String> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        use windows::core::{w, HSTRING, PCWSTR};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // ShellExecute 错误码：用户取消 UAC 常见为 SE_ERR_ACCESSDENIED(5)
+        const SE_ERR_ACCESSDENIED: isize = 5;
+        let k = kind.trim().to_ascii_lowercase();
+
+        let shell_exec = |verb: PCWSTR, file: &str| -> Result<(), String> {
+            unsafe {
+                let rc = ShellExecuteW(
+                    HWND::default(),
+                    verb,
+                    &HSTRING::from(file),
+                    None,
+                    None,
+                    SW_SHOWNORMAL,
+                );
+                let code = rc.0 as isize;
+                if code <= 32 {
+                    if code == SE_ERR_ACCESSDENIED {
+                        // 用户取消提权，不当错误抛
+                        return Ok(());
+                    }
+                    return Err(format!("打开失败 ({code})"));
+                }
+            }
+            Ok(())
+        };
+
+        let shell_open = |file: &str| -> Result<(), String> { shell_exec(w!("open"), file) };
+        let shell_runas = |file: &str| -> Result<(), String> { shell_exec(w!("runas"), file) };
+
+        match k.as_str() {
+            "taskmgr" | "task-manager" => {
+                Command::new("taskmgr.exe")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            }
+            "device-manager" | "devmgmt" => shell_open("devmgmt.msc"),
+            "control-panel" | "control" => {
+                Command::new("control.exe")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            }
+            "windows-settings" | "settings" | "ms-settings" => shell_open("ms-settings:"),
+            "env-vars" | "environment-variables" | "env" => {
+                // 直接打开「环境变量」对话框
+                Command::new("rundll32.exe")
+                    .arg("sysdm.cpl,EditEnvironmentVariables")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            }
+            "cmd-admin" | "admin-cmd" => shell_runas("cmd.exe"),
+            "powershell-admin" | "admin-powershell" | "admin-ps" => {
+                shell_runas("powershell.exe")
+            }
+            // 普通权限 Windows Terminal；未安装则回退普通 PowerShell
+            "terminal" | "wt" | "windows-terminal" => {
+                match shell_open("wt.exe") {
+                    Ok(()) => Ok(()),
+                    Err(_) => shell_open("powershell.exe"),
+                }
+            }
+            other => Err(format!("unknown system tool: {other}")),
+        }
+    }
 }
 
 #[cfg(windows)]
-pub use win::{foreground_app, set_taskbar_visible, show_desktop};
+pub use win::{
+    foreground_app, is_taskbar_visible, open_system_tool, set_taskbar_visible, show_desktop,
+};
 
 #[cfg(not(windows))]
 pub fn foreground_app(_self_hwnd: Option<isize>) -> ForegroundApp {
@@ -425,11 +516,21 @@ pub fn foreground_app(_self_hwnd: Option<isize>) -> ForegroundApp {
 }
 
 #[cfg(not(windows))]
+pub fn is_taskbar_visible() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
 pub fn set_taskbar_visible(_visible: bool) -> Result<(), String> {
     Err("Windows only".into())
 }
 
 #[cfg(not(windows))]
 pub fn show_desktop() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn open_system_tool(_kind: &str) -> Result<(), String> {
     Err("Windows only".into())
 }

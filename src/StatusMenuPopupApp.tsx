@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -28,6 +28,8 @@ async function run(action: () => Promise<void>) {
 }
 
 export default function StatusMenuPopupApp() {
+  const [taskbarVisible, setTaskbarVisible] = useState(true);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -42,6 +44,10 @@ export default function StatusMenuPopupApp() {
       }
       await invoke("apply_window_effect", {}).catch(() => undefined);
     })();
+
+    void invoke<boolean>("is_system_taskbar_visible")
+      .then(setTaskbarVisible)
+      .catch(() => undefined);
 
     const retryA = window.setTimeout(() => {
       void invoke("apply_window_effect", {}).catch(() => undefined);
@@ -115,11 +121,11 @@ export default function StatusMenuPopupApp() {
         role="menuitem"
         onClick={() =>
           void run(async () => {
-            await invoke("set_system_taskbar_visible", { visible: true });
+            await invoke("open_system_tool", { kind: "taskmgr" });
           })
         }
       >
-        显示系统任务栏
+        任务管理器
       </button>
       <button
         type="button"
@@ -127,11 +133,98 @@ export default function StatusMenuPopupApp() {
         role="menuitem"
         onClick={() =>
           void run(async () => {
-            await invoke("set_system_taskbar_visible", { visible: false });
+            await invoke("open_system_tool", { kind: "device-manager" });
           })
         }
       >
-        隐藏系统任务栏
+        设备管理器
+      </button>
+      <button
+        type="button"
+        className="status-menu-item"
+        role="menuitem"
+        onClick={() =>
+          void run(async () => {
+            await invoke("open_system_tool", { kind: "control-panel" });
+          })
+        }
+      >
+        控制面板
+      </button>
+      <button
+        type="button"
+        className="status-menu-item"
+        role="menuitem"
+        onClick={() =>
+          void run(async () => {
+            await invoke("open_system_tool", { kind: "windows-settings" });
+          })
+        }
+      >
+        系统设置
+      </button>
+      <button
+        type="button"
+        className="status-menu-item"
+        role="menuitem"
+        onClick={() =>
+          void run(async () => {
+            await invoke("open_system_tool", { kind: "env-vars" });
+          })
+        }
+      >
+        环境变量
+      </button>
+      <button
+        type="button"
+        className="status-menu-item"
+        role="menuitem"
+        onClick={() =>
+          void run(async () => {
+            await invoke("open_system_tool", { kind: "cmd-admin" });
+          })
+        }
+      >
+        管理员 CMD
+      </button>
+      <button
+        type="button"
+        className="status-menu-item"
+        role="menuitem"
+        onClick={() =>
+          void run(async () => {
+            await invoke("open_system_tool", { kind: "powershell-admin" });
+          })
+        }
+      >
+        管理员 PowerShell
+      </button>
+      <button
+        type="button"
+        className="status-menu-item"
+        role="menuitem"
+        onClick={() =>
+          void run(async () => {
+            await invoke("open_system_tool", { kind: "terminal" });
+          })
+        }
+      >
+        终端
+      </button>
+      <div className="status-menu-sep" role="separator" />
+      <button
+        type="button"
+        className="status-menu-item"
+        role="menuitem"
+        onClick={() =>
+          void run(async () => {
+            await invoke("set_system_taskbar_visible", {
+              visible: !taskbarVisible,
+            });
+          })
+        }
+      >
+        {taskbarVisible ? "隐藏系统任务栏" : "显示系统任务栏"}
       </button>
       <button
         type="button"

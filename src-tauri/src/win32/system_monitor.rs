@@ -111,6 +111,10 @@ impl Caches {
                     cpu_temp_c: None,
                     gpu_temp_c: None,
                     gpu_mem_percent: None,
+                    down_bps: 0,
+                    up_bps: 0,
+                    session_rx_bytes: 0,
+                    session_tx_bytes: 0,
                 },
             },
             temp_at: now,
@@ -199,6 +203,10 @@ pub fn start(app: AppHandle) {
     std::thread::Builder::new()
         .name("wh-sysmon-temp".into())
         .spawn(|| temperature_loop())
+        .ok();
+    std::thread::Builder::new()
+        .name("wh-sysmon-net".into())
+        .spawn(|| net_loop())
         .ok();
 }
 
@@ -362,8 +370,11 @@ fn refresh_light(also_ime: bool) {
         let same_pwr = c.power.value.percent == power.percent
             && c.power.value.charging == power.charging
             && c.power.value.ac_line == power.ac_line;
+        // net 字段已由 collect_cpu_mem → NET_LAST 填好；切勿用旧 cache 盖掉，否则会把网速抹成 0
         let same_perf = c.perf.value.mem_percent == perf.mem_percent
-            && c.perf.value.cpu_percent.abs_diff(perf.cpu_percent) < 2;
+            && c.perf.value.cpu_percent.abs_diff(perf.cpu_percent) < 2
+            && c.perf.value.down_bps.abs_diff(perf.down_bps) < 2048
+            && c.perf.value.up_bps.abs_diff(perf.up_bps) < 2048;
         let same_ime = match &ime {
             Some(i) => {
                 c.ime.value.mark == i.mark
@@ -468,6 +479,49 @@ fn refresh_temperature() {
             c.perf.value.gpu_temp_c = gpu_temp_c;
         }
         c.temp_at = Instant::now();
+        c.to_snapshot()
+    };
+    emit_updated(&snap);
+}
+
+fn net_loop() {
+    // 第一次只建基线；再按 ~1s 推速率
+    let _ = system_perf::collect_net();
+    loop {
+        let pressure = under_mem_pressure();
+        std::thread::sleep(if pressure {
+            Duration::from_millis(1800)
+        } else {
+            Duration::from_millis(1000)
+        });
+        refresh_net();
+    }
+}
+
+fn refresh_net() {
+    let (down_bps, up_bps, session_rx, session_tx) = system_perf::collect_net();
+    let snap = {
+        let mut c = state().caches.lock();
+        let prev_down = c.perf.value.down_bps;
+        let prev_up = c.perf.value.up_bps;
+        let prev_rx = c.perf.value.session_rx_bytes;
+        let prev_tx = c.perf.value.session_tx_bytes;
+        let rate_delta =
+            prev_down.abs_diff(down_bps) >= 512 || prev_up.abs_diff(up_bps) >= 512;
+        let idle_flip = ((down_bps + up_bps) < 1024) != ((prev_down + prev_up) < 1024);
+        let busy = down_bps >= 512 || up_bps >= 512 || prev_down >= 512 || prev_up >= 512;
+        let sess_tick = session_rx
+            .saturating_sub(prev_rx)
+            .saturating_add(session_tx.saturating_sub(prev_tx))
+            >= 8 * 1024;
+        c.perf.value.down_bps = down_bps;
+        c.perf.value.up_bps = up_bps;
+        c.perf.value.session_rx_bytes = session_rx;
+        c.perf.value.session_tx_bytes = session_tx;
+        // 空闲跳过；有流量时每秒推一次（面板会话累计 / 芯片速率）
+        if !rate_delta && !idle_flip && !busy && !sess_tick {
+            return;
+        }
         c.to_snapshot()
     };
     emit_updated(&snap);

@@ -479,6 +479,10 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
     clear_vibrancy(window);
     let hwnd = hwnd_of(window)?;
     disable_system_backdrop(hwnd);
+    // Icons HWND must stay fully clear — opaque fill paints the magnification /
+    // preview headroom as a solid "white bar" above the glass strip.
+    let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
+    clear_webview_fill(window);
     unsafe {
         if let Some(d) = dark {
             let v: u32 = u32::from(d);
@@ -504,12 +508,36 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
             std::mem::size_of::<u32>() as u32,
         );
     }
-    if is_hard_safe() {
-        let _ = apply_opaque_solid(window, dark);
-    } else {
-        clear_webview_fill(window);
-    }
+    let _ = dark; // theme lives on dock-glass + CSS chrome
     Ok(())
+}
+
+/// Dock glass strip: material + rounded corners (Apple / MyDockFinder pill).
+pub fn apply_dock_glass_corners(window: &WebviewWindow) {
+    // DWMWA_WINDOW_CORNER_PREFERENCE / DWMWCP_ROUND is Win11+. On Win10 it is a
+    // no-op or can leave a rectangular frame artifact — skip entirely.
+    if is_hard_safe() {
+        return;
+    }
+    let Ok(hwnd) = hwnd_of(window) else {
+        return;
+    };
+    unsafe {
+        let corner = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+        let border = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
 }
 
 /// Main top bar: MyDockFinder-like frosted blur under the ambient tint strip.
@@ -572,6 +600,22 @@ pub fn apply_effect(
     }
 
     if is_hard_safe() {
+        // dock-glass must stay clear in compat mode — an opaque slab wider/taller
+        // than the CSS chrome pill is the classic "mysterious background" behind icons.
+        // Win10 can't do acrylic here; the icons-layer `.dock-chrome` is the visible pill.
+        if window.label() == "dock-glass" {
+            clear_vibrancy(window);
+            let hwnd = hwnd_of(window)?;
+            let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
+            disable_system_backdrop(hwnd);
+            clear_webview_fill(window);
+            // Do NOT call apply_dock_glass_corners — DWMWCP_ROUND is Win11-only.
+            return Ok(());
+        }
+        // Dock preview: always dark opaque — light system theme painted a blank white box.
+        if window.label() == "dock-preview" {
+            return apply_opaque_solid(window, Some(true));
+        }
         return apply_opaque_solid(window, dark);
     }
 
@@ -634,10 +678,19 @@ pub fn apply_effect(
     };
 
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if window.label() == "dock-glass" {
+                apply_dock_glass_corners(window);
+            }
+            Ok(())
+        }
         Err(e) => {
             arm_hard_safe(&e);
-            apply_opaque_solid(window, dark)
+            let r = apply_opaque_solid(window, dark);
+            if window.label() == "dock-glass" {
+                apply_dock_glass_corners(window);
+            }
+            r
         }
     }
 }

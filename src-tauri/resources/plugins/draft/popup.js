@@ -442,6 +442,8 @@
   }
 
   async function boot() {
+    // Host inject 后立刻检查 #app；先同步画壳，再 await storage（否则首点会误判失败）。
+    render(false);
     await load();
     ensureActive();
     if (!state.drafts.length) {

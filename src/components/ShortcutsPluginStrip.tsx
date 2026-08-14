@@ -119,48 +119,69 @@ export default function ShortcutsPluginStrip({
     }
   };
 
-  const measureAndReport = () => {
+  /** Push Host `--chrome-left-*` into the iframe (icons use currentColor / --wh-chrome-fg). */
+  const syncChromeToIframe = () => {
     const iframe = iframeRef.current;
     if (!iframe) return;
     try {
       const doc = iframe.contentDocument;
       if (!doc) return;
       const root = doc.documentElement;
-      const hostEl = wrapRef.current?.closest(".shortcuts-host") ?? wrapRef.current;
+      const hostEl =
+        wrapRef.current?.closest(".shortcuts-host") ??
+        wrapRef.current?.closest(".shell") ??
+        wrapRef.current;
       const titleEl =
         document.querySelector(".settings-label") ??
         document.querySelector(".settings-btn");
-      if (root && hostEl) {
-        const cs = getComputedStyle(hostEl);
-        const titleCs = titleEl ? getComputedStyle(titleEl) : null;
-        const fg =
-          cs.getPropertyValue("--chrome-left-fg").trim() ||
-          (titleCs?.color ?? cs.color) ||
-          "rgba(255,255,255,0.94)";
-        const shadow = cs.getPropertyValue("--chrome-left-shadow").trim();
-        root.style.setProperty("--wh-chrome-fg", fg);
-        if (shadow) root.style.setProperty("--wh-chrome-shadow", shadow);
+      if (!root || !hostEl) return;
+      const cs = getComputedStyle(hostEl);
+      const shellCs = getComputedStyle(
+        hostEl.closest(".shell") ?? document.documentElement,
+      );
+      const titleCs = titleEl ? getComputedStyle(titleEl) : null;
+      const fg =
+        cs.getPropertyValue("--chrome-left-fg").trim() ||
+        shellCs.getPropertyValue("--chrome-left-fg").trim() ||
+        (titleCs?.color ?? cs.color) ||
+        "rgba(255,255,255,0.94)";
+      const shadow =
+        cs.getPropertyValue("--chrome-left-shadow").trim() ||
+        shellCs.getPropertyValue("--chrome-left-shadow").trim();
+      root.style.setProperty("--wh-chrome-fg", fg);
+      if (shadow) root.style.setProperty("--wh-chrome-shadow", shadow);
+      if (titleCs) {
+        root.style.setProperty("--wh-chrome-font-size", titleCs.fontSize);
+        root.style.setProperty("--wh-chrome-font-weight", titleCs.fontWeight);
+        root.style.setProperty("--wh-chrome-font-family", titleCs.fontFamily);
+      } else {
+        root.style.setProperty("--wh-chrome-font-size", "12px");
+        root.style.setProperty("--wh-chrome-font-weight", "700");
+      }
+      root.style.setProperty("--wh-bar-h", `${SHORTCUTS_HEIGHT}px`);
+      if (doc.body) {
+        doc.body.style.color = fg;
+        doc.body.style.background = "transparent";
+        doc.body.style.height = `${SHORTCUTS_HEIGHT}px`;
+        doc.body.style.maxHeight = `${SHORTCUTS_HEIGHT}px`;
         if (titleCs) {
-          root.style.setProperty("--wh-chrome-font-size", titleCs.fontSize);
-          root.style.setProperty("--wh-chrome-font-weight", titleCs.fontWeight);
-          root.style.setProperty("--wh-chrome-font-family", titleCs.fontFamily);
-        } else {
-          root.style.setProperty("--wh-chrome-font-size", "12px");
-          root.style.setProperty("--wh-chrome-font-weight", "700");
-        }
-        root.style.setProperty("--wh-bar-h", `${SHORTCUTS_HEIGHT}px`);
-        if (doc.body) {
-          doc.body.style.color = fg;
-          doc.body.style.background = "transparent";
-          doc.body.style.height = `${SHORTCUTS_HEIGHT}px`;
-          doc.body.style.maxHeight = `${SHORTCUTS_HEIGHT}px`;
-          if (titleCs) {
-            doc.body.style.fontSize = titleCs.fontSize;
-            doc.body.style.fontWeight = titleCs.fontWeight;
-            doc.body.style.fontFamily = titleCs.fontFamily;
-          }
+          doc.body.style.fontSize = titleCs.fontSize;
+          doc.body.style.fontWeight = titleCs.fontWeight;
+          doc.body.style.fontFamily = titleCs.fontFamily;
         }
       }
+    } catch {
+      /* sandbox / not ready */
+    }
+  };
+
+  const measureAndReport = () => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    try {
+      syncChromeToIframe();
+      const doc = iframe.contentDocument;
+      if (!doc) return;
       const bar = doc.getElementById("bar") ?? doc.body;
       if (!bar) return;
       const measured = Math.ceil(
@@ -174,12 +195,20 @@ export default function ShortcutsPluginStrip({
   };
 
   const measureTimerRef = useRef<number | null>(null);
+  const chromeTimerRef = useRef<number | null>(null);
   const scheduleMeasure = () => {
     if (measureTimerRef.current != null) return;
     measureTimerRef.current = window.setTimeout(() => {
       measureTimerRef.current = null;
       measureAndReport();
     }, 80);
+  };
+  const scheduleChromeSync = () => {
+    if (chromeTimerRef.current != null) return;
+    chromeTimerRef.current = window.setTimeout(() => {
+      chromeTimerRef.current = null;
+      syncChromeToIframe();
+    }, 16);
   };
 
   useEffect(() => {
@@ -245,6 +274,32 @@ export default function ShortcutsPluginStrip({
         window.clearTimeout(measureTimerRef.current);
         measureTimerRef.current = null;
       }
+      if (chromeTimerRef.current != null) {
+        window.clearTimeout(chromeTimerRef.current);
+        chromeTimerRef.current = null;
+      }
+    };
+  }, [pluginId, srcdoc]);
+
+  // 栏色随墙纸/沉浸变化时，Host CSS 变量会更新，但 iframe 内 --wh-chrome-fg
+  // 过去只在 measure（点插件/改 DOM）时才灌入 → 图标反色很钝。
+  useEffect(() => {
+    if (!srcdoc) return;
+    const onChrome = () => scheduleChromeSync();
+    window.addEventListener("wh-chrome-changed", onChrome);
+    const shell = document.querySelector(".shell");
+    let mo: MutationObserver | null = null;
+    if (shell && typeof MutationObserver !== "undefined") {
+      mo = new MutationObserver(onChrome);
+      mo.observe(shell, {
+        attributes: true,
+        attributeFilter: ["style", "data-chrome-left"],
+      });
+    }
+    scheduleChromeSync();
+    return () => {
+      window.removeEventListener("wh-chrome-changed", onChrome);
+      mo?.disconnect();
     };
   }, [pluginId, srcdoc]);
 

@@ -183,6 +183,8 @@
   }
 
   async function boot() {
+    // Host inject 后立刻检查 #app；先同步画壳，再 await storage。
+    render();
     await syncFromCache();
   }
 

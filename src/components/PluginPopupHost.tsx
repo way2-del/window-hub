@@ -328,6 +328,24 @@ function isPluginPainted(pluginId: string): boolean {
   return !!app && app.childElementCount > 0;
 }
 
+/**
+ * 等插件把 #app 画出来。很多 popup.js 会先 await storage 再 render，
+ * 只等 1 帧会误判失败 → 用户必须再点一次。
+ */
+async function waitForPluginPaint(
+  pluginId: string,
+  isCurrent: () => boolean,
+  budgetMs: number,
+): Promise<boolean> {
+  const start = performance.now();
+  while (performance.now() - start < budgetMs) {
+    if (!isCurrent()) return false;
+    if (isPluginPainted(pluginId)) return true;
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+  }
+  return isCurrent() && isPluginPainted(pluginId);
+}
+
 async function readPopupAssets(pluginId: string, force = false): Promise<Boot> {
   if (!force) {
     const cached = popupAssetCache.get(pluginId);
@@ -378,6 +396,12 @@ function snapOpaque() {
       root.style.transition = "";
     });
   }
+}
+
+function setLoadingMask(on: boolean) {
+  const root = document.querySelector(".plugin-popup-root") as HTMLElement | null;
+  if (!root) return;
+  root.classList.toggle("is-loading", on);
 }
 
 function stashPreferGroup(gid?: string | null) {
@@ -449,6 +473,7 @@ export default function PluginPopupHost() {
       const prefer = takePreferGroup();
       if (prefer) dispatchPreferGroup(prefer);
       setError(null);
+      setLoadingMask(false);
       snapOpaque();
       if (phaseRef.current !== "in") {
         phaseRef.current = "in";
@@ -464,6 +489,7 @@ export default function PluginPopupHost() {
       boot = await readPopupAssets(nextId, true);
     } catch (err) {
       if (seq !== loadSeqRef.current) return;
+      setLoadingMask(false);
       setError(String(err));
       activeIdRef.current = nextId;
       snapOpaque();
@@ -491,30 +517,57 @@ export default function PluginPopupHost() {
       }
       if (seq !== loadSeqRef.current) return;
 
+      // Cover clear→inject while HWND still visible (rapid click / hot-swap 卡白).
+      setLoadingMask(true);
       clearInjectedDom();
       ensureHub(nextId);
-      // pending prefer 留给 popup boot 同步读取；勿在此处 take 掉
       injectBoot(nextId, boot);
-      // 同步脚本应已 paint；若仍空（旧 WebView 缓存了未 IIFE 的失败态等）下一帧再注一次
-      if (!isPluginPainted(nextId) && seq === loadSeqRef.current) {
-        window.requestAnimationFrame(() => {
-          if (seq !== loadSeqRef.current) return;
-          if (isPluginPainted(nextId)) return;
-          try {
-            clearInjectedDom();
-            ensureHub(nextId);
-            injectBoot(nextId, boot);
-          } catch (err) {
-            setError(String(err));
-          }
-        });
+
+      const stillCurrent = () => seq === loadSeqRef.current;
+      // 先等异步 boot 画壳；勿过早 clear+重注（会 dispose 掉进行中的首次 boot）。
+      let painted = await waitForPluginPaint(nextId, stillCurrent, 700);
+      if (!stillCurrent()) {
+        setLoadingMask(false);
+        return;
       }
+      // 仍空：旧 WebView 失败态 / 脚本未挂上 → 再注一次
+      if (!painted) {
+        try {
+          clearInjectedDom();
+          ensureHub(nextId);
+          injectBoot(nextId, boot);
+        } catch (err) {
+          setLoadingMask(false);
+          setError(String(err));
+          snapOpaque();
+          phaseRef.current = "in";
+          setPhase("in");
+          void invoke("reveal_plugin_popup").catch(() => undefined);
+          return;
+        }
+        painted = await waitForPluginPaint(nextId, stillCurrent, 500);
+        if (!stillCurrent()) {
+          setLoadingMask(false);
+          return;
+        }
+      }
+
+      let failed = false;
+      if (!painted) {
+        failed = true;
+        setError("插件界面未能加载");
+      }
+      setLoadingMask(false);
       snapOpaque();
       phaseRef.current = "in";
       setPhase("in");
-      void invoke("reveal_plugin_popup").catch(() => undefined);
+      // 有内容或错误提示后再 reveal，避免把空壳顶到前台
+      if (painted || failed) {
+        void invoke("reveal_plugin_popup").catch(() => undefined);
+      }
     } catch (err) {
       if (seq !== loadSeqRef.current) return;
+      setLoadingMask(false);
       setError(String(err));
       snapOpaque();
       phaseRef.current = "in";
@@ -607,7 +660,7 @@ export default function PluginPopupHost() {
     const requestActivate = (id: string) => {
       const now = Date.now();
       // push_plugin_popup_load 会同时 CustomEvent + Tauri emit，必须合并
-      if (id === lastId && now - lastAt < 80) {
+      if (id === lastId && now - lastAt < 120) {
         if (isPluginPainted(id)) {
           const prefer = takePreferGroup();
           if (prefer) dispatchPreferGroup(prefer);

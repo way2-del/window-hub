@@ -20,9 +20,27 @@ pub struct PerfSnapshot {
     pub gpu_temp_c: Option<u8>,
     /// Dedicated GPU memory used percent (optional).
     pub gpu_mem_percent: Option<u8>,
+    /// Instant download rate (bytes/sec), all non-loopback adapters.
+    pub down_bps: u64,
+    /// Instant upload rate (bytes/sec).
+    pub up_bps: u64,
+    /// Bytes received since Window Hub started (sum of positive deltas).
+    pub session_rx_bytes: u64,
+    /// Bytes sent since Window Hub started.
+    pub session_tx_bytes: u64,
 }
 
 static CPU_TIMES: Mutex<Option<(Instant, (u64, u64))>> = Mutex::new(None);
+
+struct NetSample {
+    at: Instant,
+    rx: u64,
+    tx: u64,
+}
+
+static NET_PREV: Mutex<Option<NetSample>> = Mutex::new(None);
+static NET_SESSION: Mutex<(u64, u64)> = Mutex::new((0, 0));
+static NET_LAST: Mutex<(u64, u64, u64, u64)> = Mutex::new((0, 0, 0, 0));
 
 fn filetime_u64(ft: windows::Win32::Foundation::FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
@@ -69,6 +87,7 @@ fn cpu_percent_from_delta(prev: (u64, u64), now: (u64, u64)) -> u8 {
 }
 
 /// CPU + memory only — safe for light background loop. No temperature.
+/// Net fields are filled from the last `collect_net` sample (zeros until first net tick).
 pub fn collect_cpu_mem() -> PerfSnapshot {
     let mem = mem_percent();
     let now_times = cpu_times();
@@ -85,13 +104,104 @@ pub fn collect_cpu_mem() -> PerfSnapshot {
         }
     }
 
+    let (down_bps, up_bps, session_rx_bytes, session_tx_bytes) = *NET_LAST.lock();
+
     PerfSnapshot {
         mem_percent: mem,
         cpu_percent: cpu,
         cpu_temp_c: None,
         gpu_temp_c: None,
         gpu_mem_percent: None,
+        down_bps,
+        up_bps,
+        session_rx_bytes,
+        session_tx_bytes,
     }
+}
+
+fn iface_octets_total() -> Option<(u64, u64)> {
+    use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+
+    // IF_TYPE_SOFTWARE_LOOPBACK
+    const IF_LOOPBACK: u32 = 24;
+    // MIB_IF_ROW2.InterfaceAndOperStatusFlags.FilterInterface
+    const FLAG_FILTER_IF: u8 = 0x02;
+
+    // 不经 catch_unwind：GetIfTable2 是常规 FFI， unwind 穿过会 UB；失败用返回值判断即可
+    unsafe {
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        if GetIfTable2(&mut table).is_err() || table.is_null() {
+            return None;
+        }
+        let t = &*table;
+        let n = (t.NumEntries as usize).min(512);
+        let rows = std::slice::from_raw_parts(t.Table.as_ptr(), n);
+        let mut rx = 0u64;
+        let mut tx = 0u64;
+        for row in rows {
+            if row.Type == IF_LOOPBACK {
+                continue;
+            }
+            // 跳过 NDIS 过滤驱动层，避免同一块 WLAN 被加 5～6 次
+            if (row.InterfaceAndOperStatusFlags._bitfield & FLAG_FILTER_IF) != 0 {
+                continue;
+            }
+            if row.OperStatus != IfOperStatusUp {
+                continue;
+            }
+            rx = rx.saturating_add(row.InOctets);
+            tx = tx.saturating_add(row.OutOctets);
+        }
+        FreeMibTable(table as *const _);
+        Some((rx, tx))
+    }
+}
+
+/// Last instant rates from background `collect_net` (does not advance the sampler).
+pub fn last_net_rates() -> (u64, u64) {
+    let (down, up, _, _) = *NET_LAST.lock();
+    (down, up)
+}
+
+/// Instant rates + session totals. Call ~1 Hz from background net loop.
+pub fn collect_net() -> (u64, u64, u64, u64) {
+    let Some((rx, tx)) = iface_octets_total() else {
+        let last = *NET_LAST.lock();
+        return last;
+    };
+    let mut down_bps = 0u64;
+    let mut up_bps = 0u64;
+    let mut d_rx = 0u64;
+    let mut d_tx = 0u64;
+    {
+        let mut prev = NET_PREV.lock();
+        if let Some(p) = prev.as_ref() {
+            let dt = p.at.elapsed().as_secs_f64().max(0.05);
+            if rx >= p.rx {
+                d_rx = rx - p.rx;
+                down_bps = (d_rx as f64 / dt).round() as u64;
+            }
+            if tx >= p.tx {
+                d_tx = tx - p.tx;
+                up_bps = (d_tx as f64 / dt).round() as u64;
+            }
+        }
+        *prev = Some(NetSample {
+            at: Instant::now(),
+            rx,
+            tx,
+        });
+    }
+    let (session_rx, session_tx) = {
+        let mut s = NET_SESSION.lock();
+        s.0 = s.0.saturating_add(d_rx);
+        s.1 = s.1.saturating_add(d_tx);
+        *s
+    };
+    let out = (down_bps, up_bps, session_rx, session_tx);
+    *NET_LAST.lock() = out;
+    out
 }
 
 /// Heavy thermal probe — only from TemperatureService background thread.

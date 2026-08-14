@@ -85,12 +85,25 @@ impl WindowsService {
                     }
                 }
                 let exclude = *poller.inner.exclude.lock();
+                // list_windows already drops our PID; also strip known host labels by hwnd.
                 let mut next = list_windows(exclude);
-                // Never treat dock chrome as a running app for indicator dots
-                if let Some(dock) = app.get_webview_window("dock") {
-                    if let Ok(hwnd) = dock.hwnd() {
-                        let dh = hwnd.0 as isize;
-                        next.retain(|w| w.hwnd != dh);
+                const HOST_LABELS: &[&str] = &[
+                    "dock",
+                    "dock-glass",
+                    "dock-trigger",
+                    "dock-preview",
+                    "dock-item-menu",
+                    "main",
+                    "settings",
+                    "status-menu",
+                    "system-flyout",
+                ];
+                for label in HOST_LABELS {
+                    if let Some(w) = app.get_webview_window(label) {
+                        if let Ok(hwnd) = w.hwnd() {
+                            let h = hwnd.0 as isize;
+                            next.retain(|x| x.hwnd != h);
+                        }
                     }
                 }
 

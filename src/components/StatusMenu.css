@@ -39,7 +39,9 @@
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.01em;
-  line-height: 1;
+  /* 勿用 1：12px/700 字身会超出，g 等下降部被 overflow 裁切 */
+  line-height: 1.25;
+  padding-bottom: 1px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -57,7 +59,8 @@
   /* Match plugin popup: no CSS border/radius — DWM owns the single outer edge. */
   border: none;
   border-radius: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   /* Blur comes from Host SWCA/DWM — CSS backdrop-filter on transparent
      WebView2 cannot sample the desktop and fights the real glass. */
   font-family:

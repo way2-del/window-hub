@@ -6,11 +6,29 @@ body,
   height: 100%;
   overflow: hidden;
   background: transparent !important;
+  outline: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  accent-color: transparent;
+}
+
+html:focus,
+html:focus-visible,
+body:focus,
+body:focus-visible,
+#root:focus,
+#root:focus-visible {
+  outline: none !important;
+  background: transparent !important;
 }
 
 body.is-dock {
   color: var(--glass-fg, #f4f4f5);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: transparent !important;
 }
 
 /* Full window is transparent; glass lives on the fixed-height chrome strip. */
@@ -26,39 +44,110 @@ body.is-dock {
   border: none;
   border-radius: 0;
   background: transparent;
-  overflow: hidden;
+  overflow: visible;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  --dock-h: 56px;
+  --dock-chrome-h: 56px;
+  --dock-radius: 16px;
+  --dock-icon-slot: 40px;
+  --dock-icon: 32px;
+  --dock-gap: 5px;
+  --dock-pad-x: 8px;
 }
 
-/* Shrink-wraps the icon row; chrome matches this width only. */
+.dock-shell:focus,
+.dock-shell:focus-visible,
+.dock-shell *:focus,
+.dock-shell *:focus-visible {
+  outline: none !important;
+}
+
 .dock-stack {
   position: relative;
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  height: 60px;
+  height: var(--dock-h);
   max-width: 100%;
   overflow: visible;
 }
 
-/* Visible dock height — never grows with magnification.
-   Real acrylic comes from sibling `dock-glass` under this strip.
-   Keep CSS wash soft — a hard fill creates a black top edge. */
+/*
+  Visible dock pill — FIXED height (Apple). Magnified icons rise above the glass;
+  they are not supposed to lift the whole chrome.
+*/
 .dock-chrome {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 60px;
+  height: var(--dock-chrome-h);
   pointer-events: none;
   border: none;
   outline: none;
-  border-radius: 12px;
+  border-radius: var(--dock-radius);
   background: color-mix(
     in srgb,
-    var(--glass-panel-bg, rgba(28, 28, 30, 0.42)) 42%,
+    var(--glass-panel-bg, rgba(28, 28, 30, 0.42)) 28%,
     transparent
   );
-  box-shadow: none;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.1) inset;
+}
+
+/* Win10 compat: dock-glass is hidden — chrome must carry the full visible pill. */
+html[data-glass-compat="1"] .dock-chrome {
+  background: color-mix(
+    in srgb,
+    var(--glass-panel-bg, rgba(28, 28, 30, 0.94)) 92%,
+    transparent
+  );
+  border: none;
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.34),
+    0 1px 0 rgba(255, 255, 255, 0.12) inset;
+}
+
+html[data-glass-compat="1"][data-theme="light"] .dock-chrome {
+  background: color-mix(in srgb, rgb(245, 245, 247) 94%, transparent);
+  border: none;
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.16),
+    0 1px 0 rgba(255, 255, 255, 0.85) inset;
+}
+
+/* Win10: allow icons to rise above the fixed pill into transparent headroom.
+   Headroom size is static (set once with mag prefs) — not resized while hovering. */
+html[data-glass-compat="1"] .dock-shell {
+  overflow: visible;
+  background: transparent !important;
+}
+
+html[data-glass-compat="1"] .dock-stack {
+  overflow: visible;
+  border-radius: 0;
+  height: var(--dock-h);
+  background: transparent !important;
+}
+
+.dock-chrome::before {
+  content: "";
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: 1px;
+  height: 34%;
+  border-radius: calc(var(--dock-radius) - 2px);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.12) 0%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  pointer-events: none;
 }
 
 .dock-bar {
@@ -67,10 +156,10 @@ body.is-dock {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  gap: 6px;
-  /* Same as chrome — icons scale upward into transparent headroom above. */
-  height: 60px;
-  padding: 0 6px;
+  gap: var(--dock-gap);
+  height: var(--dock-chrome-h);
+  padding: 0 var(--dock-pad-x);
+  padding-bottom: 5px;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -82,106 +171,262 @@ body.is-dock {
 }
 
 .dock-sep {
-  width: 1px;
-  height: 28px;
-  margin-bottom: 10px;
-  background: rgba(255, 255, 255, 0.18);
+  width: 8px;
+  height: calc(var(--dock-icon-slot) * 0.55);
   flex-shrink: 0;
   align-self: flex-end;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dock-sep::after {
+  content: "";
+  width: 1px;
+  height: 100%;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.28);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.12);
 }
 
 .dock-item {
   position: relative;
-  width: 40px;
+  box-sizing: border-box;
+  width: var(--dock-icon-slot);
   height: 100%;
   padding: 0;
   border: 0;
-  background: transparent;
+  background: transparent !important;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
-  gap: 1px;
+  gap: 0;
   cursor: pointer;
   color: inherit;
   flex-shrink: 0;
-  /* Fan width grows; icon uses uniform scale only (no skew). */
-  transition: width 80ms linear;
-  margin-bottom: 0;
-  padding-bottom: 6px;
+  margin: 0;
   overflow: visible;
-  will-change: width;
+  outline: none !important;
+  box-shadow: none !important;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
-/* Hover only on the icon tile — not the running dot below. */
+.dock-item:focus,
+.dock-item:focus-visible,
+.dock-item:active,
+.dock-item:hover {
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  border-color: transparent !important;
+  filter: none !important;
+}
+
+/* Kill WebView2 / Chromium residual focus paint on the hit target. */
+.dock-item::before,
+.dock-item::after {
+  content: none !important;
+}
+
+/* Icon + indicator share one fixed-width column (mag uses side margins, not width). */
+.dock-col {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
 .dock-hit {
-  width: 40px;
-  height: 40px;
+  width: var(--dock-icon-slot);
+  height: var(--dock-icon-slot);
   display: grid;
   place-items: center;
   border-radius: 10px;
-  background: transparent;
+  background: transparent !important;
   transform: scale(var(--dock-scale, 1));
   transform-origin: bottom center;
   transition: transform 80ms linear;
   will-change: transform;
+  overflow: visible;
+  outline: none;
+  box-shadow: none !important;
 }
 
-.dock-item:hover .dock-hit,
-.dock-item.is-magnified .dock-hit {
-  background: rgba(255, 255, 255, 0.08);
+.dock-item:hover:not(.is-magnified) .dock-hit {
+  background: rgba(127, 127, 127, 0.12) !important;
 }
 
-.dock-icon {
-  width: 32px;
-  height: 32px;
-  object-fit: contain;
-  border-radius: 6px;
-  /* Source is 128–256px; let the browser downscale (sharper than upscaling 32px). */
-  image-rendering: auto;
-  -webkit-user-drag: none;
+.dock-item:active .dock-hit,
+.dock-item:focus .dock-hit,
+.dock-item:focus-visible .dock-hit {
+  background: transparent !important;
 }
 
-.dock-icon-fallback {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  display: grid;
-  place-items: center;
-  font-size: 13px;
-  font-weight: 700;
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.dock-dot {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
+.dock-foot {
+  box-sizing: border-box;
+  position: relative;
+  width: 100%;
+  height: 7px;
   flex-shrink: 0;
-  transform: scale(0);
-  background: rgba(255, 255, 255, 0.92);
-  opacity: 0;
-  transition:
-    transform 140ms ease,
-    opacity 140ms ease;
+  pointer-events: none;
 }
 
-.dock-dot.is-on {
-  transform: scale(1);
+/* Short macOS-style mark, pinned to the column center (not icon bitmap bounds). */
+.dock-indicator {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: block;
+  width: 8px;
+  height: 3px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  opacity: 0;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: none;
+  transform: translate(-50%, -50%);
+  transition: opacity 160ms ease;
+}
+
+.dock-indicator.is-bar {
+  width: 8px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.dock-indicator.is-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+}
+
+.dock-indicator.is-on {
   opacity: 1;
 }
 
-html[data-theme="light"] .dock-sep {
-  background: rgba(0, 0, 0, 0.16);
+html[data-theme="light"] .dock-indicator.is-on {
+  background: #22c55e;
+  box-shadow: 0 0 0 0.5px rgba(21, 128, 61, 0.35);
 }
 
-html[data-theme="light"] .dock-dot.is-on {
-  background: rgba(20, 20, 22, 0.85);
+html[data-theme="dark"] .dock-indicator.is-on,
+html:not([data-theme="light"]) .dock-indicator.is-on {
+  background: #34d399;
+  box-shadow: 0 0 0 0.5px rgba(16, 185, 129, 0.45);
+}
+
+.dock-item.is-bounce .dock-hit {
+  animation: dock-bounce 520ms cubic-bezier(0.22, 1.2, 0.36, 1);
+}
+
+@keyframes dock-bounce {
+  0% {
+    transform: scale(var(--dock-scale, 1)) translateY(0);
+  }
+  35% {
+    transform: scale(var(--dock-scale, 1)) translateY(-12px);
+  }
+  100% {
+    transform: scale(var(--dock-scale, 1)) translateY(0);
+  }
+}
+
+/* Fixed layout box = --dock-icon so the running mark stays centered under the glyph. */
+.dock-glyph {
+  width: var(--dock-icon);
+  height: var(--dock-icon);
+  display: grid;
+  place-items: center;
+  overflow: visible;
+  flex-shrink: 0;
+}
+
+/*
+  Draw the bitmap at max-mag CSS size, then scale it down at rest.
+  CSS transform of a 32px img looks soft; this keeps pixels sharp when magnified.
+  Layout stays inside .dock-glyph — oversized paint must not shift the column.
+*/
+.dock-icon {
+  width: calc(var(--dock-icon) * var(--dock-mag-max, 1));
+  height: calc(var(--dock-icon) * var(--dock-mag-max, 1));
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  object-position: center center;
+  border-radius: calc(7px * var(--dock-mag-max, 1));
+  image-rendering: auto;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.18));
+  transform: scale(calc(1 / var(--dock-mag-max, 1)));
+  transform-origin: center center;
+}
+
+.dock-icon-fallback,
+.dock-icon-glyph {
+  width: calc(var(--dock-icon) * var(--dock-mag-max, 1));
+  height: calc(var(--dock-icon) * var(--dock-mag-max, 1));
+  border-radius: calc(7px * var(--dock-mag-max, 1));
+  display: grid;
+  place-items: center;
+  font-size: calc(12px * var(--dock-mag-max, 1));
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  transform: scale(calc(1 / var(--dock-mag-max, 1)));
+  transform-origin: center center;
+}
+
+.dock-icon-start {
+  background: rgba(0, 120, 212, 0.22);
+  color: #60a5fa;
+}
+
+.dock-icon-trash {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(244, 244, 245, 0.92);
+}
+
+.dock-label {
+  display: none;
+}
+
+html[data-theme="light"] .dock-chrome {
+  border: none;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.14),
+    0 1px 0 rgba(255, 255, 255, 0.55) inset;
+}
+
+html[data-theme="light"] .dock-sep::after {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme="light"] .dock-icon-start {
+  background: rgba(0, 120, 212, 0.14);
+  color: #0078d4;
+}
+
+html[data-theme="light"] .dock-icon-trash {
+  color: rgba(20, 20, 22, 0.78);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .dock-item,
-  .dock-hit {
+  .dock-hit,
+  .dock-label,
+  .dock-item.is-bounce .dock-hit {
     transition: none;
+    animation: none;
   }
 }
