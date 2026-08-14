@@ -1,7 +1,8 @@
 //! Launch / focus dock items.
 
 use super::shortcut::{
-    file_name_lower, normalize_exe_key, normalize_path_key, resolve_launch_target,
+    file_name_lower, is_browser_exe_key, normalize_exe_key, normalize_path_key,
+    resolve_launch_target,
 };
 use super::DockItem;
 use crate::win32::enum_windows::{focus_or_minimize_group, list_windows, WindowInfo};
@@ -337,15 +338,39 @@ pub fn matching_windows(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowIn
     if item.kind != "app" {
         return Vec::new();
     }
+    let pin_app_id = item.app_id.trim();
+    // Edge/Chrome installed apps: match strictly by --app-id (never absorb the browser).
+    if !pin_app_id.is_empty() {
+        return windows
+            .iter()
+            .filter(|w| {
+                w.app_id
+                    .as_deref()
+                    .map(|id| id.eq_ignore_ascii_case(pin_app_id))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+    }
+
     let keys = candidate_exe_keys(item);
     if keys.is_empty() && item.real_path.is_empty() && item.launch_path.is_empty() {
         return Vec::new();
     }
+    let pin_is_browser = keys.iter().any(|k| is_browser_exe_key(k))
+        || is_browser_exe_key(&item.match_exe)
+        || is_browser_exe_key(&file_name_lower(&item.real_path));
     let reals = effective_real_paths(item);
     let suites = item_suite_families(item, &keys);
     windows
         .iter()
         .filter(|w| {
+            // Plain browser pin must not claim PWA windows (those have app_id).
+            if pin_is_browser {
+                if w.app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+                    return false;
+                }
+            }
             let exe_name = normalize_exe_key(w.exe_name.as_deref().unwrap_or(""));
             let exe_path = normalize_path_key(w.exe.as_deref().unwrap_or(""));
             if !exe_name.is_empty() && keys.iter().any(|k| k == &exe_name) {
@@ -404,7 +429,8 @@ pub fn launch_or_focus(item: &DockItem) -> Result<(), String> {
             let wins = list_windows(None);
             let mut matched = matching_windows(item, &wins);
             // Broader fallback: exe filename only (helps Cursor when pin path/heal lags).
-            if matched.is_empty() {
+            // Never for Edge/Chrome PWAs — stem match would steal the whole browser.
+            if matched.is_empty() && item.app_id.trim().is_empty() {
                 matched = windows_by_exe_stem(item, &wins);
             }
             if !matched.is_empty() {
@@ -452,19 +478,7 @@ fn windows_by_exe_stem(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowInf
 pub fn open_start_menu() -> Result<(), String> {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            keybd_event, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_LWIN,
-        };
-        unsafe {
-            keybd_event(VK_LWIN.0 as u8, 0, KEYEVENTF_EXTENDEDKEY, 0);
-            keybd_event(
-                VK_LWIN.0 as u8,
-                0,
-                KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
-                0,
-            );
-        }
-        Ok(())
+        crate::win32::input::tap_win_key()
     }
     #[cfg(not(windows))]
     {
@@ -488,7 +502,17 @@ fn launch_app(item: &DockItem) -> Result<(), String> {
     } else {
         return Err("no launch path".into());
     };
-    shell_open(path, None)
+    // `.lnk` already embeds args — ShellExecute the shortcut as-is.
+    let path_l = path.to_ascii_lowercase();
+    if path_l.ends_with(".lnk") {
+        return shell_open(path, None);
+    }
+    let params = if item.launch_args.trim().is_empty() {
+        None
+    } else {
+        Some(item.launch_args.as_str())
+    };
+    shell_open(path, params)
 }
 
 pub fn shell_open_path(path: &str) -> Result<(), String> {

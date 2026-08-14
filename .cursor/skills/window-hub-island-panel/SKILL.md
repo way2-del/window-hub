@@ -70,6 +70,9 @@ hub.panel.onLeave(cb)   // 收起一开始（摄像头等重资源必须在此 s
 |------|-----|------|
 | 天气 | `com.window-hub.weather` | `island.bar` + `island.panel`；配置在 `settings[]`；数据 `hub.storage` |
 | 镜子 | `com.window-hub.mirror` | 仅 `island.panel`；`onEnter` 开摄像头 / `onLeave` 关；iframe `allow="camera"` |
+| 歌词 / 待办 | 同上 panel | 与天气同进「下拉内容」；Host 面板顶栏可切换 tag |
+
+下拉展开时：若有 ≥2 个未 `excludeFromPullContent` 的面板插件，Host 在面板上方显示可切换 tag（不按插件 id 硬编码）。中转站等临时会话不显示 tag。
 
 示例目录：`docs/plugins/examples/{weather,mirror}/`（资源镜像 `src-tauri/resources/plugins/`）。首次启动缺失则 `ensure_official_plugins` 安装，不覆盖已装版本。
 

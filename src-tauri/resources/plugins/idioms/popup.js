@@ -8,7 +8,7 @@
   const state = {
     idiom: null,
     revealed: false,
-    showMeaningAlways: false,
+    showMeaningAlways: true,
     loading: false,
     error: "",
   };
@@ -43,15 +43,30 @@
   async function readShowMeaningAlways() {
     try {
       const s = await hub().settings.getAll();
-      return !!(s && s.showMeaningAlways);
+      // Missing key → default true（与 plugin.json default 一致）
+      if (!s || !Object.prototype.hasOwnProperty.call(s, "showMeaningAlways")) {
+        return true;
+      }
+      return !!s.showMeaningAlways;
     } catch (_) {
-      return false;
+      return true;
     }
   }
 
   async function applyRevealPref() {
     state.showMeaningAlways = await readShowMeaningAlways();
     if (state.showMeaningAlways) state.revealed = true;
+  }
+
+  async function setShowMeaningAlways(on) {
+    state.showMeaningAlways = !!on;
+    if (state.showMeaningAlways) state.revealed = true;
+    render();
+    try {
+      await hub().settings.set("showMeaningAlways", state.showMeaningAlways);
+    } catch (e) {
+      console.error("[idioms] save showMeaningAlways failed", e);
+    }
   }
 
   async function loadCache() {
@@ -147,6 +162,14 @@
           escapeHtml(meaningText) +
           "</p>") +
       "</section>" +
+      '<label class="idiom-always">' +
+      '<button type="button" class="idiom-switch' +
+      (state.showMeaningAlways ? " is-on" : "") +
+      '" data-act="toggle-always" role="switch" aria-checked="' +
+      (state.showMeaningAlways ? "true" : "false") +
+      '" aria-label="始终显示释义"></button>' +
+      "<span>始终显示释义</span>" +
+      "</label>" +
       '<div class="idiom-actions">' +
       (state.showMeaningAlways
         ? ""
@@ -168,6 +191,8 @@
         if (act === "reveal") {
           state.revealed = true;
           render();
+        } else if (act === "toggle-always") {
+          void setShowMeaningAlways(!state.showMeaningAlways);
         } else if (act === "next") {
           void refresh();
         }

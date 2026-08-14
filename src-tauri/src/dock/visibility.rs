@@ -430,6 +430,7 @@ impl DockVisibility {
         #[cfg(windows)]
         {
             use windows::Win32::Foundation::POINT;
+            use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
             use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
             let (show_desk, open_start, armed, last_at) = {
@@ -452,14 +453,17 @@ impl DockVisibility {
                 if GetCursorPos(&mut pt).is_err() {
                     return;
                 }
-                let Some((mi, scale)) = dock_monitor_info(app) else {
+                // Use the monitor under the cursor — not the dock HWND's monitor —
+                // so corners still work if the dock window is mid-create / missing.
+                let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                let Some((mi, scale)) = monitor_info_from(mon) else {
                     return;
                 };
-                if !point_in_monitor(&mi, pt.x, pt.y) {
-                    return;
-                }
 
-                let corner = ((14.0_f64 * scale).round() as i32).max(10);
+                // ~24 CSS px; slightly larger than dock reveal so corners are easy to hit.
+                let corner = ((24.0_f64 * scale).round() as i32).max(16);
+                // rcMonitor.right/bottom are exclusive; still accept == edge (Windows
+                // sometimes reports the exclusive boundary when jammed into a corner).
                 let near_bottom = pt.y >= mi.rcMonitor.bottom - corner;
                 let near_left = pt.x <= mi.rcMonitor.left + corner;
                 let near_right = pt.x >= mi.rcMonitor.right - corner;

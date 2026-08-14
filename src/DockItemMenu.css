@@ -22,10 +22,6 @@ body,
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
-.dock-item-menu-loading {
-  opacity: 0;
-}
-
 .dock-item-menu-title {
   padding: 4px 10px 5px;
   font-size: 11px;
@@ -71,6 +67,12 @@ body,
 
 .dock-item-menu-item.is-danger:hover {
   background: rgba(255, 80, 80, 0.14);
+}
+
+.dock-item-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
 }
 
 .dock-item-menu-sep {

@@ -14,6 +14,9 @@ pub struct WindowInfo {
     /// File stem of exe (e.g. wechatdevtools) for bind keys
     #[serde(default)]
     pub exe_name: Option<String>,
+    /// Edge/Chrome PWA `--app-id` (or derived from window AppUserModelID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
 }
 
 fn window_id(hwnd: isize) -> String {
@@ -55,6 +58,160 @@ fn process_exe(pid: u32) -> (Option<String>, Option<String>) {
             .map(|s| s.to_string());
         (Some(path), name)
     }
+}
+
+/// PKEY_AppUserModel_ID = {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, 5
+#[cfg(windows)]
+fn window_aumid(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
+    use windows::core::{GUID, PCWSTR};
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, PROPERTYKEY, SHGetPropertyStoreForWindow,
+    };
+
+    const PKEY_APPUSERMODEL_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3),
+        pid: 5,
+    };
+
+    unsafe {
+        let store: IPropertyStore = SHGetPropertyStoreForWindow(hwnd).ok()?;
+        let pv = store.GetValue(&PKEY_APPUSERMODEL_ID).ok()?;
+        let raw = pv.as_raw();
+        let vt = raw.Anonymous.Anonymous.vt;
+        if vt != VT_LPWSTR.0 {
+            return None;
+        }
+        let p = raw.Anonymous.Anonymous.Anonymous.pwszVal;
+        if p.is_null() {
+            return None;
+        }
+        let s = PCWSTR(p).to_string().ok()?;
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
+/// Read process command line via PEB (best-effort; fails for elevated / protected).
+#[cfg(windows)]
+fn process_command_line(pid: u32) -> Option<String> {
+    use std::mem::{size_of, zeroed};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PEB, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        RTL_USER_PROCESS_PARAMETERS,
+    };
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(
+            process: HANDLE,
+            info_class: u32,
+            info: *mut core::ffi::c_void,
+            info_len: u32,
+            ret_len: *mut u32,
+        ) -> i32;
+    }
+
+    const ProcessBasicInformation: u32 = 0;
+
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let Ok(proc) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) else {
+            return None;
+        };
+        let mut pbi: PROCESS_BASIC_INFORMATION = zeroed();
+        let mut ret = 0u32;
+        let status = NtQueryInformationProcess(
+            proc,
+            ProcessBasicInformation,
+            &mut pbi as *mut _ as *mut _,
+            size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+            &mut ret,
+        );
+        if status < 0 || pbi.PebBaseAddress.is_null() {
+            let _ = CloseHandle(proc);
+            return None;
+        }
+        let mut peb: PEB = zeroed();
+        let mut read = 0usize;
+        if ReadProcessMemory(
+            proc,
+            pbi.PebBaseAddress as *const _,
+            &mut peb as *mut _ as *mut _,
+            size_of::<PEB>(),
+            Some(&mut read),
+        )
+        .is_err()
+            || peb.ProcessParameters.is_null()
+        {
+            let _ = CloseHandle(proc);
+            return None;
+        }
+        let mut params: RTL_USER_PROCESS_PARAMETERS = zeroed();
+        if ReadProcessMemory(
+            proc,
+            peb.ProcessParameters as *const _,
+            &mut params as *mut _ as *mut _,
+            size_of::<RTL_USER_PROCESS_PARAMETERS>(),
+            Some(&mut read),
+        )
+        .is_err()
+        {
+            let _ = CloseHandle(proc);
+            return None;
+        }
+        let byte_len = params.CommandLine.Length as usize;
+        if byte_len == 0 || params.CommandLine.Buffer.0.is_null() {
+            let _ = CloseHandle(proc);
+            return None;
+        }
+        let mut buf = vec![0u16; (byte_len / 2).saturating_add(1)];
+        if ReadProcessMemory(
+            proc,
+            params.CommandLine.Buffer.0 as *const _,
+            buf.as_mut_ptr() as *mut _,
+            byte_len,
+            Some(&mut read),
+        )
+        .is_err()
+        {
+            let _ = CloseHandle(proc);
+            return None;
+        }
+        let _ = CloseHandle(proc);
+        let n = (byte_len / 2).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+fn resolve_window_app_id(
+    hwnd: windows::Win32::Foundation::HWND,
+    pid: u32,
+    exe_name: Option<&str>,
+    cmdline_cache: &mut std::collections::HashMap<u32, Option<String>>,
+) -> Option<String> {
+    use crate::dock::shortcut::{
+        is_browser_exe_key, normalize_window_app_id, parse_browser_app_id,
+    };
+
+    let exe = exe_name.unwrap_or("");
+    if !is_browser_exe_key(exe) {
+        return None;
+    }
+    let cmdline = cmdline_cache
+        .entry(pid)
+        .or_insert_with(|| process_command_line(pid))
+        .as_deref();
+    let from_cmd = cmdline.and_then(parse_browser_app_id);
+    let aumid = window_aumid(hwnd);
+    normalize_window_app_id(from_cmd.as_deref(), aumid.as_deref())
 }
 
 /// Shell / desktop HWNDs that are visible but are not real taskbar apps.
@@ -271,6 +428,7 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
                 pid,
                 exe,
                 exe_name,
+                app_id: None,
             });
         }
         BOOL(1)
@@ -279,7 +437,17 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
     unsafe {
         let _ = EnumWindows(Some(enum_cb), LPARAM(ctx_ptr as isize));
         let ctx = Box::from_raw(ctx_ptr);
-        ctx.out.into_inner().unwrap_or_default()
+        let mut out = ctx.out.into_inner().unwrap_or_default();
+        let mut cmdline_cache = std::collections::HashMap::<u32, Option<String>>::new();
+        for w in &mut out {
+            w.app_id = resolve_window_app_id(
+                HWND(w.hwnd as _),
+                w.pid,
+                w.exe_name.as_deref(),
+                &mut cmdline_cache,
+            );
+        }
+        out
     }
 }
 
@@ -377,20 +545,198 @@ pub fn focus_window(hwnd: isize) -> Result<(), String> {
     }
 }
 
+/// Minimize like the taskbar. Electron/Chromium often no-ops `ShowWindow(SW_MINIMIZE)`;
+/// `WM_SYSCOMMAND/SC_MINIMIZE` matches the title-bar minimize path.
+#[cfg(windows)]
+fn minimize_hwnd(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsIconic, IsWindow, PostMessageW, SendMessageW, ShowWindow, SC_MINIMIZE, SW_MINIMIZE,
+        WM_SYSCOMMAND,
+    };
+
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        if !IsWindow(h).as_bool() || IsIconic(h).as_bool() {
+            return false;
+        }
+        let _ = SendMessageW(
+            h,
+            WM_SYSCOMMAND,
+            WPARAM(SC_MINIMIZE as usize),
+            LPARAM(0),
+        );
+        if IsIconic(h).as_bool() {
+            return true;
+        }
+        let _ = PostMessageW(
+            h,
+            WM_SYSCOMMAND,
+            WPARAM(SC_MINIMIZE as usize),
+            LPARAM(0),
+        );
+        let _ = ShowWindow(h, SW_MINIMIZE);
+        // Do not require IsIconic yet — Electron may apply SC_MINIMIZE asynchronously;
+        // falling through to focus_window would undo the minimize.
+        true
+    }
+}
+
+/// True when `hwnd` is a visible, non-iconic top-level that is safe to minimize.
+#[cfg(windows)]
+fn is_minimizable_top_level(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GetWindowLongW, IsIconic, IsWindow, IsWindowVisible, GW_OWNER, GWL_EXSTYLE,
+        WS_EX_TOOLWINDOW,
+    };
+    unsafe {
+        if !IsWindow(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return false;
+        }
+        if !IsWindowVisible(hwnd).as_bool() {
+            return false;
+        }
+        if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
+            if !owner.0.is_null() {
+                return false;
+            }
+        }
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_TOOLWINDOW.0 != 0 {
+            return false;
+        }
+        if is_dwm_cloaked(hwnd) {
+            return false;
+        }
+        has_nonzero_client_area(hwnd)
+    }
+}
+
+/// Largest visible non-iconic candidate (stable pick when FG maps to the app but not a HWND).
+#[cfg(windows)]
+fn best_minimizable_candidate(candidates: &[isize]) -> Option<isize> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    let mut best: Option<(isize, i64)> = None;
+    unsafe {
+        for &raw in candidates {
+            let h = HWND(raw as *mut _);
+            if !is_minimizable_top_level(h) {
+                continue;
+            }
+            let mut rc = RECT::default();
+            let area = if GetClientRect(h, &mut rc).is_ok() {
+                (rc.right - rc.left) as i64 * (rc.bottom - rc.top) as i64
+            } else {
+                0
+            };
+            if best.map(|(_, a)| area > a).unwrap_or(true) {
+                best = Some((raw, area));
+            }
+        }
+    }
+    best.map(|(h, _)| h)
+}
+
+/// Topmost taskbar-style window, skipping Host/Dock PIDs (Z-order walk).
+#[cfg(windows)]
+fn topmost_taskbar_hwnd(skip_pids: &[u32]) -> Option<isize> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetTopWindow, GetWindow, GetWindowThreadProcessId, GW_HWNDNEXT,
+    };
+
+    unsafe {
+        let mut cur = GetTopWindow(HWND::default()).unwrap_or_default();
+        for _ in 0..512 {
+            if cur.0.is_null() {
+                break;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(cur, Some(&mut pid));
+            if pid != 0
+                && !skip_pids.contains(&pid)
+                && is_minimizable_top_level(cur)
+            {
+                let mut class_buf = [0u16; 256];
+                let cn = GetClassNameW(cur, &mut class_buf);
+                let class_name = String::from_utf16_lossy(&class_buf[..cn as usize]);
+                if !is_shell_noise_class(&class_name) {
+                    let (_, exe_name) = process_exe(pid);
+                    if !is_explorer_shell_only(&class_name, exe_name.as_deref())
+                        && !is_suite_helper_exe(exe_name.as_deref())
+                    {
+                        return Some(cur.0 as isize);
+                    }
+                }
+            }
+            cur = GetWindow(cur, GW_HWNDNEXT).unwrap_or_default();
+        }
+    }
+    None
+}
+
+/// Whether FG (or its process image) belongs to the candidate dock app.
+#[cfg(windows)]
+fn foreground_belongs_to_candidates(
+    candidates: &[isize],
+    fg_pid: u32,
+    fg_exe: Option<&str>,
+) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+
+    if fg_pid == 0 {
+        return false;
+    }
+    let fg_exe_l = fg_exe.map(|s| s.to_ascii_lowercase());
+    unsafe {
+        for &c in candidates {
+            let h = HWND(c as *mut _);
+            if !IsWindow(h).as_bool() {
+                continue;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid == fg_pid {
+                return true;
+            }
+            if let Some(ref want) = fg_exe_l {
+                if !want.is_empty() {
+                    let (_, name) = process_exe(pid);
+                    if name
+                        .as_deref()
+                        .map(|n| n.eq_ignore_ascii_case(want))
+                        .unwrap_or(false)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Map the OS foreground window onto a dock candidate HWND to minimize.
 ///
 /// Electron / Cursor often reports FG as a child or owned popup that never
 /// appears in [`list_windows`]. Bare same-PID → "first pin window" used to
-/// false-minimize; we only minimize the actual FG top-level (or its owner in
-/// the candidate set).
+/// false-minimize; we only minimize the actual FG top-level, its owner in the
+/// candidate set, or (when FG is Dock itself) the topmost Z-order candidate.
 #[cfg(windows)]
 fn minimize_target_for_foreground(candidates: &[isize]) -> Option<isize> {
     use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetAncestor, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowThreadProcessId,
-        IsIconic, IsWindow, IsWindowVisible, GA_ROOT, GA_ROOTOWNER, GW_OWNER, GWL_EXSTYLE,
-        WS_EX_TOOLWINDOW,
+        GetAncestor, GetForegroundWindow, GetWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
+        GA_ROOT, GA_ROOTOWNER, GW_OWNER,
     };
+
+    if candidates.is_empty() {
+        return None;
+    }
 
     unsafe {
         let fg = GetForegroundWindow();
@@ -438,28 +784,30 @@ fn minimize_target_for_foreground(candidates: &[isize]) -> Option<isize> {
             cur = owner;
         }
 
-        // Same-PID fallback: FG belongs to this app, but HWND wasn't enumerated
-        // (Electron helper chrome). Minimize the FG top-level itself — never a
-        // random sibling pin window (that was the Cursor false-minimize bug).
         let mut fg_pid = 0u32;
         GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-        if fg_pid == 0 {
+        let self_pid = GetCurrentProcessId();
+        let (_, fg_exe) = process_exe(fg_pid);
+
+        // Dock is WS_EX_NOACTIVATE, but WebView2 can still briefly become FG on click.
+        // Then use Z-order: if the topmost real window is this dock app → minimize it.
+        if fg_pid != 0 && fg_pid == self_pid {
+            if let Some(top) = topmost_taskbar_hwnd(&[self_pid]) {
+                if let Some(h) = pick(top) {
+                    return Some(h);
+                }
+                // Topmost shares exe with candidates (Electron multi-PID).
+                let mut top_pid = 0u32;
+                GetWindowThreadProcessId(HWND(top as *mut _), Some(&mut top_pid));
+                let (_, top_exe) = process_exe(top_pid);
+                if foreground_belongs_to_candidates(candidates, top_pid, top_exe.as_deref()) {
+                    return best_minimizable_candidate(candidates);
+                }
+            }
             return None;
         }
-        let mut group_has_pid = false;
-        for &c in candidates {
-            let h = HWND(c as *mut _);
-            if !IsWindow(h).as_bool() {
-                continue;
-            }
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(h, Some(&mut pid));
-            if pid == fg_pid {
-                group_has_pid = true;
-                break;
-            }
-        }
-        if !group_has_pid {
+
+        if !foreground_belongs_to_candidates(candidates, fg_pid, fg_exe.as_deref()) {
             return None;
         }
 
@@ -471,30 +819,21 @@ fn minimize_target_for_foreground(candidates: &[isize]) -> Option<isize> {
         if IsIconic(top).as_bool() {
             return None;
         }
-        // Ignore invisible / tool / empty helpers that can linger as FG.
-        if !IsWindowVisible(top).as_bool() {
-            return None;
-        }
-        let ex = GetWindowLongW(top, GWL_EXSTYLE) as u32;
-        if ex & WS_EX_TOOLWINDOW.0 != 0 {
-            return None;
-        }
-        if is_dwm_cloaked(top) {
-            return None;
-        }
-        if !has_nonzero_client_area(top) {
-            return None;
-        }
 
         let top_raw = top.0 as isize;
-        if candidates.contains(&top_raw) {
+        if candidates.contains(&top_raw) && !IsIconic(top).as_bool() {
             return Some(top_raw);
         }
-        // Prefer an owned candidate when FG is a non-enumerated popup.
         if let Some(h) = pick(owner_raw) {
             return Some(h);
         }
-        Some(top_raw)
+        // FG helper chrome (tool / zero-client / cloaked): minimize the real candidate.
+        if is_minimizable_top_level(top) {
+            // Prefer minimizing the actual FG top-level when it is a real window
+            // (even if EnumWindows dropped it) — avoids picking a sibling.
+            return Some(top_raw);
+        }
+        best_minimizable_candidate(candidates)
     }
 }
 
@@ -503,7 +842,7 @@ fn minimize_target_for_foreground(candidates: &[isize]) -> Option<isize> {
 #[cfg(windows)]
 pub fn focus_or_minimize_window(hwnd: isize) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, ShowWindow, SW_MINIMIZE};
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
 
     unsafe {
         let h = HWND(hwnd as *mut _);
@@ -515,9 +854,7 @@ pub fn focus_or_minimize_window(hwnd: isize) -> Result<(), String> {
         }
 
         if let Some(target) = minimize_target_for_foreground(&[hwnd]) {
-            let th = HWND(target as *mut _);
-            if IsWindow(th).as_bool() && !IsIconic(th).as_bool() {
-                let _ = ShowWindow(th, SW_MINIMIZE);
+            if minimize_hwnd(target) {
                 return Ok(());
             }
         }
@@ -529,7 +866,7 @@ pub fn focus_or_minimize_window(hwnd: isize) -> Result<(), String> {
 #[cfg(windows)]
 pub fn focus_or_minimize_group(hwnds: &[isize]) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, ShowWindow, SW_MINIMIZE};
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
 
     if hwnds.is_empty() {
         return Err("no windows".into());
@@ -537,9 +874,7 @@ pub fn focus_or_minimize_group(hwnds: &[isize]) -> Result<(), String> {
 
     unsafe {
         if let Some(target) = minimize_target_for_foreground(hwnds) {
-            let h = HWND(target as *mut _);
-            if IsWindow(h).as_bool() && !IsIconic(h).as_bool() {
-                let _ = ShowWindow(h, SW_MINIMIZE);
+            if minimize_hwnd(target) {
                 return Ok(());
             }
         }

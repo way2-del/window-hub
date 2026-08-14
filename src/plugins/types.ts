@@ -123,4 +123,6 @@ export type IslandBarState = {
   pluginId: string;
   text: string;
   title?: string;
+  /** data-URL image (desktop lyric mirror, etc.) */
+  image?: string;
 };

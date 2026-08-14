@@ -1,7 +1,6 @@
 (function () {
-  const HOLD_MS = 900;
-  let held = { songKey: "", lyric: "", at: 0 };
   let busy = false;
+  let lastImg = "";
 
   function hub() {
     if (!window.hub) throw new Error("window.hub missing");
@@ -12,46 +11,55 @@
     const songEl = document.getElementById("song");
     const lineEl = document.getElementById("line");
     const metaEl = document.getElementById("meta");
-    if (!songEl || !lineEl || !metaEl) return;
+    const wrap = document.getElementById("mirror-wrap");
+    const img = document.getElementById("mirror");
+    if (!songEl || !lineEl || !metaEl || !wrap || !img) return;
+
     if (!now || !now.active) {
-      held = { songKey: "", lyric: "", at: 0 };
       songEl.textContent = "未检测到网易云";
       lineEl.textContent = "请打开网易云音乐并开启桌面歌词";
+      lineEl.hidden = false;
+      wrap.hidden = true;
+      img.removeAttribute("src");
+      lastImg = "";
       metaEl.textContent = "";
       return;
     }
+
     const desk = now.desktopLyrics === true;
     const title = String(now.title || "").trim();
     const artist = String(now.artist || "").trim();
-    const songKey = title + "\0" + artist;
-    if (held.songKey && held.songKey !== songKey) {
-      held = { songKey: "", lyric: "", at: 0 };
-    }
     songEl.textContent = [title, artist].filter(Boolean).join(" · ") || "网易云 · 播放中";
 
     if (!desk) {
-      held = { songKey: "", lyric: "", at: 0 };
+      lineEl.hidden = false;
       lineEl.textContent = "未开启桌面歌词（请在网易云打开）";
+      wrap.hidden = true;
+      img.removeAttribute("src");
+      lastImg = "";
       metaEl.textContent = "桌面歌词：关 · 关后岛栏不显示歌词";
       return;
     }
 
-    let lyric = String(now.lyric || "").trim();
-    if (lyric) {
-      held = { songKey: songKey, lyric: lyric, at: Date.now() };
-    } else if (
-      held.lyric &&
-      held.songKey === songKey &&
-      Date.now() - held.at < HOLD_MS
-    ) {
-      lyric = held.lyric;
+    const image = String(now.lyricImage || "").trim();
+    if (image) {
+      if (image !== lastImg) {
+        img.src = image;
+        lastImg = image;
+      }
+      wrap.hidden = false;
+      lineEl.hidden = true;
+      metaEl.textContent = "来源：桌面歌词镜像 · 与桌面同步";
+      return;
     }
 
-    lineEl.textContent = lyric ? lyric : "桌面歌词已开 · 正在同步";
-    const bits = [];
-    if (now.source) bits.push("来源：" + now.source);
-    bits.push("桌面歌词：开");
-    if (lyric && !String(now.lyric || "").trim()) bits.push("保持上一句");
+    wrap.hidden = true;
+    img.removeAttribute("src");
+    lastImg = "";
+    lineEl.hidden = false;
+    lineEl.textContent = "正在捕捉桌面歌词（建议横向单行）";
+    const bits = ["桌面歌词：开"];
+    if (now.source) bits.unshift("来源：" + now.source);
     metaEl.textContent = bits.join(" · ");
   }
 
@@ -74,10 +82,34 @@
     }
   }
 
+  async function openNetease() {
+    if (busy) return;
+    const h = hub();
+    if (!h.media || !h.media.openNetease) {
+      console.warn("[lyrics panel] hub.media.openNetease missing");
+      return;
+    }
+    busy = true;
+    try {
+      await h.media.openNetease();
+    } catch (err) {
+      console.warn("[lyrics panel] openNetease", err);
+      const metaEl = document.getElementById("meta");
+      if (metaEl) {
+        metaEl.textContent = String(err && err.message ? err.message : err);
+      }
+    } finally {
+      setTimeout(function () {
+        busy = false;
+      }, 280);
+    }
+  }
+
   function bindTransport() {
     const prev = document.getElementById("btn-prev");
     const toggle = document.getElementById("btn-toggle");
     const next = document.getElementById("btn-next");
+    const openBtn = document.getElementById("btn-open");
     if (prev) {
       prev.addEventListener("click", function (e) {
         e.preventDefault();
@@ -97,6 +129,13 @@
         e.preventDefault();
         e.stopPropagation();
         void transport("next");
+      });
+    }
+    if (openBtn) {
+      openBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        void openNetease();
       });
     }
   }
@@ -120,7 +159,7 @@
     let timer = 0;
     function arm() {
       if (timer) clearTimeout(timer);
-      const ms = document.hidden ? 2500 : 800;
+      const ms = document.hidden ? 2000 : 280;
       timer = setTimeout(function () {
         void tick().finally(arm);
       }, ms);

@@ -92,21 +92,12 @@ impl Default for SearchFilter {
 }
 
 impl SearchFilter {
-    /// Build Everything search modifiers (path / date / size). Extensions handled separately.
+    /// Date / size modifiers appended to the search text. Path is applied via es `-path`.
     pub fn to_everything_suffix(&self) -> String {
         if !self.enabled {
             return String::new();
         }
         let mut parts: Vec<String> = Vec::new();
-        let path = self.path.trim();
-        if !path.is_empty() {
-            let p = path.trim_end_matches(['/', '\\']);
-            if self.include_subfolders {
-                parts.push(format!("\"{p}\""));
-            } else {
-                parts.push(format!("parent:\"{p}\""));
-            }
-        }
         match self.modified.as_str() {
             "today" => parts.push("dm:today".into()),
             "yesterday" => parts.push("dm:yesterday".into()),
@@ -135,6 +126,18 @@ impl SearchFilter {
         } else {
             format!(" {}", parts.join(" "))
         }
+    }
+
+    /// Folder scope for es.exe (`-path` / `-parent`). Empty = no restriction.
+    pub fn path_scope(&self) -> Option<(bool, String)> {
+        if !self.enabled {
+            return None;
+        }
+        let p = self.path.trim().trim_end_matches(['/', '\\']).to_string();
+        if p.is_empty() {
+            return None;
+        }
+        Some((self.include_subfolders, p))
     }
 
     pub fn collected_exts(&self) -> Vec<String> {
@@ -230,6 +233,7 @@ fn default_tabs() -> Vec<SousouTab> {
     vec![
         tab("home", "主页", "home"),
         tab("apps", "应用", "apps"),
+        tab("game", "游戏", "game"),
         tab("code", "编程", "code"),
         tab("work", "工作", "work"),
         tab("notes", "笔记", "notes"),

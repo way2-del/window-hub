@@ -28,6 +28,7 @@ const ALLOWED_CMDS = new Set([
   "hub_island_clear_bar",
   "hub_netease_now_playing",
   "hub_media_transport",
+  "hub_media_open_netease",
   "hub_panel_open_session",
   "hub_panel_close_session",
   "hub_windows_list",
@@ -144,7 +145,8 @@ export function panelHubBootstrapScript(pluginId: string): string {
       setBar: function (opts) {
         return invoke("hub_island_set_bar", withPlugin({
           text: (opts && opts.text) || "",
-          title: opts && opts.title
+          title: opts && opts.title,
+          image: opts && opts.image
         }));
       },
       clearBar: function () { return invoke("hub_island_clear_bar", withPlugin()); }
@@ -155,6 +157,9 @@ export function panelHubBootstrapScript(pluginId: string): string {
       },
       transport: function (action) {
         return invoke("hub_media_transport", withPlugin({ action: String(action || "") }));
+      },
+      openNetease: function () {
+        return invoke("hub_media_open_netease", withPlugin());
       }
     },
     fetch: function (url, opts) {

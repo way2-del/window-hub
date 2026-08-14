@@ -110,6 +110,8 @@ pub fn parse_dockico_text(text: &str) -> Result<Vec<DockItem>, String> {
                 virtual_path: String::new(),
                 icon_path: String::new(),
                 uwp: false,
+                launch_args: String::new(),
+                app_id: String::new(),
                 icon_png: None,
             });
             continue;
@@ -162,6 +164,8 @@ pub fn parse_dockico_text(text: &str) -> Result<Vec<DockItem>, String> {
             virtual_path: virtualpath,
             icon_path: icopath,
             uwp,
+            launch_args: String::new(),
+            app_id: String::new(),
             icon_png: None,
         });
     }

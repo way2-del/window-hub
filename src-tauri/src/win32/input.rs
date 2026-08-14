@@ -289,6 +289,95 @@ pub fn media_transport(_action: &str) -> Result<(), String> {
     Err("Windows only".into())
 }
 
+/// Tap Left Win — opens the Start menu (more reliable than keybd_event).
+#[cfg(windows)]
+pub fn tap_win_key() -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        VK_LWIN,
+    };
+
+    unsafe fn stroke(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        Default::default()
+                    },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    unsafe {
+        let inputs = [stroke(VK_LWIN, false), stroke(VK_LWIN, true)];
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if sent as usize != inputs.len() {
+            return Err(format!("SendInput Win failed ({sent}/{})", inputs.len()));
+        }
+    }
+    Ok(())
+}
+
+/// Win+D — toggle show desktop.
+#[cfg(windows)]
+pub fn chord_win_d() -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_D,
+        VK_LWIN,
+    };
+
+    unsafe fn stroke(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        Default::default()
+                    },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    unsafe {
+        let inputs = [
+            stroke(VK_LWIN, false),
+            stroke(VK_D, false),
+            stroke(VK_D, true),
+            stroke(VK_LWIN, true),
+        ];
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if sent as usize != inputs.len() {
+            return Err(format!("SendInput Win+D failed ({sent}/{})", inputs.len()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn tap_win_key() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn chord_win_d() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
 #[cfg(not(windows))]
 pub fn open_notification_center() -> Result<(), String> {
     Err("Windows only".into())

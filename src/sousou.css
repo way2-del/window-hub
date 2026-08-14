@@ -363,13 +363,21 @@ body.is-sousou {
   flex: 1;
 }
 
-/* —— 内容区 —— */
+/* —— 内容区（滚动）+ 浮动 FAB —— */
+.ss-body-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .ss-body {
   position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px 18px;
+  padding: 14px 16px 72px;
   background: transparent;
 }
 
@@ -405,6 +413,7 @@ body.is-sousou {
   min-height: 200px;
   max-height: 340px;
   overflow: auto;
+  padding-bottom: 8px;
 }
 
 .ss-card.tools {
@@ -650,11 +659,11 @@ html.ss-reordering * {
   color: var(--ss-text);
 }
 
-/* —— FAB —— */
+/* —— FAB：相对 body-wrap 浮动，不随内容滚动 —— */
 .ss-fab {
   position: absolute;
-  right: 22px;
-  bottom: 18px;
+  right: 20px;
+  bottom: 16px;
   width: 48px;
   height: 48px;
   border: none;
@@ -666,7 +675,8 @@ html.ss-reordering * {
   cursor: pointer;
   box-shadow: 0 8px 20px rgba(62, 207, 142, 0.36);
   transition: filter 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
-  z-index: 5;
+  z-index: 25;
+  pointer-events: auto;
 }
 
 .ss-fab:hover {
@@ -784,6 +794,10 @@ html.ss-reordering * {
   line-height: 1.55;
   border-radius: 12px;
   background: linear-gradient(180deg, #fafbfc 0%, transparent 100%);
+}
+
+.ss-empty-muted {
+  opacity: 0.55;
 }
 
 .ss-banner {
@@ -917,7 +931,7 @@ html.ss-reordering * {
 .ss-toast {
   position: absolute;
   left: 50%;
-  bottom: 56px;
+  bottom: 20px;
   transform: translateX(-50%);
   padding: 8px 14px;
   background: rgba(30, 30, 30, 0.88);
@@ -925,6 +939,7 @@ html.ss-reordering * {
   border-radius: 8px;
   font-size: 12px;
   z-index: 30;
+  pointer-events: none;
 }
 
 .ss-filter {

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./sousou.css";
 
@@ -143,6 +145,48 @@ function iconSrc(png?: string | null) {
 
 /** Crop transparent / solid-color margins so logos fill the tile (WeChat IME etc.). */
 const trimIconCache = new Map<string, string>();
+/** path → PNG base64 from sousou_resolve_icon (avoids IPC skeleton on remount). */
+const iconResolveCache = new Map<string, string>();
+/** folder path → last listed entries (instant tab switch). */
+const dirListCache = new Map<string, DirEntry[]>();
+let iconCacheEpoch = 0;
+const iconCacheEpochSubs = new Set<() => void>();
+
+function dirCacheKey(path: string) {
+  return path.trim().replace(/[/\\]+$/, "").toLowerCase();
+}
+
+function rememberIcon(path: string, b64: string | null | undefined) {
+  const key = path.trim();
+  if (!key || !b64) return;
+  iconResolveCache.set(key, b64);
+}
+
+function seedIconsFromEntries(entries: { path?: string; iconPng?: string | null }[]) {
+  for (const e of entries) {
+    if (e.path && e.iconPng) rememberIcon(e.path, e.iconPng);
+  }
+}
+
+function clearSousouIconFrontendCache() {
+  trimIconCache.clear();
+  iconResolveCache.clear();
+  dirListCache.clear();
+  iconCacheEpoch += 1;
+  iconCacheEpochSubs.forEach((fn) => fn());
+}
+
+function useIconCacheEpoch() {
+  const [epoch, setEpoch] = useState(iconCacheEpoch);
+  useEffect(() => {
+    const fn = () => setEpoch(iconCacheEpoch);
+    iconCacheEpochSubs.add(fn);
+    return () => {
+      iconCacheEpochSubs.delete(fn);
+    };
+  }, []);
+  return epoch;
+}
 
 function trimIconDataUrl(src: string): Promise<string> {
   const hit = trimIconCache.get(src);
@@ -277,6 +321,19 @@ function formatSize(n?: number | null) {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+function pickIconB64(pathKey: string, png?: string | null): string | null {
+  if (pathKey) {
+    const hit = iconResolveCache.get(pathKey);
+    if (hit) return hit;
+    if (png) {
+      rememberIcon(pathKey, png);
+      return png;
+    }
+    return null;
+  }
+  return png || null;
+}
+
 function Icon({
   png,
   name,
@@ -289,31 +346,51 @@ function Icon({
   className?: string;
 }) {
   const pathKey = (path || "").trim();
-  const [resolved, setResolved] = useState<string | null>(null);
-  const [display, setDisplay] = useState<string | null>(null);
+  const cacheEpoch = useIconCacheEpoch();
+  const [resolved, setResolved] = useState<string | null>(() => pickIconB64(pathKey, png));
+  const [display, setDisplay] = useState<string | null>(() => {
+    const raw = iconSrc(pickIconB64(pathKey, png));
+    if (!raw) return null;
+    // Prefer trimmed; otherwise show raw immediately (no skeleton while canvas trims).
+    return trimIconCache.get(raw) ?? raw;
+  });
 
   useEffect(() => {
+    const seeded = pickIconB64(pathKey, png);
+    if (seeded) {
+      setResolved(seeded);
+      return;
+    }
+    if (!pathKey) {
+      setResolved(null);
+      return;
+    }
     setResolved(null);
-    setDisplay(null);
-    if (!pathKey) return;
     let cancelled = false;
-    // Always re-resolve via path. Never flash cached low-res iconPng first.
     void invoke<string | null>("sousou_resolve_icon", { path: pathKey })
       .then((b64) => {
-        if (!cancelled && b64) setResolved(b64);
+        if (cancelled || !b64) return;
+        rememberIcon(pathKey, b64);
+        setResolved(b64);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [pathKey]);
+  }, [pathKey, png, cacheEpoch]);
 
   useEffect(() => {
-    const raw = iconSrc(resolved || (!pathKey ? png : null));
+    const raw = iconSrc(resolved);
     if (!raw) {
       setDisplay(null);
       return;
     }
+    const trimHit = trimIconCache.get(raw);
+    if (trimHit) {
+      setDisplay(trimHit);
+      return;
+    }
+    setDisplay(raw);
     let cancelled = false;
     void trimIconDataUrl(raw).then((t) => {
       if (!cancelled) setDisplay(t);
@@ -321,7 +398,7 @@ function Icon({
     return () => {
       cancelled = true;
     };
-  }, [resolved, png, pathKey]);
+  }, [resolved, cacheEpoch]);
 
   if (display) {
     return (
@@ -334,9 +411,7 @@ function Icon({
       />
     );
   }
-  if (pathKey || png) {
-    return <div className={`ss-item-icon ss-item-icon-skel ${className || ""}`} aria-hidden />;
-  }
+  // Prefer letter tile over shimmer while IPC runs — less "loading" flash.
   return (
     <div className={`ss-item-icon fallback ${className || ""}`}>
       {(name || "?").slice(0, 1)}
@@ -355,12 +430,14 @@ const TAB_ICON_PRESETS: { id: string; label: string }[] = [
   { id: "tools", label: "工具" },
   { id: "shop", label: "电商" },
   { id: "community", label: "社区" },
+  { id: "game", label: "游戏" },
   { id: "none", label: "无" },
 ];
 
 const DEFAULT_TAB_ICON: Record<string, string> = {
   home: "home",
   apps: "apps",
+  game: "game",
   code: "code",
   work: "work",
   notes: "notes",
@@ -381,6 +458,7 @@ const TAB_ICON_COLOR: Record<string, string> = {
   tools: "#64748b",
   shop: "#f43f5e",
   community: "#ec4899",
+  game: "#a855f7",
 };
 
 function tabIconColor(icon?: string) {
@@ -498,6 +576,18 @@ function TabGlyph({ icon, colored = true }: { icon?: string; colored?: boolean }
           <path d="M14 14.5c1.8 0 3.4.8 4.2 2.5" />
         </svg>
       );
+    case "game":
+      return (
+        <svg {...common}>
+          <path
+            d="M6.5 9.5h11c1.8 0 3.2 1.5 3 3.3l-.6 4.2a2.6 2.6 0 0 1-2.6 2.2h-1.4c-.6 0-1.1-.3-1.4-.8l-.7-1.1H9.2l-.7 1.1c-.3.5-.8.8-1.4.8H5.7a2.6 2.6 0 0 1-2.6-2.2l-.6-4.2c-.2-1.8 1.2-3.3 3-3.3z"
+            fill={`${color}18`}
+          />
+          <path d="M8 13.2v3M6.5 14.7h3" />
+          <circle cx="15.2" cy="13.4" r="0.9" fill={color} stroke="none" />
+          <circle cx="17.4" cy="15.2" r="0.9" fill={color} stroke="none" />
+        </svg>
+      );
     default:
       return (
         <svg {...common}>
@@ -534,6 +624,10 @@ export default function SousouApp() {
   const [urlDraft, setUrlDraft] = useState("");
   const [toast, setToast] = useState("");
   const [evMsg, setEvMsg] = useState("");
+  const [iconCacheStats, setIconCacheStats] = useState<{
+    entries: number;
+    bytes: number;
+  } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<number | null>(null);
 
@@ -541,6 +635,23 @@ export default function SousouApp() {
     setToast(msg);
     window.setTimeout(() => setToast(""), 2200);
   };
+
+  const refreshIconCacheStats = useCallback(() => {
+    void invoke<{ entries: number; bytes: number }>("sousou_icon_cache_stats")
+      .then(setIconCacheStats)
+      .catch(() => undefined);
+  }, []);
+
+  const clearIconCache = useCallback(async () => {
+    try {
+      const ic = await invoke<{ entries: number; bytes: number }>("sousou_clear_icon_cache");
+      clearSousouIconFrontendCache();
+      setIconCacheStats(ic);
+      showToast("已清除图标缓存");
+    } catch (e) {
+      showToast(String(e));
+    }
+  }, []);
 
   const persist = async (next: SousouConfig) => {
     const saved = await invoke<SousouConfig>("sousou_set_config", { prefs: next });
@@ -563,6 +674,8 @@ export default function SousouApp() {
           }
         }
         setCfg(ensureTabIcons(c));
+        seedIconsFromEntries(c.homeApps || []);
+        for (const t of c.tabs || []) seedIconsFromEntries(t.items || []);
         setFilter({ ...(c.searchFilter || defaultFilter()) });
         setActiveTab(c.activeTabId || "home");
         requestAnimationFrame(() => inputRef.current?.focus());
@@ -577,12 +690,22 @@ export default function SousouApp() {
           limit: 18,
           withIcons: false,
         })
-          .then((r) => setRecent(r))
+          .then((r) => {
+            setRecent(
+              r.map((e) => ({
+                ...e,
+                iconPng: e.iconPng ?? iconResolveCache.get(e.path.trim()) ?? null,
+              })),
+            );
+          })
           .then(() =>
             invoke<RecentEntry[]>("sousou_list_recent", {
               limit: 18,
               withIcons: true,
-            }).then(setRecent),
+            }).then((r) => {
+              seedIconsFromEntries(r);
+              setRecent(r);
+            }),
           )
           .catch(() => undefined);
       } catch (e) {
@@ -591,6 +714,65 @@ export default function SousouApp() {
     })();
   }, []);
 
+  // Rust WindowEvent::DragDrop → reliable path ingest (desktop .lnk / Explorer).
+  useEffect(() => {
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    void listen<{
+      ok: boolean;
+      added: number;
+      message: string;
+      prefs?: SousouConfig | null;
+    }>("sousou-drop-result", (ev) => {
+      if (cancelled) return;
+      const p = ev.payload;
+      if (p.prefs) {
+        setCfg(ensureTabIcons(p.prefs));
+        if (p.prefs.activeTabId) setActiveTab(p.prefs.activeTabId);
+      } else {
+        void invoke<SousouConfig>("sousou_get_config")
+          .then((c) => setCfg(ensureTabIcons(c)))
+          .catch(() => undefined);
+      }
+      if (p.message) showToast(p.message);
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        un = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, []);
+
+  // Settings (or elsewhere) cleared Rust icon cache — drop frontend maps too.
+  useEffect(() => {
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    void listen("sousou-icon-cache-cleared", () => {
+      if (cancelled) return;
+      clearSousouIconFrontendCache();
+      refreshIconCacheStats();
+    })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        un = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [refreshIconCacheStats]);
+
   const loadPickerApps = useCallback(async () => {
     if (apps.length > 0) return;
     try {
@@ -598,12 +780,25 @@ export default function SousouApp() {
         withIcons: false,
         limit: 0,
       });
-      setApps(bare);
+      setApps(
+        bare.map((a) => ({
+          ...a,
+          iconPng:
+            a.iconPng ??
+            iconResolveCache.get((a.target || a.path).trim()) ??
+            null,
+        })),
+      );
       // Icons in background — don't block picker UI
       void invoke<AppEntry[]>("sousou_list_apps", {
         withIcons: true,
         limit: 80,
-      }).then(setApps);
+      }).then((list) => {
+        seedIconsFromEntries(
+          list.map((a) => ({ path: a.target || a.path, iconPng: a.iconPng })),
+        );
+        setApps(list);
+      });
     } catch (e) {
       showToast(String(e));
     }
@@ -715,6 +910,13 @@ export default function SousouApp() {
   } | null>(null);
   /** Right-click on folder panel content. */
   const [folderPanelMenu, setFolderPanelMenu] = useState<{ x: number; y: number } | null>(null);
+  /** Right-click on a pinned shortcut. */
+  const [itemMenu, setItemMenu] = useState<{
+    x: number;
+    y: number;
+    id: string;
+    scope: "home" | string;
+  } | null>(null);
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const [dragTabId, setDragTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
@@ -723,6 +925,7 @@ export default function SousouApp() {
   const [panelDropMode, setPanelDropMode] = useState<"ok" | "blocked" | null>(null);
   const [tabDirEntries, setTabDirEntries] = useState<DirEntry[]>([]);
   const [tabBrowsePath, setTabBrowsePath] = useState<string>("");
+  const [tabDirLoading, setTabDirLoading] = useState(false);
   const [dragItemId, setDragItemId] = useState<string | null>(null);
   const [dragOverItemId, setDragOverItemId] = useState<string | null>(null);
   /** Tauri dragDropEnabled breaks HTML5 DnD — pointer reorder only. */
@@ -737,6 +940,8 @@ export default function SousouApp() {
   cfgRef.current = cfg;
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+  const tabBrowsePathRef = useRef(tabBrowsePath);
+  tabBrowsePathRef.current = tabBrowsePath;
 
   const arrayMoveById = <T extends { id: string }>(list: T[], fromId: string, toId: string): T[] | null => {
     const from = list.findIndex((x) => x.id === fromId);
@@ -889,6 +1094,20 @@ export default function SousouApp() {
     };
   }, []);
 
+  const browseToDir = useCallback((next: string) => {
+    const path = next.trim();
+    if (!path) return;
+    const cached = dirListCache.get(dirCacheKey(path));
+    if (cached) {
+      setTabDirEntries(cached);
+      setTabDirLoading(false);
+    } else {
+      setTabDirEntries([]);
+      setTabDirLoading(true);
+    }
+    setTabBrowsePath(path);
+  }, []);
+
   const bindFolderToTab = async (tabId: string, folder: string) => {
     const c = cfgRef.current;
     if (!c || tabId === "home") return;
@@ -907,7 +1126,7 @@ export default function SousouApp() {
     );
     await persist({ ...c, tabs });
     if (activeTabRef.current === tabId) {
-      setTabBrowsePath(path);
+      browseToDir(path);
     }
     showToast("已绑定文件夹");
   };
@@ -1003,22 +1222,35 @@ export default function SousouApp() {
     const path = dir.trim();
     if (!path) {
       setTabDirEntries([]);
+      setTabDirLoading(false);
       return;
     }
+    const key = dirCacheKey(path);
+    const cached = dirListCache.get(key);
+    if (cached) {
+      setTabDirEntries(cached);
+      setTabDirLoading(false);
+    } else {
+      setTabDirLoading(true);
+      setTabDirEntries([]);
+    }
+    const stillHere = () => dirCacheKey(tabBrowsePathRef.current) === key;
     try {
-      const bare = await invoke<DirEntry[]>("sousou_list_dir", {
-        path,
-        withIcons: false,
-        limit: 200,
-      });
-      setTabDirEntries(bare);
-      void invoke<DirEntry[]>("sousou_list_dir", {
+      // Single withIcons pass: Rust disk/mem cache makes this fast; avoids bare→skel→icon flash.
+      const full = await invoke<DirEntry[]>("sousou_list_dir", {
         path,
         withIcons: true,
         limit: 200,
-      }).then(setTabDirEntries);
+      });
+      if (!stillHere()) return;
+      seedIconsFromEntries(full);
+      dirListCache.set(key, full);
+      setTabDirEntries(full);
+      setTabDirLoading(false);
     } catch (e) {
-      setTabDirEntries([]);
+      if (!stillHere()) return;
+      if (!cached) setTabDirEntries([]);
+      setTabDirLoading(false);
       showToast(String(e));
     }
   }, []);
@@ -1030,25 +1262,35 @@ export default function SousouApp() {
     const bound = (currentTab?.folderPath || "").trim();
     if (activeTab === "home" || !bound) {
       setTabBrowsePath("");
-      setTabDirEntries([]);
+      setTabDirLoading(false);
+      // Keep tabDirEntries / dirListCache so returning to a folder tab is instant.
       return;
     }
-    // Reset browse root when switching tabs / rebinding
+    const key = dirCacheKey(bound);
+    const cached = dirListCache.get(key);
+    if (cached) {
+      setTabDirEntries(cached);
+      setTabDirLoading(false);
+    } else if (dirCacheKey(tabBrowsePathRef.current) !== key) {
+      // Switching to a different unbound path — avoid showing the previous folder's files.
+      setTabDirEntries([]);
+      setTabDirLoading(true);
+    }
     setTabBrowsePath(bound);
   }, [activeTab, currentTab?.folderPath]);
 
   useEffect(() => {
     if (!tabBrowsePath.trim()) {
-      setTabDirEntries([]);
       return;
     }
     void loadTabDir(tabBrowsePath);
   }, [tabBrowsePath, loadTabDir]);
 
-  // Explorer / Desktop → panel: add shortcuts (File.path often empty in WebView2).
+  // Explorer / Desktop / Start Menu → panel (File.path often empty in WebView2).
+  // WebviewWindow 内容区拖放会合成到 Window 事件；同时挂 Webview 双通道更稳。
   useEffect(() => {
     let cancelled = false;
-    let un: (() => void) | undefined;
+    const unFns: Array<() => void> = [];
 
     type Hit =
       | { kind: "tab"; tabId: string }
@@ -1062,29 +1304,17 @@ export default function SousouApp() {
       return { kind: "panel" };
     };
 
-    const toClient = async (pos: { x: number; y: number }) => {
-      const win = getCurrentWindow();
-      const factor = await win.scaleFactor();
-      try {
-        const outer = await win.outerPosition();
-        const inner = await win.innerPosition();
-        const dx = inner.x - outer.x;
-        const dy = inner.y - outer.y;
-        return { x: (pos.x - dx) / factor, y: (pos.y - dy) / factor };
-      } catch {
-        return { x: pos.x / factor, y: pos.y / factor };
-      }
-    };
-
     const hitFromPoint = async (payload: {
       position?: { x: number; y: number };
     }): Promise<Hit> => {
       const pos = payload.position;
-      if (!pos) return null;
+      if (!pos) return activeDropTarget();
       try {
-        const { x: lx, y: ly } = await toClient(pos);
+        const factor = await getCurrentWindow().scaleFactor();
+        const lx = pos.x / factor;
+        const ly = pos.y / factor;
         const el = document.elementFromPoint(lx, ly) as HTMLElement | null;
-        if (!el) return null;
+        if (!el) return activeDropTarget();
         const tabEl = el.closest("[data-tab-id]") as HTMLElement | null;
         if (tabEl) {
           const tabId = tabEl.getAttribute("data-tab-id");
@@ -1093,20 +1323,17 @@ export default function SousouApp() {
         if (el.closest('[data-ss-drop="home"]')) return { kind: "home" };
         if (el.closest('[data-ss-drop="panel"]')) return { kind: "panel" };
         if (el.closest("[data-ss-drop-zone]")) return activeDropTarget();
-        return null;
+        return activeDropTarget();
       } catch {
-        return null;
+        return activeDropTarget();
       }
     };
 
     const applyHover = (hit: Hit) => {
-      const c = cfgRef.current;
       if (hit?.kind === "tab") {
-        const tab = c?.tabs.find((t) => t.id === hit.tabId);
-        const blocked = hit.tabId !== "home" && !!(tab?.folderPath || "").trim();
-        folderDropTabIdRef.current = blocked ? null : hit.tabId;
-        setFolderDropTabId(blocked ? null : hit.tabId);
-        setDropBlockedTabId(blocked ? hit.tabId : null);
+        folderDropTabIdRef.current = hit.tabId;
+        setFolderDropTabId(hit.tabId);
+        setDropBlockedTabId(null);
         panelDropModeRef.current = null;
         setPanelDropMode(null);
         return;
@@ -1114,16 +1341,8 @@ export default function SousouApp() {
       folderDropTabIdRef.current = null;
       setFolderDropTabId(null);
       setDropBlockedTabId(null);
-      const aid = activeTabRef.current;
-      if (hit?.kind === "home" || aid === "home") {
-        panelDropModeRef.current = "ok";
-        setPanelDropMode("ok");
-        return;
-      }
-      const tab = c?.tabs.find((t) => t.id === aid);
-      const blocked = !!(tab?.folderPath || "").trim();
-      panelDropModeRef.current = blocked ? "blocked" : "ok";
-      setPanelDropMode(blocked ? "blocked" : "ok");
+      panelDropModeRef.current = "ok";
+      setPanelDropMode("ok");
     };
 
     const clearHover = () => {
@@ -1134,8 +1353,27 @@ export default function SousouApp() {
       setPanelDropMode(null);
     };
 
+    const importIntoFolder = async (dest: string, paths: string[]) => {
+      const n = await invoke<number>("sousou_import_into_folder", { dest, paths });
+      const destKey = dest.replace(/[/\\]+$/, "").toLowerCase();
+      const browseKey = tabBrowsePathRef.current.replace(/[/\\]+$/, "").toLowerCase();
+      const boundKey = (
+        cfgRef.current?.tabs.find((t) => t.id === activeTabRef.current)?.folderPath || ""
+      )
+        .replace(/[/\\]+$/, "")
+        .toLowerCase();
+      if (browseKey === destKey || boundKey === destKey) {
+        dirListCache.delete(destKey);
+        await loadTabDir(tabBrowsePathRef.current || dest);
+      }
+      showToast(n > 0 ? `已放入文件夹 ${n} 项` : "没有可放入的项目");
+    };
+
     const ingestPaths = async (paths: string[], hit: Hit) => {
-      if (!paths.length) return;
+      if (!paths.length) {
+        showToast("未读到文件路径（请从资源管理器 / 桌面拖入 .lnk 或 .exe）");
+        return;
+      }
       const target = hit || activeDropTarget();
       if (!target) return;
 
@@ -1147,8 +1385,14 @@ export default function SousouApp() {
           setActiveTab("home");
           return;
         }
-        if ((tab?.folderPath || "").trim()) {
-          showToast("文件夹标签不能添加图标");
+        const bound = (tab?.folderPath || "").trim();
+        if (bound) {
+          try {
+            await importIntoFolder(bound, paths);
+          } catch (e) {
+            showToast(String(e));
+          }
+          setActiveTab(target.tabId);
           return;
         }
         const onlyFolder =
@@ -1181,71 +1425,129 @@ export default function SousouApp() {
         return;
       }
       const tab = cfgRef.current?.tabs.find((t) => t.id === aid);
-      if ((tab?.folderPath || "").trim()) {
-        showToast("文件夹标签不能添加图标");
+      const bound = (tab?.folderPath || "").trim();
+      if (bound) {
+        const dest = (tabBrowsePathRef.current || bound).trim();
+        try {
+          await importIntoFolder(dest, paths);
+        } catch (e) {
+          showToast(String(e));
+        }
         return;
       }
       await addShortcutsRef.current({ type: "tab", tabId: aid }, paths);
     };
 
-    void getCurrentWindow()
-      .onDragDropEvent((ev) => {
-        if (dragTabIdRef.current) return;
-        if (dragItemIdRef.current) return;
-        const p = ev.payload;
-        if (p.type === "enter" || p.type === "over") {
-          void hitFromPoint(p).then((hit) => {
-            if (!cancelled) applyHover(hit);
-          });
-          return;
-        }
-        if (p.type === "leave") {
-          clearHover();
-          return;
-        }
-        if (p.type !== "drop") return;
-        const tabIdHint = folderDropTabIdRef.current;
+    let dropBusy = false;
+    const onDragDrop = (ev: {
+      payload: { type: string; paths?: string[]; position?: { x: number; y: number } };
+    }) => {
+      const p = ev.payload;
+      if (p.type === "enter" || p.type === "over") {
+        void hitFromPoint(p).then((hit) => {
+          if (!cancelled) applyHover(hit);
+        });
+        return;
+      }
+      if (p.type === "leave") {
         clearHover();
-        void (async () => {
+        return;
+      }
+      if (p.type !== "drop") return;
+      if (dropBusy) return;
+      dropBusy = true;
+      const tabIdHint = folderDropTabIdRef.current;
+      clearHover();
+      void (async () => {
+        try {
           const paths = ("paths" in p ? p.paths : null) ?? [];
-          if (!paths.length) return;
           const hit =
             (await hitFromPoint(p)) ||
             (tabIdHint ? ({ kind: "tab", tabId: tabIdHint } as const) : null) ||
             activeDropTarget();
           await ingestPaths(paths, hit);
-        })();
-      })
-      .then((fn) => {
-        if (cancelled) {
-          fn();
-          return;
+        } finally {
+          dropBusy = false;
         }
-        un = fn;
-      })
-      .catch((err) => {
-        console.error("[sousou] onDragDropEvent unavailable", err);
-      });
+      })();
+    };
+
+    const bind = (label: string, promise: Promise<() => void>) => {
+      void promise
+        .then((fn) => {
+          if (cancelled) {
+            fn();
+            return;
+          }
+          unFns.push(fn);
+        })
+        .catch((err) => {
+          console.error(`[sousou] onDragDropEvent (${label}) unavailable`, err);
+        });
+    };
+
+    // WindowContent 拖放事件走 Window；Webview 再挂一份兜底
+    bind("window", getCurrentWindow().onDragDropEvent(onDragDrop));
+    bind("webview", getCurrentWebview().onDragDropEvent(onDragDrop));
+
+    // HTML5 兜底：不 preventDefault 时系统会显示禁止光标
+    const allowHtml5 = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      if (!panelDropModeRef.current) {
+        panelDropModeRef.current = "ok";
+        setPanelDropMode("ok");
+      }
+    };
+    const onHtml5Leave = (e: DragEvent) => {
+      if (e.relatedTarget) return;
+      clearHover();
+    };
+    const onHtml5Drop = (e: DragEvent) => {
+      e.preventDefault();
+      clearHover();
+      const files = e.dataTransfer?.files;
+      if (!files?.length) return;
+      const paths: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i] as File & { path?: string };
+        if (f.path) paths.push(f.path);
+      }
+      if (!paths.length) return;
+      void ingestPaths(paths, activeDropTarget());
+    };
+    document.addEventListener("dragenter", allowHtml5);
+    document.addEventListener("dragover", allowHtml5);
+    document.addEventListener("dragleave", onHtml5Leave);
+    document.addEventListener("drop", onHtml5Drop);
+
     return () => {
       cancelled = true;
-      un?.();
+      for (const fn of unFns) fn();
+      document.removeEventListener("dragenter", allowHtml5);
+      document.removeEventListener("dragover", allowHtml5);
+      document.removeEventListener("dragleave", onHtml5Leave);
+      document.removeEventListener("drop", onHtml5Drop);
+      clearHover();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (!tabMenu && !addMenu && !folderPanelMenu) return;
+    if (!tabMenu && !addMenu && !folderPanelMenu && !itemMenu) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setTabMenu(null);
         setAddMenu(null);
         setFolderPanelMenu(null);
+        setItemMenu(null);
       }
     };
     const onDown = () => {
       setTabMenu(null);
       setAddMenu(null);
       setFolderPanelMenu(null);
+      setItemMenu(null);
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("mousedown", onDown);
@@ -1253,7 +1555,26 @@ export default function SousouApp() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onDown);
     };
-  }, [tabMenu, addMenu, folderPanelMenu]);
+  }, [tabMenu, addMenu, folderPanelMenu, itemMenu]);
+
+  const removePinned = async (scope: "home" | string, id: string) => {
+    const c = cfgRef.current;
+    if (!c) return;
+    if (scope === "home") {
+      const homeApps = c.homeApps.filter((i) => i.id !== id);
+      const tabs = c.tabs.map((t) =>
+        t.id === "home" ? { ...t, items: t.items.filter((i) => i.id !== id) } : t,
+      );
+      await persist({ ...c, homeApps, tabs });
+    } else {
+      const tabs = c.tabs.map((t) =>
+        t.id === scope ? { ...t, items: t.items.filter((i) => i.id !== id) } : t,
+      );
+      await persist({ ...c, tabs });
+    }
+    setItemMenu(null);
+    showToast("已移除");
+  };
 
   const addTab = async () => {
     if (!cfg) return;
@@ -1371,9 +1692,25 @@ export default function SousouApp() {
 
   const renderBest = () => {
     if (!search) return null;
+    const hasApps = search.apps.length > 0;
+    const hasFiles = (["folder", "doc", "image", "archive", "media", "all"] as const).some(
+      (cid) => (fileBucket(cid)?.items?.length ?? 0) > 0,
+    );
+    if (!hasApps && !hasFiles) {
+      const pathFilter = (filter?.enabled && filter.path?.trim()) || "";
+      return (
+        <div className="ss-empty">
+          {search.everything?.running === false
+            ? search.everything.message || "Everything 未运行"
+            : pathFilter
+              ? `无匹配结果（当前筛选限定路径：${pathFilter}，可点漏斗清除）`
+              : "无匹配结果"}
+        </div>
+      );
+    }
     return (
       <>
-        {search.apps.length > 0 && (
+        {hasApps && (
           <>
             <div className="ss-section-label">应用</div>
             <div className="ss-grid">
@@ -1543,6 +1880,14 @@ export default function SousouApp() {
           }
           void openPath(it.path);
         }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setTabMenu(null);
+          setAddMenu(null);
+          setFolderPanelMenu(null);
+          setItemMenu({ x: e.clientX, y: e.clientY, id: it.id, scope });
+        }}
         onPointerDown={(e) => beginPointerReorder(e, "pin", it.id, scope)}
       >
         <Icon png={it.iconPng} name={it.name} path={it.path} />
@@ -1602,7 +1947,10 @@ export default function SousouApp() {
           className="ss-chrome-btn ss-settings-btn"
           title="搜搜设置"
           aria-label="设置"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => {
+            setSettingsOpen(true);
+            refreshIconCacheStats();
+          }}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="3" />
@@ -1925,9 +2273,9 @@ export default function SousouApp() {
                 parent.length >= root.length &&
                 parent.toLowerCase().startsWith(root.toLowerCase())
               ) {
-                setTabBrowsePath(parent);
+                browseToDir(parent);
               } else {
-                setTabBrowsePath(root);
+                browseToDir(root);
               }
             }}
           >
@@ -1936,6 +2284,39 @@ export default function SousouApp() {
         </div>
       )}
 
+      {itemMenu && (
+        <div
+          className="ss-ctx-menu"
+          style={{ left: itemMenu.x, top: itemMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              const c = cfgRef.current;
+              const list =
+                itemMenu.scope === "home"
+                  ? c?.homeApps
+                  : c?.tabs.find((t) => t.id === itemMenu.scope)?.items;
+              const it = list?.find((x) => x.id === itemMenu.id);
+              setItemMenu(null);
+              if (it?.path) void openPath(it.path);
+            }}
+          >
+            打开
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => void removePinned(itemMenu.scope, itemMenu.id)}
+          >
+            移除
+          </button>
+        </div>
+      )}
+
+      <div className="ss-body-wrap">
       <main
         className={[
           "ss-body",
@@ -2057,8 +2438,11 @@ export default function SousouApp() {
                     setFolderPanelMenu({ x: e.clientX, y: e.clientY });
                   }}
                 >
-                  {tabDirEntries.length === 0 && (
-                    <div className="ss-empty">文件夹为空或无法读取</div>
+                  {tabDirEntries.length === 0 && !tabDirLoading && (
+                    <div className="ss-empty">文件夹为空 — 可从资源管理器拖入文件</div>
+                  )}
+                  {tabDirEntries.length === 0 && tabDirLoading && (
+                    <div className="ss-empty ss-empty-muted">加载中…</div>
                   )}
                   {tabDirEntries.map((f) => (
                     <button
@@ -2068,7 +2452,7 @@ export default function SousouApp() {
                       title={f.path}
                       onClick={() => {
                         if (f.isDir) {
-                          setTabBrowsePath(f.path);
+                          browseToDir(f.path);
                         } else {
                           void openPath(f.path);
                         }
@@ -2098,21 +2482,6 @@ export default function SousouApp() {
               </div>
             )}
           </section>
-        )}
-
-        {!searching && !(currentTab?.folderPath || "").trim() && (
-          <button
-            type="button"
-            className="ss-fab"
-            title="添加"
-            onClick={() => {
-              setPicked({});
-              setModalOpen(true);
-              void loadPickerApps();
-            }}
-          >
-            +
-          </button>
         )}
 
         {modalOpen && (
@@ -2367,6 +2736,20 @@ export default function SousouApp() {
                   onBlur={() => void patchPrefs({ esExe: cfg.esExe })}
                 />
               </label>
+
+              <label className="ss-pref-row">
+                <span>
+                  <strong>图标缓存</strong>
+                  <small>
+                    {iconCacheStats
+                      ? `${iconCacheStats.entries} 个 · ${formatSize(iconCacheStats.bytes)}`
+                      : "加载中…"}
+                  </small>
+                </span>
+                <button type="button" className="ss-btn" onClick={() => void clearIconCache()}>
+                  清除缓存
+                </button>
+              </label>
               {evMsg && <p className="ss-settings-hint">{evMsg}</p>}
               </div>
 
@@ -2596,8 +2979,25 @@ export default function SousouApp() {
           </div>
         )}
 
-        {toast && <div className="ss-toast">{toast}</div>}
       </main>
+
+      {!searching && !(currentTab?.folderPath || "").trim() && (
+        <button
+          type="button"
+          className="ss-fab"
+          title="添加"
+          aria-label="添加快捷方式"
+          onClick={() => {
+            setPicked({});
+            setModalOpen(true);
+            void loadPickerApps();
+          }}
+        >
+          +
+        </button>
+      )}
+      {toast && <div className="ss-toast">{toast}</div>}
+      </div>
 
       <footer className="ss-footer">
         <div style={{ display: "flex", gap: 4 }}>

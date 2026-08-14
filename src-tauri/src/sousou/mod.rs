@@ -3,8 +3,10 @@
 mod apps;
 mod config;
 mod dir;
+mod drop_ingest;
 mod everything;
 mod hotkey;
+mod icon_cache;
 mod open;
 mod pinyin;
 mod recent;
@@ -12,9 +14,9 @@ mod seed;
 mod window;
 
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
-pub use config::{SearchFilter, SousouConfig};
+pub use config::SousouConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +30,8 @@ pub struct SearchResponse {
 pub fn bootstrap(app: &AppHandle) {
     let cfg = config::load();
     if cfg.enabled {
+        // Drop any previous warm/hidden instance — its OLE drop target is often dead.
+        window::recreate_next_open(app);
         std::thread::spawn(|| {
             let _ = everything::ensure_running();
             let _ = apps::list_apps(false, 0);
@@ -35,13 +39,8 @@ pub fn bootstrap(app: &AppHandle) {
             let _ = seed::seed_tabs_if_needed();
         });
         hotkey::start(app.clone());
-        let app2 = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1800));
-            tauri::async_runtime::block_on(async move {
-                let _ = window::warm(app2).await;
-            });
-        });
+        // Do not warm a hidden sousou window: WebView2 drag-drop RegisterDragDrop
+        // often fails before child HWNDs exist → permanent "no drop" cursor.
     }
 }
 
@@ -119,16 +118,32 @@ pub async fn sousou_search(
         } else {
             apps::search_apps(&q, 40)
         };
+        let ev = everything::status();
         let files = if q.is_empty() {
             Vec::new()
         } else {
-            everything::search_all(&q, per).unwrap_or_default()
+            match everything::search_all(&q, per) {
+                Ok(buckets) => buckets,
+                Err(e) => {
+                    // Keep UI usable — still return status so banner can explain.
+                    let mut st = ev.clone();
+                    if st.message == "就绪" {
+                        st.message = e;
+                    }
+                    return Ok(SearchResponse {
+                        query: q,
+                        apps: apps_hits,
+                        files: Vec::new(),
+                        everything: st,
+                    });
+                }
+            }
         };
         Ok(SearchResponse {
             query: q,
             apps: apps_hits,
             files,
-            everything: everything::status(),
+            everything: ev,
         })
     })
     .await
@@ -192,6 +207,17 @@ pub async fn sousou_list_dir(
         .map_err(|e| e.to_string())?
 }
 
+/// Copy dropped paths into a bound-folder tab's real directory.
+#[tauri::command]
+pub async fn sousou_import_into_folder(
+    dest: String,
+    paths: Vec<String>,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || dir::import_paths_into_dir(&dest, &paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn sousou_resolve_icon(path: String) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -199,10 +225,22 @@ pub async fn sousou_resolve_icon(path: String) -> Result<Option<String>, String>
         if p.is_empty() {
             return None;
         }
-        crate::dock::resolve_launcher_icon_png(&p)
+        icon_cache::get_or_resolve(&p)
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn sousou_icon_cache_stats() -> icon_cache::IconCacheStats {
+    icon_cache::stats()
+}
+
+#[tauri::command]
+pub fn sousou_clear_icon_cache(app: AppHandle) -> Result<icon_cache::IconCacheStats, String> {
+    let cleared = icon_cache::clear()?;
+    let _ = app.emit("sousou-icon-cache-cleared", ());
+    Ok(cleared)
 }
 
 #[tauri::command]

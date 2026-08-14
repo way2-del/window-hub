@@ -146,7 +146,7 @@ pub struct IslandPrefsRow {
 }
 
 fn default_bar_resident() -> String {
-    "com.window-hub.weather".into()
+    "com.window-hub.lyrics".into()
 }
 
 fn default_bar_priority() -> String {

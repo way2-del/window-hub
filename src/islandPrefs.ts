@@ -62,13 +62,20 @@ export const STAGING_PANEL_H_DEFAULT = 152;
 /** @deprecated 使用 STAGING_PANEL_H_DEFAULT */
 export const STAGING_PANEL_H = STAGING_PANEL_H_DEFAULT;
 
+/** 官方岛栏默认竞选顺序：有歌词 > 有待办 > 天气 */
+export const DEFAULT_BAR_PRIORITY = [
+  "com.window-hub.lyrics",
+  "com.window-hub.todo",
+  "com.window-hub.weather",
+] as const;
+
 const DEFAULTS: IslandPrefs = {
   autoImmerse: true,
   immerseIdleSec: 8,
   /** Weather is a plugin; migrate legacy "weather"|"mirror" in parsePullContent */
   pullContent: "plugin:com.window-hub.weather",
-  barResident: "com.window-hub.weather",
-  barPriority: ["com.window-hub.weather"],
+  barResident: "com.window-hub.lyrics",
+  barPriority: [...DEFAULT_BAR_PRIORITY],
   msgNotify: true,
   msgNotifyText: "收到一条消息",
   msgNotifySec: 4,
@@ -146,8 +153,41 @@ function parseBarPriority(raw: unknown, legacyResident?: string): string[] {
   return out;
 }
 
+/** 把新插件按 DEFAULT_BAR_PRIORITY 相对位置插入（已有项不重排）。 */
+function insertByPreferredOrder(ordered: string[], id: string, preferred: readonly string[]) {
+  if (ordered.includes(id)) return;
+  const prefIdx = preferred.indexOf(id);
+  if (prefIdx < 0) {
+    ordered.push(id);
+    return;
+  }
+  let after = -1;
+  for (let i = 0; i < ordered.length; i++) {
+    const oi = preferred.indexOf(ordered[i]!);
+    if (oi >= 0 && oi < prefIdx) after = i;
+  }
+  if (after >= 0) {
+    ordered.splice(after + 1, 0, id);
+    return;
+  }
+  let before = -1;
+  for (let i = 0; i < ordered.length; i++) {
+    const oi = preferred.indexOf(ordered[i]!);
+    if (oi > prefIdx) {
+      before = i;
+      break;
+    }
+  }
+  if (before >= 0) {
+    ordered.splice(before, 0, id);
+    return;
+  }
+  ordered.push(id);
+}
+
 /**
- * 与已启用 island.bar 插件对齐：保留用户顺序，剔除失效，末尾补上新插件。
+ * 与已启用 island.bar 插件对齐：保留用户顺序，剔除失效；
+ * 新插件按 DEFAULT_BAR_PRIORITY（歌词 > 待办 > 天气）相对位置插入。
  */
 export function mergeBarPriority(
   saved: string[] | undefined,
@@ -159,7 +199,7 @@ export function mergeBarPriority(
   const base = parseBarPriority(saved, legacyResident).filter((id) => availSet.has(id));
   const ordered = [...base];
   for (const id of avail) {
-    if (!ordered.includes(id)) ordered.push(id);
+    insertByPreferredOrder(ordered, id, DEFAULT_BAR_PRIORITY);
   }
   return ordered;
 }

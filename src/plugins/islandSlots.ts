@@ -69,7 +69,8 @@ export function pickIslandContentBar(
   bars: ReadonlyMap<string, IslandBarState>,
   barPriority: string[],
 ): IslandBarState | null {
-  const textOk = (b: IslandBarState | undefined) => !!b && !!String(b.text ?? "").trim();
+  const textOk = (b: IslandBarState | undefined) =>
+    !!b && (!!String(b.text ?? "").trim() || !!String(b.image ?? "").trim());
   const seen = new Set<string>();
   for (const id of barPriority) {
     const key = String(id ?? "").trim();

@@ -393,6 +393,12 @@ mod win {
     }
 
     pub fn show_desktop() -> Result<(), String> {
+        // Prefer Win+D via SendInput — ToggleDesktop COM often fails on background
+        // dock visibility threads (wrong apartment / no shell affinity).
+        if crate::win32::input::chord_win_d().is_ok() {
+            return Ok(());
+        }
+
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED)
                 .ok()
@@ -411,7 +417,9 @@ mod win {
         unsafe {
             let shell: IShellDispatch4 = CoCreateInstance(&CLSID_SHELL, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| format!("Shell.Application: {e}"))?;
-            shell.ToggleDesktop().map_err(|e| format!("ToggleDesktop: {e}"))?;
+            shell
+                .ToggleDesktop()
+                .map_err(|e| format!("ToggleDesktop: {e}"))?;
         }
         Ok(())
     }

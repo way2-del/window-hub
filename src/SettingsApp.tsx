@@ -23,6 +23,7 @@ import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginSettingsForm from "./components/PluginSettingsForm";
 import {
   DEFAULT_SYSTEM_CHIPS,
+  isTrayPinned,
   mergeTrayIcons,
   normalizeSystemChips,
   type SystemChipVisibility,
@@ -54,6 +55,8 @@ type DockItemLite = {
   virtualPath?: string;
   iconPath?: string;
   uwp?: boolean;
+  launchArgs?: string;
+  appId?: string;
   iconPng?: string | null;
 };
 
@@ -259,6 +262,13 @@ const emptyLauncherDraft = (): Omit<ScriptLauncherRow, "running" | "pid"> => ({
   enabled: true,
 });
 
+function formatSousouCacheBytes(n: number) {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
 function trayLabel(icon: TrayIconInfo) {
   return icon.tooltip || icon.process || "未知应用";
 }
@@ -406,6 +416,7 @@ export default function SettingsApp() {
   const [darkPref, setDarkPref] = useState<DarkPref>("dark");
   const [trays, setTrays] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
+  const [pinnedProcesses, setPinnedProcesses] = useState<string[]>([]);
   const [muted, setMuted] = useState<string[]>([]);
   const [mutedProcesses, setMutedProcesses] = useState<string[]>([]);
   const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
@@ -426,6 +437,10 @@ export default function SettingsApp() {
   const [sousouMsg, setSousouMsg] = useState("");
   const [sousouBusy, setSousouBusy] = useState(false);
   const [sousouEvStatus, setSousouEvStatus] = useState("");
+  const [sousouIconCache, setSousouIconCache] = useState<{
+    entries: number;
+    bytes: number;
+  } | null>(null);
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
   const [openAtLogin, setOpenAtLogin] = useState(false);
   const [openAtLoginBusy, setOpenAtLoginBusy] = useState(false);
@@ -715,6 +730,7 @@ export default function SettingsApp() {
         ]);
         setTrays(list);
         setPinned(prefs.pinned ?? []);
+        setPinnedProcesses(prefs.pinned_processes ?? []);
         setMuted(prefs.muted ?? []);
         setMutedProcesses(prefs.muted_processes ?? []);
         setSystemChips(normalizeSystemChips(prefs.system_chips));
@@ -757,6 +773,8 @@ export default function SettingsApp() {
         });
         const st = await invoke<{ running: boolean; message: string }>("sousou_everything_status");
         setSousouEvStatus(st.running ? "Everything 运行中" : st.message);
+        const ic = await invoke<{ entries: number; bytes: number }>("sousou_icon_cache_stats");
+        setSousouIconCache(ic);
       } catch {
         /* noop */
       }
@@ -771,6 +789,7 @@ export default function SettingsApp() {
     }).then((fn) => unsubs.push(fn));
     void listen<TrayPrefs>("tray-prefs", (ev) => {
       setPinned(ev.payload.pinned ?? []);
+      setPinnedProcesses(ev.payload.pinned_processes ?? []);
       setMuted(ev.payload.muted ?? []);
       setMutedProcesses(ev.payload.muted_processes ?? []);
       setSystemChips(normalizeSystemChips(ev.payload.system_chips));
@@ -821,7 +840,10 @@ export default function SettingsApp() {
     });
   }, [darkPref]);
 
-  const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
+  const pinPrefs = useMemo(
+    () => ({ pinned, pinned_processes: pinnedProcesses }),
+    [pinned, pinnedProcesses],
+  );
   const filteredNav = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return NAV;
@@ -889,17 +911,20 @@ export default function SettingsApp() {
     nextMuted: string[] = muted,
     nextMutedProcesses: string[] = mutedProcesses,
     nextSystemChips: SystemChipVisibility = systemChips,
+    nextPinnedProcesses: string[] = pinnedProcesses,
   ) {
     setSaving(true);
     try {
       const prefs = await invoke<TrayPrefs>("set_tray_prefs", {
         pinned: nextPinned,
+        pinnedProcesses: nextPinnedProcesses,
         menuHeights: nextHeights,
         muted: nextMuted,
         mutedProcesses: nextMutedProcesses,
         systemChips: nextSystemChips,
       });
       setPinned(prefs.pinned ?? nextPinned);
+      setPinnedProcesses(prefs.pinned_processes ?? nextPinnedProcesses);
       setMenuHeights(prefs.menu_heights ?? nextHeights);
       setMuted(prefs.muted ?? nextMuted);
       setMutedProcesses(prefs.muted_processes ?? nextMutedProcesses);
@@ -917,12 +942,29 @@ export default function SettingsApp() {
     await persistTrayPrefs(pinned, menuHeights, muted, mutedProcesses, next);
   }
 
-  async function togglePinned(id: string) {
-    const next = pinnedSet.has(id)
-      ? pinned.filter((x) => x !== id)
-      : [...pinned, id];
-    setPinned(next);
-    await persistTrayPrefs(next, menuHeights);
+  async function togglePinned(icon: TrayIconInfo) {
+    const on = isTrayPinned(icon, pinPrefs);
+    const proc = (icon.process || "").trim().toLowerCase();
+    let nextPinned: string[];
+    let nextProcs: string[];
+    if (on) {
+      nextPinned = pinned.filter((id) => {
+        if (id === icon.id) return false;
+        if (!proc) return true;
+        const other = trays.find((t) => t.id === id);
+        return !other || (other.process || "").trim().toLowerCase() !== proc;
+      });
+      nextProcs = pinnedProcesses.filter((p) => p.toLowerCase() !== proc);
+    } else {
+      nextPinned = pinned.includes(icon.id) ? pinned : [...pinned, icon.id];
+      nextProcs =
+        proc && !pinnedProcesses.some((p) => p.toLowerCase() === proc)
+          ? [...pinnedProcesses, proc]
+          : pinnedProcesses;
+    }
+    setPinned(nextPinned);
+    setPinnedProcesses(nextProcs);
+    await persistTrayPrefs(nextPinned, menuHeights, muted, mutedProcesses, systemChips, nextProcs);
   }
 
   function isNotifyMuted(icon: TrayIconInfo) {
@@ -1293,7 +1335,7 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>岛栏顺序</h2>
                 <p className="card-desc">
-                  折叠态按下方顺序竞选第一条有内容的插件摘要。通知横幅始终最优先；中转站有条目时临时盖住内容层。
+                  折叠态按下方顺序竞选第一条有内容的插件摘要（默认歌词 → 待办 → 天气）。通知横幅始终最优先；中转站有条目时临时盖住内容层。
                   使用 ↑ ↓ 调整优先级（越靠上越优先）。
                 </p>
                 <div className="bar-priority-fixed">
@@ -2110,8 +2152,9 @@ export default function SettingsApp() {
                   </span>
                 </div>
                 <p className="card-desc">
-                  可直接添加应用 / 分隔线，或从 MyDockFinder 备份导入 `.dockico.ini`。右键 Dock
-                  图标也可移除、添加。特殊项：开始菜单、回收站、分隔线。
+                  可直接添加应用 / 分隔线，或从 MyDockFinder 备份导入 `.dockico.ini`。Edge/Chrome
+                  「安装的应用」（如 ChatGPT、Gemini）请选桌面或开始菜单里的 `.lnk`；也可先打开应用，在
+                  Dock 临时图标上右键「固定到 Dock」。
                 </p>
                 <div className="plugin-actions">
                   <button
@@ -2375,6 +2418,33 @@ export default function SettingsApp() {
                 />
               </label>
               <p className="card-desc">{sousouEvStatus || "检测中…"}</p>
+              <label className="pref-row">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">图标缓存</span>
+                  <span className="pref-row-desc">
+                    {sousouIconCache
+                      ? `${sousouIconCache.entries} 个 · ${formatSousouCacheBytes(sousouIconCache.bytes)}（磁盘 + 内存）`
+                      : "统计加载中…"}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="settings-ghost-btn"
+                  disabled={sousouBusy}
+                  onClick={() => {
+                    setSousouBusy(true);
+                    void invoke<{ entries: number; bytes: number }>("sousou_clear_icon_cache")
+                      .then((ic) => {
+                        setSousouIconCache(ic);
+                        setSousouMsg("已清除图标缓存");
+                      })
+                      .catch((e) => setSousouMsg(String(e)))
+                      .finally(() => setSousouBusy(false));
+                  }}
+                >
+                  清除缓存
+                </button>
+              </label>
               <div className="plugin-actions" style={{ marginTop: 10, marginBottom: 0 }}>
                 <button
                   type="button"
@@ -2463,7 +2533,7 @@ export default function SettingsApp() {
               ) : (
                 <div className="tray-settings-list">
                   {trays.map((icon) => {
-                    const on = pinnedSet.has(icon.id);
+                    const on = isTrayPinned(icon, pinPrefs);
                     const notifyMuted = isNotifyMuted(icon);
                     const customH = menuHeights[icon.id];
                     const editing = menuHeightEditId === icon.id;
@@ -2476,7 +2546,7 @@ export default function SettingsApp() {
                         <button
                           type="button"
                           className={`tray-settings-item${on ? " is-on" : ""}`}
-                          onClick={() => void togglePinned(icon.id)}
+                          onClick={() => void togglePinned(icon)}
                         >
                           {icon.icon_png_base64 ? (
                             <img

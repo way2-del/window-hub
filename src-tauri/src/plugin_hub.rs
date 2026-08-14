@@ -703,6 +703,7 @@ pub fn hub_init_script(plugin_id: &str) -> String {
           withPlugin({{
             text: (opts && opts.text) || "",
             title: opts && opts.title,
+            image: opts && opts.image,
           }}),
         ),
       clearBar: () => invoke("hub_island_clear_bar", withPlugin()),
@@ -711,6 +712,7 @@ pub fn hub_init_script(plugin_id: &str) -> String {
       neteaseNowPlaying: () => invoke("hub_netease_now_playing", withPlugin()),
       transport: (action) =>
         invoke("hub_media_transport", withPlugin({{ action: String(action || "") }})),
+      openNetease: () => invoke("hub_media_open_netease", withPlugin()),
     }},
     fetch: (url, opts) =>
       invoke(

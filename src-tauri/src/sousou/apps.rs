@@ -48,8 +48,8 @@ fn fill_icons(apps: &mut [AppEntry], max: usize) {
             continue;
         }
         // Always prefer 256px shell icons — 32px sources look blurry at 48px UI.
-        a.icon_png = crate::dock::resolve_launcher_icon_png(&a.target)
-            .or_else(|| crate::dock::resolve_launcher_icon_png(&a.path));
+        a.icon_png = super::icon_cache::get_or_resolve(&a.target)
+            .or_else(|| super::icon_cache::get_or_resolve(&a.path));
     }
 }
 

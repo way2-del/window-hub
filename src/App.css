@@ -452,6 +452,32 @@ button {
   padding-bottom: 1px;
 }
 
+.bar-staging.has-lyric-img {
+  gap: 0;
+  height: 24px;
+  max-width: min(300px, 72vw);
+  padding: 0 2px;
+}
+
+.bar-lyric-img {
+  display: block;
+  height: 22px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  object-position: center center;
+  pointer-events: none;
+  user-select: none;
+  /* 透明底 PNG：不要强锐化，交给浏览器平滑缩小 */
+  image-rendering: auto;
+  filter: none;
+}
+
+.island-root[data-chrome="light"] .bar-lyric-img {
+  /* 浅色 chrome 时给字轻微暗描边，避免发白糊 */
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.35));
+}
+
 .island-root.is-immersed .bar-staging,
 .island-root.is-immersed .bar-staging-text {
   color: var(--chrome-center-fg, #000);
@@ -695,6 +721,58 @@ button {
   opacity: 0;
   pointer-events: none;
   transition: opacity 180ms ease;
+}
+
+.island-panel.has-tags {
+  justify-content: stretch;
+}
+
+.island-panel-tags {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.island-panel-tags::-webkit-scrollbar {
+  display: none;
+}
+
+.island-panel-tag {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.72);
+  font: 600 11px/22px "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    sans-serif;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.island-panel-tag:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.island-panel-tag.is-selected {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.island-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .island-panel.is-mirror {
@@ -1321,10 +1399,13 @@ button {
 
 /* 独立托盘弹窗：浅色云母反色（深色字）
    注意：透明 + Mica 窗口上不要对整壳做 transform/scale，
-   否则 DWM 背景与内容错位，会出现左侧黑条/切角。 */
+   否则 DWM 背景与内容错位，会出现左侧黑条/切角。
+   Height follows content; TrayPopupApp resizes the HWND to match (no empty tail). */
 .tray-popup-shell {
   width: 100%;
-  height: 100%;
+  height: fit-content;
+  min-height: 0;
+  max-height: 520px;
   overflow: auto;
   padding: 12px 10px;
   box-sizing: border-box;

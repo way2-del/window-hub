@@ -92,6 +92,10 @@ impl Default for SystemChipVisibility {
 pub struct TrayPrefs {
     /// Icon ids that stay visible on the bar (outside the chevron).
     pub pinned: Vec<String>,
+    /// Process stems (e.g. `weixin` / `wechat`) pinned across `hwnd:uid` churn.
+    /// WeChat/QQ often lack NIF_GUID, so ids change every restart.
+    #[serde(default)]
+    pub pinned_processes: Vec<String>,
     /// Per-icon right-click menu height (px). Missing id = auto measure.
     #[serde(default)]
     pub menu_heights: std::collections::HashMap<String, i32>,
@@ -783,14 +787,50 @@ mod win {
                     version: info.version,
                 });
             }
-            icons.insert(id, info);
+            icons.insert(id.clone(), info);
         }
+        // Keep pin ids aligned when WeChat/QQ reappear under a new hwnd:uid.
+        heal_pinned_for_process(&proc, &id);
         // Do not sweep on every MODIFY — reconcile owns liveness; IsWindow storms freeze.
         request_publish();
         if let Some(att) = armed_attention {
             if let Some(emit) = ATTENTION.get() {
                 emit(att);
             }
+        }
+    }
+
+    /// Keep `pinned` / `pinned_processes` aligned with live icons (WeChat hwnd:uid churn).
+    fn heal_pinned_for_process(proc: &str, icon_id: &str) {
+        if proc.is_empty() || icon_id.is_empty() {
+            return;
+        }
+        let changed = {
+            let mut prefs = PREFS.lock();
+            let mut changed = false;
+            let id_pinned = prefs.pinned.iter().any(|id| id == icon_id);
+            let process_pinned = prefs
+                .pinned_processes
+                .iter()
+                .any(|p| p.trim().eq_ignore_ascii_case(proc));
+            // Icon already pinned by id → remember process so restart survives.
+            if id_pinned && !process_pinned {
+                prefs.pinned_processes.push(proc.to_string());
+                changed = true;
+            }
+            // Process already pinned → attach current id after restart.
+            if process_pinned && !id_pinned {
+                prefs.pinned.push(icon_id.to_string());
+                changed = true;
+            }
+            changed
+        };
+        if !changed {
+            return;
+        }
+        let prefs = PREFS.lock().clone();
+        if let Ok(v) = serde_json::to_value(&prefs) {
+            let _ = crate::db::with_conn(|c| crate::db::tray_set(c, &v));
         }
     }
 

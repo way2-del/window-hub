@@ -2,10 +2,10 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.lyrics",
   "name": "歌词",
-  "version": "1.1.8",
+  "version": "1.4.1",
   "official": true,
   "logo": "icon.svg",
-  "description": "监听网易云「桌面歌词」可见窗；下拉面板可上一首 / 下一首 / 播放暂停。",
+  "description": "镜像网易云桌面歌词到灵动岛（缩小贴上，对齐 MyDockFinder）；下拉可切歌 / 暂停 / 打开网易云。",
   "entry": {
     "shortcuts": "shortcuts.html",
     "panel": "panel.html"
@@ -18,7 +18,7 @@
       "action": "command"
     },
     "island.bar": {
-      "order": 15
+      "order": 10
     },
     "island.panel": {
       "defaultSize": { "w": 380, "h": 196 },
@@ -43,8 +43,8 @@
     {
       "key": "preferLyric",
       "type": "boolean",
-      "label": "优先显示歌词行",
-      "description": "有歌词时显示当前行；短暂读空时会保持上一句",
+      "label": "优先显示歌词镜像",
+      "description": "桌面歌词开着时优先贴镜像；截图未就绪时先显示歌名",
       "default": true
     }
   ],

@@ -109,8 +109,8 @@ pub fn paths_to_shortcuts(paths: &[String], with_icons: bool) -> Vec<SousouShort
         }
 
         let icon_png = if with_icons {
-            crate::dock::resolve_launcher_icon_png(&launch)
-                .or_else(|| crate::dock::resolve_launcher_icon_png(src))
+            super::icon_cache::get_or_resolve(&launch)
+                .or_else(|| super::icon_cache::get_or_resolve(src))
         } else {
             None
         };
@@ -124,6 +124,97 @@ pub fn paths_to_shortcuts(paths: &[String], with_icons: bool) -> Vec<SousouShort
         });
     }
     out
+}
+
+/// Copy Explorer-dropped files/folders into `dest_dir` (bound folder tab).
+/// Returns how many top-level items were written (skips identical dest).
+pub fn import_paths_into_dir(dest_dir: &str, paths: &[String]) -> Result<usize, String> {
+    let dest_root = PathBuf::from(dest_dir.trim());
+    if dest_root.as_os_str().is_empty() {
+        return Err("empty destination".into());
+    }
+    if !dest_root.is_dir() {
+        return Err(format!("not a folder: {}", dest_root.display()));
+    }
+    let dest_canon = dest_root
+        .canonicalize()
+        .unwrap_or_else(|_| dest_root.clone());
+    let mut written = 0usize;
+    for raw in paths {
+        let src = raw.trim();
+        if src.is_empty() {
+            continue;
+        }
+        let src_path = PathBuf::from(src);
+        if !src_path.exists() {
+            continue;
+        }
+        let src_canon = src_path.canonicalize().unwrap_or_else(|_| src_path.clone());
+        // Skip dropping the folder onto itself.
+        if src_canon == dest_canon {
+            continue;
+        }
+        // Skip if destination is inside the source folder (would recurse forever).
+        if dest_canon.starts_with(&src_canon) {
+            continue;
+        }
+        let name = src_path
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("item"));
+        let mut target = dest_root.join(&name);
+        if target.exists() {
+            target = unique_dest_path(&dest_root, &name);
+        }
+        let is_dir = src_path.is_dir();
+        let result = if is_dir {
+            copy_dir_recursive(&src_path, &target)
+        } else {
+            fs::copy(&src_path, &target)
+                .map(|_| ())
+                .map_err(|e| format!("copy {}: {e}", src_path.display()))
+        };
+        match result {
+            Ok(()) => written += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(written)
+}
+
+fn unique_dest_path(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("item");
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    for i in 1..10_000 {
+        let candidate = dir.join(format!("{stem} ({i}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!("{stem}-dup{ext}"))
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+    let rd = fs::read_dir(src).map_err(|e| format!("read_dir {}: {e}", src.display()))?;
+    for e in rd.filter_map(|x| x.ok()) {
+        let from = e.path();
+        let to = dest.join(e.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| format!("copy {}: {e}", from.display()))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn list_dir(path: &str, with_icons: bool, limit: usize) -> Result<Vec<DirEntry>, String> {
@@ -178,7 +269,7 @@ pub fn list_dir(path: &str, with_icons: bool, limit: usize) -> Result<Vec<DirEnt
     }
     if with_icons {
         for it in &mut entries {
-            it.icon_png = crate::dock::resolve_launcher_icon_png(&it.path);
+            it.icon_png = super::icon_cache::get_or_resolve(&it.path);
         }
     }
     Ok(entries)

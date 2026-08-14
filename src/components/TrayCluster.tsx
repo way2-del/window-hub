@@ -19,6 +19,8 @@ export type TrayIconInfo = {
 
 export type TrayPrefs = {
   pinned: string[];
+  /** Process stems pinned across hwnd:uid churn (WeChat/QQ). */
+  pinned_processes?: string[];
   menu_heights?: Record<string, number>;
   muted?: string[];
   muted_processes?: string[];
@@ -65,6 +67,20 @@ export function isTrayNotifyMuted(
   if (proc && mutedProcs.includes(proc)) return true;
   const tip = (icon.tooltip || "").toLowerCase();
   return mutedProcs.some((p) => tip.includes(p));
+}
+
+/** Pin survives WeChat/QQ restart: match by icon id or process stem. */
+export function isTrayPinned(
+  icon: Pick<TrayIconInfo, "id" | "process">,
+  prefs: Pick<TrayPrefs, "pinned" | "pinned_processes">,
+): boolean {
+  if ((prefs.pinned ?? []).includes(icon.id)) return true;
+  const proc = (icon.process || "").trim().toLowerCase();
+  if (!proc) return false;
+  return (prefs.pinned_processes ?? [])
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean)
+    .includes(proc);
 }
 
 const TRAY_POPUP_W = 280;
@@ -475,6 +491,7 @@ export default function TrayCluster({
 }) {
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
+  const [pinnedProcesses, setPinnedProcesses] = useState<string[]>([]);
   const [muted, setMuted] = useState<string[]>([]);
   const [mutedProcesses, setMutedProcesses] = useState<string[]>([]);
   const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
@@ -506,6 +523,7 @@ export default function TrayCluster({
         if (!cancelled) {
           setIcons(list);
           setPinned(prefs.pinned ?? []);
+          setPinnedProcesses(prefs.pinned_processes ?? []);
           setMuted(prefs.muted ?? []);
           setMutedProcesses(prefs.muted_processes ?? []);
           setSystemChips(normalizeSystemChips(prefs.system_chips));
@@ -542,6 +560,7 @@ export default function TrayCluster({
         unsubs.push(
           await listen<TrayPrefs>("tray-prefs", (ev) => {
             setPinned(ev.payload.pinned ?? []);
+            setPinnedProcesses(ev.payload.pinned_processes ?? []);
             setMuted(ev.payload.muted ?? []);
             setMutedProcesses(ev.payload.muted_processes ?? []);
             setSystemChips(normalizeSystemChips(ev.payload.system_chips));
@@ -657,10 +676,13 @@ export default function TrayCluster({
     return () => window.removeEventListener("pointerdown", onPtr, true);
   }, [open, onOpenChange]);
 
-  const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
+  const pinPrefs = useMemo(
+    () => ({ pinned, pinned_processes: pinnedProcesses }),
+    [pinned, pinnedProcesses],
+  );
   const pinnedIcons = useMemo(
-    () => icons.filter((i) => pinnedSet.has(i.id)),
-    [icons, pinnedSet],
+    () => icons.filter((i) => isTrayPinned(i, pinPrefs)),
+    [icons, pinPrefs],
   );
   const railIcons = useMemo(() => {
     const mutePrefs = { muted, muted_processes: mutedProcesses };

@@ -67,7 +67,7 @@ pub fn list_recent(limit: usize, with_icons: bool) -> Vec<RecentEntry> {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let icon_png = if with_icons {
-            crate::dock::resolve_launcher_icon_png(&target)
+            super::icon_cache::get_or_resolve(&target)
         } else {
             None
         };

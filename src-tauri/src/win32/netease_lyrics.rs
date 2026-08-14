@@ -1,21 +1,24 @@
-//! 网易云「正在播放 / 当前歌词」轻量读取。
+//! 网易云桌面歌词 → 灵动岛镜像（对齐 MyDockFinder「捕捉 / 彩色映射」）。
 //!
-//! 不做进程堆扫 / RVA 探测 / UIA / SMTC WinRT（后者易与 UI COM 死锁导致整窗未响应）。
-//! 策略：
-//! 1. 检测 `DesktopLyrics` + 主窗口标题（含隐藏主窗）
-//! 2. 官方 LRC + 本地播放时钟选句
-//! 3. HTTP 拉 LRC 只在后台线程，热路径绝不阻塞
+//! 网易云 DesktopLyrics 多为自绘分层窗，OCR 会错字且易超前。
+//! 本模块只做：检测可见桌面歌词窗 → 截取画面 → 交岛栏缩小显示。
+//! 不做 OCR / 本地 LRC 选句；不在热路径调 SMTC。
 
 use serde::Serialize;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Gdi::{
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+};
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
+    EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     IsWindowVisible,
 };
 
@@ -25,41 +28,21 @@ pub struct NeteaseNowPlaying {
     pub active: bool,
     pub title: Option<String>,
     pub artist: Option<String>,
+    /// 兼容旧插件：有镜像时放 "♪"
     pub lyric: Option<String>,
     pub source: Option<String>,
-    /// 是否检测到桌面歌词窗口（无需置顶）
     pub desktop_lyrics: bool,
+    /// `data:image/png;base64,...` 桌面歌词有字区域裁切（透明底）
+    pub lyric_image: Option<String>,
 }
 
-struct ApiLyricCache {
-    key: String,
-    lines: Vec<(u64, String)>,
+struct ImageCache {
+    hwnd: isize,
+    data_url: String,
     at: Instant,
 }
 
-struct StickyLyric {
-    song_key: String,
-    text: String,
-    at: Instant,
-}
-
-struct SmtcClock {
-    song_key: String,
-    origin_ms: u64,
-    synced_at: Instant,
-    /// 暂停时冻结的进度（ms）；Some 则不再用墙钟推进
-    frozen_ms: Option<u64>,
-}
-
-static API_LYRIC_CACHE: Mutex<Option<ApiLyricCache>> = Mutex::new(None);
-static STICKY_LYRIC: Mutex<Option<StickyLyric>> = Mutex::new(None);
-static SMTC_CLOCK: Mutex<Option<SmtcClock>> = Mutex::new(None);
-static LAST_SONG_KEY: Mutex<String> = Mutex::new(String::new());
-/// 切歌后作废进行中的旧 LRC 拉取，避免把上一首歌词写进缓存。
-static LRC_FETCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static LRC_FETCH_BUSY: AtomicBool = AtomicBool::new(false);
-/// 乐观播放态：面板点暂停时冻结本地 LRC 钟；切歌 / 下一首会恢复。
-static PLAYING: AtomicBool = AtomicBool::new(true);
+static IMAGE_CACHE: Mutex<Option<ImageCache>> = Mutex::new(None);
 
 fn wide_to_string(buf: &[u16]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
@@ -138,7 +121,6 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         || class_l == "desktoplyrics"
         || class_l.contains("desktoplyric")
     {
-        // 必须可见：用户关掉桌面歌词后窗体常仍存活但隐藏，不能再当「开着」
         if visible {
             ctx.lyric = Some(hwnd);
         }
@@ -158,502 +140,300 @@ fn find_netease_hwnds() -> (Option<HWND>, Option<HWND>) {
     (ctx.main_visible.or(ctx.main_any), ctx.lyric)
 }
 
-struct TextCollectCtx {
-    texts: Vec<String>,
+/// 面板多媒体键入口（Host 仍会调用）。镜像不依赖本地钟，空操作。
+pub fn note_media_transport(_action: &str) {}
+
+/// 亮度阈值：低于此视为「透明底 / 黑底」（PrintWindow 常把分层透明填成黑）。
+const INK_LUMA: u32 = 28;
+
+fn luma(r: u8, g: u8, b: u8) -> u32 {
+    // 粗略感知亮度
+    (r as u32 * 3 + g as u32 * 6 + b as u32) / 10
 }
 
-unsafe extern "system" fn text_collect_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = &mut *(lparam.0 as *mut TextCollectCtx);
-    let t = hwnd_title(hwnd);
-    if !t.is_empty() {
-        ctx.texts.push(t);
-    }
-    BOOL(1)
+fn is_ink(r: u8, g: u8, b: u8) -> bool {
+    luma(r, g, b) > INK_LUMA
 }
 
-fn collect_hwnd_texts(root: HWND) -> Vec<String> {
-    let mut out = Vec::new();
-    let root_t = hwnd_title(root);
-    if !root_t.is_empty() {
-        out.push(root_t);
-    }
-    let mut ctx = TextCollectCtx { texts: Vec::new() };
+/// 截取桌面歌词窗 → BGRA（含透明区被填成黑的情况）。
+fn capture_lyric_bgra(hwnd: HWND) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
-        let _ = EnumChildWindows(root, Some(text_collect_proc), LPARAM(&mut ctx as *mut _ as isize));
-    }
-    out.extend(ctx.texts);
-    out
-}
-
-fn is_desktop_lyric_chrome(s: &str) -> bool {
-    let t = s.trim();
-    if t.is_empty() {
-        return true;
-    }
-    let lower = t.to_ascii_lowercase();
-    lower == "desktoplyrics"
-        || t == "桌面歌词"
-        || t == "网易云音乐"
-        || lower == "cloudmusic"
-        || is_unlock_noise(t)
-}
-
-/// 从桌面歌词窗读当前行（暂停时网易云会停住标题/子控件文本，不会自己往前跑）。
-fn read_desktop_lyric_line(lyric_hwnd: HWND) -> Option<String> {
-    let mut best: Option<String> = None;
-    for t in collect_hwnd_texts(lyric_hwnd) {
-        let t = t.trim().to_string();
-        if is_desktop_lyric_chrome(&t) || is_lrc_credit_line(&t) {
-            continue;
-        }
-        // 偏好更长的一行（主歌词通常比进度/副标长）
-        if best.as_ref().map(|b| t.chars().count() > b.chars().count()).unwrap_or(true) {
-            best = Some(t);
-        }
-    }
-    best
-}
-
-/// 面板多媒体键回调：暂停冻结本地 LRC 钟，播放/切歌解冻。
-pub fn note_media_transport(action: &str) {
-    let a = action.trim().to_ascii_lowercase();
-    match a.as_str() {
-        "prev" | "previous" | "previoustrack" | "next" | "nexttrack" => {
-            PLAYING.store(true, Ordering::Release);
-            unfreeze_clock();
-        }
-        "play" => {
-            PLAYING.store(true, Ordering::Release);
-            unfreeze_clock();
-        }
-        "pause" => {
-            freeze_clock_now();
-            PLAYING.store(false, Ordering::Release);
-        }
-        "play-pause" | "playpause" | "toggle" => {
-            if PLAYING.load(Ordering::Acquire) {
-                freeze_clock_now();
-                PLAYING.store(false, Ordering::Release);
-            } else {
-                PLAYING.store(true, Ordering::Release);
-                unfreeze_clock();
-            }
-        }
-        _ => {}
-    }
-}
-
-fn freeze_clock_now() {
-    if let Ok(mut guard) = SMTC_CLOCK.lock() {
-        if let Some(clock) = guard.as_mut() {
-            if clock.frozen_ms.is_none() {
-                let pos = clock
-                    .origin_ms
-                    .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
-                clock.frozen_ms = Some(pos);
-            }
-        }
-    }
-}
-
-fn unfreeze_clock() {
-    if let Ok(mut guard) = SMTC_CLOCK.lock() {
-        if let Some(clock) = guard.as_mut() {
-            if let Some(pos) = clock.frozen_ms.take() {
-                clock.origin_ms = pos;
-                clock.synced_at = Instant::now();
-            }
-        }
-    }
-}
-
-fn song_key(title: Option<&str>, artist: Option<&str>) -> String {
-    format!("{}|{}", title.unwrap_or(""), artist.unwrap_or(""))
-}
-
-fn is_unlock_noise(s: &str) -> bool {
-    let t = s.trim();
-    t.contains("桌面歌词解锁") || t.contains("解锁桌面歌词")
-}
-
-fn is_lrc_credit_line(s: &str) -> bool {
-    let t = s.trim();
-    if t.is_empty() {
-        return true;
-    }
-    let lower = t.to_ascii_lowercase();
-    let keys = [
-        "原唱",
-        "作曲",
-        "作词",
-        "编曲",
-        "制作人",
-        "混音",
-        "母带",
-        "后期",
-        "mastering",
-        "producer",
-        "composer",
-        "lyricist",
-        "正版授权",
-    ];
-    keys.iter().any(|k| t.contains(k) || lower.contains(k))
-}
-
-/// 切歌：丢掉上一首的 sticky / 进度钟，并作废进行中的 LRC 请求。
-fn on_song_changed(new_key: &str) {
-    let mut changed = false;
-    if let Ok(mut last) = LAST_SONG_KEY.lock() {
-        if last.as_str() != new_key {
-            *last = new_key.to_string();
-            changed = true;
-        }
-    }
-    if !changed {
-        return;
-    }
-    LRC_FETCH_GEN.fetch_add(1, Ordering::AcqRel);
-    PLAYING.store(true, Ordering::Release);
-    let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
-    let _ = SMTC_CLOCK.lock().map(|mut g| *g = None);
-    // 旧歌 LRC 缓存可留着（按 key 区分）；但若当前缓存 key 不是新歌则不影响 peek
-}
-
-fn apply_sticky(out: &mut NeteaseNowPlaying) {
-    let key = song_key(out.title.as_deref(), out.artist.as_deref());
-    if let Some(lyric) = out.lyric.as_ref().filter(|s| !s.trim().is_empty()) {
-        if !is_lrc_credit_line(lyric) && !is_unlock_noise(lyric) {
-            if let Ok(mut g) = STICKY_LYRIC.lock() {
-                *g = Some(StickyLyric {
-                    song_key: key,
-                    text: lyric.clone(),
-                    at: Instant::now(),
-                });
-            }
-        }
-        return;
-    }
-    // 桌面歌词已关：立刻丢掉 sticky，禁止关窗后继续「自己播」
-    if !out.desktop_lyrics {
-        let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
-        return;
-    }
-    if !out.active {
-        let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
-        return;
-    }
-    if let Ok(g) = STICKY_LYRIC.lock() {
-        if let Some(s) = g.as_ref() {
-            if s.song_key == key && s.at.elapsed() < Duration::from_millis(800) {
-                out.lyric = Some(s.text.clone());
-                if out.source.as_deref() == Some("window-title") || out.source.is_none() {
-                    out.source = Some("sticky".into());
-                }
-            }
-        }
-    }
-}
-
-fn normalize_title(s: &str) -> String {
-    let s = s.split('（').next().unwrap_or(s);
-    let s = s.split('(').next().unwrap_or(s);
-    let s = s.split('[').next().unwrap_or(s);
-    s.trim().to_ascii_lowercase()
-}
-
-/// 必须标题相关，避免搜索落到完全另一首歌（串词主因）。
-fn pick_search_song_id(songs: &[serde_json::Value], title: &str, artist: Option<&str>) -> Option<u64> {
-    let want_t = normalize_title(title);
-    if want_t.is_empty() {
-        return None;
-    }
-    let want_a = artist.map(normalize_title).unwrap_or_default();
-    let mut best: Option<(i32, u64)> = None;
-    for s in songs {
-        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let nt = normalize_title(name);
-        if nt.is_empty() {
-            continue;
-        }
-        let mut score = 0i32;
-        if nt == want_t {
-            score += 100;
-        } else if nt.contains(&want_t) || want_t.contains(&nt) {
-            // 太短的包含易误伤
-            if want_t.chars().count() >= 3 && nt.chars().count() >= 3 {
-                score += 55;
-            } else {
-                continue;
-            }
-        } else {
-            continue;
-        }
-        if !want_a.is_empty() {
-            let artists = s
-                .get("artists")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
-                        .map(normalize_title)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_default();
-            if artists.contains(&want_a) || want_a.contains(&artists) {
-                score += 40;
-            }
-        }
-        let Some(id) = s.get("id").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        if best.map(|(sc, _)| score > sc).unwrap_or(true) {
-            best = Some((score, id));
-        }
-    }
-    best.and_then(|(sc, id)| if sc >= 55 { Some(id) } else { None })
-}
-
-/// 选句提前量（相对切歌后本地钟）。
-const LYRIC_LEAD_MS: u64 = 2800;
-
-/// 播放进度（ms）。只用本地钟——禁止在热路径调 WinRT SMTC（易与 WebView2 COM 死锁 → 整窗未响应）。
-fn playback_position_ms(expect_title: Option<&str>) -> u64 {
-    let key = expect_title
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default();
-    if key.is_empty() {
-        return 0;
-    }
-    let playing = PLAYING.load(Ordering::Acquire);
-    if let Ok(mut guard) = SMTC_CLOCK.lock() {
-        match guard.as_mut() {
-            Some(clock) if clock.song_key == key => {
-                if !playing && clock.frozen_ms.is_none() {
-                    let pos = clock
-                        .origin_ms
-                        .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
-                    clock.frozen_ms = Some(pos);
-                }
-            }
-            _ => {
-                *guard = Some(SmtcClock {
-                    song_key: key,
-                    origin_ms: 0,
-                    synced_at: Instant::now(),
-                    frozen_ms: if playing { None } else { Some(0) },
-                });
-            }
-        }
-        let Some(clock) = guard.as_ref() else {
-            return 0;
-        };
-        if let Some(pos) = clock.frozen_ms {
-            return pos;
-        }
-        return clock
-            .origin_ms
-            .saturating_add(clock.synced_at.elapsed().as_millis() as u64);
-    }
-    0
-}
-
-fn parse_lrc(raw: &str) -> Vec<(u64, String)> {
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        let line = line.trim();
-        if !line.starts_with('[') {
-            continue;
-        }
-        let mut rest = line;
-        let mut times: Vec<u64> = Vec::new();
-        while rest.starts_with('[') {
-            let Some(end) = rest.find(']') else {
-                break;
-            };
-            let tag = &rest[1..end];
-            rest = &rest[end + 1..];
-            let mut parts = tag.split(':');
-            let Some(mm) = parts.next() else {
-                continue;
-            };
-            let Some(ss) = parts.next() else {
-                continue;
-            };
-            if parts.next().is_some() {
-                continue;
-            }
-            let Ok(m) = mm.parse::<u64>() else {
-                continue;
-            };
-            let (sec_s, frac_s) = match ss.split_once('.') {
-                Some((a, b)) => (a, b),
-                None => (ss, "0"),
-            };
-            let Ok(sec) = sec_s.parse::<u64>() else {
-                continue;
-            };
-            let frac = frac_s.chars().take(3).collect::<String>();
-            let frac_ms = match frac.len() {
-                0 => 0u64,
-                1 => frac.parse::<u64>().unwrap_or(0) * 100,
-                2 => frac.parse::<u64>().unwrap_or(0) * 10,
-                _ => frac.parse::<u64>().unwrap_or(0),
-            };
-            times.push(m * 60_000 + sec * 1000 + frac_ms);
-        }
-        let text = rest.trim();
-        if text.is_empty() || is_lrc_credit_line(text) {
-            continue;
-        }
-        for ms in times {
-            out.push((ms, text.to_string()));
-        }
-    }
-    out.sort_by_key(|(t, _)| *t);
-    out
-}
-
-fn lyric_line_at(lines: &[(u64, String)], pos_ms: u64) -> Option<String> {
-    if lines.is_empty() {
-        return None;
-    }
-    let mut cur = None;
-    for (t, s) in lines {
-        if *t <= pos_ms {
-            cur = Some(s.clone());
-        } else {
-            break;
-        }
-    }
-    cur.or_else(|| lines.first().map(|(_, s)| s.clone()))
-}
-
-fn http_get_json(url: &str) -> Option<serde_json::Value> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_millis(800))
-        .timeout_read(std::time::Duration::from_millis(1500))
-        .build();
-    let resp = agent
-        .get(url)
-        .set(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WindowHub/1.0",
+        let mut frame = RECT::default();
+        let frame_ok = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut frame as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
         )
-        .set("Referer", "https://music.163.com/")
-        .call()
+        .is_ok();
+        if !frame_ok {
+            let _ = GetWindowRect(hwnd, &mut frame);
+        }
+        let fw = (frame.right - frame.left).max(1);
+        let fh = (frame.bottom - frame.top).max(1);
+        if fw < 24 || fh < 10 {
+            return None;
+        }
+
+        let read_dib = |hdc_mem, hbmp, w: i32, h: i32| -> Option<(Vec<u8>, u32, u32)> {
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0 as u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bgra = vec![0u8; (w as usize) * (h as usize) * 4];
+            let lines = GetDIBits(
+                hdc_mem,
+                hbmp,
+                0,
+                h as u32,
+                Some(bgra.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            if lines == 0 {
+                return None;
+            }
+            let n = (w as usize) * (h as usize);
+            let mut ink = 0usize;
+            for i in 0..n {
+                let si = i * 4;
+                let b = bgra[si];
+                let g = bgra[si + 1];
+                let r = bgra[si + 2];
+                if is_ink(r, g, b) {
+                    ink += 1;
+                }
+            }
+            if ink < 12 {
+                return None;
+            }
+            Some((bgra, w as u32, h as u32))
+        };
+
+        // PrintWindow：只要歌词窗像素（透明区多为黑，后面抠掉）
+        {
+            let hdc_win = GetDC(hwnd);
+            if !hdc_win.is_invalid() {
+                let hdc_mem = CreateCompatibleDC(hdc_win);
+                if !hdc_mem.is_invalid() {
+                    let hbmp = CreateCompatibleBitmap(hdc_win, fw, fh);
+                    if !hbmp.is_invalid() {
+                        let old = SelectObject(hdc_mem, hbmp);
+                        let ok = PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(0x2)).as_bool();
+                        let out = if ok {
+                            read_dib(hdc_mem, hbmp, fw, fh)
+                        } else {
+                            None
+                        };
+                        SelectObject(hdc_mem, old);
+                        let _ = DeleteObject(hbmp);
+                        let _ = DeleteDC(hdc_mem);
+                        ReleaseDC(hwnd, hdc_win);
+                        if out.is_some() {
+                            return out;
+                        }
+                    } else {
+                        let _ = DeleteDC(hdc_mem);
+                        ReleaseDC(hwnd, hdc_win);
+                    }
+                } else {
+                    ReleaseDC(hwnd, hdc_win);
+                }
+            }
+        }
+
+        // 回退：屏上 BitBlt（可能带壁纸，仍靠裁切有字区）
+        let hdc_screen = GetDC(HWND::default());
+        if hdc_screen.is_invalid() {
+            return None;
+        }
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        if hdc_mem.is_invalid() {
+            ReleaseDC(HWND::default(), hdc_screen);
+            return None;
+        }
+        let hbmp = CreateCompatibleBitmap(hdc_screen, fw, fh);
+        if hbmp.is_invalid() {
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(HWND::default(), hdc_screen);
+            return None;
+        }
+        let old = SelectObject(hdc_mem, hbmp);
+        let ok = BitBlt(
+            hdc_mem,
+            0,
+            0,
+            fw,
+            fh,
+            hdc_screen,
+            frame.left,
+            frame.top,
+            SRCCOPY,
+        )
+        .is_ok();
+        let out = if ok {
+            read_dib(hdc_mem, hbmp, fw, fh)
+        } else {
+            None
+        };
+        SelectObject(hdc_mem, old);
+        let _ = DeleteObject(hbmp);
+        let _ = DeleteDC(hdc_mem);
+        ReleaseDC(HWND::default(), hdc_screen);
+        out
+    }
+}
+
+/// 裁切有墨迹的包围盒，并把近黑像素打成透明 → RGBA。
+fn crop_ink_to_rgba(bgra: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let w = w as usize;
+    let h = h as usize;
+    if w == 0 || h == 0 || bgra.len() < w * h * 4 {
+        return None;
+    }
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0usize;
+    let mut max_y = 0usize;
+    let mut found = false;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            let b = bgra[i];
+            let g = bgra[i + 1];
+            let r = bgra[i + 2];
+            if is_ink(r, g, b) {
+                found = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    // 留一点描边余量，避免切掉发光字边
+    let pad = 4usize;
+    let x0 = min_x.saturating_sub(pad);
+    let y0 = min_y.saturating_sub(pad);
+    let x1 = (max_x + pad + 1).min(w);
+    let y1 = (max_y + pad + 1).min(h);
+    let cw = x1 - x0;
+    let ch = y1 - y0;
+    if cw < 4 || ch < 4 {
+        return None;
+    }
+
+    let mut rgba = vec![0u8; cw * ch * 4];
+    for y in 0..ch {
+        for x in 0..cw {
+            let si = ((y0 + y) * w + (x0 + x)) * 4;
+            let di = (y * cw + x) * 4;
+            let b = bgra[si];
+            let g = bgra[si + 1];
+            let r = bgra[si + 2];
+            if is_ink(r, g, b) {
+                rgba[di] = r;
+                rgba[di + 1] = g;
+                rgba[di + 2] = b;
+                // 半透明描边：略提 alpha，避免硬边
+                let a = ((luma(r, g, b) - INK_LUMA).min(200) as u8).saturating_add(55);
+                rgba[di + 3] = a.max(90);
+            } else {
+                rgba[di] = 0;
+                rgba[di + 1] = 0;
+                rgba[di + 2] = 0;
+                rgba[di + 3] = 0;
+            }
+        }
+    }
+    Some((rgba, cw as u32, ch as u32))
+}
+
+/// 目标显示约 22px；编码保留 2×～2.5× 清晰度，交给 CSS 缩小。
+fn rgba_to_png_data_url(rgba: &[u8], w: u32, h: u32) -> Option<String> {
+    use image::codecs::png::PngEncoder;
+    use image::{ImageBuffer, ImageEncoder, Rgba};
+    use std::io::Cursor;
+
+    let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(w, h, rgba.to_vec())?;
+
+    // 岛栏显示高 ~22；源图高度压到 44～56，避免整窗竖条却又够清晰
+    const TARGET_H: u32 = 48;
+    const MAX_W: u32 = 720;
+    let (out_img, out_w, out_h) = if h > TARGET_H || w > MAX_W {
+        let scale_h = TARGET_H as f64 / h as f64;
+        let scale_w = MAX_W as f64 / w as f64;
+        let scale = scale_h.min(scale_w).min(1.0);
+        let nw = ((w as f64) * scale).round().max(1.0) as u32;
+        let nh = ((h as f64) * scale).round().max(1.0) as u32;
+        let resized =
+            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::CatmullRom);
+        (resized, nw, nh)
+    } else if h < 28 && h > 0 {
+        // 源太矮：适度放大，减轻 CSS 再缩时的糊感
+        let scale = (36.0 / h as f64).min(2.0);
+        let nw = ((w as f64) * scale).round().max(1.0) as u32;
+        let nh = ((h as f64) * scale).round().max(1.0) as u32;
+        let resized =
+            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::CatmullRom);
+        (resized, nw, nh)
+    } else {
+        (img, w, h)
+    };
+
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let enc = PngEncoder::new(&mut cursor);
+        enc.write_image(
+            out_img.as_raw(),
+            out_w,
+            out_h,
+            image::ExtendedColorType::Rgba8,
+        )
         .ok()?;
-    resp.into_json().ok()
+    }
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, cursor.into_inner());
+    Some(format!("data:image/png;base64,{b64}"))
 }
 
-fn peek_cached_lrc(title: &str, artist: Option<&str>) -> Option<Vec<(u64, String)>> {
-    let key = format!(
-        "{}|{}",
-        title.trim(),
-        artist.map(|a| a.trim()).unwrap_or("")
-    );
-    let guard = API_LYRIC_CACHE.lock().ok()?;
-    let c = guard.as_ref()?;
-    if c.key == key && !c.lines.is_empty() && c.at.elapsed() < Duration::from_secs(600) {
-        Some(c.lines.clone())
-    } else {
-        None
+fn capture_lyric_image(hwnd: HWND) -> Option<String> {
+    let raw = hwnd.0 as isize;
+    if let Ok(guard) = IMAGE_CACHE.lock() {
+        if let Some(c) = guard.as_ref() {
+            if c.hwnd == raw && c.at.elapsed() < Duration::from_millis(160) {
+                return Some(c.data_url.clone());
+            }
+        }
     }
-}
-
-fn fetch_lrc_into_cache(title: &str, artist: Option<&str>, gen: u64) {
-    let key = format!(
-        "{}|{}",
-        title.trim(),
-        artist.map(|a| a.trim()).unwrap_or("")
-    );
-    if peek_cached_lrc(title, artist).is_some() {
-        return;
-    }
-    let bare = normalize_title(title);
-    let q = if let Some(a) = artist.filter(|s| !s.is_empty()) {
-        format!("{bare} {}", a.trim())
-    } else {
-        bare
-    };
-    let enc: String =
-        percent_encoding::utf8_percent_encode(&q, percent_encoding::NON_ALPHANUMERIC).to_string();
-    let search_url = format!(
-        "https://music.163.com/api/search/get/web?s={enc}&type=1&offset=0&total=true&limit=8"
-    );
-    let Some(search) = http_get_json(&search_url) else {
-        return;
-    };
-    if LRC_FETCH_GEN.load(Ordering::Acquire) != gen {
-        return;
-    }
-    let Some(songs) = search.pointer("/result/songs").and_then(|v| v.as_array()) else {
-        return;
-    };
-    let Some(id) = pick_search_song_id(songs, title, artist) else {
-        return;
-    };
-    let lyric_url = format!("https://music.163.com/api/song/lyric?id={id}&lv=-1&kv=-1&tv=-1");
-    let Some(lyric_json) = http_get_json(&lyric_url) else {
-        return;
-    };
-    if LRC_FETCH_GEN.load(Ordering::Acquire) != gen {
-        return;
-    }
-    let lrc = lyric_json
-        .pointer("/lrc/lyric")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let lines = parse_lrc(lrc);
-    if lines.is_empty() {
-        return;
-    }
-    if LRC_FETCH_GEN.load(Ordering::Acquire) != gen {
-        return;
-    }
-    if let Ok(mut guard) = API_LYRIC_CACHE.lock() {
-        *guard = Some(ApiLyricCache {
-            key,
-            lines,
+    let (bgra, w, h) = capture_lyric_bgra(hwnd)?;
+    let (rgba, cw, ch) = crop_ink_to_rgba(&bgra, w, h)?;
+    let data_url = rgba_to_png_data_url(&rgba, cw, ch)?;
+    if let Ok(mut guard) = IMAGE_CACHE.lock() {
+        *guard = Some(ImageCache {
+            hwnd: raw,
+            data_url: data_url.clone(),
             at: Instant::now(),
         });
     }
+    Some(data_url)
 }
 
-fn schedule_lrc_fetch(title: String, artist: Option<String>) {
-    if peek_cached_lrc(&title, artist.as_deref()).is_some() {
-        return;
-    }
-    // 允许切歌打断：busy 时若 gen 已变，仍可再开一枪
-    if LRC_FETCH_BUSY.load(Ordering::Acquire) {
-        return;
-    }
-    if LRC_FETCH_BUSY.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let gen = LRC_FETCH_GEN.load(Ordering::Acquire);
-    let _ = std::thread::Builder::new()
-        .name("netease-lrc-fetch".into())
-        .spawn(move || {
-            fetch_lrc_into_cache(&title, artist.as_deref(), gen);
-            LRC_FETCH_BUSY.store(false, Ordering::Release);
-            // 若拉取期间又切歌且缓存仍空，下次 snapshot 会再 schedule
-        });
-}
-
-fn lyric_from_cached_lrc(title: &str, artist: Option<&str>) -> Option<String> {
-    let lines = peek_cached_lrc(title, artist)?;
-    let pos = playback_position_ms(Some(title)).saturating_add(LYRIC_LEAD_MS);
-    lyric_line_at(&lines, pos)
-}
-
-/// 热路径快照：只 EnumWindows + 读缓存 LRC，绝不 HTTP / 扫内存。
 pub fn snapshot() -> NeteaseNowPlaying {
     static CACHE: Mutex<Option<(Instant, NeteaseNowPlaying)>> = Mutex::new(None);
     if let Ok(guard) = CACHE.lock() {
         if let Some((at, snap)) = guard.as_ref() {
-            if at.elapsed() < Duration::from_millis(400) {
+            if at.elapsed() < Duration::from_millis(120) {
                 return snap.clone();
             }
         }
@@ -668,7 +448,6 @@ pub fn snapshot() -> NeteaseNowPlaying {
 fn snapshot_uncached() -> NeteaseNowPlaying {
     let (main, lyric_hwnd) = find_netease_hwnds();
     let mut out = NeteaseNowPlaying::default();
-    // 仅「可见」的 DesktopLyrics 才算开启——监听网易云桌面歌词开关，不自创通道
     out.desktop_lyrics = lyric_hwnd.is_some();
 
     if let Some(hwnd) = main {
@@ -682,91 +461,63 @@ fn snapshot_uncached() -> NeteaseNowPlaying {
         }
     }
 
-    let key = song_key(out.title.as_deref(), out.artist.as_deref());
-    if !key.is_empty() && key != "|" {
-        on_song_changed(&key);
-    }
-
     if out.desktop_lyrics {
         out.active = true;
-        // 优先跟听桌面歌词窗文本（暂停时网易云停住，岛栏不会自己往前跑）
-        let desk_line = lyric_hwnd.and_then(read_desktop_lyric_line);
-        if let Some(line) = desk_line {
-            out.lyric = Some(line);
-            out.source = Some("desktop-lyrics".into());
-            // 用桌面行校准本地钟，避免短暂读空时 api-lrc 乱跳
-            if let Some(title) = out.title.as_deref() {
-                sync_clock_to_line(title, out.artist.as_deref(), out.lyric.as_deref().unwrap_or(""));
-            }
-        } else if let Some(title) = out.title.clone() {
-            // 桌面窗读不到字时才用官方 LRC + 本地钟（尊重 PLAYING 冻结）
-            if let Some(line) = lyric_from_cached_lrc(&title, out.artist.as_deref()) {
-                out.lyric = Some(line);
-                out.source = Some("api-lrc".into());
-            } else {
-                schedule_lrc_fetch(title, out.artist.clone());
+        if let Some(hwnd) = lyric_hwnd {
+            if let Some(img) = capture_lyric_image(hwnd) {
+                out.lyric_image = Some(img);
+                out.lyric = Some("♪".into());
+                out.source = Some("desktop-mirror".into());
             }
         }
     } else {
-        // 关桌面歌词：清空歌词与 sticky，岛栏应让位
-        out.lyric = None;
-        let _ = STICKY_LYRIC.lock().map(|mut g| *g = None);
+        let _ = IMAGE_CACHE.lock().map(|mut g| *g = None);
     }
 
-    if out.title.is_some() || out.lyric.is_some() || out.desktop_lyrics {
+    if out.title.is_some() || out.lyric_image.is_some() || out.desktop_lyrics {
         out.active = true;
     }
-    apply_sticky(&mut out);
     out
 }
 
-/// 桌面歌词当前行 → 把本地钟钉到该 LRC 时间戳，暂停/短暂丢字时不乱进。
-fn sync_clock_to_line(title: &str, artist: Option<&str>, line: &str) {
-    let line = line.trim();
-    if line.is_empty() {
-        return;
+pub fn open_or_focus() -> Result<(), String> {
+    let (main, _) = find_netease_hwnds();
+    if let Some(hwnd) = main {
+        let raw = hwnd.0 as isize;
+        if raw != 0 {
+            return crate::win32::enum_windows::focus_window(raw);
+        }
     }
-    let Some(lines) = peek_cached_lrc(title, artist) else {
-        return;
-    };
-    let Some((ms, _)) = lines.iter().find(|(_, s)| s.trim() == line) else {
-        return;
-    };
-    let key = title.trim().to_ascii_lowercase();
-    if key.is_empty() {
-        return;
-    }
-    // 选句时会再加 LYRIC_LEAD_MS，这里反推 origin
-    let origin = ms.saturating_sub(LYRIC_LEAD_MS);
-    if let Ok(mut guard) = SMTC_CLOCK.lock() {
-        let frozen = if PLAYING.load(Ordering::Acquire) {
-            None
-        } else {
-            Some(origin)
-        };
-        *guard = Some(SmtcClock {
-            song_key: key,
-            origin_ms: origin,
-            synced_at: Instant::now(),
-            frozen_ms: frozen,
-        });
-    }
+    launch_cloudmusic()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn launch_cloudmusic() -> Result<(), String> {
+    use std::path::PathBuf;
 
-    #[test]
-    fn credit_filter() {
-        assert!(is_lrc_credit_line("母带后期处理：Mastering"));
-        assert!(is_lrc_credit_line("【本歌曲已获得正版授权】"));
-        assert!(!is_lrc_credit_line("每天一张开眼睛就会想到你"));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local)
+                .join("NetEase")
+                .join("CloudMusic")
+                .join("cloudmusic.exe"),
+        );
     }
-
-    #[test]
-    fn unlock_noise() {
-        assert!(is_unlock_noise("桌面歌词解锁"));
-        assert!(!is_unlock_noise("有没有暂停键可以stop"));
+    for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Ok(pf) = std::env::var(key) {
+            candidates.push(
+                PathBuf::from(pf)
+                    .join("NetEase")
+                    .join("CloudMusic")
+                    .join("cloudmusic.exe"),
+            );
+        }
     }
+    for path in &candidates {
+        if path.is_file() {
+            return crate::dock::shell_open_path(&path.to_string_lossy());
+        }
+    }
+    crate::dock::shell_open_path("cloudmusic.exe")
+        .map_err(|_| "未找到网易云音乐，请先安装或手动打开".into())
 }

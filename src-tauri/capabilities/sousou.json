@@ -19,6 +19,9 @@
     "core:window:allow-set-position",
     "core:window:allow-inner-size",
     "core:window:allow-outer-size",
-    "core:window:allow-current-monitor"
+    "core:window:allow-current-monitor",
+    "core:window:allow-scale-factor",
+    "core:window:allow-inner-position",
+    "core:window:allow-outer-position"
   ]
 }

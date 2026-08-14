@@ -9,7 +9,10 @@
   <body>
     <div class="lx-panel" id="root">
       <div class="lx-song" id="song">未检测到网易云</div>
-      <div class="lx-line" id="line">开启桌面歌词后，岛栏会显示当前行</div>
+      <div class="lx-mirror-wrap" id="mirror-wrap" hidden>
+        <img class="lx-mirror" id="mirror" alt="桌面歌词镜像" draggable="false" />
+      </div>
+      <div class="lx-line" id="line">开启桌面歌词后，岛栏会镜像缩小显示</div>
       <div class="lx-transport" role="group" aria-label="播放控制">
         <button type="button" class="lx-btn" id="btn-prev" title="上一首" aria-label="上一首">
           ⏮
@@ -25,6 +28,15 @@
         </button>
         <button type="button" class="lx-btn" id="btn-next" title="下一首" aria-label="下一首">
           ⏭
+        </button>
+        <button
+          type="button"
+          class="lx-btn is-open-app"
+          id="btn-open"
+          title="打开网易云"
+          aria-label="打开网易云音乐"
+        >
+          网易云
         </button>
       </div>
       <div class="lx-meta" id="meta"></div>

@@ -87,8 +87,8 @@ pub fn focus_open_window(id: String) -> Result<(), String> {
 }
 
 /// Dock icon click: focus, or minimize when already frontmost (taskbar toggle).
-/// Expands to same-PID siblings so multi-window Electron (Cursor) toggles correctly
-/// when the dock icon only cached one HWND.
+/// Expands to same-PID / same-exe siblings so multi-window Electron (Cursor)
+/// toggles correctly when the dock icon only cached one HWND.
 #[tauri::command]
 pub fn focus_or_minimize_open_window(id: String) -> Result<(), String> {
     let hwnd = parse_window_id(&id)?;
@@ -104,9 +104,53 @@ pub fn focus_or_minimize_open_window(id: String) -> Result<(), String> {
             }
         }
         if pid != 0 {
-            let mut hwnds: Vec<isize> = list_windows(None)
+            let wins = list_windows(None);
+            let exe_key = wins
+                .iter()
+                .find(|w| w.hwnd == hwnd || w.pid == pid)
+                .and_then(|w| {
+                    w.exe_name
+                        .as_ref()
+                        .or(w.exe.as_ref())
+                        .map(|s| s.to_ascii_lowercase())
+                })
+                .or_else(|| {
+                    // HWND may be stale in the list — resolve from PID.
+                    wins.iter()
+                        .find(|w| w.pid == pid)
+                        .and_then(|w| w.exe_name.as_ref().map(|s| s.to_ascii_lowercase()))
+                });
+            let mut hwnds: Vec<isize> = wins
                 .into_iter()
-                .filter(|w| w.pid == pid)
+                .filter(|w| {
+                    if w.pid == pid {
+                        return true;
+                    }
+                    if let Some(ref key) = exe_key {
+                        let n = w
+                            .exe_name
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        let base = w
+                            .exe
+                            .as_deref()
+                            .and_then(|p| {
+                                std::path::Path::new(p)
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| s.to_ascii_lowercase())
+                            })
+                            .unwrap_or_default();
+                        let want = std::path::Path::new(key)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(key)
+                            .to_ascii_lowercase();
+                        return n == want || base == want;
+                    }
+                    false
+                })
                 .map(|w| w.hwnd)
                 .collect();
             if !hwnds.iter().any(|&h| h == hwnd) {
@@ -883,6 +927,7 @@ pub fn warm_popup_windows(app: AppHandle) {
                     let _ = win.hide();
                 }
             }
+            crate::dock::warm_dock_item_menu(&app, &state);
             #[cfg(windows)]
             {
                 // Soft kick only — never block warm thread on full WLAN/BT/temp scan.
@@ -1968,6 +2013,85 @@ fn normalize_mute_list(items: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Fill `pinned_processes` from live tray icons for any pinned ids still present.
+fn enrich_pinned_processes(
+    pinned: &[String],
+    mut processes: Vec<String>,
+) -> Vec<String> {
+    let icons = crate::win32::tray::list_icons();
+    for id in pinned {
+        let Some(icon) = icons.iter().find(|i| &i.id == id) else {
+            continue;
+        };
+        let p = icon.process.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            continue;
+        }
+        if !processes
+            .iter()
+            .any(|x| x.eq_ignore_ascii_case(&p))
+        {
+            processes.push(p);
+        }
+    }
+    normalize_mute_list(processes)
+}
+
+/// Drop dead `hwnd:uid` pin ids when the process is already tracked — keeps prefs tidy
+/// after WeChat/QQ restart without losing the pin (matched via `pinned_processes`).
+fn reconcile_pinned_ids(pinned: Vec<String>, pinned_processes: &[String]) -> Vec<String> {
+    let icons = crate::win32::tray::list_icons();
+    let live: std::collections::HashSet<&str> =
+        icons.iter().map(|i| i.id.as_str()).collect();
+    let mut out = Vec::new();
+    for id in pinned {
+        if live.contains(id.as_str()) {
+            if !out.iter().any(|x: &String| x == &id) {
+                out.push(id);
+            }
+            continue;
+        }
+        // Keep GUID-like / registry ids even if not live yet (cold start).
+        let looks_hwnd_uid = id.contains(':')
+            && id
+                .split_once(':')
+                .is_some_and(|(h, u)| {
+                    !h.is_empty()
+                        && h.chars().all(|c| c.is_ascii_digit() || c == '-')
+                        && u.chars().all(|c| c.is_ascii_digit())
+                });
+        if !looks_hwnd_uid {
+            if !out.iter().any(|x: &String| x == &id) {
+                out.push(id);
+            }
+            continue;
+        }
+        // Dead hwnd:uid — drop if we already pin by process (survives churn).
+        if pinned_processes.is_empty() {
+            if !out.iter().any(|x: &String| x == &id) {
+                out.push(id);
+            }
+        }
+    }
+    // Ensure every live icon whose process is pinned also has its current id listed.
+    for icon in &icons {
+        let p = icon.process.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            continue;
+        }
+        if !pinned_processes
+            .iter()
+            .any(|x| x.eq_ignore_ascii_case(&p))
+        {
+            continue;
+        }
+        if !out.iter().any(|x| x == &icon.id) {
+            out.push(icon.id.clone());
+        }
+    }
+    out
+}
+
 pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
     let mut prefs: crate::win32::tray::TrayPrefs =
         if let Ok(Some(v)) = crate::db::with_conn(|c| crate::db::tray_get(c)) {
@@ -1988,6 +2112,15 @@ pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
             .map(|p| p.to_ascii_lowercase())
             .collect(),
     );
+    prefs.pinned_processes = normalize_mute_list(
+        prefs
+            .pinned_processes
+            .into_iter()
+            .map(|p| p.to_ascii_lowercase())
+            .collect(),
+    );
+    prefs.pinned_processes = enrich_pinned_processes(&prefs.pinned, prefs.pinned_processes);
+    prefs.pinned = reconcile_pinned_ids(prefs.pinned, &prefs.pinned_processes);
     prefs
 }
 
@@ -2012,6 +2145,7 @@ pub fn get_tray_prefs() -> crate::win32::tray::TrayPrefs {
 pub fn set_tray_prefs(
     app: AppHandle,
     pinned: Vec<String>,
+    pinned_processes: Option<Vec<String>>,
     menu_heights: Option<std::collections::HashMap<String, i32>>,
     muted: Option<Vec<String>>,
     muted_processes: Option<Vec<String>>,
@@ -2023,8 +2157,20 @@ pub fn set_tray_prefs(
         *h = (*h).clamp(48, 640);
     }
     let prev = crate::win32::tray::get_prefs();
+    let pinned_processes = enrich_pinned_processes(
+        &pinned,
+        normalize_mute_list(
+            pinned_processes
+                .unwrap_or(prev.pinned_processes)
+                .into_iter()
+                .map(|p| p.to_ascii_lowercase())
+                .collect(),
+        ),
+    );
+    let pinned = reconcile_pinned_ids(pinned, &pinned_processes);
     let prefs = crate::win32::tray::TrayPrefs {
         pinned,
+        pinned_processes,
         menu_heights: heights,
         menu_height_px: None,
         muted: normalize_mute_list(muted.unwrap_or(prev.muted)),
@@ -2281,6 +2427,9 @@ pub struct IslandBarDto {
     pub plugin_id: String,
     pub text: String,
     pub title: Option<String>,
+    /// Optional data-URL image (e.g. desktop lyric mirror JPEG).
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[tauri::command]
@@ -2289,10 +2438,14 @@ pub fn hub_island_set_bar(
     plugin_id: String,
     text: String,
     title: Option<String>,
+    image: Option<String>,
 ) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
     crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.bar")?;
     let text = text.trim().to_string();
+    let image = image
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     // Always include plugin_id so Host can clear only that plugin's layer
     // (resident vs temporary overlay) without wiping the other.
     let _ = app.emit(
@@ -2301,6 +2454,7 @@ pub fn hub_island_set_bar(
             plugin_id,
             text,
             title,
+            image,
         },
     );
     Ok(())
@@ -2316,6 +2470,7 @@ pub fn hub_island_clear_bar(app: AppHandle, plugin_id: String) -> Result<(), Str
             plugin_id,
             text: String::new(),
             title: None,
+            image: None,
         },
     );
     Ok(())
@@ -2338,7 +2493,8 @@ pub fn hub_netease_now_playing(plugin_id: String) -> Result<serde_json::Value, S
             "artist": null,
             "lyric": null,
             "source": null,
-            "desktopLyrics": false
+            "desktopLyrics": false,
+            "lyricImage": null
         }))
     }
 }
@@ -2352,6 +2508,21 @@ pub fn hub_media_transport(plugin_id: String, action: String) -> Result<(), Stri
         crate::win32::netease_lyrics::note_media_transport(&action);
     }
     crate::win32::input::media_transport(&action)
+}
+
+/// 打开 / 聚焦网易云音乐（歌词面板按钮）。
+#[tauri::command]
+pub fn hub_media_open_netease(plugin_id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "island.bar")?;
+    #[cfg(windows)]
+    {
+        return crate::win32::netease_lyrics::open_or_focus();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = plugin_id;
+        Err("仅 Windows 支持打开网易云".into())
+    }
 }
 
 #[tauri::command]
@@ -2571,7 +2742,7 @@ pub struct IslandPrefsDto {
 }
 
 fn default_bar_resident_pref() -> String {
-    "com.window-hub.weather".into()
+    "com.window-hub.lyrics".into()
 }
 
 fn default_volume_preview_pref() -> bool {
@@ -2585,7 +2756,11 @@ impl Default for IslandPrefsDto {
             immerse_idle_sec: 8,
             pull_content: "plugin:com.window-hub.weather".into(),
             bar_resident: default_bar_resident_pref(),
-            bar_priority: Vec::new(),
+            bar_priority: vec![
+                "com.window-hub.lyrics".into(),
+                "com.window-hub.todo".into(),
+                "com.window-hub.weather".into(),
+            ],
             msg_notify: true,
             msg_notify_text: "收到一条消息".into(),
             msg_notify_sec: 4,

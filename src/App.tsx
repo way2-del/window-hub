@@ -39,15 +39,28 @@ import {
   resolvePluginPanelShellSize,
   type IslandBarState,
 } from "./plugins/islandSlots";
-import { parsePluginPanelId } from "./plugins/panelProviders";
+import { parsePluginPanelId, listPanelProviders } from "./plugins/panelProviders";
 import { pluginRegistry } from "./plugins/registry";
 import "./App.css";
 
 /** 默认插件面板展开尺寸（非中转站） */
 const VIEW_W_DEFAULT = 380;
 const VIEW_H_DEFAULT = 220;
+/** 下拉面板可切换 tag 行高度（含底间距） */
+const PANEL_TAB_ROW_H = 34;
 /** 岛贴屏顶后顶隙为 0；窗口高度 = 岛高 */
 const TOP_GAP = 0;
+
+/** 下拉 tag 行：≥2 个 pull 面板且当前非临时会话时加高 */
+function panelTabExtraFor(pluginId: string | null | undefined): number {
+  if (!pluginId) return 0;
+  const excluded = Boolean(
+    pluginRegistry.get(pluginId)?.manifest.slots?.["island.panel"]?.excludeFromPullContent,
+  );
+  if (excluded) return 0;
+  const n = listPanelProviders(pluginRegistry.listPanelManifests()).length;
+  return n >= 2 ? PANEL_TAB_ROW_H : 0;
+}
 const ISLAND_COLLAPSED = { width: 300, height: 28 };
 /** 当前展开目标 / SVG 画布（中转站时变宽变矮）——由 App 每帧同步 */
 const liveExpanded = { width: VIEW_W_DEFAULT, height: VIEW_H_DEFAULT };
@@ -391,6 +404,9 @@ function App() {
   const [dropTarget, setDropTarget] = useState(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
   const panelOverrideRef = useRef<string | null>(null);
+  const [panelTabs, setPanelTabs] = useState(() =>
+    listPanelProviders(pluginRegistry.listPanelManifests()),
+  );
   const [dropPluginId, setDropPluginId] = useState<string | null>(() =>
     resolveIslandDropPluginId(),
   );
@@ -483,6 +499,7 @@ function App() {
         const pid = prev.slice("plugin:".length);
         return pluginRegistry.get(pid)?.enabled ? prev : null;
       });
+      setPanelTabs(listPanelProviders(pluginRegistry.listPanelManifests()));
     };
     sync();
     return pluginRegistry.subscribe(sync);
@@ -1249,7 +1266,7 @@ function App() {
       setShellPanelW(w);
       setShellPanelH(h);
       liveExpanded.width = w;
-      liveExpanded.height = h;
+      liveExpanded.height = h + panelTabExtraFor(sizePluginId);
     };
     // Sync from manifest first so expand never uses stale staging 560×152
     apply(null);
@@ -1351,10 +1368,16 @@ function App() {
     void listen<IslandBarState | null>("island-bar-changed", (ev) => {
       const p = ev.payload;
       if (!p?.pluginId) return;
-      const cleared = !String(p.text ?? "").trim();
+      const cleared =
+        !String(p.text ?? "").trim() && !String(p.image ?? "").trim();
       const next = cleared
         ? null
-        : { pluginId: p.pluginId, text: p.text, title: p.title };
+        : {
+            pluginId: p.pluginId,
+            text: p.text,
+            title: p.title,
+            image: p.image,
+          };
       const rec = pluginRegistry.get(p.pluginId);
       if (
         !rec?.enabled ||
@@ -1384,7 +1407,8 @@ function App() {
         if (
           cur &&
           cur.text === next!.text &&
-          (cur.title ?? "") === (next!.title ?? "")
+          (cur.title ?? "") === (next!.title ?? "") &&
+          (cur.image ?? "") === (next!.image ?? "")
         ) {
           return prev;
         }
@@ -1505,10 +1529,18 @@ function App() {
   const effectivePullContent = panelOverride ?? islandPrefs.pullContent;
   const activePanelPluginId = parsePluginPanelId(effectivePullContent);
   const stagingBar = islandBar?.text ?? "";
+  const stagingImage = islandBar?.image ?? "";
+  const showStagingBar = !!(stagingBar.trim() || stagingImage.trim());
+  const activePanelExcluded =
+    !!activePanelPluginId &&
+    !!pluginRegistry.get(activePanelPluginId)?.manifest.slots?.["island.panel"]
+      ?.excludeFromPullContent;
+  const showPanelTags = panelTabs.length >= 2 && !activePanelExcluded;
+  const tabExtraH = showPanelTags ? PANEL_TAB_ROW_H : 0;
   const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
-  const viewH = activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT;
+  const viewH = (activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT) + tabExtraH;
   const pluginStagingShell =
-    !!activePanelPluginId && isStagingPanelShell(viewW, viewH);
+    !!activePanelPluginId && isStagingPanelShell(viewW, shellPanelH);
   liveExpanded.width = viewW;
   liveExpanded.height = viewH;
 
@@ -1565,7 +1597,7 @@ function App() {
     setShellPanelW(w);
     setShellPanelH(h);
     liveExpanded.width = w;
-    liveExpanded.height = h;
+    liveExpanded.height = h + panelTabExtraFor(pluginId);
     setPanelOverride(`plugin:${pluginId}`);
   }
 
@@ -1900,27 +1932,56 @@ function App() {
           >
             <div className={`island-bar${msgBanner ? " is-notifying" : ""}`}>
               <div className={`bar-weather${msgBanner ? " is-exiting" : ""}`}>
-                {stagingBar ? (
+                {showStagingBar ? (
                   <div
-                    className="bar-staging"
+                    className={`bar-staging${stagingImage ? " has-lyric-img" : ""}`}
                     role="button"
                     tabIndex={0}
                     title={islandBar?.title || "打开面板"}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
-                      // 常驻摘要仅展示；展开一律用设置里的「下拉内容」
+                      // 点摘要：优先打开当前竞选赢家的面板；否则用设置「下拉内容」
+                      const winnerId = contentBar?.pluginId;
+                      if (
+                        winnerId &&
+                        !overlayBar &&
+                        pluginRegistry.get(winnerId)?.manifest.slots?.["island.panel"]
+                      ) {
+                        void openPluginSession(winnerId);
+                        return;
+                      }
                       if (!expandedRef.current) void expand();
                     }}
                     onKeyDown={(e) => {
                       if (e.key !== "Enter" && e.key !== " ") return;
                       e.preventDefault();
                       e.stopPropagation();
+                      const winnerId = contentBar?.pluginId;
+                      if (
+                        winnerId &&
+                        !overlayBar &&
+                        pluginRegistry.get(winnerId)?.manifest.slots?.["island.panel"]
+                      ) {
+                        void openPluginSession(winnerId);
+                        return;
+                      }
                       if (!expandedRef.current) void expand();
                     }}
                   >
-                    <span className="bar-staging-dot" aria-hidden />
-                    <span className="bar-staging-text">{stagingBar}</span>
+                    {stagingImage ? (
+                      <img
+                        className="bar-lyric-img"
+                        src={stagingImage}
+                        alt={islandBar?.title || stagingBar || "歌词"}
+                        draggable={false}
+                      />
+                    ) : (
+                      <>
+                        <span className="bar-staging-dot" aria-hidden />
+                        <span className="bar-staging-text">{stagingBar}</span>
+                      </>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -2007,17 +2068,45 @@ function App() {
 
             <div
               ref={panelRef}
-              className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}`}
+              className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}${showPanelTags ? " has-tags" : ""}`}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
             >
-              <IslandPanelHost
-                pullContent={effectivePullContent}
-                active={panelActive}
-                onPanelClose={() => {
-                  if (expandedRef.current) void collapse();
-                }}
-              />
+              {showPanelTags ? (
+                <div className="island-panel-tags" role="tablist" aria-label="面板切换">
+                  {panelTabs.map((tab) => {
+                    const pid = tab.pluginId ?? parsePluginPanelId(tab.id);
+                    if (!pid) return null;
+                    const selected = activePanelPluginId === pid;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={selected}
+                        className={`island-panel-tag${selected ? " is-selected" : ""}`}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (selected) return;
+                          armPluginSession(pid);
+                        }}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              <div className="island-panel-body">
+                <IslandPanelHost
+                  pullContent={effectivePullContent}
+                  active={panelActive}
+                  onPanelClose={() => {
+                    if (expandedRef.current) void collapse();
+                  }}
+                />
+              </div>
             </div>
           </div>
         </div>

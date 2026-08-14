@@ -94,7 +94,7 @@
     return save()
       .then(function () {
         state.error = "";
-        // 岛栏常驻是天气时 setBar 会被 Host 忽略，不影响保存
+        // 岛栏按 barPriority 竞选；无未完成项时 clearBar 让位
         return syncBar().catch(function () {});
       })
       .catch(function (err) {

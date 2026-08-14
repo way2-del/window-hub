@@ -1,6 +1,6 @@
 [package]
 name = "window-hub"
-version = "0.1.5"
+version = "0.1.7"
 description = "Windows window mosaic hub with ECS capture and input forwarding"
 authors = ["you"]
 edition = "2021"
@@ -38,7 +38,11 @@ windows = { version = "0.58", features = [
   "implement",
   "Foundation",
   "Foundation_Collections",
+  "Globalization",
+  "Graphics_Imaging",
   "Media_Control",
+  "Media_Ocr",
+  "Storage_Streams",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
@@ -61,9 +65,11 @@ windows = { version = "0.58", features = [
   "Win32_System_Memory",
   "Win32_System_DataExchange",
   "Win32_System_Threading",
+  "Win32_System_Kernel",
   "Win32_System_ProcessStatus",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_LibraryLoader",
+  "Win32_System_WinRT",
   "Win32_NetworkManagement_WiFi",
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",

@@ -1,11 +1,12 @@
-//! One-shot seed: match local Start Menu apps into tabs (from 小智搜搜 screenshots).
-//! Results are written into SQLite `prefs_sousou` — not hardcoded UI lists.
+//! One-shot seed: match local Start Menu / Desktop shortcuts into tabs by name
+//! keywords. Results are written into SQLite `prefs_sousou` (JSON) — never
+//! hardcode machine paths here.
 
 use super::apps;
-use super::config::{self, SousouConfig, SousouShortcut};
+use super::config::{self, SousouConfig, SousouShortcut, SousouTab};
 
 /// (tab_id, name keywords to match against local shortcuts)
-/// Keywords come from user screenshots (应用 / 编程 / 工作 / 优化 …).
+/// Games → `game` shelf; other categories follow screenshots loosely.
 const SEED: &[(&str, &[&str])] = &[
     (
         "apps",
@@ -19,30 +20,19 @@ const SEED: &[(&str, &[&str])] = &[
             "CloudMusic",
             "vivo办公",
             "HECATE",
-            "游戏加加",
-            "BetterGI",
             "欧路词典",
             "Eudic",
-            "灾殃",
             "Telegram",
-            "GameSir",
-            "GTA5",
-            "forzahorizon",
-            "SteamTools",
-            "Dock_64",
-            "Steam",
             "微信输入法",
+            "WeType",
             "MCHOSE",
             "小智桌面日历",
             "QQ",
             "紫鸟",
             "PotPlayer",
             "Motrix",
-            "Mem Reduct",
             "夸克",
             "DeskPins",
-            "PVZ",
-            "抖音",
             "ImageGlass",
             "微信",
             "WeChat",
@@ -52,6 +42,34 @@ const SEED: &[(&str, &[&str])] = &[
             "Clash",
             "Math Input",
             "数学输入",
+            "抖音",
+        ],
+    ),
+    (
+        "game",
+        &[
+            "Steam",
+            "SteamTools",
+            "游戏加加",
+            "GamePP",
+            "BetterGI",
+            "灾殃",
+            "Scourge",
+            "TheScourge",
+            "GameSir",
+            "GTA5",
+            "GTAV",
+            "Grand Theft Auto",
+            "forzahorizon",
+            "Forza Horizon",
+            "PVZ",
+            "植物大战僵尸",
+            "WeGame",
+            "米哈游",
+            "miHoYo",
+            "原神",
+            "我的世界",
+            "Minecraft",
         ],
     ),
     (
@@ -68,6 +86,7 @@ const SEED: &[(&str, &[&str])] = &[
             "VSCode",
             "Cursor",
             "Trae",
+            "TRAE",
             "HBuilder",
             "Typora",
             "Navicat",
@@ -87,8 +106,26 @@ const SEED: &[(&str, &[&str])] = &[
             "ProxyPin",
             "natapp",
             "cpolar",
+            "花生壳",
             "milvus",
             "vectordb",
+            "VectorDB",
+            "Attu",
+            "Axure",
+            "cosbrowser",
+            "DBX",
+            "QtScrcpy",
+            "宝塔",
+            "Kafka-King",
+            "Kafka",
+            "若依",
+            "New-API",
+            "ApacheJMeter",
+            "JMeter",
+            "Kiro",
+            "CursorLogin",
+            "微信开发者",
+            "抖音开发者",
             "Postman",
             "CLion",
             "Rider",
@@ -111,6 +148,7 @@ const SEED: &[(&str, &[&str])] = &[
             "WeCom",
             "MuMu",
             "GameViewer",
+            "UU远程",
             "向日葵",
             "Sunlogin",
             "ToDesk",
@@ -134,6 +172,7 @@ const SEED: &[(&str, &[&str])] = &[
             "有道翻译",
             "Youdao",
             "泉州师院",
+            "EasyConnect",
         ],
     ),
     (
@@ -149,7 +188,6 @@ const SEED: &[(&str, &[&str])] = &[
             "思源",
             "Logseq",
             "便签",
-            "Typora",
         ],
     ),
     (
@@ -172,6 +210,7 @@ const SEED: &[(&str, &[&str])] = &[
         "optimize",
         &[
             "Standalone",
+            "ShExView",
             "CCleaner",
             "LiteMonitor",
             "ContextMenu",
@@ -204,7 +243,6 @@ const SEED: &[(&str, &[&str])] = &[
             "京东",
             "拼多多",
             "闲鱼",
-            "抖音",
             "快手",
             "美团",
             "饿了么",
@@ -212,7 +250,21 @@ const SEED: &[(&str, &[&str])] = &[
     ),
 ];
 
-const SEED_META: &str = "sousou_tabs_seeded_v2";
+/// Tab id → display name (used when creating a missing shelf).
+const TAB_NAMES: &[(&str, &str, &str)] = &[
+    ("home", "主页", "home"),
+    ("apps", "应用", "apps"),
+    ("game", "游戏", "game"),
+    ("code", "编程", "code"),
+    ("work", "工作", "work"),
+    ("notes", "笔记", "notes"),
+    ("xinwu", "信物社", "community"),
+    ("shop", "电商", "shop"),
+    ("tools", "小工具", "tools"),
+    ("optimize", "优化", "optimize"),
+];
+
+const SEED_META: &str = "sousou_tabs_seeded_v3";
 
 pub fn seed_tabs_if_needed() -> SousouConfig {
     let mut cfg = config::load();
@@ -233,10 +285,13 @@ pub fn seed_tabs_if_needed() -> SousouConfig {
 
 /// `replace_seeded`: if true, clear items on seeded tabs before filling (screenshot refresh).
 pub fn seed_into(mut cfg: SousouConfig, replace_seeded: bool) -> SousouConfig {
+    ensure_seed_tabs(&mut cfg);
+
     let seeded_ids: std::collections::HashSet<&str> = SEED.iter().map(|(id, _)| *id).collect();
     if replace_seeded {
         for tab in &mut cfg.tabs {
-            if seeded_ids.contains(tab.id.as_str()) {
+            if seeded_ids.contains(tab.id.as_str()) || tab_alias_id(tab).is_some_and(|id| seeded_ids.contains(id))
+            {
                 tab.items.clear();
             }
         }
@@ -251,8 +306,11 @@ pub fn seed_into(mut cfg: SousouConfig, replace_seeded: bool) -> SousouConfig {
             || n.contains("uninstall")
             || n.contains("help")
             || n.contains("installer")
+            || n.contains("website")
             || p.contains("installer")
             || p.contains("msedge_proxy")
+            || p.contains("node_modules")
+            || p.contains("\\test\\")
         {
             return false;
         }
@@ -271,7 +329,7 @@ pub fn seed_into(mut cfg: SousouConfig, replace_seeded: bool) -> SousouConfig {
     let mut matched_idxs: Vec<usize> = Vec::new();
 
     for (tab_id, keys) in SEED {
-        let Some(tab) = cfg.tabs.iter_mut().find(|t| t.id == *tab_id) else {
+        let Some(tab) = find_tab_mut(&mut cfg.tabs, tab_id) else {
             continue;
         };
         let mut exist: std::collections::HashSet<String> = tab
@@ -288,7 +346,6 @@ pub fn seed_into(mut cfg: SousouConfig, replace_seeded: bool) -> SousouConfig {
                 if k.len() < 4 {
                     return name_l.contains(&k);
                 }
-                // Prefer name match; allow target filename match for exe stems.
                 if name_l.contains(&k) {
                     return true;
                 }
@@ -296,6 +353,10 @@ pub fn seed_into(mut cfg: SousouConfig, replace_seeded: bool) -> SousouConfig {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("");
+                // "steam" must not match Watt Toolkit / Steam++.exe
+                if k == "steam" {
+                    return file == "steam";
+                }
                 file.contains(&k)
             });
             if !hit {
@@ -321,13 +382,19 @@ pub fn seed_into(mut cfg: SousouConfig, replace_seeded: bool) -> SousouConfig {
         }
     }
 
+    // Deduplicate cross-tab: prefer game shelf for game keywords, code for 开发者工具.
+    dedupe_prefer(&mut cfg, "game", &["steam", "bettergi", "游戏加加", "gamespp", "games sir", "gta", "forza", "灾殃", "scourge", "pvz", "steamtools"]);
+    dedupe_prefer(&mut cfg, "code", &["开发者工具", "hbuilder", "axure", "jmeter", "kafka", "natapp", "cpolar"]);
+    dedupe_prefer(&mut cfg, "work", &["企业微信", "wxwork"]);
+    dedupe_prefer(&mut cfg, "optimize", &["mem reduct", "wiztree", "图吧"]);
+
     matched_idxs.sort_unstable();
     matched_idxs.dedup();
     for i in matched_idxs {
         if let Some(app) = all.get_mut(i) {
             if app.icon_png.is_none() {
-                app.icon_png = crate::dock::resolve_launcher_icon_png(&app.target)
-                    .or_else(|| crate::dock::resolve_launcher_icon_png(&app.path));
+                app.icon_png = super::icon_cache::get_or_resolve(&app.target)
+                    .or_else(|| super::icon_cache::get_or_resolve(&app.path));
             }
         }
     }
@@ -344,6 +411,92 @@ pub fn seed_into(mut cfg: SousouConfig, replace_seeded: bool) -> SousouConfig {
         }
     }
     cfg
+}
+
+fn ensure_seed_tabs(cfg: &mut SousouConfig) {
+    let needed: std::collections::HashSet<&str> = SEED.iter().map(|(id, _)| *id).collect();
+    for (id, name, icon) in TAB_NAMES {
+        if !needed.contains(id) {
+            continue;
+        }
+        if find_tab_mut(&mut cfg.tabs, id).is_some() {
+            continue;
+        }
+        // Insert game after apps when possible.
+        let insert_at = if *id == "game" {
+            cfg.tabs
+                .iter()
+                .position(|t| t.id == "apps" || t.name == "应用")
+                .map(|i| i + 1)
+                .unwrap_or(cfg.tabs.len())
+        } else {
+            cfg.tabs.len()
+        };
+        cfg.tabs.insert(
+            insert_at,
+            SousouTab {
+                id: (*id).into(),
+                name: (*name).into(),
+                icon: (*icon).into(),
+                items: Vec::new(),
+                folder_path: String::new(),
+            },
+        );
+    }
+}
+
+fn tab_alias_id(tab: &SousouTab) -> Option<&'static str> {
+    for (id, name, _) in TAB_NAMES {
+        if tab.id == *id || tab.name == *name {
+            return Some(*id);
+        }
+    }
+    None
+}
+
+fn find_tab_mut<'a>(tabs: &'a mut [SousouTab], want: &str) -> Option<&'a mut SousouTab> {
+    let want_name = TAB_NAMES
+        .iter()
+        .find(|(id, _, _)| *id == want)
+        .map(|(_, name, _)| *name);
+    tabs.iter_mut().find(|t| {
+        t.id == want || want_name.is_some_and(|n| t.name == n) || tab_alias_id(t) == Some(want)
+    })
+}
+
+/// Keep needle matches only on `prefer` tab; strip them from other shelves.
+fn dedupe_prefer(cfg: &mut SousouConfig, prefer: &str, needles: &[&str]) {
+    for tab in &mut cfg.tabs {
+        let is_prefer = tab.id == prefer
+            || tab_alias_id(tab) == Some(prefer)
+            || TAB_NAMES
+                .iter()
+                .any(|(id, name, _)| *id == prefer && tab.name == *name);
+        if is_prefer {
+            continue;
+        }
+        tab.items.retain(|i| {
+            let hay = format!("{} {}", i.name, i.path).to_ascii_lowercase();
+            !needle_hit(&hay, needles)
+        });
+    }
+}
+
+fn needle_hit(hay: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| {
+        let n = n.to_ascii_lowercase();
+        // Watt Toolkit is Steam++ — not the Steam client.
+        if n == "steam" {
+            if hay.contains("steam++") || hay.contains("watt") {
+                return false;
+            }
+            return hay.contains("steam.exe")
+                || hay.contains("\\steam\\")
+                || hay.contains("/steam/")
+                || hay.contains(" steam");
+        }
+        hay.contains(&n)
+    })
 }
 
 /// Force re-seed from screenshots into DB (replace seeded tab items).
@@ -366,7 +519,7 @@ mod tests {
         let cfg = reseeds_merge().expect("seed");
         for t in &cfg.tabs {
             eprintln!("tab {} ({}) => {} items", t.id, t.name, t.items.len());
-            for it in t.items.iter().take(8) {
+            for it in t.items.iter().take(12) {
                 eprintln!("  - {} | {}", it.name, it.path);
             }
         }

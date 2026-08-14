@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  isTrayPinned,
   mergeTrayIcons,
   trayLabel,
   type TrayIconInfo,
   type TrayPrefs,
 } from "./components/TrayCluster";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
+
+/** Keep in sync with `TRAY_POPUP_W` / `TRAY_POPUP_H` in commands.rs */
+const TRAY_POPUP_W = 280;
+const TRAY_POPUP_MAX_H = 520;
 
 function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
   if (icon.icon_png_base64) {
@@ -53,8 +59,47 @@ function snapIn(setPhase: (p: "enter" | "in" | "leave") => void) {
 export default function TrayPopupApp() {
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
+  const [pinnedProcesses, setPinnedProcesses] = useState<string[]>([]);
+  /** Avoid fitting to the empty boot frame before the first list_tray_icons returns. */
+  const [listReady, setListReady] = useState(false);
   // Always opaque — hide/show HWND only (opacity:0 + mica = stuck frosted slab).
   const [phase, setPhase] = useState<"enter" | "in" | "leave">("in");
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const lastFitH = useRef(0);
+
+  /** Shrink/grow the HWND to the menu content so the glass panel has no empty tail. */
+  useLayoutEffect(() => {
+    if (!listReady) return;
+    const el = shellRef.current;
+    if (!el) return;
+
+    const fit = () => {
+      const natural = Math.ceil(Math.max(el.scrollHeight, el.getBoundingClientRect().height));
+      const h = Math.min(TRAY_POPUP_MAX_H, Math.max(48, natural));
+      if (h === lastFitH.current) return;
+      lastFitH.current = h;
+      void getCurrentWindow()
+        .setSize(new LogicalSize(TRAY_POPUP_W, h))
+        .catch(() => undefined);
+    };
+
+    fit();
+    const ro = new ResizeObserver(() => fit());
+    ro.observe(el);
+
+    let unlisten: (() => void) | undefined;
+    void listen("tray-popup-opened", () => {
+      lastFitH.current = 0;
+      requestAnimationFrame(fit);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      ro.disconnect();
+      unlisten?.();
+    };
+  }, [listReady]);
 
   useEffect(() => {
     const syncGlass = (prefs: GlassPrefs) => {
@@ -113,9 +158,11 @@ export default function TrayPopupApp() {
         if (!cancelled) {
           setIcons(list);
           setPinned(prefs.pinned ?? []);
+          setPinnedProcesses(prefs.pinned_processes ?? []);
+          setListReady(true);
         }
       } catch {
-        /* noop */
+        if (!cancelled) setListReady(true);
       }
 
       try {
@@ -131,6 +178,7 @@ export default function TrayPopupApp() {
         unsubs.push(
           await listen<TrayPrefs>("tray-prefs", (ev) => {
             setPinned(ev.payload.pinned ?? []);
+            setPinnedProcesses(ev.payload.pinned_processes ?? []);
           }),
         );
       } catch {
@@ -176,18 +224,21 @@ export default function TrayPopupApp() {
     };
   }, []);
 
-  const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
+  const pinPrefs = useMemo(
+    () => ({ pinned, pinned_processes: pinnedProcesses }),
+    [pinned, pinnedProcesses],
+  );
   const pinnedIcons = useMemo(
-    () => icons.filter((i) => pinnedSet.has(i.id)),
-    [icons, pinnedSet],
+    () => icons.filter((i) => isTrayPinned(i, pinPrefs)),
+    [icons, pinPrefs],
   );
   const overflowIcons = useMemo(
-    () => icons.filter((i) => !pinnedSet.has(i.id)),
-    [icons, pinnedSet],
+    () => icons.filter((i) => !isTrayPinned(i, pinPrefs)),
+    [icons, pinPrefs],
   );
 
   return (
-    <div className={`tray-popup-shell is-${phase}`} role="menu">
+    <div ref={shellRef} className={`tray-popup-shell is-${phase}`} role="menu">
       {icons.length === 0 ? (
         <div className="tray-empty">暂无系统托盘图标</div>
       ) : (

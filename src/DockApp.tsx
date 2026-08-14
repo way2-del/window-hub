@@ -24,6 +24,9 @@ type DockItem = {
   virtualPath: string;
   iconPath: string;
   uwp: boolean;
+  /** Edge/Chrome PWA `--app-id`. */
+  appId?: string;
+  launchArgs?: string;
   iconPng?: string | null;
   /** Ephemeral running-app entry (not persisted). */
   ephemeral?: boolean;
@@ -61,6 +64,9 @@ type HubWindow = {
   /** Prefer snake_case (`exe_name`); camelCase kept for resilience. */
   exe_name?: string | null;
   exeName?: string | null;
+  /** Edge/Chrome PWA id from cmdline / AUMID. */
+  app_id?: string | null;
+  appId?: string | null;
 };
 
 const STATUS_MENU_W = 220;
@@ -394,13 +400,43 @@ function itemSuites(item: DockItem, keys: Set<string>): string[][] {
   return out;
 }
 
+function windowAppId(w: HubWindow): string {
+  return (w.app_id || w.appId || "").trim();
+}
+
+function isBrowserExeName(name: string): boolean {
+  const n = normExeKey(name);
+  return (
+    n === "msedge.exe" ||
+    n === "msedge_proxy.exe" ||
+    n === "chrome.exe" ||
+    n === "chrome_proxy.exe" ||
+    n === "brave.exe" ||
+    n === "brave_proxy.exe" ||
+    n === "firefox.exe" ||
+    n === "opera.exe" ||
+    n === "opera_proxy.exe"
+  );
+}
+
 function exeMatches(item: DockItem, w: HubWindow): boolean {
+  const pinAppId = (item.appId || "").trim();
+  const winAppId = windowAppId(w);
+  if (pinAppId) {
+    return !!winAppId && winAppId.toLowerCase() === pinAppId.toLowerCase();
+  }
+
   const name = normExeKey(windowExeName(w));
   const path = (w.exe || "").toLowerCase().replace(/\//g, "\\");
   const pathBase = normExeKey(path.split("\\").pop() || "");
   const className = windowClassName(w).toLowerCase();
   const keys = collectItemKeys(item);
   const suites = itemSuites(item, keys);
+  const pinIsBrowser =
+    [...keys].some((k) => isBrowserExeName(k)) || isBrowserExeName(item.matchExe);
+
+  // Plain browser pin must not claim Edge/Chrome installed-app windows.
+  if (pinIsBrowser && winAppId) return false;
 
   // explorer.exe: only real folder windows light the pin / count as running.
   if (name === "explorer.exe" || pathBase === "explorer.exe") {
@@ -459,11 +495,21 @@ function exeMatches(item: DockItem, w: HubWindow): boolean {
  * Tree / marker / soft-title matching must NOT hide unpinned apps from the dock.
  */
 function pinOwnsWindow(item: DockItem, w: HubWindow): boolean {
+  const pinAppId = (item.appId || "").trim();
+  const winAppId = windowAppId(w);
+  if (pinAppId) {
+    return !!winAppId && winAppId.toLowerCase() === pinAppId.toLowerCase();
+  }
+
   const name = normExeKey(windowExeName(w));
   const path = (w.exe || "").toLowerCase().replace(/\//g, "\\");
   const pathBase = normExeKey(path.split("\\").pop() || "");
   const className = windowClassName(w).toLowerCase();
   const keys = collectItemKeys(item);
+  const pinIsBrowser =
+    [...keys].some((k) => isBrowserExeName(k)) || isBrowserExeName(item.matchExe);
+
+  if (pinIsBrowser && winAppId) return false;
 
   if (name === "explorer.exe" || pathBase === "explorer.exe") {
     if (!EXPLORER_FOLDER_CLASSES.has(className)) return false;
@@ -502,9 +548,13 @@ function normalizeExeName(w: HubWindow): string {
   return base.toLowerCase();
 }
 
-/** UWP host: keep one ephemeral slot keyed by title stem, not by ApplicationFrameHost. */
+/** UWP / Edge PWA: one ephemeral slot per app identity, not per browser process. */
 function ephemeralKey(w: HubWindow): string {
   const exeName = normalizeExeName(w);
+  const appId = windowAppId(w);
+  if (appId && isBrowserExeName(exeName)) {
+    return `pwa:${appId.toLowerCase()}`;
+  }
   if (exeName === "applicationframehost.exe") {
     const stem =
       (w.title || "").split(/[-—|·]/)[0]?.trim().toLowerCase() || "uwp";
@@ -717,6 +767,7 @@ export default function DockApp() {
       const key = ephemeralKey(w);
       if (byKey.has(key)) continue;
       const isUwp = exeName === "applicationframehost.exe";
+      const appId = windowAppId(w);
       const label =
         (w.title || "").split(/[-—|·]/)[0]?.trim() ||
         (windowExeName(w) || exeName.replace(/\.exe$/i, ""));
@@ -724,13 +775,18 @@ export default function DockApp() {
         id: `running:${key}`,
         kind: "app",
         label,
-        matchExe: isUwp ? "" : exeName,
+        matchExe: isUwp ? "" : exeName === "msedge_proxy.exe" ? "msedge.exe" : exeName,
         launchPath: w.exe || "",
         realPath: w.exe || "",
         virtualPath: "",
         iconPath: "",
         uwp: isUwp,
-        iconPng: exeIcons[key] || exeIcons[exeName] || null,
+        appId: appId || undefined,
+        iconPng:
+          (appId ? exeIcons[`pwa:${appId.toLowerCase()}`] : null) ||
+          exeIcons[key] ||
+          exeIcons[exeName] ||
+          null,
         ephemeral: true,
         hwnd: w.hwnd,
       });
@@ -748,8 +804,10 @@ export default function DockApp() {
   useEffect(() => {
     let cancelled = false;
     const missing = runningExtras.filter((it) => {
-      const key = (it.realPath || it.matchExe).toLowerCase();
-      return !it.iconPng && (it.realPath || it.matchExe) && !exeIcons[key];
+      const cacheKey = it.appId
+        ? `pwa:${it.appId.toLowerCase()}`
+        : (it.realPath || it.matchExe).toLowerCase();
+      return !it.iconPng && (it.appId || it.realPath || it.matchExe) && !exeIcons[cacheKey];
     });
     if (!missing.length) return;
     const timer = window.setTimeout(() => {
@@ -759,9 +817,17 @@ export default function DockApp() {
         for (const it of missing.slice(0, 6)) {
           if (cancelled) break;
           const path = it.realPath || it.matchExe;
+          const cacheKey = it.appId
+            ? `pwa:${it.appId.toLowerCase()}`
+            : (it.realPath || it.matchExe).toLowerCase();
           try {
-            const png = await invoke<string | null>("dock_resolve_exe_icon", { path });
+            const png = await invoke<string | null>("dock_resolve_exe_icon", {
+              path,
+              appId: it.appId || null,
+            });
             if (png) {
+              next[cacheKey] = png;
+              if (it.appId) next[`pwa:${it.appId.toLowerCase()}`] = png;
               next[(it.realPath || it.matchExe).toLowerCase()] = png;
               next[it.matchExe.toLowerCase()] = png;
             }
@@ -961,6 +1027,8 @@ export default function DockApp() {
     // Fire-and-forget teardown — never block launch on preview/menu IPC.
     void invoke("close_dock_preview").catch(() => undefined);
     void invoke("close_dock_item_menu").catch(() => undefined);
+    // Re-assert NOACTIVATE before toggle so WebView2 doesn't keep FG.
+    void invoke("dock_touch_noactivate").catch(() => undefined);
     if (bounceOnClick) {
       setBounceId(item.id);
       if (bounceTimer.current) window.clearTimeout(bounceTimer.current);
@@ -1009,14 +1077,22 @@ export default function DockApp() {
     e.stopPropagation();
     previewItemId.current = null;
     void invoke("close_dock_preview").catch(() => undefined);
-    if (item.ephemeral) return;
+    if (item.kind === "separator") return;
     try {
-      const screen = await clientToScreen(e.clientX, e.clientY);
-      const menuH = 260;
-      let x = screen.x;
-      let y = screen.y - menuH - 8;
-      if (y < 8) y = screen.y + 8;
-      await invoke("open_dock_item_menu", { itemId: item.id, x, y });
+      // Anchor to the icon top so the menu sits just above the glyph, not the cursor.
+      const el = e.currentTarget as HTMLElement;
+      const rect = el.getBoundingClientRect();
+      const screen = await clientToScreen(e.clientX, rect.top);
+      await invoke("open_dock_item_menu", {
+        itemId: item.id,
+        x: screen.x,
+        y: screen.y,
+        matchExe: item.ephemeral ? item.matchExe || null : null,
+        realPath: item.ephemeral ? item.realPath || null : null,
+        label: item.ephemeral ? itemLabel(item) : null,
+        hwnd: item.ephemeral ? item.hwnd ?? null : null,
+        appId: item.ephemeral ? item.appId || null : null,
+      });
     } catch (err) {
       console.error(err);
     }
