@@ -466,9 +466,12 @@ function App() {
   const lyricSlotRef = useRef<HTMLImageElement | HTMLSpanElement | null>(null);
   const lyricPanelSlotRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  /** 歌词垂直微调 / 显示大小：直接读插件设置 */
+  /** 歌词垂直微调 / 显示大小：按显示器档案 */
   const [lyricOffsetY, setLyricOffsetY] = useState(0);
   const [lyricScale, setLyricScale] = useState(100);
+  const lyricMonitorKeyRef = useRef<string>("");
+  const lyricSettingsPluginIdRef = useRef("com.window-hub.lyrics");
+  const lyricApplyingMonitorRef = useRef(false);
   const lastWinH = useRef(winHeight(ISLAND_COLLAPSED.height));
   const idleTimer = useRef<number | null>(null);
   const drag = useRef<{
@@ -1603,7 +1606,7 @@ function App() {
     stagingMirror
   );
 
-  // 歌词垂直位置 / 大小：Host 直读设置，拖滑块立刻生效
+  // 歌词垂直位置 / 大小：按当前显示器记忆，换屏 / 接扩展屏自动恢复
   useEffect(() => {
     const BASE = "com.window-hub.lyrics";
     const DEV = `${BASE}__dev`;
@@ -1617,14 +1620,63 @@ function App() {
       if (!Number.isFinite(n)) return 100;
       return Math.max(50, Math.min(150, Math.round(n / 5) * 5));
     };
-    const applySettings = (all?: Record<string, unknown> | null) => {
-      setLyricOffsetY(clampOy(all?.mirrorOffsetY));
-      setLyricScale(clampScale(all?.mirrorScale ?? 100));
-    };
     const isLyricsId = (id?: string) => id === BASE || id === DEV;
-    let activeId = BASE;
+
+    const applyLocal = (oy: number, scale: number) => {
+      setLyricOffsetY(clampOy(oy));
+      setLyricScale(clampScale(scale));
+    };
+
+    const remember = (oy: number, scale: number) => {
+      if (lyricApplyingMonitorRef.current) return;
+      void invoke("hub_lyric_mirror_remember_layout", {
+        offsetY: clampOy(oy),
+        scale: clampScale(scale),
+      }).catch(() => undefined);
+    };
+
+    const loadForCurrentMonitor = async () => {
+      try {
+        const layout = await invoke<{
+          monitorKey: string;
+          offsetY: number;
+          scale: number;
+        }>("hub_lyric_mirror_current_layout");
+        const key = layout.monitorKey || "default";
+        const changed = key !== lyricMonitorKeyRef.current;
+        lyricMonitorKeyRef.current = key;
+        applyLocal(layout.offsetY, layout.scale);
+        // 换屏时把滑块值也同步到插件设置，设置页打开时与当前屏一致
+        if (changed) {
+          lyricApplyingMonitorRef.current = true;
+          const pid = lyricSettingsPluginIdRef.current;
+          try {
+            await invoke("hub_settings_set", {
+              pluginId: pid,
+              key: "mirrorOffsetY",
+              value: clampOy(layout.offsetY),
+            });
+            await invoke("hub_settings_set", {
+              pluginId: pid,
+              key: "mirrorScale",
+              value: clampScale(layout.scale),
+            });
+          } catch {
+            /* ignore */
+          } finally {
+            window.setTimeout(() => {
+              lyricApplyingMonitorRef.current = false;
+            }, 80);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
     let unlisten: (() => void) | undefined;
     let cancelled = false;
+    let pollTimer = 0;
 
     void (async () => {
       try {
@@ -1636,33 +1688,48 @@ function App() {
           list.find((p) => p.id === BASE && p.enabled !== false) ||
           list.find((p) => p.id === DEV) ||
           list.find((p) => p.id === BASE);
-        if (prefer?.id) activeId = prefer.id;
+        if (prefer?.id) lyricSettingsPluginIdRef.current = prefer.id;
       } catch {
         /* keep BASE */
       }
       if (cancelled) return;
-      try {
-        const all = await invoke<Record<string, unknown>>("hub_settings_get_all", {
-          pluginId: activeId,
-        });
-        if (!cancelled) applySettings(all);
-      } catch {
-        /* ignore */
-      }
+      await loadForCurrentMonitor();
     })();
 
     void listen<{ pluginId?: string; settings?: Record<string, unknown> }>(
       "plugin-settings-changed",
       (ev) => {
         if (!isLyricsId(ev.payload?.pluginId)) return;
-        applySettings(ev.payload?.settings ?? null);
+        const all = ev.payload?.settings ?? {};
+        const oy = clampOy(all.mirrorOffsetY);
+        const scale = clampScale(all.mirrorScale ?? 100);
+        applyLocal(oy, scale);
+        remember(oy, scale);
       },
     ).then((fn) => {
       unlisten = fn;
     });
+
+    // 接扩展屏 / 主屏切换时 currentMonitor 会变
+    pollTimer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const layout = await invoke<{ monitorKey: string }>(
+            "hub_lyric_mirror_current_layout",
+          );
+          if (layout.monitorKey && layout.monitorKey !== lyricMonitorKeyRef.current) {
+            await loadForCurrentMonitor();
+          }
+        } catch {
+          /* ignore */
+        }
+      })();
+    }, 2000);
+
     return () => {
       cancelled = true;
       unlisten?.();
+      window.clearInterval(pollTimer);
     };
   }, []);
 

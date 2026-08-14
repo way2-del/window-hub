@@ -2582,7 +2582,7 @@ pub fn hub_lyric_mirror_set_slot(
         let py = (y * dpi).round() as i32;
         let pw = (w * dpi).round().max(1.0) as i32;
         let ph = (h * dpi).round().max(1.0) as i32;
-        let (logical_oy, user_scale) = lyrics_mirror_layout();
+        let (logical_oy, user_scale, _) = lyrics_mirror_layout_for(&app);
         let _ = (offset_y, scale);
         let oy = (logical_oy.clamp(-12.0, 12.0) * dpi).round() as i32;
         crate::win32::lyric_mirror::set_dest_slot(
@@ -2611,6 +2611,46 @@ pub fn hub_lyric_mirror_set_slot(
     }
 }
 
+/// 当前显示器上的歌词布局（供前端同步滑块 / 检测换屏）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricMirrorLayoutDto {
+    pub monitor_key: String,
+    pub offset_y: f64,
+    pub scale: f64,
+}
+
+#[tauri::command]
+pub fn hub_lyric_mirror_current_layout(app: AppHandle) -> Result<LyricMirrorLayoutDto, String> {
+    let (oy, scale, key) = lyrics_mirror_layout_for(&app);
+    Ok(LyricMirrorLayoutDto {
+        monitor_key: key,
+        offset_y: oy,
+        scale: (scale * 100.0).round(),
+    })
+}
+
+/// 把当前滑块值记到「当前显示器」档案（接扩展屏后可自动恢复）。
+#[tauri::command]
+pub fn hub_lyric_mirror_remember_layout(
+    app: AppHandle,
+    offset_y: f64,
+    scale: f64,
+) -> Result<LyricMirrorLayoutDto, String> {
+    let key = main_monitor_key(&app);
+    let id = resolve_lyrics_plugin_id().ok_or_else(|| "lyrics plugin not installed".to_string())?;
+    let oy = offset_y.clamp(-12.0, 12.0).round();
+    let scale_pct = scale.clamp(50.0, 150.0).round();
+    save_lyrics_layout_for_monitor(&id, &key, oy, scale_pct)?;
+    Ok(LyricMirrorLayoutDto {
+        monitor_key: key,
+        offset_y: oy,
+        scale: scale_pct,
+    })
+}
+
+const LYRIC_LAYOUTS_KEY: &str = "__lyricMirrorLayouts";
+
 fn resolve_lyrics_plugin_id() -> Option<String> {
     let plugins = crate::plugin_install::list_installed_plugins_sync();
     let base = "com.window-hub.lyrics";
@@ -2627,6 +2667,28 @@ fn resolve_lyrics_plugin_id() -> Option<String> {
         .map(|p| p.id)
 }
 
+fn main_monitor_key(app: &AppHandle) -> String {
+    use tauri::Manager;
+    let Some(win) = app.get_webview_window("main") else {
+        return "default".into();
+    };
+    let Ok(Some(mon)) = win.current_monitor() else {
+        return "default".into();
+    };
+    let name = mon
+        .name()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "display".into());
+    let size = mon.size();
+    let pos = mon.position();
+    let scale = mon.scale_factor();
+    format!(
+        "{name}|{}x{}+{}+{}@{:.2}",
+        size.width, size.height, pos.x, pos.y, scale
+    )
+}
+
 fn lyrics_settings_number(val: &serde_json::Value, key: &str) -> Option<f64> {
     val.get(key).and_then(|v| {
         v.as_f64()
@@ -2635,21 +2697,76 @@ fn lyrics_settings_number(val: &serde_json::Value, key: &str) -> Option<f64> {
     })
 }
 
-/// `(offset_y 逻辑像素, user_scale 0.5–1.5)`
-fn lyrics_mirror_layout() -> (f64, f64) {
+fn read_lyrics_settings_raw(plugin_id: &str) -> serde_json::Value {
+    crate::db::with_conn(|c| {
+        crate::db::plugin_get_system(c, plugin_id, crate::db::KEY_SETTINGS)
+    })
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn load_lyrics_layouts(plugin_id: &str) -> serde_json::Map<String, serde_json::Value> {
+    crate::db::with_conn(|c| {
+        crate::db::plugin_get_system(c, plugin_id, LYRIC_LAYOUTS_KEY)
+    })
+    .ok()
+    .flatten()
+    .and_then(|v| v.as_object().cloned())
+    .unwrap_or_default()
+}
+
+fn save_lyrics_layout_for_monitor(
+    plugin_id: &str,
+    monitor_key: &str,
+    offset_y: f64,
+    scale_pct: f64,
+) -> Result<(), String> {
+    let mut map = load_lyrics_layouts(plugin_id);
+    map.insert(
+        monitor_key.to_string(),
+        serde_json::json!({
+            "offsetY": offset_y,
+            "scale": scale_pct,
+        }),
+    );
+    // 防止无限膨胀：最多留 12 块屏的档案
+    if map.len() > 12 {
+        let keys: Vec<String> = map.keys().cloned().collect();
+        for k in keys.into_iter().take(map.len().saturating_sub(12)) {
+            if k != monitor_key {
+                map.remove(&k);
+            }
+        }
+    }
+    crate::db::with_conn(|c| {
+        crate::db::plugin_set_system(
+            c,
+            plugin_id,
+            LYRIC_LAYOUTS_KEY,
+            &serde_json::Value::Object(map),
+        )
+    })
+}
+
+/// `(offset_y 逻辑像素, user_scale 0.5–1.5, monitor_key)`
+fn lyrics_mirror_layout_for(app: &AppHandle) -> (f64, f64, String) {
+    let key = main_monitor_key(app);
     let Some(id) = resolve_lyrics_plugin_id() else {
-        return (0.0, 1.0);
+        return (0.0, 1.0, key);
     };
-    let Ok(Some(val)) = crate::db::with_conn(|c| {
-        crate::db::plugin_get_system(c, &id, crate::db::KEY_SETTINGS)
-    }) else {
-        return (0.0, 1.0);
-    };
+    let layouts = load_lyrics_layouts(&id);
+    if let Some(entry) = layouts.get(&key) {
+        let oy = lyrics_settings_number(entry, "offsetY").unwrap_or(0.0);
+        let scale_pct = lyrics_settings_number(entry, "scale").unwrap_or(100.0);
+        return (oy, (scale_pct / 100.0).clamp(0.5, 1.5), key);
+    }
+    // 该屏尚无档案：回退到全局滑块值（并顺手写入，下次换屏可恢复）
+    let val = read_lyrics_settings_raw(&id);
     let oy = lyrics_settings_number(&val, "mirrorOffsetY").unwrap_or(0.0);
-    // mirrorScale：百分比 50–150，默认 100
     let scale_pct = lyrics_settings_number(&val, "mirrorScale").unwrap_or(100.0);
-    let user_scale = (scale_pct / 100.0).clamp(0.5, 1.5);
-    (oy, user_scale)
+    let _ = save_lyrics_layout_for_monitor(&id, &key, oy, scale_pct);
+    (oy, (scale_pct / 100.0).clamp(0.5, 1.5), key)
 }
 
 #[tauri::command]
