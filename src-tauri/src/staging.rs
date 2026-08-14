@@ -509,11 +509,8 @@ pub fn reveal(plugin_id: &str, id: &str) -> Result<(), String> {
         .ok_or_else(|| "item not found".to_string())?;
     let path = item.path.clone();
     drop(map);
-    Command::new("explorer")
-        .arg(format!("/select,{path}"))
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    // Same Explorer /select quoting rules as sousou (see open::reveal_in_folder).
+    crate::sousou::open::reveal_in_folder(&path)
 }
 
 /// Open / run with the default shell association (exe/bat run, docs open, folders browse).

@@ -24,7 +24,29 @@ pub fn open_path(path: &str) -> Result<(), String> {
     shell_open(path, None)
 }
 
-/// Open Explorer with the item selected (`explorer /select,path`).
+/// Normalize a filesystem path for Explorer (`/` → `\`, strip `\\?\`).
+fn explorer_path_arg(path: &str) -> String {
+    let p = Path::new(path.trim());
+    let abs = if p.exists() {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    } else {
+        p.to_path_buf()
+    };
+    let s = abs.to_string_lossy();
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.into_owned()
+    };
+    s.replace('/', "\\")
+}
+
+/// Open Explorer with the item selected (`explorer /select,"path"`).
+///
+/// Must use `raw_arg`: Rust `Command::arg` auto-quotes when the path has spaces,
+/// and Explorer then fails to parse `/select` and silently opens Documents.
 pub fn reveal_in_folder(path: &str) -> Result<(), String> {
     let path = path.trim();
     if path.is_empty() {
@@ -37,11 +59,21 @@ pub fn reveal_in_folder(path: &str) -> Result<(), String> {
     {
         return Err("not a filesystem path".into());
     }
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{path}"))
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let target = explorer_path_arg(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer")
+            .raw_arg(format!(r#"/select,"{target}""#))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        Err("Windows only".into())
+    }
 }
 
 pub fn open_system(id: &str) -> Result<(), String> {

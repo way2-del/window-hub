@@ -7,7 +7,7 @@ mod drop_ingest;
 mod everything;
 mod hotkey;
 mod icon_cache;
-mod open;
+pub mod open;
 mod pinyin;
 mod recent;
 mod seed;
