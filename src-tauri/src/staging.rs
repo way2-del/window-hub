@@ -333,38 +333,45 @@ pub fn add_image_bytes(
     )
 }
 
+/// Prefer Explorer-style absolute paths as-is; `canonicalize` is expensive
+/// (AV / network) and unnecessary for typical CF_HDROP payloads.
+fn resolve_drop_path(src: PathBuf) -> PathBuf {
+    let s = src.to_string_lossy();
+    let needs_canon = !src.is_absolute()
+        || s.contains("..")
+        || s.starts_with(r"\\?\");
+    if needs_canon {
+        fs::canonicalize(&src).unwrap_or(src)
+    } else {
+        src
+    }
+}
+
 /// Store absolute path reference only — do not copy into staging/.
 /// Accepts regular files and directories (`folder` kind).
+///
+/// Batches: one DB write + one `staging-changed` for the whole drop
+/// (avoids UI freeze when dragging many files).
 pub fn add_paths(
     app: Option<&AppHandle>,
     plugin_id: &str,
     paths: Vec<String>,
 ) -> Result<Vec<StagingItem>, String> {
-    let mut out = Vec::new();
+    // FS resolve outside the store lock so we don't block other staging ops.
+    let mut candidates: Vec<(String, String, StagingKind)> = Vec::new();
     for p in paths {
         let src = PathBuf::from(&p);
-        let is_dir = src.is_dir();
-        let is_file = src.is_file();
+        let meta = match fs::symlink_metadata(&src) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let is_dir = meta.is_dir();
+        let is_file = meta.is_file();
         if !is_file && !is_dir {
             continue;
         }
-        let abs = fs::canonicalize(&src).unwrap_or(src);
+        let abs = resolve_drop_path(src);
         let path_str = path_display_string(&abs);
-        {
-            let mut map = store().by_plugin.lock();
-            ensure_loaded(&mut map, plugin_id);
-            if map
-                .get(plugin_id)
-                .map(|idx| {
-                    idx.items.iter().any(|it| {
-                        it.kind != StagingKind::Text && it.path.eq_ignore_ascii_case(&path_str)
-                    })
-                })
-                .unwrap_or(false)
-            {
-                continue;
-            }
-        }
         let name = abs
             .file_name()
             .and_then(|s| s.to_str())
@@ -377,20 +384,57 @@ pub fn add_paths(
         } else {
             StagingKind::File
         };
-        let item = push_item(
-            app,
-            plugin_id,
-            StagingItem {
-                id: new_id(),
-                kind,
-                label: name,
-                created_at: now_ms(),
-                path: path_str,
-            },
-        )?;
-        out.push(item);
+        candidates.push((path_str, name, kind));
     }
-    // 全部已在库 / 路径无效：拖放 UX 视为成功空操作，避免双通道监听重复报错
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut map = store().by_plugin.lock();
+    ensure_loaded(&mut map, plugin_id);
+    let index = map.get_mut(plugin_id).unwrap();
+
+    let mut out = Vec::new();
+    let mut seen_new: Vec<String> = Vec::new();
+    for (path_str, name, kind) in candidates {
+        let dup_existing = index.items.iter().any(|it| {
+            it.kind != StagingKind::Text && it.path.eq_ignore_ascii_case(&path_str)
+        });
+        let dup_batch = seen_new
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(&path_str));
+        if dup_existing || dup_batch {
+            continue;
+        }
+        seen_new.push(path_str.clone());
+        out.push(StagingItem {
+            id: new_id(),
+            kind,
+            label: name,
+            created_at: now_ms(),
+            path: path_str,
+        });
+    }
+
+    if out.is_empty() {
+        return Ok(out);
+    }
+
+    // Preserve prior per-item insert(0) order: last path ends up on top.
+    let mut prepended = out.clone();
+    prepended.reverse();
+    prepended.append(&mut index.items);
+    index.items = prepended;
+
+    let rows: Vec<_> = index.items.iter().map(to_row).collect();
+    if let Err(e) = crate::db::with_conn(|c| crate::db::staging_replace_all(c, plugin_id, &rows)) {
+        // Roll back memory to last good DB snapshot.
+        *index = load_index(plugin_id);
+        return Err(e);
+    }
+    drop(map);
+    emit_changed(app, plugin_id);
     Ok(out)
 }
 
@@ -405,18 +449,42 @@ fn is_image_name(name: &str) -> bool {
 }
 
 pub fn remove(app: Option<&AppHandle>, plugin_id: &str, id: &str) -> Result<(), String> {
+    remove_many(app, plugin_id, &[id.to_string()]).map(|_| ())
+}
+
+/// Batch remove — one DB write + one `staging-changed`.
+pub fn remove_many(
+    app: Option<&AppHandle>,
+    plugin_id: &str,
+    ids: &[String],
+) -> Result<u32, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let id_set: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
     let mut map = store().by_plugin.lock();
     ensure_loaded(&mut map, plugin_id);
     let index = map.get_mut(plugin_id).unwrap();
-    let Some(pos) = index.items.iter().position(|i| i.id == id) else {
+    let mut kept = Vec::with_capacity(index.items.len());
+    let mut removed = 0u32;
+    for it in index.items.drain(..) {
+        if id_set.contains(it.id.as_str()) {
+            try_remove_owned_payload(plugin_id, &it.path);
+            removed += 1;
+        } else {
+            kept.push(it);
+        }
+    }
+    if removed == 0 {
+        index.items = kept;
         return Err("item not found".into());
-    };
-    let item = index.items.remove(pos);
-    try_remove_owned_payload(plugin_id, &item.path);
-    crate::db::with_conn(|c| crate::db::staging_remove(c, plugin_id, id))?;
+    }
+    index.items = kept;
+    let rows: Vec<_> = index.items.iter().map(to_row).collect();
+    crate::db::with_conn(|c| crate::db::staging_replace_all(c, plugin_id, &rows))?;
     drop(map);
     emit_changed(app, plugin_id);
-    Ok(())
+    Ok(removed)
 }
 
 pub fn clear(app: Option<&AppHandle>, plugin_id: &str) -> Result<(), String> {
@@ -604,6 +672,33 @@ pub fn copy_all_paths(_plugin_id: &str) -> Result<u32, String> {
     Err("clipboard only on Windows".into())
 }
 
+/// Decode full image pixels only below this size (popup cards are ~56×40).
+const IMAGE_THUMB_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+fn shell_thumb_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Cheap 32px shell icon with path cache — staging UI is small; avoid 256px factory storms.
+fn cached_shell_thumb_data_url(path: &str) -> Option<String> {
+    let key = path.to_ascii_lowercase();
+    {
+        let cache = shell_thumb_cache().lock();
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+    }
+    let data = crate::dock::resolve_small_icon_png(path)
+        .map(|b64| format!("data:image/png;base64,{b64}"));
+    let mut cache = shell_thumb_cache().lock();
+    if cache.len() > 512 {
+        cache.clear();
+    }
+    cache.insert(key, data.clone());
+    data
+}
+
 pub fn thumb_data_url(plugin_id: &str, id: &str) -> Result<Option<String>, String> {
     let mut map = store().by_plugin.lock();
     ensure_loaded(&mut map, plugin_id);
@@ -615,11 +710,19 @@ pub fn thumb_data_url(plugin_id: &str, id: &str) -> Result<Option<String>, Strin
     drop(map);
     match item.kind {
         StagingKind::Image => {
+            let meta_len = fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+            // Large images: shell icon instead of full decode (multi-drop freeze root cause).
+            if meta_len == 0 || meta_len > IMAGE_THUMB_MAX_BYTES {
+                return Ok(cached_shell_thumb_data_url(&item.path));
+            }
             let bytes = fs::read(&item.path).map_err(|e| e.to_string())?;
-            if bytes.is_empty() || bytes.len() > 12 * 1024 * 1024 {
+            if bytes.is_empty() {
                 return Ok(None);
             }
-            let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+            let img = match image::load_from_memory(&bytes) {
+                Ok(i) => i,
+                Err(_) => return Ok(cached_shell_thumb_data_url(&item.path)),
+            };
             let thumb = img.thumbnail(96, 96);
             let mut out = Vec::new();
             thumb
@@ -632,13 +735,7 @@ pub fn thumb_data_url(plugin_id: &str, id: &str) -> Result<Option<String>, Strin
             let b64 = base64::engine::general_purpose::STANDARD.encode(&out);
             Ok(Some(format!("data:image/png;base64,{b64}")))
         }
-        StagingKind::File | StagingKind::Folder => {
-            // 系统壳图标（按扩展名 / 文件夹）
-            if let Some(b64) = crate::dock::resolve_item_icon_png("", &item.path) {
-                return Ok(Some(format!("data:image/png;base64,{b64}")));
-            }
-            Ok(None)
-        }
+        StagingKind::File | StagingKind::Folder => Ok(cached_shell_thumb_data_url(&item.path)),
         StagingKind::Text => Ok(None),
     }
 }
@@ -676,8 +773,9 @@ fn set_clipboard_text(text: &str) -> Result<(), String> {
 }
 
 /// Put file paths on the clipboard as `CF_HDROP` so Explorer paste works.
+/// Accepts one or more staging item ids (file / image / folder).
 #[cfg(windows)]
-pub fn copy_files_to_clipboard(plugin_id: &str, id: &str) -> Result<(), String> {
+pub fn copy_files_to_clipboard(plugin_id: &str, ids: &[String]) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::{HANDLE, HWND, POINT};
     use windows::Win32::System::DataExchange::{
@@ -688,28 +786,40 @@ pub fn copy_files_to_clipboard(plugin_id: &str, id: &str) -> Result<(), String> 
 
     const CF_HDROP: u32 = 15;
 
+    if ids.is_empty() {
+        return Err("no items".into());
+    }
+
     let mut map = store().by_plugin.lock();
     ensure_loaded(&mut map, plugin_id);
-    let item = map
-        .get(plugin_id)
-        .and_then(|idx| idx.items.iter().find(|i| i.id == id))
-        .cloned()
-        .ok_or_else(|| "item not found".to_string())?;
+    let guard = map.get(plugin_id).ok_or_else(|| "item not found".to_string())?;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for id in ids {
+        let Some(item) = guard.items.iter().find(|i| i.id == *id) else {
+            continue;
+        };
+        if !matches!(
+            item.kind,
+            StagingKind::File | StagingKind::Image | StagingKind::Folder
+        ) {
+            continue;
+        }
+        let path = PathBuf::from(&item.path);
+        if path.exists() {
+            paths.push(path);
+        }
+    }
     drop(map);
 
-    if !matches!(
-        item.kind,
-        StagingKind::File | StagingKind::Image | StagingKind::Folder
-    ) {
-        return Err("only files/folders/images can be copied as files".into());
-    }
-    let path = std::path::PathBuf::from(&item.path);
-    if !path.exists() {
-        return Err("path missing".into());
+    if paths.is_empty() {
+        return Err("no files to copy".into());
     }
 
-    let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    path_wide.push(0);
+    let mut path_wide: Vec<u16> = Vec::new();
+    for path in &paths {
+        path_wide.extend(path.as_os_str().encode_wide());
+        path_wide.push(0);
+    }
     path_wide.push(0); // double-null terminator for HDROP list
 
     let header_size = std::mem::size_of::<DROPFILES>();
@@ -750,7 +860,46 @@ pub fn copy_files_to_clipboard(plugin_id: &str, id: &str) -> Result<(), String> 
 }
 
 #[cfg(not(windows))]
-pub fn copy_files_to_clipboard(_plugin_id: &str, _id: &str) -> Result<(), String> {
+pub fn copy_files_to_clipboard(_plugin_id: &str, _ids: &[String]) -> Result<(), String> {
+    Err("clipboard only on Windows".into())
+}
+
+/// Copy selected file/folder/image paths as newline-joined text.
+#[cfg(windows)]
+pub fn copy_selected_paths(plugin_id: &str, ids: &[String]) -> Result<u32, String> {
+    if ids.is_empty() {
+        return Err("no items".into());
+    }
+    let id_set: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+    let mut map = store().by_plugin.lock();
+    ensure_loaded(&mut map, plugin_id);
+    let paths: Vec<String> = map
+        .get(plugin_id)
+        .map(|idx| {
+            idx.items
+                .iter()
+                .filter(|i| {
+                    id_set.contains(i.id.as_str())
+                        && matches!(
+                            i.kind,
+                            StagingKind::File | StagingKind::Image | StagingKind::Folder
+                        )
+                })
+                .map(|i| i.path.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    drop(map);
+    if paths.is_empty() {
+        return Err("no file paths".into());
+    }
+    let n = paths.len() as u32;
+    set_clipboard_text(&paths.join("\n"))?;
+    Ok(n)
+}
+
+#[cfg(not(windows))]
+pub fn copy_selected_paths(_plugin_id: &str, _ids: &[String]) -> Result<u32, String> {
     Err("clipboard only on Windows".into())
 }
 

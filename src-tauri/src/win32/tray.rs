@@ -111,6 +111,9 @@ pub struct TrayPrefs {
     /// 岛栏右侧系统芯片（Wi‑Fi / 蓝牙等）是否显示。
     #[serde(default)]
     pub system_chips: SystemChipVisibility,
+    /// 岛栏右侧系统芯片显示顺序（设置页拖拽）。
+    #[serde(default)]
+    pub system_chip_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

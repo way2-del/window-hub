@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, memo } from "react";
+import { useEffect, useMemo, useRef, useState, memo, Fragment, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -25,7 +25,20 @@ export type TrayPrefs = {
   muted?: string[];
   muted_processes?: string[];
   system_chips?: SystemChipVisibility;
+  /** Island-right system chip order (settings drag). */
+  system_chip_order?: SystemChipKey[];
 };
+
+export type SystemChipKey =
+  | "perf"
+  | "network"
+  | "wifi"
+  | "bluetooth"
+  | "volume"
+  | "power"
+  | "peripherals"
+  | "ime"
+  | "clock";
 
 export type SystemChipVisibility = {
   perf: boolean;
@@ -39,6 +52,18 @@ export type SystemChipVisibility = {
   clock: boolean;
 };
 
+export const SYSTEM_CHIP_KEYS: SystemChipKey[] = [
+  "perf",
+  "network",
+  "wifi",
+  "bluetooth",
+  "volume",
+  "power",
+  "peripherals",
+  "ime",
+  "clock",
+];
+
 export const DEFAULT_SYSTEM_CHIPS: SystemChipVisibility = {
   perf: true,
   network: true,
@@ -51,10 +76,28 @@ export const DEFAULT_SYSTEM_CHIPS: SystemChipVisibility = {
   clock: true,
 };
 
+export const DEFAULT_SYSTEM_CHIP_ORDER: SystemChipKey[] = [...SYSTEM_CHIP_KEYS];
+
 export function normalizeSystemChips(
   raw?: Partial<SystemChipVisibility> | null,
 ): SystemChipVisibility {
   return { ...DEFAULT_SYSTEM_CHIPS, ...(raw ?? {}) };
+}
+
+export function normalizeSystemChipOrder(raw?: string[] | null): SystemChipKey[] {
+  const known = new Set<string>(SYSTEM_CHIP_KEYS);
+  const out: SystemChipKey[] = [];
+  const seen = new Set<string>();
+  for (const id of raw ?? []) {
+    const key = String(id || "").trim();
+    if (!known.has(key) || seen.has(key)) continue;
+    out.push(key as SystemChipKey);
+    seen.add(key);
+  }
+  for (const id of SYSTEM_CHIP_KEYS) {
+    if (!seen.has(id)) out.push(id);
+  }
+  return out;
 }
 
 export function isTrayNotifyMuted(
@@ -81,6 +124,32 @@ export function isTrayPinned(
     .map((p) => p.trim().toLowerCase())
     .filter(Boolean)
     .includes(proc);
+}
+
+/** Order live pinned icons by `prefs.pinned` (settings drag order). */
+export function sortPinnedTrayIcons(
+  icons: TrayIconInfo[],
+  prefs: Pick<TrayPrefs, "pinned" | "pinned_processes">,
+): TrayIconInfo[] {
+  const pinnedOnes = icons.filter((i) => isTrayPinned(i, prefs));
+  if (!pinnedOnes.length) return [];
+  const byId = new Map(pinnedOnes.map((i) => [i.id, i]));
+  const ordered: TrayIconInfo[] = [];
+  const seen = new Set<string>();
+  for (const id of prefs.pinned ?? []) {
+    const icon = byId.get(id);
+    if (icon && !seen.has(icon.id)) {
+      ordered.push(icon);
+      seen.add(icon.id);
+    }
+  }
+  for (const icon of pinnedOnes) {
+    if (!seen.has(icon.id)) {
+      ordered.push(icon);
+      seen.add(icon.id);
+    }
+  }
+  return ordered;
 }
 
 const TRAY_POPUP_W = 280;
@@ -329,7 +398,13 @@ function TempMeter({
       : `CPU 占用 ${cpuPercent}%`,
   ];
   if (hasGpu) titleParts.push(`GPU ${gpuTempC}°C`);
-  if (!hasCpu && !hasGpu) titleParts.push("温度暂不可用");
+  if (!hasCpu) {
+    titleParts.push(
+      "CPU 温度需 LibreHardwareMonitor（开启 Remote Web Server，默认端口 8085）",
+    );
+  } else if (!hasGpu) {
+    titleParts.push("GPU 温度暂不可用");
+  }
   const title = titleParts.join(" · ");
 
   return (
@@ -495,6 +570,7 @@ export default function TrayCluster({
   const [muted, setMuted] = useState<string[]>([]);
   const [mutedProcesses, setMutedProcesses] = useState<string[]>([]);
   const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
+  const [systemChipOrder, setSystemChipOrder] = useState<SystemChipKey[]>(DEFAULT_SYSTEM_CHIP_ORDER);
   const [radio, setRadio] = useState<SystemRadioSnapshot | null>(null);
   const [flyoutKind, setFlyoutKind] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -527,6 +603,7 @@ export default function TrayCluster({
           setMuted(prefs.muted ?? []);
           setMutedProcesses(prefs.muted_processes ?? []);
           setSystemChips(normalizeSystemChips(prefs.system_chips));
+          setSystemChipOrder(normalizeSystemChipOrder(prefs.system_chip_order));
           setRadio(snap);
           radioSigRef.current = JSON.stringify({
             w: snap?.wifi?.connectedSsid,
@@ -564,6 +641,7 @@ export default function TrayCluster({
             setMuted(ev.payload.muted ?? []);
             setMutedProcesses(ev.payload.muted_processes ?? []);
             setSystemChips(normalizeSystemChips(ev.payload.system_chips));
+            setSystemChipOrder(normalizeSystemChipOrder(ev.payload.system_chip_order));
           }),
         );
       } catch {
@@ -681,7 +759,7 @@ export default function TrayCluster({
     [pinned, pinnedProcesses],
   );
   const pinnedIcons = useMemo(
-    () => icons.filter((i) => isTrayPinned(i, pinPrefs)),
+    () => sortPinnedTrayIcons(icons, pinPrefs),
     [icons, pinPrefs],
   );
   const railIcons = useMemo(() => {
@@ -783,11 +861,32 @@ export default function TrayCluster({
   const peripherals = radio?.peripherals ?? [];
   const perf = radio?.perf;
 
-  return (
-    <div className="tray-cluster" ref={rootRef} onClick={(e) => e.stopPropagation()}>
-      <div className="tray-rail">
-        {systemChips.perf ? (
-          <div className="tray-perf">
+  const railAppIcons = (
+    <>
+      {railIcons.map((icon) => (
+        <button
+          key={icon.id}
+          type="button"
+          className={`tray-icon-btn${icon.flashing ? " is-flashing" : ""}`}
+          title={trayLabel(icon)}
+          onClick={() => void clickTray(icon, "left")}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void clickTray(icon, "right");
+          }}
+        >
+          <TrayGlyph icon={icon} />
+        </button>
+      ))}
+    </>
+  );
+
+  const renderSystemChip = (key: SystemChipKey): ReactNode => {
+    switch (key) {
+      case "perf":
+        return systemChips.perf ? (
+          <div key="perf" className="tray-perf">
             <TempMeter
               cpuTempC={perf?.cpuTempC}
               gpuTempC={perf?.gpuTempC}
@@ -809,10 +908,11 @@ export default function TrayCluster({
               <MemMeter percent={perf?.memPercent ?? 0} />
             </button>
           </div>
-        ) : null}
-
-        {systemChips.network ? (
+        ) : null;
+      case "network":
+        return systemChips.network ? (
           <button
+            key="network"
             ref={netRef}
             type="button"
             className={`tray-sys-btn tray-net-btn${flyoutKind === "network" ? " is-open" : ""}`}
@@ -827,10 +927,11 @@ export default function TrayCluster({
           >
             <NetMeter downBps={perf?.downBps ?? 0} upBps={perf?.upBps ?? 0} />
           </button>
-        ) : null}
-
-        {systemChips.wifi ? (
+        ) : null;
+      case "wifi":
+        return systemChips.wifi ? (
           <button
+            key="wifi"
             ref={wifiRef}
             type="button"
             className={`tray-sys-btn${flyoutKind === "wifi" ? " is-open" : ""}${wifiOn ? " is-active" : ""}`}
@@ -845,10 +946,11 @@ export default function TrayCluster({
           >
             <WifiGlyph on={wifiOn} signal={wifiSignal} />
           </button>
-        ) : null}
-
-        {systemChips.bluetooth ? (
+        ) : null;
+      case "bluetooth":
+        return systemChips.bluetooth ? (
           <button
+            key="bluetooth"
             ref={btRef}
             type="button"
             className={`tray-sys-btn${flyoutKind === "bluetooth" ? " is-open" : ""}${btOn ? " is-active" : ""}`}
@@ -863,10 +965,11 @@ export default function TrayCluster({
           >
             <BtGlyph on={btOn} />
           </button>
-        ) : null}
-
-        {systemChips.volume ? (
+        ) : null;
+      case "volume":
+        return systemChips.volume ? (
           <button
+            key="volume"
             ref={volRef}
             type="button"
             className={`tray-sys-btn${flyoutKind === "volume" ? " is-open" : ""}${!volMuted ? " is-active" : ""}`}
@@ -881,10 +984,11 @@ export default function TrayCluster({
           >
             <VolumeGlyph muted={volMuted} level={volLevel} />
           </button>
-        ) : null}
-
-        {systemChips.power ? (
+        ) : null;
+      case "power":
+        return systemChips.power ? (
           <button
+            key="power"
             ref={powerRef}
             type="button"
             className={`tray-sys-btn${flyoutKind === "power" ? " is-open" : ""}${powerAc || power?.charging ? " is-active" : ""}`}
@@ -907,10 +1011,11 @@ export default function TrayCluster({
               ac={powerAc}
             />
           </button>
-        ) : null}
-
-        {systemChips.peripherals
-          ? peripherals.map((p) => (
+        ) : null;
+      case "peripherals":
+        return systemChips.peripherals ? (
+          <Fragment key="peripherals">
+            {peripherals.map((p) => (
               <button
                 key={p.id}
                 type="button"
@@ -926,11 +1031,13 @@ export default function TrayCluster({
               >
                 {p.kind === "headphones" ? <HeadphoneGlyph /> : <GamepadGlyph />}
               </button>
-            ))
-          : null}
-
-        {systemChips.ime ? (
+            ))}
+          </Fragment>
+        ) : null;
+      case "ime":
+        return systemChips.ime ? (
           <button
+            key="ime"
             ref={imeRef}
             type="button"
             className={`tray-sys-btn tray-ime-btn${flyoutKind === "ime" ? " is-open" : ""}${imeCaps ? " is-caps" : ""}`}
@@ -952,31 +1059,38 @@ export default function TrayCluster({
             <span className="tray-ime-mark">{imeMark}</span>
             {imeCaps ? <span className="tray-ime-caps">A</span> : null}
           </button>
-        ) : null}
-
-        {railIcons.map((icon) => (
-          <button
-            key={icon.id}
-            type="button"
-            className={`tray-icon-btn${icon.flashing ? " is-flashing" : ""}`}
-            title={trayLabel(icon)}
-            onClick={() => void clickTray(icon, "left")}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              void clickTray(icon, "right");
-            }}
-          >
-            <TrayGlyph icon={icon} />
-          </button>
-        ))}
-
-        {systemChips.clock ? (
+        ) : null;
+      case "clock":
+        return systemChips.clock ? (
           <TrayClockButton
+            key="clock"
             open={flyoutKind === "calendar"}
             onToggle={(el) => void toggleFlyout("calendar", el)}
           />
-        ) : null}
+        ) : null;
+      default:
+        return null;
+    }
+  };
+
+  const orderedChipNodes: ReactNode[] = [];
+  let railInserted = false;
+  for (const key of systemChipOrder) {
+    // Keep app tray icons immediately before the clock slot (default layout).
+    if (key === "clock" && !railInserted) {
+      orderedChipNodes.push(<Fragment key="rail-apps">{railAppIcons}</Fragment>);
+      railInserted = true;
+    }
+    orderedChipNodes.push(renderSystemChip(key));
+  }
+  if (!railInserted) {
+    orderedChipNodes.push(<Fragment key="rail-apps">{railAppIcons}</Fragment>);
+  }
+
+  return (
+    <div className="tray-cluster" ref={rootRef} onClick={(e) => e.stopPropagation()}>
+      <div className="tray-rail">
+        {orderedChipNodes}
 
         <button
           ref={chevronRef}

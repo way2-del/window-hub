@@ -1,0 +1,52 @@
+.staging-catcher {
+  position: absolute;
+  z-index: 40;
+  height: 56px;
+  pointer-events: auto;
+  /* WebView2：极淡底保证可接 OLE drop，空白处仍靠 .shell pointer-events:none 点透 */
+  background: transparent;
+}
+
+.staging-catcher-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1.5px dashed rgba(255, 255, 255, 0.38);
+  background: rgba(20, 20, 22, 0.88);
+  color: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.staging-catcher.is-hot .staging-catcher-inner {
+  border-color: rgba(80, 200, 120, 0.85);
+  border-style: solid;
+  background: rgba(28, 48, 36, 0.94);
+  transform: scale(1.02);
+}
+
+.staging-catcher-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.staging-catcher-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+html.is-staging-drag .shortcuts-plugin-strip.is-staging-drop-target {
+  outline: 1.5px solid rgba(80, 200, 120, 0.55);
+  outline-offset: 1px;
+  border-radius: 6px;
+  background: rgba(80, 200, 120, 0.12) !important;
+}

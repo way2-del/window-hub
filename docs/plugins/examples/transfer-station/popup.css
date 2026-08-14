@@ -94,6 +94,50 @@ button {
   filter: brightness(1.06);
 }
 
+.ts-btn-danger {
+  color: #b91c1c;
+}
+
+.ts-btn-danger:hover {
+  background: rgba(220, 60, 60, 0.14);
+}
+
+.ts-selbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(45, 138, 85, 0.1);
+  border: 1px solid rgba(45, 138, 85, 0.28);
+}
+
+.ts-selbar[hidden] {
+  display: none !important;
+}
+
+.ts-selcount {
+  font-size: 12px;
+  font-weight: 650;
+  color: rgba(26, 90, 60, 0.95);
+  white-space: nowrap;
+}
+
+.ts-sel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.ts-sel-actions .ts-btn {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
 .ts-more {
   width: 28px;
   height: 28px;
@@ -251,6 +295,11 @@ button {
 .ts-card.is-selected .ts-thumb,
 .ts-card.is-selected .ts-thumb-fallback {
   box-shadow: 0 0 0 2px rgba(45, 138, 85, 0.85);
+  border-color: rgba(45, 138, 85, 0.55);
+}
+
+.ts-card.is-selected .ts-name {
+  color: rgba(26, 90, 60, 0.95);
 }
 
 .ts-ctx {
@@ -305,6 +354,20 @@ button {
 
 :root[data-theme="dark"] .ts-btn-primary {
   background: rgba(45, 138, 85, 0.85);
+}
+
+:root[data-theme="dark"] .ts-selbar {
+  background: rgba(45, 138, 85, 0.16);
+  border-color: rgba(45, 138, 85, 0.35);
+}
+
+:root[data-theme="dark"] .ts-selcount,
+:root[data-theme="dark"] .ts-card.is-selected .ts-name {
+  color: #9fe0bc;
+}
+
+:root[data-theme="dark"] .ts-btn-danger {
+  color: #ff8a8a;
 }
 
 :root[data-theme="dark"] .ts-drop {

@@ -261,6 +261,8 @@ pub fn run() {
             crate::commands::warm_popup_windows(app.handle().clone());
             #[cfg(windows)]
             crate::win32::system_monitor::start(app.handle().clone());
+            #[cfg(windows)]
+            crate::win32::drag_watch::start(app.handle().clone());
 
             Ok(())
         })
@@ -571,6 +573,7 @@ pub fn run() {
             dock::pick_dock_app_file,
             dock::dock_launch_item,
             dock::dock_launch_path,
+            dock::dock_open_jump_item,
             dock::dock_add_app,
             dock::dock_pin_running_app,
             dock::dock_add_separator,
@@ -579,6 +582,7 @@ pub fn run() {
             dock::dock_list_item_windows,
             dock::dock_close_item_windows,
             dock::dock_close_hwnd,
+            dock::refresh_dock_preview,
             dock::dock_capture_item_previews,
             dock::dock_capture_exe_previews,
             dock::open_dock_preview,
@@ -609,6 +613,7 @@ pub fn run() {
             sousou::sousou_list_recent,
             sousou::sousou_search,
             sousou::sousou_open_path,
+            sousou::sousou_reveal_path,
             sousou::sousou_open_system,
             sousou::sousou_refresh_apps,
             sousou::sousou_pick_folder,
@@ -626,9 +631,11 @@ pub fn run() {
             commands::hub_staging_add_paths,
             commands::hub_staging_add_image_bytes,
             commands::hub_staging_remove,
+            commands::hub_staging_remove_many,
             commands::hub_staging_clear,
             commands::hub_staging_copy,
             commands::hub_staging_copy_files,
+            commands::hub_staging_copy_paths,
             commands::hub_staging_copy_all_paths,
             commands::hub_staging_thumb,
             commands::hub_staging_reveal,

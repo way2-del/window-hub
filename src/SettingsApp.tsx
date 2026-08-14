@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -23,9 +23,13 @@ import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginSettingsForm from "./components/PluginSettingsForm";
 import {
   DEFAULT_SYSTEM_CHIPS,
+  DEFAULT_SYSTEM_CHIP_ORDER,
   isTrayPinned,
   mergeTrayIcons,
+  normalizeSystemChipOrder,
   normalizeSystemChips,
+  sortPinnedTrayIcons,
+  type SystemChipKey,
   type SystemChipVisibility,
   type TrayIconInfo as SharedTrayIconInfo,
   type TrayPrefs as SharedTrayPrefs,
@@ -179,17 +183,20 @@ type TrayIconInfo = SharedTrayIconInfo;
 
 type TrayPrefs = SharedTrayPrefs;
 
-const SYSTEM_CHIP_TOGGLES: { key: keyof SystemChipVisibility; label: string; desc: string }[] = [
-  { key: "perf", label: "性能温度", desc: "CPU / GPU 温度与内存占用" },
-  { key: "network", label: "网速", desc: "上行 / 下行、进程网速与断网" },
-  { key: "wifi", label: "Wi‑Fi", desc: "网络状态与无线列表" },
-  { key: "bluetooth", label: "蓝牙", desc: "蓝牙开关与已配对设备" },
-  { key: "volume", label: "声音", desc: "音量与输出设备" },
-  { key: "power", label: "电源", desc: "电池与电源计划" },
-  { key: "peripherals", label: "外设", desc: "耳机 / 手柄等快捷芯片" },
-  { key: "ime", label: "输入法", desc: "当前输入法与大小写" },
-  { key: "clock", label: "时钟", desc: "日期时间与日历" },
-];
+const SYSTEM_CHIP_META: Record<SystemChipKey, { label: string; desc: string }> = {
+  perf: {
+    label: "性能温度",
+    desc: "CPU / GPU 温度与内存占用；CPU 温度建议运行 LibreHardwareMonitor（开启 Remote Web Server）",
+  },
+  network: { label: "网速", desc: "上行 / 下行、进程网速与断网" },
+  wifi: { label: "Wi‑Fi", desc: "网络状态与无线列表" },
+  bluetooth: { label: "蓝牙", desc: "蓝牙开关与已配对设备" },
+  volume: { label: "声音", desc: "音量与输出设备" },
+  power: { label: "电源", desc: "电池与电源计划" },
+  peripherals: { label: "外设", desc: "耳机 / 手柄等快捷芯片" },
+  ime: { label: "输入法", desc: "当前输入法与大小写" },
+  clock: { label: "时钟", desc: "日期时间与日历" },
+};
 
 type PluginMarketEntry = {
   id: string;
@@ -420,6 +427,16 @@ export default function SettingsApp() {
   const [muted, setMuted] = useState<string[]>([]);
   const [mutedProcesses, setMutedProcesses] = useState<string[]>([]);
   const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
+  const [systemChipOrder, setSystemChipOrder] = useState<SystemChipKey[]>(DEFAULT_SYSTEM_CHIP_ORDER);
+  const systemChipOrderRef = useRef(systemChipOrder);
+  const chipDraggingRef = useRef(false);
+  if (!chipDraggingRef.current) {
+    systemChipOrderRef.current = systemChipOrder;
+  }
+  const [chipDragId, setChipDragId] = useState<SystemChipKey | null>(null);
+  const [chipDragOverId, setChipDragOverId] = useState<SystemChipKey | null>(null);
+  const chipReorderLastToRef = useRef<string | null>(null);
+  const chipReorderUnbindRef = useRef<(() => void) | null>(null);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
   const [menuHeightEditId, setMenuHeightEditId] = useState<string | null>(null);
   const [menuHeightDraft, setMenuHeightDraft] = useState("");
@@ -427,6 +444,31 @@ export default function SettingsApp() {
   const [dockPrefs, setDockPrefs] = useState<DockPrefs>(() => normalizeDockPrefs(null));
   const [dockMsg, setDockMsg] = useState("");
   const [dockBusy, setDockBusy] = useState(false);
+  /** Tauri dragDropEnabled breaks HTML5 DnD — pointer reorder only. */
+  const [dockDragId, setDockDragId] = useState<string | null>(null);
+  const [dockDragOverId, setDockDragOverId] = useState<string | null>(null);
+  const dockItemsRef = useRef(dockPrefs.items);
+  const dockDraggingRef = useRef(false);
+  if (!dockDraggingRef.current) {
+    dockItemsRef.current = dockPrefs.items;
+  }
+  const dockReorderLastToRef = useRef<string | null>(null);
+  const dockReorderUnbindRef = useRef<(() => void) | null>(null);
+  const [dockCtxMenu, setDockCtxMenu] = useState<{
+    x: number;
+    y: number;
+    id: string;
+    kind: string;
+  } | null>(null);
+  const [trayDragId, setTrayDragId] = useState<string | null>(null);
+  const [trayDragOverId, setTrayDragOverId] = useState<string | null>(null);
+  const pinnedRef = useRef(pinned);
+  const trayDraggingRef = useRef(false);
+  if (!trayDraggingRef.current) {
+    pinnedRef.current = pinned;
+  }
+  const trayReorderLastToRef = useRef<string | null>(null);
+  const trayReorderUnbindRef = useRef<(() => void) | null>(null);
   const [sousouPrefs, setSousouPrefs] = useState({
     enabled: true,
     hotkeyEnabled: true,
@@ -604,17 +646,115 @@ export default function SettingsApp() {
     }
   };
 
-  const moveDockItem = (index: number, dir: -1 | 1) => {
-    const next = index + dir;
-    if (next < 0 || next >= dockPrefs.items.length) return;
-    const items = [...dockPrefs.items];
-    const tmp = items[index]!;
-    items[index] = items[next]!;
-    items[next] = tmp;
-    void persistDockPrefs({ items });
+  const arrayMoveDockById = (list: DockItemLite[], fromId: string, toId: string) => {
+    const from = list.findIndex((x) => x.id === fromId);
+    const to = list.findIndex((x) => x.id === toId);
+    if (from < 0 || to < 0 || from === to) return null;
+    const next = [...list];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved!);
+    return next;
   };
 
+  const moveDockItemBefore = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setDockPrefs((prev) => {
+      const items = arrayMoveDockById(prev.items, fromId, toId);
+      if (!items) return prev;
+      const next = { ...prev, items };
+      dockItemsRef.current = items;
+      return next;
+    });
+  };
+
+  const stopDockPointerReorder = (moved: boolean) => {
+    dockReorderUnbindRef.current?.();
+    dockReorderUnbindRef.current = null;
+    dockReorderLastToRef.current = null;
+    dockDraggingRef.current = false;
+    setDockDragId(null);
+    setDockDragOverId(null);
+    document.documentElement.classList.remove("dock-settings-reordering");
+    if (moved) {
+      void persistDockPrefs({ items: dockItemsRef.current });
+    }
+  };
+
+  const beginDockPointerReorder = (
+    e: ReactPointerEvent,
+    id: string,
+    surface: "bar" | "list",
+  ) => {
+    if (e.button !== 0 || dockBusy) return;
+    e.preventDefault();
+    dockReorderUnbindRef.current?.();
+    dockReorderLastToRef.current = null;
+    dockDraggingRef.current = true;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let moved = false;
+    const pointerId = e.pointerId;
+    const dragEl = e.currentTarget as HTMLElement;
+    try {
+      dragEl.setPointerCapture(pointerId);
+    } catch {
+      /* noop */
+    }
+
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && dx * dx + dy * dy < 25) return;
+      if (!moved) {
+        moved = true;
+        document.documentElement.classList.add("dock-settings-reordering");
+        setDockDragId(id);
+      }
+      ev.preventDefault();
+
+      const prevPe = dragEl.style.pointerEvents;
+      dragEl.style.pointerEvents = "none";
+      const under = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+      dragEl.style.pointerEvents = prevPe;
+      if (!under) return;
+
+      const target = under.closest(
+        `[data-dock-item-id][data-dock-surface="${surface}"]`,
+      ) as HTMLElement | null;
+      const toId = target?.getAttribute("data-dock-item-id");
+      if (!toId || toId === id) return;
+      if (dockReorderLastToRef.current === toId) return;
+      dockReorderLastToRef.current = toId;
+      moveDockItemBefore(id, toId);
+      setDockDragOverId(toId);
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      stopDockPointerReorder(moved);
+    };
+
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    dockReorderUnbindRef.current = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  };
+
+  useEffect(() => {
+    return () => {
+      dockReorderUnbindRef.current?.();
+      document.documentElement.classList.remove("dock-settings-reordering");
+    };
+  }, []);
+
   const removeDockItem = (id: string) => {
+    setDockCtxMenu(null);
     const items = dockPrefs.items.filter((i) => i.id !== id);
     void persistDockPrefs({ items });
   };
@@ -638,19 +778,56 @@ export default function SettingsApp() {
     }
   };
 
-  const addDockSeparator = async () => {
+  const addDockSeparator = async (afterId: string | null = null) => {
     setDockBusy(true);
     setDockMsg("");
+    setDockCtxMenu(null);
     try {
-      const saved = await invoke<DockPrefs>("dock_add_separator", { afterId: null });
+      const saved = await invoke<DockPrefs>("dock_add_separator", {
+        afterId,
+        beforeId: null,
+      });
       setDockPrefs(normalizeDockPrefs(saved));
-      setDockMsg("已添加分隔线");
+      setDockMsg(afterId ? "已在选中项后添加分隔线" : "已添加分隔线");
     } catch (err) {
       setDockMsg(String(err));
     } finally {
       setDockBusy(false);
     }
   };
+
+  const openDockItemCtxMenu = (e: ReactMouseEvent, item: DockItemLite) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (dockBusy) return;
+    setDockCtxMenu({
+      x: e.clientX,
+      y: e.clientY,
+      id: item.id,
+      kind: item.kind,
+    });
+  };
+
+  useEffect(() => {
+    if (!dockCtxMenu) return;
+    const close = (ev: Event) => {
+      const t = ev.target as HTMLElement | null;
+      if (t?.closest?.(".settings-ctx-menu")) return;
+      setDockCtxMenu(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setDockCtxMenu(null);
+    };
+    const onBlur = () => setDockCtxMenu(null);
+    window.addEventListener("pointerdown", close, true);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [dockCtxMenu]);
 
   const refreshDockIcons = async () => {
     setDockBusy(true);
@@ -677,6 +854,119 @@ export default function SettingsApp() {
     if (item.kind === "trash") return item.label || "回收站";
     return item.label || item.matchExe || item.id;
   };
+
+  const arrayMoveTrayPinnedById = (list: string[], fromId: string, toId: string) => {
+    const from = list.indexOf(fromId);
+    const to = list.indexOf(toId);
+    if (from < 0 || to < 0 || from === to) return list;
+    const next = [...list];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item!);
+    return next;
+  };
+
+  const moveTrayPinnedBefore = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    const liveOrder = sortPinnedTrayIcons(trays, {
+      pinned: pinnedRef.current,
+      pinned_processes: pinnedProcesses,
+    }).map((i) => i.id);
+    const reordered = arrayMoveTrayPinnedById(liveOrder, fromId, toId);
+    if (reordered === liveOrder) return;
+    const live = new Set(reordered);
+    const orphans = pinnedRef.current.filter((id) => !live.has(id));
+    const nextPinned = [...reordered, ...orphans];
+    pinnedRef.current = nextPinned;
+    setPinned(nextPinned);
+  };
+
+  const stopTrayPointerReorder = (moved: boolean) => {
+    trayReorderUnbindRef.current?.();
+    trayReorderUnbindRef.current = null;
+    trayReorderLastToRef.current = null;
+    trayDraggingRef.current = false;
+    setTrayDragId(null);
+    setTrayDragOverId(null);
+    document.documentElement.classList.remove("tray-settings-reordering");
+    if (moved) {
+      void persistTrayPrefs(
+        pinnedRef.current,
+        menuHeights,
+        muted,
+        mutedProcesses,
+        systemChips,
+        pinnedProcesses,
+        systemChipOrderRef.current,
+      );
+    }
+  };
+
+  const beginTrayPointerReorder = (e: ReactPointerEvent, id: string) => {
+    if (e.button !== 0 || saving) return;
+    e.preventDefault();
+    trayReorderUnbindRef.current?.();
+    trayReorderLastToRef.current = null;
+    trayDraggingRef.current = true;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let moved = false;
+    const pointerId = e.pointerId;
+    const dragEl = e.currentTarget as HTMLElement;
+    try {
+      dragEl.setPointerCapture(pointerId);
+    } catch {
+      /* noop */
+    }
+
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && dx * dx + dy * dy < 25) return;
+      if (!moved) {
+        moved = true;
+        document.documentElement.classList.add("tray-settings-reordering");
+        setTrayDragId(id);
+      }
+      ev.preventDefault();
+
+      const prevPe = dragEl.style.pointerEvents;
+      dragEl.style.pointerEvents = "none";
+      const under = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+      dragEl.style.pointerEvents = prevPe;
+      if (!under) return;
+
+      const target = under.closest("[data-tray-pin-id]") as HTMLElement | null;
+      const toId = target?.getAttribute("data-tray-pin-id");
+      if (!toId || toId === id) return;
+      if (trayReorderLastToRef.current === toId) return;
+      trayReorderLastToRef.current = toId;
+      moveTrayPinnedBefore(id, toId);
+      setTrayDragOverId(toId);
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      stopTrayPointerReorder(moved);
+    };
+
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    trayReorderUnbindRef.current = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  };
+
+  useEffect(() => {
+    return () => {
+      trayReorderUnbindRef.current?.();
+      document.documentElement.classList.remove("tray-settings-reordering");
+    };
+  }, []);
 
   useEffect(() => {
     void syncGlassCss({
@@ -734,6 +1024,7 @@ export default function SettingsApp() {
         setMuted(prefs.muted ?? []);
         setMutedProcesses(prefs.muted_processes ?? []);
         setSystemChips(normalizeSystemChips(prefs.system_chips));
+        setSystemChipOrder(normalizeSystemChipOrder(prefs.system_chip_order));
         setMenuHeights(prefs.menu_heights ?? {});
       } catch {
         /* noop */
@@ -793,6 +1084,7 @@ export default function SettingsApp() {
       setMuted(ev.payload.muted ?? []);
       setMutedProcesses(ev.payload.muted_processes ?? []);
       setSystemChips(normalizeSystemChips(ev.payload.system_chips));
+      setSystemChipOrder(normalizeSystemChipOrder(ev.payload.system_chip_order));
       setMenuHeights(ev.payload.menu_heights ?? {});
     }).then((fn) => unsubs.push(fn));
     void listen<{
@@ -844,6 +1136,15 @@ export default function SettingsApp() {
     () => ({ pinned, pinned_processes: pinnedProcesses }),
     [pinned, pinnedProcesses],
   );
+  const pinnedTrayIcons = useMemo(
+    () => sortPinnedTrayIcons(trays, pinPrefs),
+    [trays, pinPrefs],
+  );
+  const traysOrdered = useMemo(() => {
+    const pinnedIds = new Set(pinnedTrayIcons.map((i) => i.id));
+    const rest = trays.filter((t) => !pinnedIds.has(t.id));
+    return [...pinnedTrayIcons, ...rest];
+  }, [trays, pinnedTrayIcons]);
   const filteredNav = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return NAV;
@@ -912,6 +1213,7 @@ export default function SettingsApp() {
     nextMutedProcesses: string[] = mutedProcesses,
     nextSystemChips: SystemChipVisibility = systemChips,
     nextPinnedProcesses: string[] = pinnedProcesses,
+    nextSystemChipOrder: SystemChipKey[] = systemChipOrderRef.current,
   ) {
     setSaving(true);
     try {
@@ -922,6 +1224,7 @@ export default function SettingsApp() {
         muted: nextMuted,
         mutedProcesses: nextMutedProcesses,
         systemChips: nextSystemChips,
+        systemChipOrder: nextSystemChipOrder,
       });
       setPinned(prefs.pinned ?? nextPinned);
       setPinnedProcesses(prefs.pinned_processes ?? nextPinnedProcesses);
@@ -929,6 +1232,12 @@ export default function SettingsApp() {
       setMuted(prefs.muted ?? nextMuted);
       setMutedProcesses(prefs.muted_processes ?? nextMutedProcesses);
       setSystemChips(normalizeSystemChips(prefs.system_chips ?? nextSystemChips));
+      const savedOrder = prefs.system_chip_order;
+      setSystemChipOrder(
+        normalizeSystemChipOrder(
+          savedOrder && savedOrder.length ? savedOrder : nextSystemChipOrder,
+        ),
+      );
     } catch {
       /* noop */
     } finally {
@@ -936,11 +1245,126 @@ export default function SettingsApp() {
     }
   }
 
-  async function toggleSystemChip(key: keyof SystemChipVisibility) {
+  async function toggleSystemChip(key: SystemChipKey) {
     const next = { ...systemChips, [key]: !systemChips[key] };
     setSystemChips(next);
     await persistTrayPrefs(pinned, menuHeights, muted, mutedProcesses, next);
   }
+
+  const reorderChipByClientY = (dragId: SystemChipKey, clientY: number) => {
+    const rows = Array.from(
+      document.querySelectorAll<HTMLElement>(".chip-settings-list [data-chip-key]"),
+    ).filter((el) => el.getAttribute("data-chip-key") !== dragId);
+    if (!rows.length) return;
+
+    let dest = rows.length;
+    for (let i = 0; i < rows.length; i++) {
+      const rect = rows[i]!.getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) {
+        dest = i;
+        break;
+      }
+    }
+
+    const without = systemChipOrderRef.current.filter((k) => k !== dragId);
+    if (dest > without.length) dest = without.length;
+    const next = [...without];
+    next.splice(dest, 0, dragId);
+    if (next.length !== systemChipOrderRef.current.length) return;
+    if (next.every((k, i) => k === systemChipOrderRef.current[i])) return;
+
+    const overKey = rows[Math.min(dest, rows.length - 1)]?.getAttribute(
+      "data-chip-key",
+    ) as SystemChipKey | null;
+    systemChipOrderRef.current = next;
+    setSystemChipOrder(next);
+    setChipDragOverId(overKey && overKey !== dragId ? overKey : null);
+  };
+
+  const stopChipPointerReorder = (moved: boolean) => {
+    chipReorderUnbindRef.current?.();
+    chipReorderUnbindRef.current = null;
+    chipReorderLastToRef.current = null;
+    chipDraggingRef.current = false;
+    setChipDragId(null);
+    setChipDragOverId(null);
+    document.documentElement.classList.remove("chip-settings-reordering");
+    if (moved) {
+      void persistTrayPrefs(
+        pinnedRef.current,
+        menuHeights,
+        muted,
+        mutedProcesses,
+        systemChips,
+        pinnedProcesses,
+        systemChipOrderRef.current,
+      );
+    }
+  };
+
+  const beginChipPointerReorder = (e: ReactPointerEvent, id: SystemChipKey) => {
+    if (e.button !== 0 || saving) return;
+    const t = e.target as HTMLElement;
+    if (t.closest(".pref-switch")) return;
+    e.preventDefault();
+    chipReorderUnbindRef.current?.();
+    chipReorderLastToRef.current = null;
+    chipDraggingRef.current = true;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let moved = false;
+    const pointerId = e.pointerId;
+    const dragEl = e.currentTarget as HTMLElement;
+    try {
+      dragEl.setPointerCapture(pointerId);
+    } catch {
+      /* noop */
+    }
+
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && dx * dx + dy * dy < 16) return;
+      if (!moved) {
+        moved = true;
+        document.documentElement.classList.add("chip-settings-reordering");
+        setChipDragId(id);
+      }
+      ev.preventDefault();
+      reorderChipByClientY(id, ev.clientY);
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      try {
+        if (dragEl.hasPointerCapture(pointerId)) {
+          dragEl.releasePointerCapture(pointerId);
+        }
+      } catch {
+        /* noop */
+      }
+      stopChipPointerReorder(moved);
+    };
+
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    chipReorderUnbindRef.current = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  };
+
+  useEffect(() => {
+    return () => {
+      chipReorderUnbindRef.current?.();
+      chipDraggingRef.current = false;
+      document.documentElement.classList.remove("chip-settings-reordering");
+    };
+  }, []);
 
   async function togglePinned(icon: TrayIconInfo) {
     const on = isTrayPinned(icon, pinPrefs);
@@ -2152,7 +2576,7 @@ export default function SettingsApp() {
                   </span>
                 </div>
                 <p className="card-desc">
-                  可直接添加应用 / 分隔线，或从 MyDockFinder 备份导入 `.dockico.ini`。Edge/Chrome
+                  可直接添加应用 / 分隔线，或从 MyDockFinder 备份导入 `.dockico.ini`。下方预览条可拖动图标与分隔线排序（分隔线加宽更易抓取）；右键缩略图可删除或在其后添加分隔线。Edge/Chrome
                   「安装的应用」（如 ChatGPT、Gemini）请选桌面或开始菜单里的 `.lnk`；也可先打开应用，在
                   Dock 临时图标上右键「固定到 Dock」。
                 </p>
@@ -2194,77 +2618,163 @@ export default function SettingsApp() {
                 {dockPrefs.items.length === 0 ? (
                   <p className="tray-settings-empty">尚未配置图标，请添加应用或导入 .dockico.ini</p>
                 ) : (
-                  <div className="dock-settings-list">
-                    {dockPrefs.items.map((item, index) => {
-                      const label = dockItemLabel(item);
-                      const isSep = item.kind === "separator";
-                      const missingIcon = !isSep && !item.iconPng;
-                      return (
-                        <div
-                          key={item.id}
-                          className={`dock-settings-row${missingIcon ? " is-missing-icon" : ""}`}
-                        >
-                          <div className="dock-settings-item">
+                  <>
+                    <div
+                      className={`dock-settings-bar${dockDragId ? " is-reordering" : ""}`}
+                      aria-label="Dock 图标排序预览，按住拖动调整顺序"
+                    >
+                      {dockPrefs.items.map((item) => {
+                        const label = dockItemLabel(item);
+                        const isSep = item.kind === "separator";
+                        const missingIcon = !isSep && !item.iconPng;
+                        const dragging = dockDragId === item.id;
+                        const dragOver = dockDragOverId === item.id;
+                        return (
+                          <button
+                            key={`bar-${item.id}`}
+                            type="button"
+                            data-dock-item-id={item.id}
+                            data-dock-surface="bar"
+                            className={[
+                              "dock-settings-bar-slot",
+                              isSep ? "is-sep" : "",
+                              missingIcon ? "is-missing-icon" : "",
+                              dragging ? "is-dragging" : "",
+                              dragOver ? "is-drag-over" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            disabled={dockBusy}
+                            title={
+                              isSep
+                                ? "分隔线 · 拖动排序 · 右键删除/添加"
+                                : `${label} · 拖动排序 · 右键删除/添加分隔线`
+                            }
+                            aria-label={isSep ? "分隔线" : label}
+                            onPointerDown={(e) => beginDockPointerReorder(e, item.id, "bar")}
+                            onContextMenu={(e) => openDockItemCtxMenu(e, item)}
+                          >
                             {isSep ? (
-                              <span className="dock-settings-sep" aria-hidden />
+                              <span className="dock-settings-bar-sep" aria-hidden />
                             ) : item.iconPng ? (
                               <img
-                                className="dock-settings-icon"
+                                className="dock-settings-bar-icon"
                                 src={`data:image/png;base64,${item.iconPng}`}
                                 alt=""
+                                draggable={false}
                               />
                             ) : (
-                              <span className="dock-settings-icon-fallback" aria-hidden>
+                              <span className="dock-settings-bar-fallback" aria-hidden>
                                 {(label || "?").charAt(0)}
                               </span>
                             )}
-                            <span className="dock-settings-meta">
-                              <strong>{label}</strong>
-                              <span>
-                                {isSep
-                                  ? "分隔线"
-                                  : missingIcon
-                                    ? "图标未解析 · 可刷新或删除"
-                                    : item.kind === "startmenu" || item.kind === "trash"
-                                      ? item.kind
-                                      : item.matchExe || item.launchPath || item.kind}
-                              </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="dock-settings-list">
+                      {dockPrefs.items.map((item) => {
+                        const label = dockItemLabel(item);
+                        const isSep = item.kind === "separator";
+                        const missingIcon = !isSep && !item.iconPng;
+                        const dragging = dockDragId === item.id;
+                        const dragOver = dockDragOverId === item.id;
+                        return (
+                          <div
+                            key={item.id}
+                            data-dock-item-id={item.id}
+                            data-dock-surface="list"
+                            className={[
+                              "dock-settings-row",
+                              missingIcon ? "is-missing-icon" : "",
+                              isSep ? "is-sep" : "",
+                              dragging ? "is-dragging" : "",
+                              dragOver ? "is-drag-over" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            onPointerDown={(e) => {
+                              const t = e.target as HTMLElement;
+                              if (t.closest("button")) return;
+                              beginDockPointerReorder(e, item.id, "list");
+                            }}
+                            onContextMenu={(e) => openDockItemCtxMenu(e, item)}
+                          >
+                            <span className="dock-settings-grip" aria-hidden title="拖动排序">
+                              ⋮⋮
                             </span>
+                            <div className="dock-settings-item">
+                              {isSep ? (
+                                <span className="dock-settings-sep" aria-hidden />
+                              ) : item.iconPng ? (
+                                <img
+                                  className="dock-settings-icon"
+                                  src={`data:image/png;base64,${item.iconPng}`}
+                                  alt=""
+                                  draggable={false}
+                                />
+                              ) : (
+                                <span className="dock-settings-icon-fallback" aria-hidden>
+                                  {(label || "?").charAt(0)}
+                                </span>
+                              )}
+                              <span className="dock-settings-meta">
+                                <strong>{label}</strong>
+                                <span>
+                                  {isSep
+                                    ? "拖动左侧手柄或上方预览条中的分隔线调整位置"
+                                    : missingIcon
+                                      ? "图标未解析 · 可刷新或删除"
+                                      : item.kind === "startmenu" || item.kind === "trash"
+                                        ? item.kind
+                                        : item.matchExe || item.launchPath || item.kind}
+                                </span>
+                              </span>
+                            </div>
+                            <div className="dock-settings-actions">
+                              <button
+                                type="button"
+                                className="dock-settings-btn is-danger"
+                                disabled={dockBusy}
+                                title="删除"
+                                onClick={() => removeDockItem(item.id)}
+                              >
+                                删
+                              </button>
+                            </div>
                           </div>
-                          <div className="dock-settings-actions">
-                            <button
-                              type="button"
-                              className="dock-settings-btn"
-                              disabled={dockBusy || index === 0}
-                              title="上移"
-                              onClick={() => moveDockItem(index, -1)}
-                            >
-                              ↑
-                            </button>
-                            <button
-                              type="button"
-                              className="dock-settings-btn"
-                              disabled={dockBusy || index >= dockPrefs.items.length - 1}
-                              title="下移"
-                              onClick={() => moveDockItem(index, 1)}
-                            >
-                              ↓
-                            </button>
-                            <button
-                              type="button"
-                              className="dock-settings-btn is-danger"
-                              disabled={dockBusy}
-                              title="删除"
-                              onClick={() => removeDockItem(item.id)}
-                            >
-                              删
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  </>
                 )}
+                {dockCtxMenu ? (
+                  <div
+                    className="settings-ctx-menu"
+                    style={{ left: dockCtxMenu.x, top: dockCtxMenu.y }}
+                    role="menu"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={dockBusy}
+                      onClick={() => void addDockSeparator(dockCtxMenu.id)}
+                    >
+                      在此后添加分隔线
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="is-danger"
+                      disabled={dockBusy}
+                      onClick={() => removeDockItem(dockCtxMenu.id)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                ) : null}
               </section>
             </>
           )}
@@ -2484,17 +2994,36 @@ export default function SettingsApp() {
                 <div className="section-head">
                   <h2>系统芯片</h2>
                   <span className="section-hint">
-                    {saving ? "保存中…" : "控制岛栏右侧 Wi‑Fi / 蓝牙等是否显示"}
+                    {saving ? "保存中…" : "拖动调序；开关控制是否显示"}
                   </span>
                 </div>
                 <p className="card-desc">
                   关闭后对应芯片从岛栏右侧消失；不影响系统本身的网络 / 蓝牙功能。展开托盘箭头始终保留。
+                  拖动左侧手柄可调整岛栏顺序，设置会写入托盘偏好（数据库）。
                 </p>
-                <div>
-                  {SYSTEM_CHIP_TOGGLES.map((item) => {
-                    const on = systemChips[item.key];
+                <div className={`chip-settings-list${chipDragId ? " is-reordering" : ""}`}>
+                  {systemChipOrder.map((key) => {
+                    const item = SYSTEM_CHIP_META[key];
+                    const on = systemChips[key];
+                    const dragging = chipDragId === key;
+                    const dragOver = chipDragOverId === key;
                     return (
-                      <label key={item.key} className="pref-row">
+                      <div
+                        key={key}
+                        data-chip-key={key}
+                        className={[
+                          "pref-row",
+                          "chip-settings-row",
+                          dragging ? "is-dragging" : "",
+                          dragOver ? "is-drag-over" : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        onPointerDown={(e) => beginChipPointerReorder(e, key)}
+                      >
+                        <span className="chip-settings-grip" aria-hidden title="拖动排序">
+                          ⋮⋮
+                        </span>
                         <span className="pref-row-text">
                           <span className="pref-row-label">{item.label}</span>
                           <span className="pref-row-desc">{item.desc}</span>
@@ -2503,11 +3032,11 @@ export default function SettingsApp() {
                           type="button"
                           className={`pref-switch${on ? " is-on" : ""}`}
                           aria-pressed={on}
-                          onClick={() => void toggleSystemChip(item.key)}
+                          onClick={() => void toggleSystemChip(key)}
                         >
                           <span className="pref-switch-knob" />
                         </button>
-                      </label>
+                      </div>
                     );
                   })}
                 </div>
@@ -2520,19 +3049,67 @@ export default function SettingsApp() {
                   {saving
                     ? "保存中…"
                     : trays.length > 0
-                      ? "勾选常显；铃铛关闭岛通知；齿轮设菜单高度"
+                      ? "勾选常显；上方可拖动排序；铃铛勿扰；齿轮设菜单高度"
                       : "正在抓取系统托盘…"}
                 </span>
               </div>
               <p className="card-desc">
                 仅列出应用托盘图标。系统芯片（网络 / 音量 / 电源 / 蓝牙 / 输入法 / 时钟）请在上方单独开关。
-                右键菜单默认自动测量高度；铃铛关闭后该应用托盘闪动不再弹出岛通知。
+                勾选常显后，可在上方预览条拖动调整岛栏右侧顺序；铃铛关闭后该应用托盘闪动不再弹出岛通知。
               </p>
               {trays.length === 0 ? (
                 <p className="tray-settings-empty">暂未收到托盘图标</p>
               ) : (
-                <div className="tray-settings-list">
-                  {trays.map((icon) => {
+                <>
+                  {pinnedTrayIcons.length > 0 ? (
+                    <div
+                      className={`tray-settings-bar${trayDragId ? " is-reordering" : ""}`}
+                      aria-label="常显托盘排序预览，按住拖动调整顺序"
+                    >
+                      {pinnedTrayIcons.map((icon) => {
+                        const dragging = trayDragId === icon.id;
+                        const dragOver = trayDragOverId === icon.id;
+                        const label = trayLabel(icon);
+                        return (
+                          <button
+                            key={`pin-${icon.id}`}
+                            type="button"
+                            data-tray-pin-id={icon.id}
+                            className={[
+                              "tray-settings-bar-slot",
+                              dragging ? "is-dragging" : "",
+                              dragOver ? "is-drag-over" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            disabled={saving}
+                            title={`${label} · 拖动调整常显顺序`}
+                            aria-label={label}
+                            onPointerDown={(e) => beginTrayPointerReorder(e, icon.id)}
+                          >
+                            {icon.icon_png_base64 ? (
+                              <img
+                                className="tray-settings-bar-icon"
+                                src={`data:image/png;base64,${icon.icon_png_base64}`}
+                                alt=""
+                                draggable={false}
+                              />
+                            ) : (
+                              <span className="tray-settings-bar-fallback" aria-hidden>
+                                {label.charAt(0).toUpperCase()}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="tray-settings-empty tray-settings-bar-hint">
+                      勾选下方图标后，可在此拖动调整常显顺序
+                    </p>
+                  )}
+                  <div className="tray-settings-list">
+                  {traysOrdered.map((icon) => {
                     const on = isTrayPinned(icon, pinPrefs);
                     const notifyMuted = isNotifyMuted(icon);
                     const customH = menuHeights[icon.id];
@@ -2661,6 +3238,7 @@ export default function SettingsApp() {
                     );
                   })}
                 </div>
+                </>
               )}
             </section>
             </>

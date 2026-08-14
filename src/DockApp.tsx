@@ -425,6 +425,8 @@ function exeMatches(item: DockItem, w: HubWindow): boolean {
   if (pinAppId) {
     return !!winAppId && winAppId.toLowerCase() === pinAppId.toLowerCase();
   }
+  // Plain pin must never claim Edge/Chrome installed-app windows.
+  if (winAppId) return false;
 
   const name = normExeKey(windowExeName(w));
   const path = (w.exe || "").toLowerCase().replace(/\//g, "\\");
@@ -432,11 +434,6 @@ function exeMatches(item: DockItem, w: HubWindow): boolean {
   const className = windowClassName(w).toLowerCase();
   const keys = collectItemKeys(item);
   const suites = itemSuites(item, keys);
-  const pinIsBrowser =
-    [...keys].some((k) => isBrowserExeName(k)) || isBrowserExeName(item.matchExe);
-
-  // Plain browser pin must not claim Edge/Chrome installed-app windows.
-  if (pinIsBrowser && winAppId) return false;
 
   // explorer.exe: only real folder windows light the pin / count as running.
   if (name === "explorer.exe" || pathBase === "explorer.exe") {
@@ -500,16 +497,13 @@ function pinOwnsWindow(item: DockItem, w: HubWindow): boolean {
   if (pinAppId) {
     return !!winAppId && winAppId.toLowerCase() === pinAppId.toLowerCase();
   }
+  if (winAppId) return false;
 
   const name = normExeKey(windowExeName(w));
   const path = (w.exe || "").toLowerCase().replace(/\//g, "\\");
   const pathBase = normExeKey(path.split("\\").pop() || "");
   const className = windowClassName(w).toLowerCase();
   const keys = collectItemKeys(item);
-  const pinIsBrowser =
-    [...keys].some((k) => isBrowserExeName(k)) || isBrowserExeName(item.matchExe);
-
-  if (pinIsBrowser && winAppId) return false;
 
   if (name === "explorer.exe" || pathBase === "explorer.exe") {
     if (!EXPLORER_FOLDER_CLASSES.has(className)) return false;
@@ -979,6 +973,7 @@ export default function DockApp() {
               realPath: item.realPath || null,
               label: itemLabel(item),
               iconPng: item.iconPng || null,
+              appId: item.appId || null,
             });
           } catch (e) {
             console.error(e);
@@ -1011,8 +1006,9 @@ export default function DockApp() {
     closePreviewSoon();
   };
 
-  async function onItemClick(item: DockItem) {
+  async function onItemClick(item: DockItem, opts?: { forceNew?: boolean }) {
     if (item.kind === "separator") return;
+    const forceNew = !!opts?.forceNew;
     if (previewOpenTimer.current) {
       window.clearTimeout(previewOpenTimer.current);
       previewOpenTimer.current = 0;
@@ -1036,6 +1032,19 @@ export default function DockApp() {
     }
     try {
       if (item.ephemeral) {
+        // Middle-click: always spawn another instance (skip focus/minimize).
+        if (forceNew) {
+          if (item.appId || item.realPath) {
+            void invoke("dock_launch_path", {
+              path: item.realPath || "",
+              forceNew: true,
+              appId: item.appId || null,
+            }).catch((e) => console.error(e));
+          } else {
+            console.error("ephemeral middle-click: no path", item);
+          }
+          return;
+        }
         const want = (item.matchExe || "").toLowerCase();
         const key = item.id.replace(/^running:/, "");
         // Prefer stored HWND — EnumWindows order / title changes must not drop the click.
@@ -1059,13 +1068,18 @@ export default function DockApp() {
           void invoke("focus_or_minimize_open_window", { id: matched.id }).catch((e) =>
             console.error(e),
           );
-        } else if (item.realPath) {
-          void invoke("dock_launch_path", { path: item.realPath }).catch((e) => console.error(e));
+        } else if (item.appId || item.realPath) {
+          void invoke("dock_launch_path", {
+            path: item.realPath || "",
+            appId: item.appId || null,
+          }).catch((e) => console.error(e));
         } else {
           console.error("ephemeral click: no hwnd and no path", item);
         }
       } else {
-        void invoke("dock_launch_item", { itemId: item.id }).catch((e) => console.error(e));
+        void invoke("dock_launch_item", { itemId: item.id, forceNew }).catch((e) =>
+          console.error(e),
+        );
       }
     } catch (e) {
       console.error(e);
@@ -1171,7 +1185,9 @@ export default function DockApp() {
                 }${bounceId === item.id ? " is-bounce" : ""}`}
                 style={style}
                 onPointerDown={(e) => {
-                  if (e.button !== 0) return;
+                  // Left = focus/toggle; middle = always open a new window/instance.
+                  if (e.button !== 0 && e.button !== 1) return;
+                  if (e.button === 1) e.preventDefault();
                   // Fire on press — pointerup misses when mag scale moves the target under the cursor.
                   e.stopPropagation();
                   try {
@@ -1179,7 +1195,14 @@ export default function DockApp() {
                   } catch {
                     /* noop */
                   }
-                  void onItemClick(item);
+                  void onItemClick(item, { forceNew: e.button === 1 });
+                }}
+                onAuxClick={(e) => {
+                  // Block browser middle-click defaults (autoscroll / open-in-new-tab).
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }
                 }}
                 onContextMenu={(e) => void openItemContextMenu(e, item)}
                 onPointerEnter={(e) => {

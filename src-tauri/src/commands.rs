@@ -968,7 +968,11 @@ pub fn refresh_system_status(domains: Option<Vec<String>>) {
                 "bluetooth" | "bt" => out.push(Domain::Bluetooth),
                 "audio" | "volume" => out.push(Domain::Audio),
                 "power" | "battery" => out.push(Domain::Power),
-                "perf" | "cpu" | "mem" => out.push(Domain::Perf),
+                "perf" | "cpu" | "mem" => {
+                    out.push(Domain::Perf);
+                    // Soft "perf" refresh also kicks the isolated temperature loop.
+                    out.push(Domain::Temperature);
+                }
                 "temp" | "temperature" => out.push(Domain::Temperature),
                 "ime" => out.push(Domain::Ime),
                 "all" => {
@@ -2092,6 +2096,35 @@ fn reconcile_pinned_ids(pinned: Vec<String>, pinned_processes: &[String]) -> Vec
     out
 }
 
+const SYSTEM_CHIP_ORDER_KEYS: &[&str] = &[
+    "perf",
+    "network",
+    "wifi",
+    "bluetooth",
+    "volume",
+    "power",
+    "peripherals",
+    "ime",
+    "clock",
+];
+
+fn normalize_system_chip_order(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in raw {
+        let key = id.trim().to_ascii_lowercase();
+        if SYSTEM_CHIP_ORDER_KEYS.iter().any(|k| *k == key) && seen.insert(key.clone()) {
+            out.push(key);
+        }
+    }
+    for &k in SYSTEM_CHIP_ORDER_KEYS {
+        if seen.insert(k.to_string()) {
+            out.push(k.to_string());
+        }
+    }
+    out
+}
+
 pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
     let mut prefs: crate::win32::tray::TrayPrefs =
         if let Ok(Some(v)) = crate::db::with_conn(|c| crate::db::tray_get(c)) {
@@ -2121,6 +2154,7 @@ pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
     );
     prefs.pinned_processes = enrich_pinned_processes(&prefs.pinned, prefs.pinned_processes);
     prefs.pinned = reconcile_pinned_ids(prefs.pinned, &prefs.pinned_processes);
+    prefs.system_chip_order = normalize_system_chip_order(prefs.system_chip_order);
     prefs
 }
 
@@ -2150,6 +2184,7 @@ pub fn set_tray_prefs(
     muted: Option<Vec<String>>,
     muted_processes: Option<Vec<String>>,
     system_chips: Option<crate::win32::tray::SystemChipVisibility>,
+    system_chip_order: Option<Vec<String>>,
 ) -> Result<crate::win32::tray::TrayPrefs, String> {
     let mut heights = menu_heights.unwrap_or_default();
     heights.retain(|_, h| *h > 0);
@@ -2182,6 +2217,9 @@ pub fn set_tray_prefs(
                 .collect(),
         ),
         system_chips: system_chips.unwrap_or(prev.system_chips),
+        system_chip_order: normalize_system_chip_order(
+            system_chip_order.unwrap_or(prev.system_chip_order),
+        ),
     };
     crate::win32::tray::set_prefs(prefs.clone());
     save_tray_prefs(&prefs)?;
@@ -2295,13 +2333,18 @@ pub fn hub_staging_add_text(
 }
 
 #[tauri::command]
-pub fn hub_staging_add_paths(
+pub async fn hub_staging_add_paths(
     app: AppHandle,
     plugin_id: String,
     paths: Vec<String>,
 ) -> Result<Vec<crate::staging::StagingItem>, String> {
     crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
-    crate::staging::add_paths(Some(&app), &plugin_id, paths)
+    // FS metadata for many paths must not block the async runtime / UI.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::staging::add_paths(Some(&app), &plugin_id, paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -2323,6 +2366,16 @@ pub fn hub_staging_remove(app: AppHandle, plugin_id: String, id: String) -> Resu
 }
 
 #[tauri::command]
+pub fn hub_staging_remove_many(
+    app: AppHandle,
+    plugin_id: String,
+    ids: Vec<String>,
+) -> Result<u32, String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
+    crate::staging::remove_many(Some(&app), &plugin_id, &ids)
+}
+
+#[tauri::command]
 pub fn hub_staging_clear(app: AppHandle, plugin_id: String) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
     crate::staging::clear(Some(&app), &plugin_id)
@@ -2335,9 +2388,15 @@ pub fn hub_staging_copy(plugin_id: String, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn hub_staging_copy_files(plugin_id: String, id: String) -> Result<(), String> {
+pub fn hub_staging_copy_files(plugin_id: String, ids: Vec<String>) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
-    crate::staging::copy_files_to_clipboard(&plugin_id, &id)
+    crate::staging::copy_files_to_clipboard(&plugin_id, &ids)
+}
+
+#[tauri::command]
+pub fn hub_staging_copy_paths(plugin_id: String, ids: Vec<String>) -> Result<u32, String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
+    crate::staging::copy_selected_paths(&plugin_id, &ids)
 }
 
 #[tauri::command]
@@ -2347,9 +2406,13 @@ pub fn hub_staging_copy_all_paths(plugin_id: String) -> Result<u32, String> {
 }
 
 #[tauri::command]
-pub fn hub_staging_thumb(plugin_id: String, id: String) -> Result<Option<String>, String> {
+pub async fn hub_staging_thumb(plugin_id: String, id: String) -> Result<Option<String>, String> {
     crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
-    crate::staging::thumb_data_url(&plugin_id, &id)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::staging::thumb_data_url(&plugin_id, &id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

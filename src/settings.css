@@ -266,6 +266,95 @@ a {
   gap: 16px;
 }
 
+.chip-settings-list {
+  margin-top: 4px;
+}
+
+.chip-settings-list.is-reordering .chip-settings-row {
+  transition: none;
+}
+
+.chip-settings-row {
+  touch-action: none;
+  cursor: grab;
+  justify-content: flex-start;
+  align-items: center;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: rgba(0, 0, 0, 0.12);
+  gap: 10px;
+}
+
+.chip-settings-row .pref-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+}
+
+.chip-settings-row .pref-switch {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.chip-settings-row:hover {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.chip-settings-row.is-dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+.chip-settings-row.is-drag-over {
+  border-color: rgba(10, 132, 255, 0.55);
+  background: rgba(10, 132, 255, 0.12);
+}
+
+.chip-settings-grip {
+  flex: 0 0 auto;
+  width: 18px;
+  align-self: center;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: -1px;
+  color: rgba(255, 255, 255, 0.35);
+  user-select: none;
+}
+
+.chip-settings-row:hover .chip-settings-grip {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+html.chip-settings-reordering,
+html.chip-settings-reordering * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+html[data-theme="light"] .chip-settings-row {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+html[data-theme="light"] .chip-settings-row:hover {
+  background: rgba(0, 0, 0, 0.055);
+}
+
+html[data-theme="light"] .chip-settings-row.is-drag-over {
+  border-color: rgba(0, 122, 255, 0.45);
+  background: rgba(0, 122, 255, 0.08);
+}
+
+html[data-theme="light"] .chip-settings-grip {
+  color: rgba(0, 0, 0, 0.28);
+}
+
+html[data-theme="light"] .chip-settings-row:hover .chip-settings-grip {
+  color: rgba(0, 0, 0, 0.45);
+}
+
 .pref-row.pref-row-stack {
   flex-direction: column;
   align-items: stretch;
@@ -646,6 +735,86 @@ html[data-theme="light"] .bar-priority-btn {
   color: #9ca3af;
 }
 
+.tray-settings-bar-hint {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
+.tray-settings-bar {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+  min-height: 52px;
+}
+
+.tray-settings-bar.is-reordering {
+  border-color: rgba(10, 132, 255, 0.45);
+  background: rgba(10, 132, 255, 0.08);
+}
+
+.tray-settings-bar-slot {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  touch-action: none;
+}
+
+.tray-settings-bar-slot:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.tray-settings-bar-slot:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tray-settings-bar-slot.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.tray-settings-bar-slot.is-drag-over {
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.65);
+  background: rgba(10, 132, 255, 0.18);
+}
+
+.tray-settings-bar-icon {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.tray-settings-bar-fallback {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 650;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e5e7eb;
+}
+
+html.tray-settings-reordering,
+html.tray-settings-reordering * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
 .tray-settings-list {
   margin-top: 10px;
   display: flex;
@@ -809,6 +978,101 @@ html[data-theme="light"] .bar-priority-btn {
   gap: 6px;
 }
 
+.dock-settings-bar {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 14px;
+  min-height: 56px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  user-select: none;
+  touch-action: none;
+}
+
+.dock-settings-bar.is-reordering {
+  border-color: rgba(10, 132, 255, 0.35);
+  background: rgba(10, 132, 255, 0.06);
+}
+
+.dock-settings-bar-slot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: grab;
+  touch-action: none;
+  flex-shrink: 0;
+}
+
+.dock-settings-bar-slot.is-sep {
+  width: 22px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: grab;
+}
+
+.dock-settings-bar-slot:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.dock-settings-bar-slot:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dock-settings-bar-slot.is-dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+.dock-settings-bar-slot.is-drag-over {
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.55);
+  background: rgba(10, 132, 255, 0.12);
+}
+
+.dock-settings-bar-slot.is-missing-icon {
+  border-color: rgba(255, 159, 10, 0.35);
+}
+
+.dock-settings-bar-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.dock-settings-bar-fallback {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e5e7eb;
+  pointer-events: none;
+}
+
+.dock-settings-bar-sep {
+  width: 4px;
+  height: 22px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.28);
+  box-shadow: -3px 0 0 rgba(255, 255, 255, 0.12), 3px 0 0 rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+
 .dock-settings-row {
   display: flex;
   align-items: center;
@@ -818,11 +1082,43 @@ html[data-theme="light"] .bar-priority-btn {
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid transparent;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.dock-settings-row.is-sep {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.dock-settings-row.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.dock-settings-row.is-drag-over {
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.5);
+  background: rgba(10, 132, 255, 0.1);
 }
 
 .dock-settings-row.is-missing-icon {
   border-color: rgba(255, 159, 10, 0.35);
   background: rgba(255, 159, 10, 0.06);
+}
+
+.dock-settings-grip {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: -2px;
+  color: rgba(255, 255, 255, 0.28);
+  line-height: 1;
+  pointer-events: none;
+}
+
+.dock-settings-row:hover .dock-settings-grip {
+  color: rgba(255, 255, 255, 0.5);
 }
 
 .dock-settings-item {
@@ -831,6 +1127,7 @@ html[data-theme="light"] .bar-priority-btn {
   gap: 10px;
   min-width: 0;
   flex: 1;
+  pointer-events: none;
 }
 
 .dock-settings-icon,
@@ -862,9 +1159,11 @@ html[data-theme="light"] .bar-priority-btn {
 
 .dock-settings-sep::after {
   content: "";
-  width: 1px;
+  width: 3px;
   height: 18px;
+  border-radius: 2px;
   background: rgba(255, 255, 255, 0.28);
+  box-shadow: -4px 0 0 rgba(255, 255, 255, 0.12), 4px 0 0 rgba(255, 255, 255, 0.12);
 }
 
 .dock-settings-meta {
@@ -926,8 +1225,99 @@ html[data-theme="light"] .bar-priority-btn {
   border-color: rgba(255, 69, 58, 0.35);
 }
 
+html.dock-settings-reordering,
+html.dock-settings-reordering * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.settings-ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 148px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(36, 36, 40, 0.96);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-ctx-menu button {
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: #f3f4f6;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.settings-ctx-menu button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.settings-ctx-menu button.is-danger {
+  color: #ff6961;
+}
+
+.settings-ctx-menu button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+html[data-theme="light"] .dock-settings-bar {
+  background: rgba(0, 0, 0, 0.03);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="light"] .dock-settings-bar.is-reordering {
+  border-color: rgba(0, 122, 255, 0.35);
+  background: rgba(0, 122, 255, 0.06);
+}
+
+html[data-theme="light"] .dock-settings-bar-slot {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+html[data-theme="light"] .dock-settings-bar-slot:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+html[data-theme="light"] .dock-settings-bar-slot.is-drag-over {
+  box-shadow: inset 0 0 0 1px rgba(0, 122, 255, 0.5);
+  background: rgba(0, 122, 255, 0.1);
+}
+
+html[data-theme="light"] .dock-settings-bar-fallback {
+  background: rgba(0, 0, 0, 0.06);
+  color: #111827;
+}
+
+html[data-theme="light"] .dock-settings-bar-sep {
+  background: rgba(0, 0, 0, 0.2);
+  box-shadow: -3px 0 0 rgba(0, 0, 0, 0.08), 3px 0 0 rgba(0, 0, 0, 0.08);
+}
+
 html[data-theme="light"] .dock-settings-row {
   background: rgba(0, 0, 0, 0.03);
+}
+
+html[data-theme="light"] .dock-settings-row.is-drag-over {
+  box-shadow: inset 0 0 0 1px rgba(0, 122, 255, 0.45);
+  background: rgba(0, 122, 255, 0.08);
+}
+
+html[data-theme="light"] .dock-settings-grip {
+  color: rgba(0, 0, 0, 0.28);
+}
+
+html[data-theme="light"] .dock-settings-row:hover .dock-settings-grip {
+  color: rgba(0, 0, 0, 0.45);
 }
 
 html[data-theme="light"] .dock-settings-meta strong {
@@ -949,7 +1339,8 @@ html[data-theme="light"] .dock-settings-icon-fallback {
 }
 
 html[data-theme="light"] .dock-settings-sep::after {
-  background: rgba(0, 0, 0, 0.18);
+  background: rgba(0, 0, 0, 0.2);
+  box-shadow: -4px 0 0 rgba(0, 0, 0, 0.08), 4px 0 0 rgba(0, 0, 0, 0.08);
 }
 
 .settings-primary-btn,
@@ -1345,6 +1736,52 @@ html[data-theme="light"] .weather-msg,
 html[data-theme="light"] .tray-settings-empty,
 html[data-theme="light"] .swatch-meta {
   color: #3f3f46;
+}
+
+html[data-theme="light"] .tray-settings-bar {
+  background: rgba(0, 0, 0, 0.03);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="light"] .tray-settings-bar.is-reordering {
+  border-color: rgba(0, 122, 255, 0.35);
+  background: rgba(0, 122, 255, 0.06);
+}
+
+html[data-theme="light"] .tray-settings-bar-slot {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+html[data-theme="light"] .tray-settings-bar-slot:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+html[data-theme="light"] .tray-settings-bar-slot.is-drag-over {
+  box-shadow: inset 0 0 0 1px rgba(0, 122, 255, 0.5);
+  background: rgba(0, 122, 255, 0.1);
+}
+
+html[data-theme="light"] .tray-settings-bar-fallback {
+  background: rgba(0, 0, 0, 0.06);
+  color: #111827;
+}
+
+html[data-theme="light"] .settings-ctx-menu {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+html[data-theme="light"] .settings-ctx-menu button {
+  color: #1c1c1e;
+}
+
+html[data-theme="light"] .settings-ctx-menu button:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+html[data-theme="light"] .settings-ctx-menu button.is-danger {
+  color: #d94848;
 }
 
 html[data-theme="light"] .tray-settings-item {

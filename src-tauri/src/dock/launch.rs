@@ -1,8 +1,8 @@
 //! Launch / focus dock items.
 
 use super::shortcut::{
-    file_name_lower, is_browser_exe_key, normalize_exe_key, normalize_path_key,
-    resolve_launch_target,
+    canonicalize_browser_app_id, file_name_lower, is_browser_exe_key, normalize_exe_key,
+    normalize_path_key, resolve_launch_target, resolve_lnk_info,
 };
 use super::DockItem;
 use crate::win32::enum_windows::{focus_or_minimize_group, list_windows, WindowInfo};
@@ -338,7 +338,7 @@ pub fn matching_windows(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowIn
     if item.kind != "app" {
         return Vec::new();
     }
-    let pin_app_id = item.app_id.trim();
+    let pin_app_id = canonicalize_browser_app_id(item.app_id.trim());
     // Edge/Chrome installed apps: match strictly by --app-id (never absorb the browser).
     if !pin_app_id.is_empty() {
         return windows
@@ -346,7 +346,10 @@ pub fn matching_windows(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowIn
             .filter(|w| {
                 w.app_id
                     .as_deref()
-                    .map(|id| id.eq_ignore_ascii_case(pin_app_id))
+                    .map(|id| {
+                        let wid = canonicalize_browser_app_id(id);
+                        !wid.is_empty() && wid.eq_ignore_ascii_case(&pin_app_id)
+                    })
                     .unwrap_or(false)
             })
             .cloned()
@@ -357,19 +360,16 @@ pub fn matching_windows(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowIn
     if keys.is_empty() && item.real_path.is_empty() && item.launch_path.is_empty() {
         return Vec::new();
     }
-    let pin_is_browser = keys.iter().any(|k| is_browser_exe_key(k))
-        || is_browser_exe_key(&item.match_exe)
-        || is_browser_exe_key(&file_name_lower(&item.real_path));
     let reals = effective_real_paths(item);
     let suites = item_suite_families(item, &keys);
     windows
         .iter()
         .filter(|w| {
-            // Plain browser pin must not claim PWA windows (those have app_id).
-            if pin_is_browser {
-                if w.app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
-                    return false;
-                }
+            // Installed-app windows always carry app_id. A pin without app_id
+            // (plain Edge/Chrome) must never claim them — even if browser
+            // detection fails for a .lnk-only pin.
+            if w.app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+                return false;
             }
             let exe_name = normalize_exe_key(w.exe_name.as_deref().unwrap_or(""));
             let exe_path = normalize_path_key(w.exe.as_deref().unwrap_or(""));
@@ -443,6 +443,14 @@ pub fn launch_or_focus(item: &DockItem) -> Result<(), String> {
     }
 }
 
+/// Always start a new process/window (middle-click). Skips focus/minimize toggle.
+pub fn launch_new(item: &DockItem) -> Result<(), String> {
+    match item.kind.as_str() {
+        "startmenu" | "trash" | "separator" => Ok(()),
+        _ => launch_app_new(item),
+    }
+}
+
 /// Match running windows by exe stem from pin paths / match_exe / label.
 fn windows_by_exe_stem(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowInfo> {
     let mut stems = Vec::new();
@@ -467,6 +475,10 @@ fn windows_by_exe_stem(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowInf
     windows
         .iter()
         .filter(|w| {
+            // Never absorb Edge/Chrome installed apps via stem fallback.
+            if w.app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+                return false;
+            }
             let n = normalize_exe_key(w.exe_name.as_deref().unwrap_or(""));
             let base = normalize_exe_key(&file_name_lower(w.exe.as_deref().unwrap_or("")));
             stems.iter().any(|s| s == &n || s == &base)
@@ -491,6 +503,14 @@ fn open_trash() -> Result<(), String> {
 }
 
 fn launch_app(item: &DockItem) -> Result<(), String> {
+    launch_app_with(item, false)
+}
+
+fn launch_app_new(item: &DockItem) -> Result<(), String> {
+    launch_app_with(item, true)
+}
+
+fn launch_app_with(item: &DockItem, force_new: bool) -> Result<(), String> {
     if item.uwp && !item.virtual_path.is_empty() {
         let uri = format!("shell:AppsFolder\\{}", item.virtual_path);
         return shell_open(&uri, None);
@@ -503,20 +523,58 @@ fn launch_app(item: &DockItem) -> Result<(), String> {
         return Err("no launch path".into());
     };
     // `.lnk` already embeds args — ShellExecute the shortcut as-is.
+    // Middle-click on a browser shortcut: resolve target and pass `--new-window`
+    // (plain ShellExecute on the .lnk usually just focuses the existing window).
     let path_l = path.to_ascii_lowercase();
     if path_l.ends_with(".lnk") {
+        if force_new {
+            if let Some(lnk) = resolve_lnk_info(path) {
+                let target = lnk.target.trim();
+                let exe_key = normalize_exe_key(&file_name_lower(target));
+                if !target.is_empty() && is_browser_exe_key(&exe_key) {
+                    let mut args = item.launch_args.trim().to_string();
+                    if args.is_empty() {
+                        args = lnk.args.trim().to_string();
+                    }
+                    if !args.to_ascii_lowercase().contains("new-window") {
+                        if args.is_empty() {
+                            args = "--new-window".into();
+                        } else {
+                            args = format!("{args} --new-window");
+                        }
+                    }
+                    let params = if args.is_empty() {
+                        None
+                    } else {
+                        Some(args.as_str())
+                    };
+                    return shell_open(target, params);
+                }
+            }
+        }
         return shell_open(path, None);
     }
-    let params = if item.launch_args.trim().is_empty() {
-        None
-    } else {
-        Some(item.launch_args.as_str())
-    };
+    let exe_key = normalize_exe_key(&file_name_lower(path));
+    let mut args = item.launch_args.trim().to_string();
+    // Browsers often reuse the existing process unless asked for a new window.
+    if force_new && is_browser_exe_key(&exe_key) && !args.to_ascii_lowercase().contains("new-window")
+    {
+        if args.is_empty() {
+            args = "--new-window".into();
+        } else {
+            args = format!("{args} --new-window");
+        }
+    }
+    let params = if args.is_empty() { None } else { Some(args.as_str()) };
     shell_open(path, params)
 }
 
 pub fn shell_open_path(path: &str) -> Result<(), String> {
     shell_open(path, None)
+}
+
+pub fn shell_open_path_with_params(path: &str, params: Option<&str>) -> Result<(), String> {
+    shell_open(path, params)
 }
 
 fn shell_open(file: &str, params: Option<&str>) -> Result<(), String> {

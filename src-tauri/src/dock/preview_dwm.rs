@@ -42,6 +42,35 @@ pub fn thumb_dest_rects(count: usize, scale: f64) -> Vec<(i32, i32, i32, i32)> {
     out
 }
 
+/// Synchronously resize/move the preview HWND (logical px → physical).
+/// Tauri `set_size` can lag a frame; DWM dest rects must see the final client size.
+#[cfg(windows)]
+pub fn sync_set_bounds(hwnd: isize, x: f64, y: f64, w: f64, h: f64, scale: f64) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+    if hwnd == 0 || w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let px = (x * scale).round() as i32;
+    let py = (y * scale).round() as i32;
+    let pw = (w * scale).round().max(1.0) as i32;
+    let ph = (h * scale).round().max(1.0) as i32;
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd as _),
+            HWND::default(),
+            px,
+            py,
+            pw,
+            ph,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn sync_set_bounds(_hwnd: isize, _x: f64, _y: f64, _w: f64, _h: f64, _scale: f64) {}
+
 /// Unregister every live thumbnail (call on preview close / hide).
 pub fn clear_thumbnails() {
     #[cfg(windows)]

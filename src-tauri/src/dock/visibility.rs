@@ -426,7 +426,7 @@ impl DockVisibility {
     }
 
     /// Screen-corner gestures: BL → Start, BR → Show Desktop.
-    fn poll_hot_corners(&self, app: &AppHandle) {
+    fn poll_hot_corners(&self, _app: &AppHandle) {
         #[cfg(windows)]
         {
             use windows::Win32::Foundation::POINT;
@@ -515,7 +515,7 @@ impl DockVisibility {
         }
         #[cfg(not(windows))]
         {
-            let _ = app;
+            let _ = _app;
         }
     }
 

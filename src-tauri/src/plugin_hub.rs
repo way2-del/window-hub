@@ -660,10 +660,21 @@ pub fn hub_init_script(plugin_id: &str) -> String {
       addPaths: (paths) => invoke("hub_staging_add_paths", withPlugin({{ paths }})),
       addImageBytes: (label, bytes, ext) =>
         invoke("hub_staging_add_image_bytes", withPlugin({{ label, bytes, ext }})),
-      remove: (id) => invoke("hub_staging_remove", withPlugin({{ id }})),
+      remove: (idOrIds) => {{
+        const ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+        if (ids.length === 0) return Promise.resolve();
+        if (ids.length === 1) {{
+          return invoke("hub_staging_remove", withPlugin({{ id: ids[0] }}));
+        }}
+        return invoke("hub_staging_remove_many", withPlugin({{ ids }}));
+      }},
       clear: () => invoke("hub_staging_clear", withPlugin()),
       copy: (id) => invoke("hub_staging_copy", withPlugin({{ id }})),
-      copyFiles: (id) => invoke("hub_staging_copy_files", withPlugin({{ id }})),
+      copyFiles: (idOrIds) => {{
+        const ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+        return invoke("hub_staging_copy_files", withPlugin({{ ids }}));
+      }},
+      copyPaths: (ids) => invoke("hub_staging_copy_paths", withPlugin({{ ids }})),
       copyAllPaths: () => invoke("hub_staging_copy_all_paths", withPlugin()),
       thumb: (id) => invoke("hub_staging_thumb", withPlugin({{ id }})),
       reveal: (id) => invoke("hub_staging_reveal", withPlugin({{ id }})),

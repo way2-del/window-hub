@@ -17,7 +17,7 @@ description: >-
 | 槽位 | 作用 |
 |------|------|
 | `shortcuts` | 左侧 chip；点击 `hub.popup.open` |
-| `entry.popup` | 弹窗内暂存预览 / 添加文件 / 拖入 |
+| `entry.popup` | 弹窗内暂存预览 / 添加文件 / 拖入 / 多选批量 |
 
 **不再**使用 `island.drop` / `island.panel` / `island.bar`（透明岛拖放不可靠）。
 
@@ -35,6 +35,7 @@ description: >-
 ## 拖入文件
 
 - **拖到快捷区图标上松开**：Host 入库并打开弹窗（正确用法）
+- **系统拖文件开始**（Explorer `SysDragImage`）：Host 在**同一主窗**内露出 mini 落点（抬高顶栏 HWND，**禁止**新建弹窗 HWND）；松手入库后再 `open_plugin_popup`
 - **禁止**在拖拽过程中悬停即开弹窗：新 HWND 插入拖拽会话会导致目标区禁止光标、无法放下
 - 弹窗已打开时，可再往弹窗虚线区拖入（Tauri `onDragDropEvent`）
 

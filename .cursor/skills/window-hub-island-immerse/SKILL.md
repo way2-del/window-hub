@@ -32,23 +32,28 @@ description: >-
 
 ## 瞬时阻断（可退出沉浸，不是永久例外）
 
-| 条件 | 原因 |
-|------|------|
-| 展开 / `reveal` | 面板打开 |
-| 托盘 / 弹窗 | 交互 |
-| `.is-drop-target` | 放置高亮，需不透明壳 |
-| `.is-notifying` | 横幅可读 |
-| busy / pulling / springing | 动画中 |
+
+| 条件                         | 原因         |
+| -------------------------- | ---------- |
+| 展开 / `reveal`              | 面板打开       |
+| 托盘 / 弹窗                    | 交互         |
+| `.is-drop-target`          | 放置高亮，需不透明壳 |
+| `catcherActive`（系统拖文件）   | 岛抬高露出落点，需不透明壳 |
+| `.is-notifying`            | 横幅可读       |
+| busy / pulling / springing | 动画中        |
+
 
 **不要**把 `staging.total > 0` 放进 `scheduleImmerse` 早退或「强制清沉浸」的 effect。
 
 ## chrome 反色
 
-| 状态 | `data-chrome` | 栏文字 |
-|------|---------------|--------|
-| 默认（磨砂关） | 非沉浸 `dark`；沉浸跟 `chromeCenter.scheme` | 非沉浸白字；沉浸跟取色 |
-| 磨砂开 `topbarFrost` | `chromeCenter.scheme` | `--chrome-center-fg` |
-| 仅拖放命中 | 可强制 `dark` | 白字 |
+
+| 状态                | `data-chrome`                        | 栏文字                  |
+| ----------------- | ------------------------------------ | -------------------- |
+| 默认（磨砂关）           | 非沉浸 `dark`；沉浸跟 `chromeCenter.scheme` | 非沉浸白字；沉浸跟取色          |
+| 磨砂开 `topbarFrost` | `chromeCenter.scheme`                | `--chrome-center-fg` |
+| 仅拖放命中             | 可强制 `dark`                           | 白字                   |
+
 
 默认岛壳 `fill: #000`；磨砂开时跟 ambient。中转站摘要须与 `.bar-weather` 一样跟 chrome，**禁止** `!important` 锁死白字。
 
@@ -56,8 +61,8 @@ description: >-
 
 岛展开壳仍是黑胶囊。`island.panel`：
 
-1. 禁止把设置窗 `data-theme=light` 灌进面板 iframe  
-2. iframe / body 显式深色底 + 浅色字  
+1. 禁止把设置窗 `data-theme=light` 灌进面板 iframe
+2. iframe / body 显式深色底 + 浅色字
 3. Host：`IslandPanelHost` 注入 `data-theme="dark"`
 
 面板 UI 保持精简（列表 + 复制路径/删除）；勿叠大虚线放置区 + 多按钮卡片。
@@ -66,14 +71,14 @@ description: >-
 
 - 本地文件：`addPaths` **只记绝对路径**，不 `fs::copy` 缓存  
 - `copy`：文件/图片 → 剪贴板路径字符串；文字 → 正文  
-- `remove`/`clear`：只删 staging 自有载荷，不删用户原文件  
+- `remove`/`clear`：只删 staging 自有载荷，不删用户原文件
 
-详见 `docs/plugins/host-api.md` → `hub.staging.*`。
+详见 `docs/plugins/host-api.md` → `hub.staging.`*。
 
 ## 检查清单
 
-- [ ] 自动沉浸勾选：闲置后含中转站摘要的岛也能透底，字色跟 chrome
-- [ ] 自动沉浸未勾选：永不沉浸
-- [ ] 无 `staging.total` 永久阻断
-- [ ] 文件条目不复制本体；按钮为「复制路径」
-- [ ] 改沉浸逻辑时同步本 skill
+- 自动沉浸勾选：闲置后含中转站摘要的岛也能透底，字色跟 chrome
+- 自动沉浸未勾选：永不沉浸
+- 无 `staging.total` 永久阻断
+- 文件条目不复制本体；按钮为「复制路径」
+- 改沉浸逻辑时同步本 skill

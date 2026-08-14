@@ -24,6 +24,26 @@ pub fn open_path(path: &str) -> Result<(), String> {
     shell_open(path, None)
 }
 
+/// Open Explorer with the item selected (`explorer /select,path`).
+pub fn reveal_in_folder(path: &str) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("empty path".into());
+    }
+    if path.starts_with("http://")
+        || path.starts_with("https://")
+        || path.starts_with("ms-settings:")
+        || path.starts_with("shell:")
+    {
+        return Err("not a filesystem path".into());
+    }
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn open_system(id: &str) -> Result<(), String> {
     let k = id.trim().to_ascii_lowercase();
     match k.as_str() {

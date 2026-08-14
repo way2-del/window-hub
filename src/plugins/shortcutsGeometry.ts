@@ -29,17 +29,18 @@ export function shortcutsAllowsHoverOpen(_pluginId: string): boolean {
   return false;
 }
 
-/** 拖入快捷区条时自动开表面：仅中转站（接文件）。 */
-export function shortcutsAllowsDragOpen(pluginId: string): boolean {
-  return pluginId.startsWith("com.window-hub.transfer-station");
-}
-
 export type ShortcutsBounds = {
   x: number;
   width: number;
   height: number;
   maxExpandWidth: number;
 };
+
+/**
+ * 拖入快捷区是否自动开弹窗：见 `islandSlots.shortcutsAllowsDragOpen`（staging 竞选）。
+ * 此处保留薄封装，避免 ShortcutsHost 多处改 import。
+ */
+export { shortcutsAllowsDragOpen } from "./islandSlots";
 
 /**
  * 计算快捷区可用宽（逻辑像素）。

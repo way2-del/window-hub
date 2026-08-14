@@ -47,7 +47,12 @@ function thumbStyle(frame: DockPreviewFrame): CSSProperties {
 export default function DockPreviewApp() {
   const [payload, setPayload] = useState<Payload | null>(null);
   const itemIdRef = useRef<string | null>(null);
+  const payloadRef = useRef<Payload | null>(null);
   const refreshRef = useRef(0);
+
+  useEffect(() => {
+    payloadRef.current = payload;
+  }, [payload]);
 
   useEffect(() => {
     void (async () => {
@@ -71,6 +76,7 @@ export default function DockPreviewApp() {
       if (cancelled) return;
       setPayload(e.payload);
       itemIdRef.current = e.payload.itemId;
+      payloadRef.current = e.payload;
     }).then((fn) => {
       if (!cancelled) unsubs.push(fn);
       else fn();
@@ -80,6 +86,7 @@ export default function DockPreviewApp() {
       if (!cancelled) {
         setPayload(null);
         itemIdRef.current = null;
+        payloadRef.current = null;
       }
     }).then((fn) => {
       if (!cancelled) unsubs.push(fn);
@@ -102,16 +109,19 @@ export default function DockPreviewApp() {
           });
           if (!frames.length) {
             setPayload(null);
+            payloadRef.current = null;
             await closeSelf();
             return;
           }
-          setPayload((prev) => {
-            if (!prev || prev.itemId !== id) return prev;
-            const hadJpeg = prev.frames.some((f) => f.jpegBase64);
-            if (!hadJpeg && !frames.some((f) => f.jpegBase64)) {
-              return { ...prev, frames };
-            }
-            const merged = frames.map((f, i) => {
+          const prev = payloadRef.current;
+          if (!prev || prev.itemId !== id) return;
+          const prevHwnds = prev.frames.map((f) => f.hwnd).join(",");
+          const nextHwnds = frames.map((f) => f.hwnd).join(",");
+          const hwndsChanged = prevHwnds !== nextHwnds;
+          const hadJpeg = prev.frames.some((f) => f.jpegBase64);
+          let nextFrames = frames;
+          if (hadJpeg || frames.some((f) => f.jpegBase64)) {
+            nextFrames = frames.map((f, i) => {
               if (f.jpegBase64) return f;
               const old = prev.frames.find((p) => p.hwnd === f.hwnd) ?? prev.frames[i];
               if (old?.jpegBase64) {
@@ -119,8 +129,13 @@ export default function DockPreviewApp() {
               }
               return f;
             });
-            return { ...prev, frames: merged };
-          });
+          }
+          const next = { ...prev, frames: nextFrames };
+          payloadRef.current = next;
+          setPayload(next);
+          if (hwndsChanged) {
+            await invoke("refresh_dock_preview", { payload: next }).catch(() => undefined);
+          }
         } catch {
           /* noop */
         }
@@ -142,15 +157,23 @@ export default function DockPreviewApp() {
     } catch (err) {
       console.error(err);
     }
-    setPayload((prev) => {
-      if (!prev) return prev;
-      const frames = prev.frames.filter((f) => f.hwnd !== hwnd);
-      if (!frames.length) {
-        void closeSelf();
-        return null;
-      }
-      return { ...prev, frames };
-    });
+    const prev = payloadRef.current;
+    if (!prev) return;
+    const frames = prev.frames.filter((f) => f.hwnd !== hwnd);
+    if (!frames.length) {
+      setPayload(null);
+      payloadRef.current = null;
+      await closeSelf();
+      return;
+    }
+    const next = { ...prev, frames };
+    payloadRef.current = next;
+    setPayload(next);
+    try {
+      await invoke("refresh_dock_preview", { payload: next });
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   if (!payload || payload.frames.length === 0) {

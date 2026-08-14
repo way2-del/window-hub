@@ -121,9 +121,21 @@ export function panelHubBootstrapScript(pluginId: string): string {
       addImageBytes: function (label, bytes, ext) {
         return invoke("hub_staging_add_image_bytes", withPlugin({ label: label, bytes: bytes, ext: ext }));
       },
-      remove: function (id) { return invoke("hub_staging_remove", withPlugin({ id: id })); },
+      remove: function (idOrIds) {
+        var ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+        if (ids.length === 0) return Promise.resolve();
+        if (ids.length === 1) {
+          return invoke("hub_staging_remove", withPlugin({ id: ids[0] }));
+        }
+        return invoke("hub_staging_remove_many", withPlugin({ ids: ids }));
+      },
       clear: function () { return invoke("hub_staging_clear", withPlugin()); },
       copy: function (id) { return invoke("hub_staging_copy", withPlugin({ id: id })); },
+      copyFiles: function (idOrIds) {
+        var ids = Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+        return invoke("hub_staging_copy_files", withPlugin({ ids: ids }));
+      },
+      copyPaths: function (ids) { return invoke("hub_staging_copy_paths", withPlugin({ ids: ids })); },
       copyAllPaths: function () { return invoke("hub_staging_copy_all_paths", withPlugin()); },
       thumb: function (id) { return invoke("hub_staging_thumb", withPlugin({ id: id })); },
       reveal: function (id) { return invoke("hub_staging_reveal", withPlugin({ id: id })); },

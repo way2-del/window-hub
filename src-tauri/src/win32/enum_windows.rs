@@ -117,7 +117,7 @@ fn process_command_line(pid: u32) -> Option<String> {
         ) -> i32;
     }
 
-    const ProcessBasicInformation: u32 = 0;
+    const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
 
     if pid == 0 {
         return None;
@@ -130,7 +130,7 @@ fn process_command_line(pid: u32) -> Option<String> {
         let mut ret = 0u32;
         let status = NtQueryInformationProcess(
             proc,
-            ProcessBasicInformation,
+            PROCESS_BASIC_INFORMATION_CLASS,
             &mut pbi as *mut _ as *mut _,
             size_of::<PROCESS_BASIC_INFORMATION>() as u32,
             &mut ret,
@@ -678,19 +678,27 @@ fn topmost_taskbar_hwnd(skip_pids: &[u32]) -> Option<isize> {
 }
 
 /// Whether FG (or its process image) belongs to the candidate dock app.
+///
+/// Same PID / same exe alone is NOT enough: Edge installed apps (ChatGPT, Gemini)
+/// share `msedge.exe` with the browser but must toggle independently.
 #[cfg(windows)]
 fn foreground_belongs_to_candidates(
     candidates: &[isize],
+    fg_hwnd: isize,
     fg_pid: u32,
     fg_exe: Option<&str>,
 ) -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
 
-    if fg_pid == 0 {
+    if fg_pid == 0 || candidates.is_empty() {
         return false;
     }
+
+    let fg_app = app_id_for_hwnd(fg_hwnd, fg_pid, fg_exe);
     let fg_exe_l = fg_exe.map(|s| s.to_ascii_lowercase());
+    let mut same_process_hit = false;
+
     unsafe {
         for &c in candidates {
             let h = HWND(c as *mut _);
@@ -699,24 +707,54 @@ fn foreground_belongs_to_candidates(
             }
             let mut pid = 0u32;
             GetWindowThreadProcessId(h, Some(&mut pid));
+            let (_, cand_exe) = process_exe(pid);
+            let cand_app = app_id_for_hwnd(c, pid, cand_exe.as_deref());
+
             if pid == fg_pid {
-                return true;
+                same_process_hit = true;
+                if app_ids_compatible(fg_app.as_deref(), cand_app.as_deref()) {
+                    return true;
+                }
+                continue;
             }
+
             if let Some(ref want) = fg_exe_l {
-                if !want.is_empty() {
-                    let (_, name) = process_exe(pid);
-                    if name
+                if !want.is_empty()
+                    && cand_exe
                         .as_deref()
                         .map(|n| n.eq_ignore_ascii_case(want))
                         .unwrap_or(false)
-                    {
-                        return true;
-                    }
+                    && app_ids_compatible(fg_app.as_deref(), cand_app.as_deref())
+                {
+                    return true;
                 }
             }
         }
     }
+
+    // Shared browser process but different installed-app identity → not this pin.
+    if same_process_hit {
+        return false;
+    }
     false
+}
+
+#[cfg(windows)]
+fn app_ids_compatible(a: Option<&str>, b: Option<&str>) -> bool {
+    let a = a.map(str::trim).filter(|s| !s.is_empty());
+    let b = b.map(str::trim).filter(|s| !s.is_empty());
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn app_id_for_hwnd(hwnd: isize, pid: u32, exe_name: Option<&str>) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    let mut cache = std::collections::HashMap::<u32, Option<String>>::new();
+    resolve_window_app_id(HWND(hwnd as _), pid, exe_name, &mut cache)
 }
 
 /// Map the OS foreground window onto a dock candidate HWND to minimize.
@@ -800,14 +838,19 @@ fn minimize_target_for_foreground(candidates: &[isize]) -> Option<isize> {
                 let mut top_pid = 0u32;
                 GetWindowThreadProcessId(HWND(top as *mut _), Some(&mut top_pid));
                 let (_, top_exe) = process_exe(top_pid);
-                if foreground_belongs_to_candidates(candidates, top_pid, top_exe.as_deref()) {
+                if foreground_belongs_to_candidates(
+                    candidates,
+                    top,
+                    top_pid,
+                    top_exe.as_deref(),
+                ) {
                     return best_minimizable_candidate(candidates);
                 }
             }
             return None;
         }
 
-        if !foreground_belongs_to_candidates(candidates, fg_pid, fg_exe.as_deref()) {
+        if !foreground_belongs_to_candidates(candidates, fg_raw, fg_pid, fg_exe.as_deref()) {
             return None;
         }
 
@@ -827,12 +870,9 @@ fn minimize_target_for_foreground(candidates: &[isize]) -> Option<isize> {
         if let Some(h) = pick(owner_raw) {
             return Some(h);
         }
-        // FG helper chrome (tool / zero-client / cloaked): minimize the real candidate.
-        if is_minimizable_top_level(top) {
-            // Prefer minimizing the actual FG top-level when it is a real window
-            // (even if EnumWindows dropped it) — avoids picking a sibling.
-            return Some(top_raw);
-        }
+        // FG helper chrome (tool / zero-client) dropped by EnumWindows — minimize
+        // the dock candidate, never a sibling installed-app window that merely
+        // shares the browser process.
         best_minimizable_candidate(candidates)
     }
 }
@@ -896,32 +936,6 @@ pub fn focus_or_minimize_group(hwnds: &[isize]) -> Result<(), String> {
     Err("no valid window in group".into())
 }
 
-/// Focus / restore the best HWND in a group — never minimize (dock activate).
-#[cfg(windows)]
-pub fn focus_group(hwnds: &[isize]) -> Result<(), String> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
-
-    if hwnds.is_empty() {
-        return Err("no windows".into());
-    }
-    unsafe {
-        if let Some(&raw) = hwnds.iter().find(|&&raw| {
-            let h = HWND(raw as *mut _);
-            IsWindow(h).as_bool() && IsIconic(h).as_bool()
-        }) {
-            return focus_window(raw);
-        }
-        for &raw in hwnds {
-            let h = HWND(raw as *mut _);
-            if IsWindow(h).as_bool() {
-                return focus_window(raw);
-            }
-        }
-    }
-    Err("no valid window in group".into())
-}
-
 #[cfg(not(windows))]
 pub fn focus_or_minimize_window(hwnd: isize) -> Result<(), String> {
     focus_window(hwnd)
@@ -934,11 +948,6 @@ pub fn focus_or_minimize_group(hwnds: &[isize]) -> Result<(), String> {
         .copied()
         .ok_or_else(|| "no windows".into())
         .and_then(focus_window)
-}
-
-#[cfg(not(windows))]
-pub fn focus_group(hwnds: &[isize]) -> Result<(), String> {
-    focus_or_minimize_group(hwnds)
 }
 
 /// Restore / focus the largest visible top-level window owned by `pid`

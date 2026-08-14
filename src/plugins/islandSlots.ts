@@ -9,6 +9,43 @@ function orderOf(manifest: PluginManifest, slot: "island.bar" | "island.drop"): 
   return manifest.slots?.[slot]?.order ?? 100;
 }
 
+function shortcutsOrder(manifest: PluginManifest): number {
+  return manifest.slots?.shortcuts?.order ?? 100;
+}
+
+/**
+ * Shortcuts + staging + popup：系统拖文件时露出 mini 落点，松手入库并开弹窗。
+ * 不按插件 id 硬编码（官方中转站靠 capability 竞选）。
+ */
+export function listShortcutsStagingPlugins() {
+  return pluginRegistry
+    .listAll()
+    .filter((p) => {
+      if (!p.enabled) return false;
+      const caps = p.manifest.capabilities ?? [];
+      if (!caps.includes("staging") || !caps.includes("shortcuts") || !caps.includes("popup")) {
+        return false;
+      }
+      if (!p.manifest.slots?.shortcuts) return false;
+      const action = p.manifest.slots.shortcuts.action ?? "popup.open";
+      return action === "popup.open";
+    })
+    .sort((a, b) => shortcutsOrder(a.manifest) - shortcutsOrder(b.manifest));
+}
+
+export function resolveShortcutsStagingPluginId(): string | null {
+  return listShortcutsStagingPlugins()[0]?.pluginId ?? null;
+}
+
+export function isShortcutsStagingPlugin(pluginId: string): boolean {
+  return listShortcutsStagingPlugins().some((p) => p.pluginId === pluginId);
+}
+
+/** 拖入快捷区条时自动开表面：声明 staging+shortcuts+popup 的插件。 */
+export function shortcutsAllowsDragOpen(pluginId: string): boolean {
+  return isShortcutsStagingPlugin(pluginId);
+}
+
 /** Enabled plugins declaring island.drop (+ staging recommended for transfer UX). */
 export function listIslandDropPlugins() {
   return pluginRegistry

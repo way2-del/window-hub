@@ -1,0 +1,61 @@
+---
+description: Window Hub 全局架构与 AI 工作规范（每次会话必读）
+alwaysApply: true
+---
+
+# Window Hub — AI 必读规范
+
+Windows-only 桌面壳：**Tauri 2 + React/Vite + Rust**。产品主表面是顶部**灵动岛** + **状态菜单（含左侧快捷区）** + 托盘/设置/搜搜/Dock；业务扩展靠静态 **`.whpx` 插件**（`plugin.json` + HTML/CSS/JS），经 CapGate（`window.hub.*`）拿能力。
+
+## 开工前：按改动读 skill（勿跳过）
+
+改相关代码前 **Read** 对应 `SKILL.md`，细节以 skill + `docs/plugins/*` + 当前 `plugin.json` 为准（过时段落以现网示例为准）。
+
+| 改动 | 必读 |
+|------|------|
+| 新建/改插件、`plugin.json`、CapGate、`.whpx` | `.cursor/skills/window-hub-plugin/SKILL.md`（总入口，先读） |
+| 快捷区 iframe / 几何 / `--wh-bar-h` | `window-hub-shortcuts`（+ `geometry.md`） |
+| `entry.popup` / `#app.wg-shell` | `window-hub-plugin-popup` |
+| 岛下拉面板 inset/radius/`requestSize` | `window-hub-island-panel` |
+| `hub.notify` / 动作按钮 | `window-hub-island-notify` |
+| `autoImmerse` / 岛栏 chrome | `window-hub-island-immerse` |
+| 窗口组 / pins | `window-hub-window-groups` |
+| 中转站 / `hub.staging` | `window-hub-transfer-station` |
+
+契约文档：`docs/plugins/`（`plugin.schema.json`、`host-api.md`、`sdk.md`、`local-storage.md`）。官方示例真源：`docs/plugins/examples/*`；打包镜像：`src-tauri/resources/plugins/*`（改一处须同步另一处）。
+
+## 边界（不可越）
+
+1. **Host ≠ 插件**：Host = `src/` + `src-tauri/src/`（壳、CapGate、Win32/ECS、安装、SQLite）。插件 = 可安装静态包，**不是** `include_str` 内嵌业务 UI。
+2. **官方插件仍是插件**（窗口组、中转站、天气等），禁止 Host 按插件 id 硬编码业务/壳型。
+3. **系统能力只经 `window.hub.*`**；缺能力走 Companion 独立进程，禁止未审核 DLL 进主进程。
+4. **分表面注入不一致（有意）**：快捷区/面板/弹窗拿到的 hub 子集不同；勿假定三表面 API 全集相同。
+5. **命名**：状态菜单左侧 = **快捷区**，勿称 Dock。Dock 是 Host 另一表面，schema **无** plugin slot。
+6. **中转站现状** = `shortcuts` + `popup` + `hub.staging`（**不是** `island.drop` + 岛面板）。
+
+## 硬禁令
+
+- 插件内 `alert` / `confirm` / `prompt`
+- `hub.shortcuts.setPins` / `clearPins`（已废弃）
+- 臆造未实现 API（如 `hub.clipboard.*`、Dock/Widget slot）
+- 插件自写 `%APPDATA%` / 滥用宿主 `localStorage` → 只用 `hub.storage` / `hub.settings` / `hub.staging`
+- 面板只写 `index.html`、弹窗不挂 `#app.wg-shell`（会空白/贴边）
+- 拖拽 enter/over 就开弹窗；面板加载即 `getUserMedia`（须 `onEnter`/`onLeave`）
+- 为每个插件新建 SQLite 表，或用 `hub.storage` 写 `__*` 保留键
+
+## 目录速查
+
+| 路径 | 职责 |
+|------|------|
+| `src/` | Host 前端（多窗：island / settings / tray / status-menu / popup / dock / sousou…） |
+| `src/plugins/` | CapGate、registry、bridges、几何常量 |
+| `src-tauri/` | Rust commands、Win32、plugin_hub、staging、ECS |
+| `docs/plugins/` | 插件平台契约真源 |
+| `.cursor/skills/` | 分主题 AI 流程（改前必读） |
+
+## 工作习惯
+
+- UI 文案偏简体中文；API/代码英文。
+- 最小权限：`slots` + `capabilities` 按需声明；敏感能力安装须明示。
+- 对照示例改：窗口组（快捷区+弹窗）、中转站 v2、天气（岛栏+面板）、镜子（仅面板）。
+- 只改任务所需文件；同步 `docs/plugins/examples/X` ↔ `src-tauri/resources/plugins/X`。

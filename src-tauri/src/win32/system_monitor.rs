@@ -178,7 +178,13 @@ pub fn start(app: AppHandle) {
     *s.app.lock() = Some(app);
     if s.started.swap(true, Ordering::SeqCst) {
         // Already running — kick a soft light refresh for warm start.
-        request_refresh(&[Domain::Audio, Domain::Power, Domain::Perf, Domain::Ime]);
+        request_refresh(&[
+            Domain::Audio,
+            Domain::Power,
+            Domain::Perf,
+            Domain::Ime,
+            Domain::Temperature,
+        ]);
         return;
     }
 

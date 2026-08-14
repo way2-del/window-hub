@@ -39,15 +39,6 @@ pub async fn open(app: AppHandle) -> Result<(), String> {
     create_window(app, true).await
 }
 
-/// Create hidden window for faster first toggle (no focus).
-/// Prefer not calling this — hidden create breaks OS file drag-drop on WebView2.
-pub async fn warm(app: AppHandle) -> Result<(), String> {
-    if app.get_webview_window(LABEL).is_some() {
-        return Ok(());
-    }
-    create_window(app, false).await
-}
-
 async fn create_window(app: AppHandle, show: bool) -> Result<(), String> {
     let cfg = config::load();
     let w = cfg.window_width.max(720.0);
@@ -130,12 +121,6 @@ pub fn hide(app: &AppHandle) -> Result<(), String> {
         let _ = w.hide();
     }
     Ok(())
-}
-
-pub fn is_visible(app: &AppHandle) -> bool {
-    app.get_webview_window(LABEL)
-        .map(|w| is_front_ready(&w))
-        .unwrap_or(false)
 }
 
 /// Destroy any existing sousou window so the next open recreates drag-drop targets.

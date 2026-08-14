@@ -177,20 +177,6 @@ fn build_query(raw: &str, category: &str) -> (String, Vec<String>, bool) {
     (q, extras, is_dir)
 }
 
-pub fn search_category(query: &str, category: &str, limit: usize) -> Result<(u64, Vec<FileHit>), String> {
-    let q0 = query.trim();
-    if q0.is_empty() {
-        return Ok((0, Vec::new()));
-    }
-    if !is_everything_running() {
-        let _ = ensure_running();
-        if !is_everything_running() {
-            return Err("Everything 未运行".into());
-        }
-    }
-    search_category_checked(query, category, limit)
-}
-
 fn search_category_checked(
     query: &str,
     category: &str,
@@ -220,7 +206,8 @@ fn apply_path_scope(cmd: &mut Command) {
 fn get_result_count(query: &str, extras: &[String]) -> Result<u64, String> {
     let cfg = config::load();
     let mut cmd = es_cmd(&cfg.es_exe);
-    cmd.arg("-p"); // match full path + name (Everything GUI default)
+    // Name-only match (no -p). Full-path match pulls every file under a folder
+    // named like the query (e.g. 逆战 → all files in …\逆战\…).
     apply_path_scope(&mut cmd);
     cmd.arg("-get-result-count");
     cmd.arg(query);
@@ -253,8 +240,8 @@ fn query_csv(
     let tmp_str = tmp.to_string_lossy().to_string();
 
     let mut cmd = es_cmd(&cfg.es_exe);
-    cmd.arg("-p")
-        .arg("-n")
+    // Match file/folder name only — keep -path-column for CSV export, not -p.
+    cmd.arg("-n")
         .arg(limit.to_string())
         .arg("-export-csv")
         .arg(&tmp_str)

@@ -1,13 +1,15 @@
 /**
  * 中转站 — 弹窗（挂 #app.wg-shell）
- * 添加文件 / 拖入 / 右键菜单 / 复制路径·文件
+ * 添加文件 / 拖入 / 多选批量操作 / 右键菜单
  *
- * 文件拖入：WebView2 上 HTML5 File.path 常为空，必须走 Tauri onDragDropEvent。
+ * 文件拖入：WebView2 上 HTML5 File.path 常为空，路径入库由 Host PluginPopupHost
+ * 的 onDragDropEvent 负责；本页只做视觉反馈，靠 staging.subscribe 刷新，避免双通道重复入库卡顿。
  * HTML5 drop 仅可靠处理 text/plain 与无 path 的图片 bytes。
  */
 (function () {
   const KIND_FALLBACK = { file: "文件", text: "文字", image: "图片", folder: "文件夹" };
   const DRAG_THRESHOLD = 6;
+  const THUMB_CONCURRENCY = 3;
   const thumbCache = Object.create(null);
 
   let rail = null;
@@ -16,14 +18,28 @@
   let copyAllBtn = null;
   let addBtn = null;
   let footerEl = null;
+  let selBar = null;
+  let selCountEl = null;
   let ctxMenu = null;
-  let ctxItemId = null;
+  let ctxIds = [];
   let disposed = false;
+  let itemsCache = [];
+  let refreshTimer = null;
+  let refreshSeq = 0;
+  /** @type {Set<string>} */
+  let selected = new Set();
+  let lastAnchorId = null;
   const disposers = [];
+  const thumbQueue = [];
+  let thumbActive = 0;
 
   function onDispose() {
     if (disposed) return;
     disposed = true;
+    if (refreshTimer) {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = null;
+    }
     while (disposers.length) {
       const fn = disposers.pop();
       try {
@@ -57,12 +73,12 @@
   function hideCtx() {
     if (!ctxMenu) return;
     ctxMenu.hidden = true;
-    ctxItemId = null;
+    ctxIds = [];
   }
 
-  function showCtx(x, y, itemId) {
+  function showCtx(x, y, ids) {
     if (!ctxMenu) return;
-    ctxItemId = itemId;
+    ctxIds = ids.slice();
     ctxMenu.hidden = false;
     const pad = 8;
     const rect = ctxMenu.getBoundingClientRect();
@@ -70,6 +86,87 @@
     const maxY = window.innerHeight - rect.height - pad;
     ctxMenu.style.left = Math.max(pad, Math.min(x, maxX)) + "px";
     ctxMenu.style.top = Math.max(pad, Math.min(y, maxY)) + "px";
+  }
+
+  function selectedIds() {
+    return Array.from(selected);
+  }
+
+  function syncSelectionUi() {
+    if (!rail) return;
+    rail.querySelectorAll(".ts-card").forEach(function (card) {
+      const id = card.dataset.id;
+      card.classList.toggle("is-selected", !!(id && selected.has(id)));
+    });
+    const n = selected.size;
+    if (selBar) {
+      selBar.hidden = n === 0;
+      if (selCountEl) selCountEl.textContent = "已选 " + n + " 项";
+    }
+    if (footerEl && n === 0) {
+      /* footer text set by refresh */
+    }
+  }
+
+  function clearSelection() {
+    selected.clear();
+    lastAnchorId = null;
+    syncSelectionUi();
+  }
+
+  function selectOnly(id) {
+    selected.clear();
+    selected.add(id);
+    lastAnchorId = id;
+    syncSelectionUi();
+  }
+
+  function toggleSelect(id) {
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
+    lastAnchorId = id;
+    syncSelectionUi();
+  }
+
+  function selectRange(toId) {
+    const ids = itemsCache.map(function (it) {
+      return it.id;
+    });
+    const anchor = lastAnchorId && ids.indexOf(lastAnchorId) >= 0 ? lastAnchorId : toId;
+    const a = ids.indexOf(anchor);
+    const b = ids.indexOf(toId);
+    if (a < 0 || b < 0) {
+      selectOnly(toId);
+      return;
+    }
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    selected.clear();
+    for (let i = lo; i <= hi; i++) selected.add(ids[i]);
+    lastAnchorId = anchor;
+    syncSelectionUi();
+  }
+
+  function pumpThumbs() {
+    while (thumbActive < THUMB_CONCURRENCY && thumbQueue.length) {
+      const job = thumbQueue.shift();
+      if (!job) break;
+      thumbActive += 1;
+      Promise.resolve()
+        .then(job)
+        .catch(function () {
+          /* ignore */
+        })
+        .finally(function () {
+          thumbActive -= 1;
+          pumpThumbs();
+        });
+    }
+  }
+
+  function enqueueThumb(fn) {
+    thumbQueue.push(fn);
+    pumpThumbs();
   }
 
   function bindOsDrag(card, h, it) {
@@ -89,8 +186,18 @@
         cleanup();
         card.dataset.didDrag = "1";
         card.classList.add("is-dragging");
+        let ids = [it.id];
+        if (selected.has(it.id) && selected.size > 1) {
+          ids = selectedIds().filter(function (id) {
+            const item = itemsCache.find(function (x) {
+              return x.id === id;
+            });
+            return item && item.path;
+          });
+          if (!ids.length) ids = [it.id];
+        }
         h.staging
-          .startDrag([it.id])
+          .startDrag(ids)
           .catch(console.error)
           .finally(function () {
             card.classList.remove("is-dragging");
@@ -114,7 +221,10 @@
     card.type = "button";
     card.className = "ts-card";
     card.dataset.id = it.id;
-    card.title = (it.path || it.label || "") + "\n右键更多操作 · 拖出到文件夹";
+    if (selected.has(it.id)) card.classList.add("is-selected");
+    card.title =
+      (it.path || it.label || "") +
+      "\n单击选择 · Ctrl 多选 · Shift 连选\n右键批量操作 · 拖出到文件夹";
 
     const name = document.createElement("span");
     name.className = "ts-name";
@@ -133,19 +243,24 @@
       if (cached) {
         img.src = cached;
       } else if (h.staging.thumb) {
-        h.staging
-          .thumb(it.id)
-          .then(function (url) {
-            if (!url) {
-              img.replaceWith(fallbackEl(it.kind));
-              return;
-            }
-            thumbCache[it.id] = url;
-            img.src = url;
-          })
-          .catch(function () {
-            img.replaceWith(fallbackEl(it.kind));
-          });
+        const itemId = it.id;
+        const kind = it.kind;
+        enqueueThumb(function () {
+          if (disposed) return;
+          return h.staging
+            .thumb(itemId)
+            .then(function (url) {
+              if (!url) {
+                if (img.isConnected) img.replaceWith(fallbackEl(kind));
+                return;
+              }
+              thumbCache[itemId] = url;
+              if (img.isConnected) img.src = url;
+            })
+            .catch(function () {
+              if (img.isConnected) img.replaceWith(fallbackEl(kind));
+            });
+        });
       } else {
         img.replaceWith(fallbackEl(it.kind));
       }
@@ -157,40 +272,35 @@
     card.appendChild(name);
     bindOsDrag(card, h, it);
 
-    // 单击延迟复制，避免双击时先触发两次 copy
-    var clickTimer = null;
     card.addEventListener("click", function (e) {
       if (card.dataset.didDrag) {
         delete card.dataset.didDrag;
         e.preventDefault();
         return;
       }
-      if (clickTimer) window.clearTimeout(clickTimer);
-      clickTimer = window.setTimeout(function () {
-        clickTimer = null;
-        // 单击：复制路径（文字条目复制正文）
-        h.staging.copy(it.id).catch(console.error);
-        card.classList.add("is-selected");
-        window.setTimeout(function () {
-          card.classList.remove("is-selected");
-        }, 450);
-      }, 280);
+      if (e.shiftKey) {
+        selectRange(it.id);
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {
+        toggleSelect(it.id);
+        return;
+      }
+      selectOnly(it.id);
     });
 
     card.addEventListener("contextmenu", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      showCtx(e.clientX, e.clientY, it.id);
+      if (!selected.has(it.id)) {
+        selectOnly(it.id);
+      }
+      showCtx(e.clientX, e.clientY, selectedIds());
     });
 
     card.addEventListener("dblclick", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      if (clickTimer) {
-        window.clearTimeout(clickTimer);
-        clickTimer = null;
-      }
-      // 双击：系统默认方式打开/运行（exe、bat、文档等）
       if (!it.path) return;
       if (it.kind === "file" || it.kind === "image" || it.kind === "folder") {
         if (h.staging.open) {
@@ -201,47 +311,69 @@
       }
     });
 
-    card.addEventListener("keydown", function (e) {
-      if (e.key === "Delete" || e.key === "Backspace") {
-        e.preventDefault();
-        h.staging.remove(it.id).then(refresh).catch(console.error);
-      }
-    });
-
     return card;
+  }
+
+  function scheduleRefresh() {
+    if (disposed) return;
+    if (refreshTimer) window.clearTimeout(refreshTimer);
+    refreshTimer = window.setTimeout(function () {
+      refreshTimer = null;
+      void refresh();
+    }, 40);
   }
 
   async function refresh() {
     const h = hub();
     if (!h || !h.staging || !rail) return;
+    const seq = ++refreshSeq;
     const items = await h.staging.list();
+    if (disposed || seq !== refreshSeq) return;
+
+    itemsCache = items || [];
+    const alive = new Set(
+      itemsCache.map(function (it) {
+        return it.id;
+      }),
+    );
+    Array.from(selected).forEach(function (id) {
+      if (!alive.has(id)) selected.delete(id);
+    });
+
+    // Clear pending thumb jobs for removed cards; keep in-flight ones.
+    thumbQueue.length = 0;
+
     rail.querySelectorAll(".ts-card").forEach(function (n) {
       n.remove();
     });
-    if (!items.length) {
+    if (!itemsCache.length) {
       emptyEl.hidden = false;
       copyAllBtn.disabled = true;
+      clearSelection();
       if (footerEl) footerEl.textContent = "暂无内容";
       return;
     }
     emptyEl.hidden = true;
-    copyAllBtn.disabled = !items.some(function (it) {
+    copyAllBtn.disabled = !itemsCache.some(function (it) {
       return it.kind === "file" || it.kind === "image" || it.kind === "folder";
     });
-    for (const it of items) {
-      rail.appendChild(makeCard(h, it));
+    const frag = document.createDocumentFragment();
+    for (const it of itemsCache) {
+      frag.appendChild(makeCard(h, it));
     }
+    rail.appendChild(frag);
+    syncSelectionUi();
     if (footerEl) {
-      const files = items.filter(function (it) {
+      const files = itemsCache.filter(function (it) {
         return it.kind === "file";
       }).length;
-      const folders = items.filter(function (it) {
+      const folders = itemsCache.filter(function (it) {
         return it.kind === "folder";
       }).length;
-      const texts = items.filter(function (it) {
+      const texts = itemsCache.filter(function (it) {
         return it.kind === "text";
       }).length;
-      const images = items.filter(function (it) {
+      const images = itemsCache.filter(function (it) {
         return it.kind === "image";
       }).length;
       const parts = [];
@@ -249,7 +381,7 @@
       if (folders) parts.push("文件夹 " + folders);
       if (texts) parts.push("文字 " + texts);
       if (images) parts.push("图片 " + images);
-      footerEl.textContent = parts.join(" · ") || items.length + " 项";
+      footerEl.textContent = parts.join(" · ") || itemsCache.length + " 项";
     }
   }
 
@@ -281,6 +413,7 @@
         }
       }
     }
+    // 有 path 时交给 Host Tauri 通道；此处仅在 Host 未接到时兜底（极少）
     if (paths.length && h.staging.addPaths) {
       await h.staging.addPaths(paths).catch(console.error);
     }
@@ -304,12 +437,14 @@
     dropZone.addEventListener("drop", function (e) {
       e.preventDefault();
       dropZone.classList.remove("is-over");
-      // 文字 / 无 path 图片；文件路径优先靠 bindTauriFileDrop
-      void ingestDataTransfer(e.dataTransfer).then(refresh).catch(console.error);
+      const dt = e.dataTransfer;
+      // 系统文件（含空 path 的 File 列表）一律交给 Host Tauri，避免双写/读大图卡顿
+      if (dt && dt.files && dt.files.length) return;
+      void ingestDataTransfer(dt).then(scheduleRefresh).catch(console.error);
     });
   }
 
-  /** OS 文件拖入真源：Tauri paths（与 Host PluginPopupHost 双通道，互为兜底） */
+  /** 仅视觉反馈；入库由 Host 负责，避免与 PluginPopupHost 双写卡顿 */
   function bindTauriFileDrop() {
     const api =
       window.__TAURI__ &&
@@ -341,22 +476,55 @@
         }
         if (p.type !== "drop") return;
         if (dropZone) dropZone.classList.remove("is-over");
-        const paths = p.paths || [];
-        if (!paths.length) return;
-        const h = hub();
-        if (!h || !h.staging || !h.staging.addPaths) return;
-        void h.staging
-          .addPaths(paths)
-          .then(function () {
-            return refresh();
-          })
-          .catch(console.error);
+        if (footerEl) footerEl.textContent = "正在导入…";
+        // Host 已 addPaths；subscribe 会 refresh。此处不重复调用。
       })
       .then(function (un) {
         if (typeof un === "function") {
           if (disposed) un();
           else disposers.push(un);
         }
+      })
+      .catch(console.error);
+  }
+
+  function actCopyPaths(ids) {
+    const h = hub();
+    if (!h || !ids.length) return;
+    if (ids.length === 1) {
+      h.staging.copy(ids[0]).catch(console.error);
+      return;
+    }
+    if (h.staging.copyPaths) {
+      h.staging.copyPaths(ids).catch(console.error);
+    } else {
+      ids.forEach(function (id) {
+        h.staging.copy(id).catch(console.error);
+      });
+    }
+  }
+
+  function actCopyFiles(ids) {
+    const h = hub();
+    if (!h || !ids.length) return;
+    if (h.staging.copyFiles) {
+      h.staging.copyFiles(ids).catch(console.error);
+    } else {
+      actCopyPaths(ids);
+    }
+  }
+
+  function actRemove(ids) {
+    const h = hub();
+    if (!h || !ids.length) return;
+    h.staging
+      .remove(ids)
+      .then(function () {
+        ids.forEach(function (id) {
+          selected.delete(id);
+          delete thumbCache[id];
+        });
+        scheduleRefresh();
       })
       .catch(console.error);
   }
@@ -375,6 +543,14 @@
       '<button type="button" id="menu-add-folder">添加文件夹</button>' +
       '<button type="button" id="menu-clear">清空全部</button></div>' +
       "</div></header>" +
+      '<div class="ts-selbar" id="selbar" hidden>' +
+      '<span class="ts-selcount" id="selcount">已选 0 项</span>' +
+      '<div class="ts-sel-actions">' +
+      '<button type="button" class="ts-btn" id="btn-sel-copy-path">复制路径</button>' +
+      '<button type="button" class="ts-btn" id="btn-sel-copy-file">复制文件</button>' +
+      '<button type="button" class="ts-btn ts-btn-danger" id="btn-sel-remove">移除</button>' +
+      '<button type="button" class="ts-btn" id="btn-sel-clear">取消选择</button>' +
+      "</div></div>" +
       '<div class="ts-drop" id="drop">' +
       '<p class="ts-hint" id="empty">拖入文件、文件夹、文字或图片<br/>或点「添加」</p>' +
       '<div class="ts-rail" id="rail" role="list"></div>' +
@@ -394,6 +570,8 @@
     copyAllBtn = document.getElementById("btn-copy-all");
     addBtn = document.getElementById("btn-add");
     footerEl = document.getElementById("footer");
+    selBar = document.getElementById("selbar");
+    selCountEl = document.getElementById("selcount");
     ctxMenu = document.getElementById("ctx");
     const moreBtn = document.getElementById("btn-more");
     const menu = document.getElementById("menu");
@@ -412,9 +590,15 @@
       menu.hidden = !open;
       moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
     });
-    document.addEventListener("click", function () {
+    document.addEventListener("click", function (e) {
       closeMenu();
       hideCtx();
+      const t = e.target;
+      if (t && rail && rail.contains(t)) return;
+      if (t && selBar && selBar.contains(t)) return;
+      if (t && ctxMenu && ctxMenu.contains(t)) return;
+      // 点空白处取消选择
+      if (selected.size) clearSelection();
     });
     menu.addEventListener("click", function (e) {
       e.stopPropagation();
@@ -430,7 +614,7 @@
         h.staging
           .pickFolders()
           .then(function () {
-            return refresh();
+            scheduleRefresh();
           })
           .catch(console.error);
       });
@@ -439,7 +623,16 @@
       closeMenu();
       const h = hub();
       if (!h) return;
-      h.staging.clear().then(refresh).catch(console.error);
+      h.staging
+        .clear()
+        .then(function () {
+          selected.clear();
+          Object.keys(thumbCache).forEach(function (k) {
+            delete thumbCache[k];
+          });
+          scheduleRefresh();
+        })
+        .catch(console.error);
     });
     copyAllBtn.addEventListener("click", function () {
       const h = hub();
@@ -455,38 +648,79 @@
       h.staging
         .pickFiles()
         .then(function () {
-          return refresh();
+          scheduleRefresh();
         })
         .catch(console.error);
+    });
+
+    document.getElementById("btn-sel-copy-path").addEventListener("click", function (e) {
+      e.stopPropagation();
+      actCopyPaths(selectedIds());
+    });
+    document.getElementById("btn-sel-copy-file").addEventListener("click", function (e) {
+      e.stopPropagation();
+      actCopyFiles(selectedIds());
+    });
+    document.getElementById("btn-sel-remove").addEventListener("click", function (e) {
+      e.stopPropagation();
+      actRemove(selectedIds());
+    });
+    document.getElementById("btn-sel-clear").addEventListener("click", function (e) {
+      e.stopPropagation();
+      clearSelection();
     });
 
     ctxMenu.querySelectorAll("button[data-act]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         const act = btn.getAttribute("data-act");
-        const id = ctxItemId;
+        const ids = ctxIds.slice();
         hideCtx();
         const h = hub();
-        if (!h || !id) return;
+        if (!h || !ids.length) return;
         if (act === "open") {
+          const id = ids[0];
           if (h.staging.open) {
             h.staging.open(id).catch(console.error);
           } else {
             h.staging.reveal(id).catch(console.error);
           }
         } else if (act === "copy-path") {
-          h.staging.copy(id).catch(console.error);
+          actCopyPaths(ids);
         } else if (act === "copy-file") {
-          if (h.staging.copyFiles) {
-            h.staging.copyFiles(id).catch(console.error);
-          } else {
-            h.staging.copy(id).catch(console.error);
-          }
+          actCopyFiles(ids);
         } else if (act === "reveal") {
-          h.staging.reveal(id).catch(console.error);
+          h.staging.reveal(ids[0]).catch(console.error);
         } else if (act === "remove") {
-          h.staging.remove(id).then(refresh).catch(console.error);
+          actRemove(ids);
         }
       });
+    });
+
+    document.addEventListener("keydown", function (e) {
+      if (disposed) return;
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if ((e.key === "a" || e.key === "A") && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        selected.clear();
+        itemsCache.forEach(function (it) {
+          selected.add(it.id);
+        });
+        if (itemsCache.length) lastAnchorId = itemsCache[0].id;
+        syncSelectionUi();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (selected.size) {
+          e.preventDefault();
+          clearSelection();
+        }
+        return;
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && selected.size) {
+        e.preventDefault();
+        actRemove(selectedIds());
+      }
     });
 
     bindDrop();
@@ -507,11 +741,11 @@
     mount();
     if (h.staging.subscribe) {
       const un = h.staging.subscribe(function () {
-        if (!disposed) refresh();
+        if (!disposed) scheduleRefresh();
       });
       if (typeof un === "function") disposers.push(un);
     } else {
-      refresh();
+      scheduleRefresh();
     }
   }
 

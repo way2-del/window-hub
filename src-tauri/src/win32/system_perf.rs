@@ -1,5 +1,7 @@
 //! CPU / memory collectors + isolated temperature collector.
-//! Temperature (PowerShell CIM / nvidia-smi) must never run on the UI/IPC path.
+//! Temperature (LHM / ACPI / nvidia-smi) must never run on the UI/IPC path.
+//! Prefer LibreHardwareMonitor (HTTP :8085 or WMI) for real CPU die/package temps;
+//! MSAcpi zones are a last-resort fallback and often need elevation or are EC-only.
 
 #![cfg(windows)]
 
@@ -206,14 +208,11 @@ pub fn collect_net() -> (u64, u64, u64, u64) {
 
 /// Heavy thermal probe — only from TemperatureService background thread.
 pub fn collect_temperatures() -> (Option<u8>, Option<u8>) {
-    // Dedicated ACPI one-liner (CPU zones) + nvidia-smi (GPU). LHM only fills gaps.
-    let cpu = cpu_temp_acpi_powershell();
-    let gpu = gpu_temp_nvidia_smi();
-    if cpu.is_some() && gpu.is_some() {
-        return (cpu, gpu);
-    }
-    let (lhm_cpu, lhm_gpu) = thermal_via_lhm_powershell();
-    (cpu.or(lhm_cpu), gpu.or(lhm_gpu))
+    // LHM first (real package/die). ACPI zones are often EC chassis and may need admin.
+    let (lhm_cpu, lhm_gpu) = thermal_via_lhm();
+    let gpu = gpu_temp_nvidia_smi().or(lhm_gpu);
+    let cpu = lhm_cpu.or_else(cpu_temp_acpi_powershell);
+    (cpu, gpu)
 }
 
 fn parse_temp_c(raw: &str) -> Option<u8> {
@@ -221,7 +220,12 @@ fn parse_temp_c(raw: &str) -> Option<u8> {
     if t.is_empty() {
         return None;
     }
-    let head = t.split(|c: char| c == '.' || c == ',').next().unwrap_or(t);
+    // LHM HTTP values look like "45.0 °C"
+    let cleaned = t.trim_start_matches(|c: char| !(c.is_ascii_digit() || c == '-' || c == '.' || c == ','));
+    let head = cleaned
+        .split(|c: char| c == '.' || c == ',' || c == ' ' || c == '°')
+        .next()
+        .unwrap_or(cleaned);
     let c: u8 = head.trim().parse().ok()?;
     if c > 120 {
         None
@@ -234,21 +238,153 @@ fn powershell_exe() -> &'static str {
     r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 }
 
-/// MSAcpi thermal zones → °C (max zone). Works without LibreHardwareMonitor.
+/// Score LHM/OHM sensor names — higher wins (package/die over ambient/distance).
+fn cpu_sensor_score(name: &str) -> i32 {
+    let low = name.to_ascii_lowercase();
+    if low.contains("distance")
+        || low.contains("ambient")
+        || low.contains("motherboard")
+        || low.contains("chipset")
+        || low.contains("sodimm")
+        || low.contains("dimm")
+        || low.contains("hdd")
+        || low.contains("ssd")
+        || low.contains("nvme")
+        || low.contains("drive")
+    {
+        return -1;
+    }
+    if low.contains("package")
+        || low.contains("tctl")
+        || low.contains("tdie")
+        || low.contains("cpu die")
+    {
+        return 100;
+    }
+    if low.contains("ccd") || low.contains("cpu (tctl") {
+        return 90;
+    }
+    if low.contains("cpu") && low.contains("core") {
+        return 70;
+    }
+    if low.contains("cpu") {
+        return 60;
+    }
+    if low.contains("core") {
+        return 40;
+    }
+    -1
+}
+
+fn gpu_sensor_score(name: &str) -> i32 {
+    let low = name.to_ascii_lowercase();
+    if low.contains("hot spot") || low.contains("hotspot") || low.contains("junction") {
+        return 80;
+    }
+    if low.contains("gpu core") || low.contains("gpu temperature") {
+        return 90;
+    }
+    if low.contains("gpu") || low.contains("gfx") || low.contains("video") {
+        return 60;
+    }
+    -1
+}
+
+fn pick_best_temp(samples: &[(i32, u8)]) -> Option<u8> {
+    samples
+        .iter()
+        .filter(|(score, _)| *score >= 0)
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, c)| *c)
+}
+
+/// LibreHardwareMonitor remote JSON (Options → Remote Web Server, default :8085).
+fn thermal_via_lhm_http() -> (Option<u8>, Option<u8>) {
+    let mut cpu_samples: Vec<(i32, u8)> = Vec::new();
+    let mut gpu_samples: Vec<(i32, u8)> = Vec::new();
+
+    for port in [8085u16, 8086, 8090] {
+        let url = format!("http://127.0.0.1:{port}/data.json");
+        let Ok(resp) = ureq::get(&url)
+            .timeout(std::time::Duration::from_millis(400))
+            .call()
+        else {
+            continue;
+        };
+        let Ok(v) = resp.into_json::<serde_json::Value>() else {
+            continue;
+        };
+        walk_lhm_json(&v, &mut cpu_samples, &mut gpu_samples);
+        if !cpu_samples.is_empty() || !gpu_samples.is_empty() {
+            break;
+        }
+    }
+
+    (pick_best_temp(&cpu_samples), pick_best_temp(&gpu_samples))
+}
+
+fn walk_lhm_json(
+    node: &serde_json::Value,
+    cpu_samples: &mut Vec<(i32, u8)>,
+    gpu_samples: &mut Vec<(i32, u8)>,
+) {
+    let sensor_type = node
+        .get("SensorType")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let text = node
+        .get("Text")
+        .or_else(|| node.get("text"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let value = node
+        .get("Value")
+        .or_else(|| node.get("value"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+
+    if sensor_type.eq_ignore_ascii_case("Temperature") {
+        if let Some(c) = parse_temp_c(value) {
+            let cs = cpu_sensor_score(text);
+            if cs >= 0 {
+                cpu_samples.push((cs, c));
+            }
+            let gs = gpu_sensor_score(text);
+            if gs >= 0 {
+                gpu_samples.push((gs, c));
+            }
+        }
+    }
+
+    if let Some(children) = node.get("Children").and_then(|c| c.as_array()) {
+        for child in children {
+            walk_lhm_json(child, cpu_samples, gpu_samples);
+        }
+    }
+}
+
+fn thermal_via_lhm() -> (Option<u8>, Option<u8>) {
+    let http = thermal_via_lhm_http();
+    if http.0.is_some() && http.1.is_some() {
+        return http;
+    }
+    let wmi = thermal_via_lhm_powershell();
+    (http.0.or(wmi.0), http.1.or(wmi.1))
+}
+
+/// MSAcpi thermal zones → °C (max zone). Often empty without elevation; not true package temp.
 fn cpu_temp_acpi_powershell() -> Option<u8> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    // Tiny script: the old combined ACPI+LHM script often left CPU empty in-app
-    // while nvidia-smi still filled GPU.
     let script = concat!(
         "$ErrorActionPreference='SilentlyContinue';",
         "$vals=@();",
         "Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | ",
         "ForEach-Object {",
         "  $c=[int]($_.CurrentTemperature/10-273);",
-        "  if($c -ge 0 -and $c -le 120){$vals+=$c}",
+        "  if($c -ge 20 -and $c -le 120){$vals+=$c}",
         "};",
         "if($vals.Count -gt 0){($vals|Measure-Object -Maximum).Maximum}",
     );
@@ -289,14 +425,14 @@ fn gpu_temp_nvidia_smi() -> Option<u8> {
     None
 }
 
-/// Optional LibreHardwareMonitor / OpenHardwareMonitor package sensors (best CPU die reading).
+/// Optional LibreHardwareMonitor / OpenHardwareMonitor WMI sensors.
 fn thermal_via_lhm_powershell() -> (Option<u8>, Option<u8>) {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let script = r#"
-$ErrorActionPreference='Stop'
+$ErrorActionPreference='SilentlyContinue'
 $out = @()
 foreach ($ns in @('root/LibreHardwareMonitor','root/OpenHardwareMonitor')) {
   try {
@@ -324,8 +460,8 @@ $out -join "`n"
         return (None, None);
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut cpu = None;
-    let mut gpu = None;
+    let mut cpu_samples: Vec<(i32, u8)> = Vec::new();
+    let mut gpu_samples: Vec<(i32, u8)> = Vec::new();
     for line in text.lines() {
         let mut parts = line.splitn(3, '|');
         let Some(kind) = parts.next() else { continue };
@@ -335,25 +471,14 @@ $out -join "`n"
         let Some(name) = parts.next() else { continue };
         let Some(temp) = parts.next() else { continue };
         let Some(c) = parse_temp_c(temp) else { continue };
-        let low = name.to_ascii_lowercase();
-        let looks_gpu = low.contains("gpu")
-            || low.contains("gfx")
-            || low.contains("video")
-            || low.contains("hot spot")
-            || low.contains("hotspot");
-        let looks_cpu = low.contains("cpu")
-            || low.contains("core")
-            || low.contains("package")
-            || low.contains("tctl")
-            || low.contains("tdie")
-            || low.contains("ccd")
-            || low.contains("cpu die")
-            || low.contains("cpu (tctl");
-        if looks_gpu && gpu.is_none() {
-            gpu = Some(c);
-        } else if looks_cpu && cpu.is_none() {
-            cpu = Some(c);
+        let cs = cpu_sensor_score(name);
+        if cs >= 0 {
+            cpu_samples.push((cs, c));
+        }
+        let gs = gpu_sensor_score(name);
+        if gs >= 0 {
+            gpu_samples.push((gs, c));
         }
     }
-    (cpu, gpu)
+    (pick_best_temp(&cpu_samples), pick_best_temp(&gpu_samples))
 }

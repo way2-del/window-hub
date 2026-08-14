@@ -1,0 +1,29 @@
+---
+description: 开发/验证机为 Win10 — 禁止默认走 Win11 材质与 API
+alwaysApply: true
+---
+
+# 目标系统：Windows 10
+
+本机与日常验证环境是 **Windows 10**（build **&lt; 22000**），不是 Win11。改窗口材质、DWM、弹窗玻璃、圆角时必须以 Win10 可跑、不卡壳为准。
+
+## 硬约束
+
+1. **不要默认启用 Win11 专有材质/API 作为主路径**，例如：
+   - `DWMWA_SYSTEMBACKDROP_TYPE` / `DWMSBT_*`（系统 Mica、`TRANSIENTWINDOW` Acrylic 等）
+   - 依赖 Win11 才好看的 `DWMWA_WINDOW_CORNER_PREFERENCE` 圆角体验
+   - 假定「系统 Mica 会透出来」、透明 WebView2 + acrylic 在 Win10 上稳定可用
+2. **Win10 默认走现有兼容路径**：`HARD_SAFE` / opaque solid / `data-glass-compat`（见 `src-tauri/src/win32/blur_glass.rs`、`src/glassPrefs.ts`）。精简版 Win10 上 SWCA acrylic 易把 DWM 冻成白屏——勿关掉该兜底。
+3. **新增玻璃/材质逻辑**：必须带 Win10（build &lt; 22000）与失败回退；禁止「只在 Win11 测过就合入」。
+4. **产品代码可保留 Win11 分支**（运行时 `os_build()` 判断），但 AI 改代码、给方案、调 UI 时 **按 Win10 效果验收**，勿按 Start 菜单式 Mica 视觉强推。
+
+## 改材质时必读
+
+- `src-tauri/src/win32/blur_glass.rs`（`HARD_SAFE`、`os_build`、opaque 弹窗）
+- `src/glassPrefs.ts`（compat 下 opaque wash）
+
+## 禁止话术/方案
+
+- 「直接上系统 Mica / Win11 Acrylic 材质包」
+- 「去掉 opaque compat，全透明更好看」
+- 引入未经验证的第三方 Win11-only 材质 DLL / 注入 dwm.exe

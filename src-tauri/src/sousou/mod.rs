@@ -166,6 +166,11 @@ pub fn sousou_open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn sousou_reveal_path(path: String) -> Result<(), String> {
+    open::reveal_in_folder(&path)
+}
+
+#[tauri::command]
 pub fn sousou_open_system(id: String) -> Result<(), String> {
     open::open_system(&id)
 }

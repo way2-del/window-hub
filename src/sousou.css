@@ -104,6 +104,43 @@ body.is-sousou {
   color: var(--ss-accent-deep);
 }
 
+.ss-search-ico.is-busy {
+  opacity: 1;
+}
+
+.ss-spinner {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(46, 160, 110, 0.22);
+  border-top-color: var(--ss-accent);
+  border-radius: 50%;
+  animation: ss-spin 0.7s linear infinite;
+}
+
+.ss-spinner-lg {
+  width: 22px;
+  height: 22px;
+  border-width: 2.5px;
+}
+
+@keyframes ss-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ss-searching {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 140px;
+  color: var(--ss-muted);
+  font-size: 13px;
+}
+
 .ss-search input {
   flex: 1;
   min-width: 0;

@@ -21,7 +21,8 @@ body,
   padding: 10px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  /* Left-align with DWM thumb_dest_rects (pad → cards). Center drifts when N shrinks before resize. */
+  justify-content: flex-start;
   background: var(--glass-panel-bg, rgba(28, 28, 30, 0.96));
   color: var(--glass-fg, #f4f4f5);
   border: none;
@@ -43,7 +44,7 @@ html[data-theme="light"] .dock-preview-shell {
 .dock-preview-row {
   display: flex;
   align-items: flex-end;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   width: 100%;
   height: 100%;

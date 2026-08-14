@@ -2,6 +2,7 @@
 
 mod icon;
 mod ini;
+mod jumplist;
 mod launch;
 mod preview_dwm;
 pub(crate) mod shortcut;
@@ -1301,24 +1302,127 @@ pub fn pick_dockico_file() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn dock_launch_item(item_id: String) -> Result<(), String> {
+pub fn dock_launch_item(item_id: String, force_new: Option<bool>) -> Result<(), String> {
     let prefs = load_dock_prefs();
     let item = prefs
         .items
         .iter()
         .find(|i| i.id == item_id)
         .ok_or_else(|| format!("dock item not found: {item_id}"))?;
-    launch_or_focus(item)
+    if force_new.unwrap_or(false) {
+        launch::launch_new(item)
+    } else {
+        launch_or_focus(item)
+    }
 }
 
 /// Launch / reopen an arbitrary exe path (ephemeral running-app fallback).
+/// When `force_new` is true (middle-click), browsers get `--new-window`.
+/// `app_id` launches Edge/Chrome installed apps with the correct args (not a bare browser).
 #[tauri::command]
-pub fn dock_launch_path(path: String) -> Result<(), String> {
+pub fn dock_launch_path(
+    path: String,
+    force_new: Option<bool>,
+    app_id: Option<String>,
+) -> Result<(), String> {
     let path = path.trim();
+    let app_id = app_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(shortcut::canonicalize_browser_app_id);
+    if path.is_empty() && app_id.is_none() {
+        return Err("empty path".into());
+    }
+    if let Some(id) = app_id.as_ref() {
+        if let Some(lnk) = find_browser_app_lnk(id) {
+            let item = dock_item_from_path(&lnk)?;
+            return if force_new.unwrap_or(false) {
+                launch::launch_new(&item)
+            } else {
+                launch_or_focus(&item)
+            };
+        }
+        let edge = find_msedge_proxy()
+            .or_else(find_msedge_exe)
+            .unwrap_or_else(|| path.to_string());
+        let item = DockItem {
+            id: String::new(),
+            kind: "app".into(),
+            label: String::new(),
+            match_exe: "msedge.exe".into(),
+            launch_path: edge.clone(),
+            real_path: edge,
+            virtual_path: String::new(),
+            icon_path: String::new(),
+            uwp: false,
+            launch_args: shortcut::launch_args_for_browser_app(id),
+            app_id: id.clone(),
+            icon_png: None,
+        };
+        return if force_new.unwrap_or(false) {
+            launch::launch_new(&item)
+        } else {
+            launch_or_focus(&item)
+        };
+    }
     if path.is_empty() {
         return Err("empty path".into());
     }
+    if force_new.unwrap_or(false) {
+        let item = DockItem {
+            id: String::new(),
+            kind: "app".into(),
+            label: String::new(),
+            match_exe: String::new(),
+            launch_path: path.to_string(),
+            real_path: path.to_string(),
+            virtual_path: String::new(),
+            icon_path: String::new(),
+            uwp: false,
+            launch_args: String::new(),
+            app_id: String::new(),
+            icon_png: None,
+        };
+        return launch::launch_new(&item);
+    }
     launch::shell_open_path(path)
+}
+
+/// Open a Jump List / recent destination with the dock item’s app when needed.
+#[tauri::command]
+pub fn dock_open_jump_item(
+    item_id: String,
+    path: String,
+    app_path: Option<String>,
+) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("empty jump path".into());
+    }
+    let prefs = load_dock_prefs();
+    if let Some(item) = prefs.items.iter().find(|i| i.id == item_id) {
+        return jumplist::open_jump_item(item, path);
+    }
+    if item_id.starts_with("running:") {
+        let app = app_path.unwrap_or_default();
+        let item = DockItem {
+            id: item_id,
+            kind: "app".into(),
+            label: String::new(),
+            match_exe: String::new(),
+            launch_path: app.clone(),
+            real_path: app,
+            virtual_path: String::new(),
+            icon_path: String::new(),
+            uwp: false,
+            launch_args: String::new(),
+            app_id: String::new(),
+            icon_png: None,
+        };
+        return jumplist::open_jump_item(&item, path);
+    }
+    Err(format!("dock item not found: {item_id}"))
 }
 
 fn persist_and_emit(app: &AppHandle, mut prefs: DockPrefs) -> Result<DockPrefs, String> {
@@ -1465,7 +1569,7 @@ pub fn dock_pin_running_app(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+        .map(|s| shortcut::canonicalize_browser_app_id(s));
     let launch_args = launch_args
         .as_deref()
         .map(str::trim)
@@ -1474,7 +1578,7 @@ pub fn dock_pin_running_app(
         .or_else(|| {
             app_id
                 .as_ref()
-                .map(|id| format!("--profile-directory=Default --app-id={id}"))
+                .map(|id| shortcut::launch_args_for_browser_app(id))
         });
 
     // Prefer an existing Edge/Chrome .lnk that already has the right icon + args.
@@ -1504,16 +1608,15 @@ pub fn dock_pin_running_app(
         return Err("cannot pin UWP host process".into());
     }
 
-    let mut item = if !path.is_empty() && std::path::Path::new(path).exists() {
-        dock_item_from_path(path)?
-    } else if let Some(id) = app_id.as_ref() {
-        // Reconstruct an Edge PWA launch without a shortcut on disk.
+    let mut item = if let Some(id) = app_id.as_ref() {
+        // Reconstruct an Edge/Chrome installed-app launch (shared msedge.exe process).
         let edge = find_msedge_proxy().or_else(find_msedge_exe).ok_or_else(|| {
             "Microsoft Edge not found — pin via its .lnk from Desktop / Start Menu".to_string()
         })?;
         let args = launch_args
             .clone()
-            .unwrap_or_else(|| format!("--profile-directory=Default --app-id={id}"));
+            .unwrap_or_else(|| shortcut::launch_args_for_browser_app(id));
+        let label_default = id.strip_prefix("site:").unwrap_or("Edge App");
         DockItem {
             id: new_item_id("app"),
             kind: "app".into(),
@@ -1521,7 +1624,7 @@ pub fn dock_pin_running_app(
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .unwrap_or("Edge App")
+                .unwrap_or(label_default)
                 .to_string(),
             match_exe: "msedge.exe".into(),
             launch_path: edge.clone(),
@@ -1533,6 +1636,8 @@ pub fn dock_pin_running_app(
             app_id: id.clone(),
             icon_png: None,
         }
+    } else if !path.is_empty() && std::path::Path::new(path).exists() {
+        dock_item_from_path(path)?
     } else {
         return Err("empty path".into());
     };
@@ -1558,8 +1663,7 @@ pub fn dock_pin_running_app(
             item.launch_path = proxy;
         }
         if item.launch_args.is_empty() {
-            item.launch_args =
-                format!("--profile-directory=Default --app-id={}", item.app_id);
+            item.launch_args = shortcut::launch_args_for_browser_app(&item.app_id);
         }
     }
     push_pin_item(app, item)
@@ -1617,10 +1721,14 @@ fn find_msedge_proxy() -> Option<String> {
 
 /// Scan Desktop / Start Menu / browser Web Applications for an Edge/Chrome app `.lnk`.
 fn find_browser_app_lnk(app_id: &str) -> Option<String> {
+    let app_id = shortcut::canonicalize_browser_app_id(app_id);
     let app_id_l = app_id.to_ascii_lowercase();
     if app_id_l.is_empty() {
         return None;
     }
+    let host_l = app_id_l
+        .strip_prefix("site:")
+        .map(|s| s.to_string());
     let mut roots = Vec::new();
     if let Some(u) = std::env::var_os("USERPROFILE") {
         let u = std::path::PathBuf::from(u);
@@ -1674,14 +1782,19 @@ fn find_browser_app_lnk(app_id: &str) -> Option<String> {
         }
     }
     for root in roots {
-        if let Some(found) = walk_lnk_for_app_id(&root, &app_id_l, 0) {
+        if let Some(found) = walk_lnk_for_app_id(&root, &app_id_l, host_l.as_deref(), 0) {
             return Some(found);
         }
     }
     None
 }
 
-fn walk_lnk_for_app_id(dir: &std::path::Path, app_id_l: &str, depth: u8) -> Option<String> {
+fn walk_lnk_for_app_id(
+    dir: &std::path::Path,
+    app_id_l: &str,
+    host_l: Option<&str>,
+    depth: u8,
+) -> Option<String> {
     if depth > 5 || !dir.is_dir() {
         return None;
     }
@@ -1689,7 +1802,7 @@ fn walk_lnk_for_app_id(dir: &std::path::Path, app_id_l: &str, depth: u8) -> Opti
     for ent in entries.flatten() {
         let p = ent.path();
         if p.is_dir() {
-            if let Some(f) = walk_lnk_for_app_id(&p, app_id_l, depth + 1) {
+            if let Some(f) = walk_lnk_for_app_id(&p, app_id_l, host_l, depth + 1) {
                 return Some(f);
             }
             continue;
@@ -1705,8 +1818,17 @@ fn walk_lnk_for_app_id(dir: &std::path::Path, app_id_l: &str, depth: u8) -> Opti
         let Some(info) = shortcut::resolve_lnk_info(&p.to_string_lossy()) else {
             continue;
         };
-        if info.args.to_ascii_lowercase().contains(app_id_l) {
+        let args_l = info.args.to_ascii_lowercase();
+        if !app_id_l.starts_with("site:") && args_l.contains(app_id_l) {
             return Some(p.to_string_lossy().to_string());
+        }
+        if let Some(host) = host_l {
+            if shortcut::parse_app_url_host(&info.args)
+                .map(|h| h == host)
+                .unwrap_or(false)
+            {
+                return Some(p.to_string_lossy().to_string());
+            }
         }
     }
     None
@@ -1876,6 +1998,71 @@ pub fn dock_close_hwnd(hwnd: isize) -> Result<(), String> {
     }
 }
 
+/// After removing one preview card: resize the shell and rebind DWM live thumbs.
+/// Without this, DOM cards shrink/recenter while DWM still paints the old N slots.
+#[tauri::command]
+pub async fn refresh_dock_preview(
+    app: AppHandle,
+    payload: DockPreviewPayload,
+) -> Result<(), String> {
+    if payload.frames.is_empty() {
+        return close_dock_preview(app).await;
+    }
+    let Some(win) = app.get_webview_window(DOCK_PREVIEW_LABEL) else {
+        return Ok(());
+    };
+    // Drop old DWM slots before resize so stale N-card paint cannot overlap the new layout.
+    preview_dwm::clear_thumbnails();
+    let (menu_w, menu_h) = preview_window_size(payload.frames.len());
+    let scale = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let (nx, ny) = match (win.outer_position(), win.outer_size()) {
+        (Ok(pos), Ok(size)) => {
+            let ox = f64::from(pos.x) / scale;
+            let oy = f64::from(pos.y) / scale;
+            let ow = f64::from(size.width) / scale;
+            let cx = ox + ow / 2.0;
+            clamp_preview_pos(&app, cx - menu_w / 2.0, oy, menu_w, menu_h)
+        }
+        _ => clamp_preview_pos(&app, 0.0, 0.0, menu_w, menu_h),
+    };
+    // Prefer sync Win32 bounds — Tauri set_size can apply after DWM rebind (ghost overlap).
+    if let Ok(hwnd) = win.hwnd() {
+        preview_dwm::sync_set_bounds(hwnd.0 as isize, nx, ny, menu_w, menu_h, scale);
+        win32_dock_clear_frame(hwnd.0 as isize);
+        crate::win32::blur_glass::apply_dock_pill_region(&win, 14.0);
+    } else {
+        let _ = win.set_size(LogicalSize::new(menu_w, menu_h));
+        let _ = win.set_position(LogicalPosition::new(nx, ny));
+    }
+    // Live DWM path: never re-emit JPEG frames (DOM img + DWM double-paint).
+    let live_n = apply_preview_live_thumbs(&app, &payload.frames);
+    let out = if live_n > 0 {
+        DockPreviewPayload {
+            frames: payload
+                .frames
+                .iter()
+                .map(|f| DockPreviewFrame {
+                    hwnd: f.hwnd,
+                    title: f.title.clone(),
+                    jpeg_base64: String::new(),
+                    width: 0,
+                    height: 0,
+                })
+                .collect(),
+            ..payload
+        }
+    } else {
+        payload
+    };
+    let _ = app.emit("dock-preview", &out);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockPreviewFrame {
@@ -1889,6 +2076,7 @@ pub struct DockPreviewFrame {
 fn capture_previews_for_match(
     match_exe: &str,
     real_path: &str,
+    app_id: &str,
 ) -> Result<Vec<DockPreviewFrame>, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let prefs = load_dock_prefs();
@@ -1906,7 +2094,7 @@ fn capture_previews_for_match(
         icon_path: String::new(),
         uwp: false,
         launch_args: String::new(),
-        app_id: String::new(),
+        app_id: app_id.to_string(),
         icon_png: None,
     };
     let wins = crate::win32::enum_windows::list_windows(None);
@@ -1940,7 +2128,7 @@ fn capture_previews_for_match(
 }
 
 /// Window list only (no capture) — used to open the preview popup instantly.
-fn list_preview_targets(match_exe: &str, real_path: &str) -> Vec<DockPreviewFrame> {
+fn list_preview_targets(match_exe: &str, real_path: &str, app_id: &str) -> Vec<DockPreviewFrame> {
     let probe = DockItem {
         id: String::new(),
         kind: "app".into(),
@@ -1952,7 +2140,7 @@ fn list_preview_targets(match_exe: &str, real_path: &str) -> Vec<DockPreviewFram
         icon_path: String::new(),
         uwp: false,
         launch_args: String::new(),
-        app_id: String::new(),
+        app_id: app_id.to_string(),
         icon_png: None,
     };
     let wins = crate::win32::enum_windows::list_windows(None);
@@ -1972,27 +2160,33 @@ fn list_preview_targets(match_exe: &str, real_path: &str) -> Vec<DockPreviewFram
 fn dock_capture_item_previews_sync(item_id: String) -> Result<Vec<DockPreviewFrame>, String> {
     let prefs = load_dock_prefs();
     if let Some(item) = prefs.items.iter().find(|i| i.id == item_id) {
-        return capture_previews_for_match(&item.match_exe, &item.real_path);
+        return capture_previews_for_match(&item.match_exe, &item.real_path, &item.app_id);
     }
     // Ephemeral running:* items from the frontend.
     if let Some(rest) = item_id.strip_prefix("running:") {
-        let match_exe = rest.to_string();
-        let real = prefs
-            .items
-            .iter()
-            .find(|i| i.match_exe.eq_ignore_ascii_case(&match_exe))
-            .map(|i| i.real_path.clone())
-            .unwrap_or_default();
-        return capture_previews_for_match(&match_exe, &real);
+        let (match_exe, app_id) = if let Some(aid) = rest.strip_prefix("pwa:") {
+            ("msedge.exe".into(), aid.to_string())
+        } else if rest.starts_with("uwp:") {
+            (String::new(), String::new())
+        } else {
+            (rest.to_string(), String::new())
+        };
+        let real = if !app_id.is_empty() {
+            find_msedge_exe().unwrap_or_default()
+        } else {
+            prefs
+                .items
+                .iter()
+                .find(|i| i.match_exe.eq_ignore_ascii_case(&match_exe))
+                .map(|i| i.real_path.clone())
+                .unwrap_or_default()
+        };
+        return capture_previews_for_match(&match_exe, &real, &app_id);
     }
     Err(format!("dock item not found: {item_id}"))
 }
 
 const DOCK_PREVIEW_LABEL: &str = "dock-preview";
-const DOCK_PREVIEW_PAD: f64 = 10.0;
-const DOCK_PREVIEW_GAP: f64 = 8.0;
-const DOCK_PREVIEW_CARD_W: f64 = 168.0;
-const DOCK_PREVIEW_CARD_H: f64 = 118.0; // thumb ~100 + title strip
 
 fn apply_preview_live_thumbs(app: &AppHandle, frames: &[DockPreviewFrame]) -> usize {
     #[cfg(windows)]
@@ -2079,7 +2273,6 @@ fn clamp_preview_pos(app: &AppHandle, x: f64, y: f64, menu_w: f64, menu_h: f64) 
 #[tauri::command]
 pub async fn open_dock_preview(
     app: AppHandle,
-    state: State<'_, MaterialState>,
     item_id: String,
     anchor_x: f64,
     anchor_y: f64,
@@ -2087,6 +2280,7 @@ pub async fn open_dock_preview(
     real_path: Option<String>,
     label: Option<String>,
     icon_png: Option<String>,
+    app_id: Option<String>,
 ) -> Result<(), String> {
     // Fast: no with_icons — that re-extracted every dock icon and made preview feel stuck.
     let prefs = load_dock_prefs();
@@ -2095,7 +2289,7 @@ pub async fn open_dock_preview(
     }
 
     let pinned = prefs.items.iter().find(|i| i.id == item_id).cloned();
-    let (match_exe, real_path, label, icon_png) = if let Some(item) = pinned {
+    let (match_exe, real_path, label, icon_png, app_id) = if let Some(item) = pinned {
         if item.kind != "app" {
             return Ok(());
         }
@@ -2108,6 +2302,7 @@ pub async fn open_dock_preview(
                 item.match_exe.clone()
             },
             icon_png.or(item.icon_png),
+            item.app_id,
         )
     } else {
         let mex = match_exe.unwrap_or_else(|| {
@@ -2119,9 +2314,29 @@ pub async fn open_dock_preview(
         if mex.is_empty() {
             return Ok(());
         }
+        let aid = app_id
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                item_id
+                    .strip_prefix("running:pwa:")
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_default();
+        let (mex, aid) = if let Some(rest) = mex.strip_prefix("pwa:") {
+            ("msedge.exe".into(), {
+                if aid.is_empty() {
+                    rest.to_string()
+                } else {
+                    aid
+                }
+            })
+        } else {
+            (mex, aid)
+        };
         let rp = real_path.unwrap_or_default();
         let lb = label.unwrap_or_else(|| mex.clone());
-        (mex, rp, lb, icon_png)
+        (mex, rp, lb, icon_png, aid)
     };
 
     let epoch = preview_epoch().load(std::sync::atomic::Ordering::SeqCst);
@@ -2129,8 +2344,9 @@ pub async fn open_dock_preview(
     // Instant shell: window titles first (taskbar-like snappiness), thumbs fill in after.
     let match_exe_list = match_exe.clone();
     let real_path_list = real_path.clone();
+    let app_id_list = app_id.clone();
     let mut frames = tauri::async_runtime::spawn_blocking(move || {
-        list_preview_targets(&match_exe_list, &real_path_list)
+        list_preview_targets(&match_exe_list, &real_path_list, &app_id_list)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -2249,9 +2465,10 @@ pub async fn open_dock_preview(
     let icon2 = icon_png;
     let match_exe2 = match_exe;
     let real_path2 = real_path;
+    let app_id2 = app_id;
     tauri::async_runtime::spawn(async move {
         let captured = tauri::async_runtime::spawn_blocking(move || {
-            capture_previews_for_match(&match_exe2, &real_path2)
+            capture_previews_for_match(&match_exe2, &real_path2, &app_id2)
         })
         .await;
         let Ok(Ok(filled)) = captured else {
@@ -2417,9 +2634,15 @@ pub async fn dock_capture_item_previews(item_id: String) -> Result<Vec<DockPrevi
 pub async fn dock_capture_exe_previews(
     match_exe: String,
     real_path: Option<String>,
+    app_id: Option<String>,
 ) -> Result<Vec<DockPreviewFrame>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        capture_previews_for_match(&match_exe, real_path.as_deref().unwrap_or(""))
+        let aid = app_id.unwrap_or_default();
+        capture_previews_for_match(
+            &match_exe,
+            real_path.as_deref().unwrap_or(""),
+            &aid,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2443,6 +2666,9 @@ pub struct DockItemMenuPayload {
     /// Edge/Chrome PWA id when pinning a running installed app.
     #[serde(default)]
     pub app_id: String,
+    /// Jump List / IDE recent destinations (projects, files).
+    #[serde(default)]
+    pub recent: Vec<jumplist::DockJumpItem>,
 }
 
 /// Cold create stays hidden until frontend `reveal_dock_item_menu` (glass + payload ready).
@@ -2499,7 +2725,7 @@ pub fn warm_dock_item_menu(app: &AppHandle, state: &MaterialState) {
         WebviewUrl::App("index.html?window=dock-item-menu".into()),
     )
     .title("Dock Menu")
-    .inner_size(196.0, 220.0)
+    .inner_size(240.0, 280.0)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
@@ -2646,6 +2872,11 @@ pub async fn open_dock_item_menu(
     } else {
         item.match_exe.clone()
     };
+    let recent = if item.kind == "app" {
+        jumplist::list_jump_items(&item, hwnd)
+    } else {
+        Vec::new()
+    };
     let payload = DockItemMenuPayload {
         item_id: item.id.clone(),
         label: menu_label,
@@ -2656,16 +2887,49 @@ pub async fn open_dock_item_menu(
         ephemeral,
         path,
         app_id: item.app_id.clone(),
+        recent: recent.clone(),
     };
     store_dock_item_menu_payload(&payload);
 
-    let menu_w = 196.0_f64;
-    // Title+open (~48) + optional window rows + fixed actions (incl. L/R separator toggles).
-    let close_row = if windows.is_empty() { 0.0 } else { 28.0 };
-    // Ephemeral menu drops L/R separator toggles (~56px).
-    let actions = if ephemeral { 120.0 } else { 176.0 };
-    let menu_h =
-        (48.0 + windows.len().min(6) as f64 * 24.0 + close_row + actions).clamp(160.0, 380.0);
+    let menu_w = 240.0_f64;
+    // Keep in sync with `DockItemMenu.css` (section label + scroll max-height + row heights).
+    const SECTION_LABEL_H: f64 = 20.0;
+    const SCROLL_MAX_H: f64 = 168.0;
+    const RECENT_ROW_H: f64 = 36.0;
+    const WIN_ROW_H: f64 = 30.0;
+    const ACTION_ROW_H: f64 = 30.0;
+    const HEADER_H: f64 = 30.0;
+    const SHELL_PAD: f64 = 12.0;
+    const SEP_H: f64 = 9.0;
+    let recent_h = if recent.is_empty() {
+        0.0
+    } else {
+        SECTION_LABEL_H
+            + (recent.len().min(8) as f64 * RECENT_ROW_H).min(SCROLL_MAX_H)
+    };
+    let wins_h = if windows.is_empty() {
+        0.0
+    } else {
+        SECTION_LABEL_H + (windows.len().min(6) as f64 * WIN_ROW_H).min(SCROLL_MAX_H)
+    };
+    // open / show
+    let mut actions = ACTION_ROW_H;
+    // 新开窗口 — mirrors frontend `canNewWindow`
+    if item.kind == "app" || ephemeral {
+        if item.kind != "startmenu" && item.kind != "trash" {
+            actions += ACTION_ROW_H;
+        }
+    }
+    // 关闭窗口
+    if !windows.is_empty() {
+        actions += ACTION_ROW_H;
+    }
+    actions += SEP_H;
+    // 固定到 Dock / 从 Dock 移除
+    if ephemeral || item.kind == "app" {
+        actions += ACTION_ROW_H;
+    }
+    let menu_h = (SHELL_PAD + HEADER_H + recent_h + wins_h + actions).clamp(96.0, 520.0);
     // `x`/`y` are the click anchor; place the menu just above with a tight gap.
     const GAP: f64 = 4.0;
     let mut pos_x = x;

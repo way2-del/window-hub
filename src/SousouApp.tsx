@@ -614,6 +614,7 @@ export default function SousouApp() {
   const [apps, setApps] = useState<AppEntry[]>([]);
   const [recent, setRecent] = useState<RecentEntry[]>([]);
   const [search, setSearch] = useState<SearchResponse | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [searchCat, setSearchCat] = useState("best");
   const [modalOpen, setModalOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
@@ -630,6 +631,7 @@ export default function SousouApp() {
   } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<number | null>(null);
+  const searchGenRef = useRef(0);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -805,20 +807,35 @@ export default function SousouApp() {
   }, [apps.length]);
 
   const runSearch = useCallback(async (q: string) => {
-    if (!q.trim()) {
+    const trimmed = q.trim();
+    if (!trimmed) {
+      searchGenRef.current += 1;
       setSearch(null);
+      setSearchLoading(false);
       return;
     }
+    const gen = ++searchGenRef.current;
+    setSearchLoading(true);
     try {
       const res = await invoke<SearchResponse>("sousou_search", {
-        query: q,
+        query: trimmed,
         perCategory: 30,
       });
+      if (gen !== searchGenRef.current) return;
       setSearch(res);
       if (!res.everything.running) setEvMsg(res.everything.message);
       else setEvMsg("");
     } catch (e) {
+      if (gen !== searchGenRef.current) return;
       showToast(String(e));
+      setSearch({
+        query: trimmed,
+        apps: [],
+        files: [],
+        everything: { running: false, message: String(e) },
+      });
+    } finally {
+      if (gen === searchGenRef.current) setSearchLoading(false);
     }
   }, []);
 
@@ -843,6 +860,17 @@ export default function SousouApp() {
     }
   };
 
+  const revealPath = async (path: string) => {
+    try {
+      await invoke("sousou_reveal_path", { path });
+      if (cfg?.closeAfterOpen !== false) {
+        void invoke("sousou_hide").catch(() => undefined);
+      }
+    } catch (e) {
+      showToast(String(e));
+    }
+  };
+
   const openSystem = async (id: string) => {
     try {
       await invoke("sousou_open_system", { id });
@@ -852,6 +880,18 @@ export default function SousouApp() {
     } catch (e) {
       showToast(String(e));
     }
+  };
+
+  const isFilesystemPath = (path: string, kind?: string) => {
+    if ((kind || "").toLowerCase() === "url") return false;
+    const p = (path || "").trim().toLowerCase();
+    if (!p) return false;
+    return !(
+      p.startsWith("http://") ||
+      p.startsWith("https://") ||
+      p.startsWith("ms-settings:") ||
+      p.startsWith("shell:")
+    );
   };
 
   const ensureEv = async () => {
@@ -1687,6 +1727,8 @@ export default function SousouApp() {
   };
 
   const searching = query.trim().length > 0;
+  const resultsFresh = !!search && search.query === query.trim();
+  const searchBusy = searching && (searchLoading || !resultsFresh);
 
   const fileBucket = (id: string) => search?.files.find((f) => f.id === id);
 
@@ -1899,12 +1941,16 @@ export default function SousouApp() {
     <div className="ss-root">
       <div className="ss-chrome">
       <header className="ss-header">
-        <div className={`ss-search${query.trim() ? " has-query" : ""}${filterActive ? " has-filter" : ""}`}>
-          <span className="ss-search-ico" aria-hidden>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-              <circle cx="11" cy="11" r="7" />
-              <path d="M20 20l-3.5-3.5" />
-            </svg>
+        <div className={`ss-search${query.trim() ? " has-query" : ""}${filterActive ? " has-filter" : ""}${searchBusy ? " is-busy" : ""}`}>
+          <span className={`ss-search-ico${searchBusy ? " is-busy" : ""}`} aria-hidden>
+            {searchBusy ? (
+              <i className="ss-spinner" />
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                <circle cx="11" cy="11" r="7" />
+                <path d="M20 20l-3.5-3.5" />
+              </svg>
+            )}
           </span>
           <input
             ref={inputRef}
@@ -1912,6 +1958,7 @@ export default function SousouApp() {
             onChange={(e) => setQuery(e.target.value)}
             placeholder={"输入 jsq 可以找到「计算器」"}
             spellCheck={false}
+            aria-busy={searchBusy}
           />
           {!!query.trim() && (
             <button
@@ -2284,37 +2331,51 @@ export default function SousouApp() {
         </div>
       )}
 
-      {itemMenu && (
-        <div
-          className="ss-ctx-menu"
-          style={{ left: itemMenu.x, top: itemMenu.y }}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              const c = cfgRef.current;
-              const list =
-                itemMenu.scope === "home"
-                  ? c?.homeApps
-                  : c?.tabs.find((t) => t.id === itemMenu.scope)?.items;
-              const it = list?.find((x) => x.id === itemMenu.id);
-              setItemMenu(null);
-              if (it?.path) void openPath(it.path);
-            }}
+      {itemMenu && (() => {
+        const c = cfgRef.current;
+        const list =
+          itemMenu.scope === "home"
+            ? c?.homeApps
+            : c?.tabs.find((t) => t.id === itemMenu.scope)?.items;
+        const it = list?.find((x) => x.id === itemMenu.id);
+        const canReveal = !!it?.path && isFilesystemPath(it.path, it.kind);
+        return (
+          <div
+            className="ss-ctx-menu"
+            style={{ left: itemMenu.x, top: itemMenu.y }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
           >
-            打开
-          </button>
-          <button
-            type="button"
-            className="danger"
-            onClick={() => void removePinned(itemMenu.scope, itemMenu.id)}
-          >
-            移除
-          </button>
-        </div>
-      )}
+            <button
+              type="button"
+              onClick={() => {
+                setItemMenu(null);
+                if (it?.path) void openPath(it.path);
+              }}
+            >
+              打开
+            </button>
+            {canReveal && (
+              <button
+                type="button"
+                onClick={() => {
+                  setItemMenu(null);
+                  if (it?.path) void revealPath(it.path);
+                }}
+              >
+                打开所在文件夹
+              </button>
+            )}
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void removePinned(itemMenu.scope, itemMenu.id)}
+            >
+              移除
+            </button>
+          </div>
+        );
+      })()}
 
       <div className="ss-body-wrap">
       <main
@@ -2347,11 +2408,18 @@ export default function SousouApp() {
                   onClick={() => setSearchCat(t.id)}
                 >
                   {t.label}
-                  {catCount(t.id)}
+                  {!searchBusy && catCount(t.id)}
                 </button>
               ))}
             </div>
-            {renderSearchCat()}
+            {searchBusy ? (
+              <div className="ss-empty ss-searching" role="status" aria-live="polite">
+                <i className="ss-spinner ss-spinner-lg" aria-hidden />
+                <span>正在搜索…</span>
+              </div>
+            ) : (
+              renderSearchCat()
+            )}
           </>
         ) : activeTab === "home" ? (
           <div className="ss-home">

@@ -11,6 +11,7 @@ import TrayCluster from "./components/TrayCluster";
 import ShortcutsHost from "./components/ShortcutsHost";
 import StatusMenu from "./components/StatusMenu";
 import IslandPanelHost from "./components/IslandPanelHost";
+import StagingCatcher, { STAGING_CATCHER_EXTRA } from "./components/StagingCatcher";
 import {
   applyIslandPrefsSnapshot,
   getIslandPrefs,
@@ -402,6 +403,9 @@ function App() {
   const contentBar = pickIslandContentBar(contentBars, barOrder);
   const islandBar = overlayBar ?? contentBar;
   const [dropTarget, setDropTarget] = useState(false);
+  /** 系统文件拖拽：同 HWND mini 落点（中转站） */
+  const [catcherActive, setCatcherActive] = useState(false);
+  const catcherRaisedRef = useRef(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
   const panelOverrideRef = useRef<string | null>(null);
   const [panelTabs, setPanelTabs] = useState(() =>
@@ -1493,8 +1497,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // 展开 / 托盘 / 拖放高亮 / 通知：暂停沉浸。中转站有内容不阻断。
-    if (expanded || trayOpen || pulling || springing || reveal > 0.02 || msgBanner || dropTarget) {
+    // 展开 / 托盘 / 拖放高亮 / 系统拖文件 catcher / 通知：暂停沉浸。中转站有内容不阻断。
+    if (
+      expanded ||
+      trayOpen ||
+      pulling ||
+      springing ||
+      reveal > 0.02 ||
+      msgBanner ||
+      dropTarget ||
+      catcherActive
+    ) {
       clearIdleTimer();
       if (immersedRef.current) {
         immersedRef.current = false;
@@ -1521,10 +1534,32 @@ function App() {
     reveal,
     msgBanner,
     dropTarget,
+    catcherActive,
     islandPrefs.autoImmerse,
     islandPrefs.immerseIdleSec,
     immersed,
   ]);
+
+  /** 系统拖文件：抬高主窗露出 mini 落点（不新建 HWND） */
+  useEffect(() => {
+    const suppress =
+      expanded || trayOpen || pulling || springing || reveal > 0.02;
+    if (catcherActive && !suppress) {
+      if (!catcherRaisedRef.current) {
+        catcherRaisedRef.current = true;
+        const h = ISLAND_COLLAPSED.height + STAGING_CATCHER_EXTRA;
+        lastWinH.current = winHeight(h);
+        void setBarHeight(h);
+      }
+      return;
+    }
+    if (!catcherRaisedRef.current) return;
+    catcherRaisedRef.current = false;
+    if (!expanded && !trayOpen && !pulling && !springing && reveal < 0.02) {
+      lastWinH.current = winHeight(ISLAND_COLLAPSED.height);
+      void setBarHeight(ISLAND_COLLAPSED.height);
+    }
+  }, [catcherActive, expanded, trayOpen, pulling, springing, reveal]);
 
   const effectivePullContent = panelOverride ?? islandPrefs.pullContent;
   const activePanelPluginId = parsePluginPanelId(effectivePullContent);
@@ -1797,6 +1832,8 @@ function App() {
       </div>
 
       <ShortcutsHost settingsRef={settingsAnchorRef} islandWidth={size.width} />
+
+      <StagingCatcher onActiveChange={setCatcherActive} />
 
       <TrayCluster open={trayOpen} onOpenChange={setTrayOpen} />
 

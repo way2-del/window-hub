@@ -5,6 +5,8 @@ pub mod appbar;
 #[cfg(windows)]
 pub mod blur_glass;
 pub mod capture;
+#[cfg(windows)]
+pub mod drag_watch;
 pub mod enum_windows;
 pub mod fullscreen;
 pub mod input;
