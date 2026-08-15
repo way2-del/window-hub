@@ -114,6 +114,9 @@ pub struct TrayPrefs {
     /// 岛栏右侧系统芯片显示顺序（设置页拖拽）。
     #[serde(default)]
     pub system_chip_order: Vec<String>,
+    /// 收纳进折叠托盘（chevron）的系统芯片 id；仍须 `system_chips` 为 true。
+    #[serde(default)]
+    pub system_chips_overflow: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

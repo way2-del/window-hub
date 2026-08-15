@@ -28,8 +28,11 @@ import {
   mergeTrayIcons,
   normalizeSystemChipOrder,
   normalizeSystemChips,
+  normalizeSystemChipsOverflow,
   sortPinnedTrayIcons,
+  systemChipPlacement,
   type SystemChipKey,
+  type SystemChipPlacement,
   type SystemChipVisibility,
   type TrayIconInfo as SharedTrayIconInfo,
   type TrayPrefs as SharedTrayPrefs,
@@ -428,6 +431,7 @@ export default function SettingsApp() {
   const [mutedProcesses, setMutedProcesses] = useState<string[]>([]);
   const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
   const [systemChipOrder, setSystemChipOrder] = useState<SystemChipKey[]>(DEFAULT_SYSTEM_CHIP_ORDER);
+  const [systemChipsOverflow, setSystemChipsOverflow] = useState<SystemChipKey[]>([]);
   const systemChipOrderRef = useRef(systemChipOrder);
   const chipDraggingRef = useRef(false);
   if (!chipDraggingRef.current) {
@@ -1025,6 +1029,7 @@ export default function SettingsApp() {
         setMutedProcesses(prefs.muted_processes ?? []);
         setSystemChips(normalizeSystemChips(prefs.system_chips));
         setSystemChipOrder(normalizeSystemChipOrder(prefs.system_chip_order));
+        setSystemChipsOverflow(normalizeSystemChipsOverflow(prefs.system_chips_overflow));
         setMenuHeights(prefs.menu_heights ?? {});
       } catch {
         /* noop */
@@ -1085,6 +1090,7 @@ export default function SettingsApp() {
       setMutedProcesses(ev.payload.muted_processes ?? []);
       setSystemChips(normalizeSystemChips(ev.payload.system_chips));
       setSystemChipOrder(normalizeSystemChipOrder(ev.payload.system_chip_order));
+      setSystemChipsOverflow(normalizeSystemChipsOverflow(ev.payload.system_chips_overflow));
       setMenuHeights(ev.payload.menu_heights ?? {});
     }).then((fn) => unsubs.push(fn));
     void listen<{
@@ -1214,6 +1220,7 @@ export default function SettingsApp() {
     nextSystemChips: SystemChipVisibility = systemChips,
     nextPinnedProcesses: string[] = pinnedProcesses,
     nextSystemChipOrder: SystemChipKey[] = systemChipOrderRef.current,
+    nextSystemChipsOverflow: SystemChipKey[] = systemChipsOverflow,
   ) {
     setSaving(true);
     try {
@@ -1225,6 +1232,7 @@ export default function SettingsApp() {
         mutedProcesses: nextMutedProcesses,
         systemChips: nextSystemChips,
         systemChipOrder: nextSystemChipOrder,
+        systemChipsOverflow: nextSystemChipsOverflow,
       });
       setPinned(prefs.pinned ?? nextPinned);
       setPinnedProcesses(prefs.pinned_processes ?? nextPinnedProcesses);
@@ -1238,6 +1246,11 @@ export default function SettingsApp() {
           savedOrder && savedOrder.length ? savedOrder : nextSystemChipOrder,
         ),
       );
+      setSystemChipsOverflow(
+        normalizeSystemChipsOverflow(
+          prefs.system_chips_overflow ?? nextSystemChipsOverflow,
+        ),
+      );
     } catch {
       /* noop */
     } finally {
@@ -1245,10 +1258,24 @@ export default function SettingsApp() {
     }
   }
 
-  async function toggleSystemChip(key: SystemChipKey) {
-    const next = { ...systemChips, [key]: !systemChips[key] };
-    setSystemChips(next);
-    await persistTrayPrefs(pinned, menuHeights, muted, mutedProcesses, next);
+  async function setSystemChipPlacement(key: SystemChipKey, placement: SystemChipPlacement) {
+    const nextChips = { ...systemChips, [key]: placement !== "hidden" };
+    const nextOverflow =
+      placement === "overflow"
+        ? normalizeSystemChipsOverflow([...systemChipsOverflow.filter((k) => k !== key), key])
+        : systemChipsOverflow.filter((k) => k !== key);
+    setSystemChips(nextChips);
+    setSystemChipsOverflow(nextOverflow);
+    await persistTrayPrefs(
+      pinned,
+      menuHeights,
+      muted,
+      mutedProcesses,
+      nextChips,
+      pinnedProcesses,
+      systemChipOrderRef.current,
+      nextOverflow,
+    );
   }
 
   const reorderChipByClientY = (dragId: SystemChipKey, clientY: number) => {
@@ -1305,7 +1332,7 @@ export default function SettingsApp() {
   const beginChipPointerReorder = (e: ReactPointerEvent, id: SystemChipKey) => {
     if (e.button !== 0 || saving) return;
     const t = e.target as HTMLElement;
-    if (t.closest(".pref-switch")) return;
+    if (t.closest(".pref-switch, .chip-placement")) return;
     e.preventDefault();
     chipReorderUnbindRef.current?.();
     chipReorderLastToRef.current = null;
@@ -2994,17 +3021,17 @@ export default function SettingsApp() {
                 <div className="section-head">
                   <h2>系统芯片</h2>
                   <span className="section-hint">
-                    {saving ? "保存中…" : "拖动调序；开关控制是否显示"}
+                    {saving ? "保存中…" : "拖动调序；岛栏 / 折叠 / 隐藏"}
                   </span>
                 </div>
                 <p className="card-desc">
-                  关闭后对应芯片从岛栏右侧消失；不影响系统本身的网络 / 蓝牙功能。展开托盘箭头始终保留。
-                  拖动左侧手柄可调整岛栏顺序，设置会写入托盘偏好（数据库）。
+                  「岛栏」显示在右侧常显区；「折叠」收进最右侧箭头弹出的托盘；「隐藏」完全不显示。
+                  展开托盘箭头始终保留。拖动左侧手柄可调整岛栏顺序。
                 </p>
                 <div className={`chip-settings-list${chipDragId ? " is-reordering" : ""}`}>
                   {systemChipOrder.map((key) => {
                     const item = SYSTEM_CHIP_META[key];
-                    const on = systemChips[key];
+                    const placement = systemChipPlacement(key, systemChips, systemChipsOverflow);
                     const dragging = chipDragId === key;
                     const dragOver = chipDragOverId === key;
                     return (
@@ -3028,14 +3055,30 @@ export default function SettingsApp() {
                           <span className="pref-row-label">{item.label}</span>
                           <span className="pref-row-desc">{item.desc}</span>
                         </span>
-                        <button
-                          type="button"
-                          className={`pref-switch${on ? " is-on" : ""}`}
-                          aria-pressed={on}
-                          onClick={() => void toggleSystemChip(key)}
+                        <div
+                          className="chip-placement"
+                          role="group"
+                          aria-label={`${item.label}显示位置`}
+                          onPointerDown={(e) => e.stopPropagation()}
                         >
-                          <span className="pref-switch-knob" />
-                        </button>
+                          {(
+                            [
+                              ["rail", "岛栏"],
+                              ["overflow", "折叠"],
+                              ["hidden", "隐藏"],
+                            ] as const
+                          ).map(([value, label]) => (
+                            <button
+                              key={value}
+                              type="button"
+                              className={`chip-placement-btn${placement === value ? " is-on" : ""}`}
+                              aria-pressed={placement === value}
+                              onClick={() => void setSystemChipPlacement(key, value)}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     );
                   })}
@@ -3054,7 +3097,7 @@ export default function SettingsApp() {
                 </span>
               </div>
               <p className="card-desc">
-                仅列出应用托盘图标。系统芯片（网络 / 音量 / 电源 / 蓝牙 / 输入法 / 时钟）请在上方单独开关。
+                仅列出应用托盘图标。系统芯片请在上方选择「岛栏 / 折叠 / 隐藏」。
                 勾选常显后，可在上方预览条拖动调整岛栏右侧顺序；铃铛关闭后该应用托盘闪动不再弹出岛通知。
               </p>
               {trays.length === 0 ? (

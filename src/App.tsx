@@ -16,6 +16,7 @@ import {
   applyIslandPrefsSnapshot,
   getIslandPrefs,
   hydrateIslandPrefs,
+  setIslandPrefs,
   subscribeIslandPrefs,
   clampStagingPanelH,
   clampStagingPanelW,
@@ -2445,6 +2446,8 @@ function App() {
                           e.stopPropagation();
                           if (selected) return;
                           armPluginSession(pid);
+                          // 记住上次 tag，下次展开默认打开同一面板
+                          void setIslandPrefs({ pullContent: `plugin:${pid}` });
                         }}
                       >
                         {tab.label}

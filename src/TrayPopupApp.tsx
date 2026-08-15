@@ -3,9 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  SYSTEM_CHIP_LABELS,
   isTrayPinned,
   mergeTrayIcons,
+  normalizeSystemChipOrder,
+  normalizeSystemChips,
+  normalizeSystemChipsOverflow,
+  systemChipFlyoutKind,
+  systemChipPlacement,
   trayLabel,
+  type SystemChipKey,
+  type SystemChipVisibility,
   type TrayIconInfo,
   type TrayPrefs,
 } from "./components/TrayCluster";
@@ -14,6 +22,8 @@ import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs
 /** Keep in sync with `TRAY_POPUP_W` / `TRAY_POPUP_H` in commands.rs */
 const TRAY_POPUP_W = 280;
 const TRAY_POPUP_MAX_H = 520;
+const SYSTEM_FLYOUT_W = 280;
+const TRAY_POPUP_GAP = 6;
 
 function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
   if (icon.icon_png_base64) {
@@ -45,6 +55,26 @@ async function clickTray(icon: TrayIconInfo, action: "left" | "right") {
   }
 }
 
+async function openSystemChipFlyout(key: SystemChipKey, el: HTMLElement) {
+  void invoke("suppress_system_flyout_blur", { ms: 400 });
+  void invoke("close_tray_popup").catch(() => undefined);
+  try {
+    const win = getCurrentWindow();
+    const factor = await win.scaleFactor();
+    const outer = await win.outerPosition();
+    const rect = el.getBoundingClientRect();
+    const x = outer.x / factor + rect.right - SYSTEM_FLYOUT_W;
+    const y = outer.y / factor + rect.bottom + TRAY_POPUP_GAP;
+    await invoke("open_system_flyout", {
+      kind: systemChipFlyoutKind(key),
+      x,
+      y,
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 function snapIn(setPhase: (p: "enter" | "in" | "leave") => void) {
   const root = document.querySelector(".tray-popup-shell") as HTMLElement | null;
   if (root) {
@@ -60,6 +90,11 @@ export default function TrayPopupApp() {
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
   const [pinnedProcesses, setPinnedProcesses] = useState<string[]>([]);
+  const [systemChips, setSystemChips] = useState<SystemChipVisibility>(() =>
+    normalizeSystemChips(null),
+  );
+  const [systemChipOrder, setSystemChipOrder] = useState<SystemChipKey[]>([]);
+  const [systemChipsOverflow, setSystemChipsOverflow] = useState<SystemChipKey[]>([]);
   /** Avoid fitting to the empty boot frame before the first list_tray_icons returns. */
   const [listReady, setListReady] = useState(false);
   // Always opaque — hide/show HWND only (opacity:0 + mica = stuck frosted slab).
@@ -159,6 +194,9 @@ export default function TrayPopupApp() {
           setIcons(list);
           setPinned(prefs.pinned ?? []);
           setPinnedProcesses(prefs.pinned_processes ?? []);
+          setSystemChips(normalizeSystemChips(prefs.system_chips));
+          setSystemChipOrder(normalizeSystemChipOrder(prefs.system_chip_order));
+          setSystemChipsOverflow(normalizeSystemChipsOverflow(prefs.system_chips_overflow));
           setListReady(true);
         }
       } catch {
@@ -179,6 +217,11 @@ export default function TrayPopupApp() {
           await listen<TrayPrefs>("tray-prefs", (ev) => {
             setPinned(ev.payload.pinned ?? []);
             setPinnedProcesses(ev.payload.pinned_processes ?? []);
+            setSystemChips(normalizeSystemChips(ev.payload.system_chips));
+            setSystemChipOrder(normalizeSystemChipOrder(ev.payload.system_chip_order));
+            setSystemChipsOverflow(
+              normalizeSystemChipsOverflow(ev.payload.system_chips_overflow),
+            );
           }),
         );
       } catch {
@@ -236,13 +279,50 @@ export default function TrayPopupApp() {
     () => icons.filter((i) => !isTrayPinned(i, pinPrefs)),
     [icons, pinPrefs],
   );
+  const overflowSystemChips = useMemo(
+    () =>
+      systemChipOrder.filter(
+        (key) => systemChipPlacement(key, systemChips, systemChipsOverflow) === "overflow",
+      ),
+    [systemChipOrder, systemChips, systemChipsOverflow],
+  );
+
+  const empty =
+    icons.length === 0 && overflowSystemChips.length === 0;
 
   return (
     <div ref={shellRef} className={`tray-popup-shell is-${phase}`} role="menu">
-      {icons.length === 0 ? (
+      {empty ? (
         <div className="tray-empty">暂无系统托盘图标</div>
       ) : (
         <>
+          {overflowSystemChips.length > 0 && (
+            <div className="tray-drop-section">
+              <div className="tray-drop-label">系统</div>
+              <div className="tray-drop-grid">
+                {overflowSystemChips.map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className="tray-drop-item"
+                    title={SYSTEM_CHIP_LABELS[key]}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      void invoke("suppress_system_flyout_blur", { ms: 400 });
+                    }}
+                    onClick={(e) => {
+                      void openSystemChipFlyout(key, e.currentTarget);
+                    }}
+                  >
+                    <span className="tray-glyph tray-glyph-fallback">
+                      {SYSTEM_CHIP_LABELS[key].charAt(0)}
+                    </span>
+                    <span className="tray-drop-text">{SYSTEM_CHIP_LABELS[key]}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {overflowIcons.length > 0 && (
             <div className="tray-drop-section">
               <div className="tray-drop-label">已收纳</div>

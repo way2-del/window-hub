@@ -27,6 +27,8 @@ export type TrayPrefs = {
   system_chips?: SystemChipVisibility;
   /** Island-right system chip order (settings drag). */
   system_chip_order?: SystemChipKey[];
+  /** System chips shown only inside the chevron overflow popup. */
+  system_chips_overflow?: SystemChipKey[];
 };
 
 export type SystemChipKey =
@@ -99,6 +101,68 @@ export function normalizeSystemChipOrder(raw?: string[] | null): SystemChipKey[]
   }
   return out;
 }
+
+export function normalizeSystemChipsOverflow(raw?: string[] | null): SystemChipKey[] {
+  const known = new Set<string>(SYSTEM_CHIP_KEYS);
+  const out: SystemChipKey[] = [];
+  const seen = new Set<string>();
+  for (const id of raw ?? []) {
+    const key = String(id || "").trim();
+    if (!known.has(key) || seen.has(key)) continue;
+    out.push(key as SystemChipKey);
+    seen.add(key);
+  }
+  return out;
+}
+
+export type SystemChipPlacement = "rail" | "overflow" | "hidden";
+
+export function systemChipPlacement(
+  key: SystemChipKey,
+  chips: SystemChipVisibility,
+  overflow: SystemChipKey[],
+): SystemChipPlacement {
+  if (!chips[key]) return "hidden";
+  if (overflow.includes(key)) return "overflow";
+  return "rail";
+}
+
+/** Flyout kind opened from an overflow system chip. */
+export function systemChipFlyoutKind(
+  key: SystemChipKey,
+): "wifi" | "bluetooth" | "volume" | "ime" | "power" | "calendar" | "memory" | "network" {
+  switch (key) {
+    case "perf":
+      return "memory";
+    case "network":
+      return "network";
+    case "wifi":
+      return "wifi";
+    case "bluetooth":
+      return "bluetooth";
+    case "volume":
+    case "peripherals":
+      return "volume";
+    case "power":
+      return "power";
+    case "ime":
+      return "ime";
+    case "clock":
+      return "calendar";
+  }
+}
+
+export const SYSTEM_CHIP_LABELS: Record<SystemChipKey, string> = {
+  perf: "性能温度",
+  network: "网速",
+  wifi: "Wi‑Fi",
+  bluetooth: "蓝牙",
+  volume: "声音",
+  power: "电源",
+  peripherals: "外设",
+  ime: "输入法",
+  clock: "时钟",
+};
 
 export function isTrayNotifyMuted(
   icon: Pick<TrayIconInfo, "id" | "process" | "tooltip">,
@@ -571,6 +635,7 @@ export default function TrayCluster({
   const [mutedProcesses, setMutedProcesses] = useState<string[]>([]);
   const [systemChips, setSystemChips] = useState<SystemChipVisibility>(DEFAULT_SYSTEM_CHIPS);
   const [systemChipOrder, setSystemChipOrder] = useState<SystemChipKey[]>(DEFAULT_SYSTEM_CHIP_ORDER);
+  const [systemChipsOverflow, setSystemChipsOverflow] = useState<SystemChipKey[]>([]);
   const [radio, setRadio] = useState<SystemRadioSnapshot | null>(null);
   const [flyoutKind, setFlyoutKind] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -604,6 +669,7 @@ export default function TrayCluster({
           setMutedProcesses(prefs.muted_processes ?? []);
           setSystemChips(normalizeSystemChips(prefs.system_chips));
           setSystemChipOrder(normalizeSystemChipOrder(prefs.system_chip_order));
+          setSystemChipsOverflow(normalizeSystemChipsOverflow(prefs.system_chips_overflow));
           setRadio(snap);
           radioSigRef.current = JSON.stringify({
             w: snap?.wifi?.connectedSsid,
@@ -642,6 +708,9 @@ export default function TrayCluster({
             setMutedProcesses(ev.payload.muted_processes ?? []);
             setSystemChips(normalizeSystemChips(ev.payload.system_chips));
             setSystemChipOrder(normalizeSystemChipOrder(ev.payload.system_chip_order));
+            setSystemChipsOverflow(
+              normalizeSystemChipsOverflow(ev.payload.system_chips_overflow),
+            );
           }),
         );
       } catch {
@@ -883,6 +952,9 @@ export default function TrayCluster({
   );
 
   const renderSystemChip = (key: SystemChipKey): ReactNode => {
+    if (systemChipPlacement(key, systemChips, systemChipsOverflow) !== "rail") {
+      return null;
+    }
     switch (key) {
       case "perf":
         return systemChips.perf ? (

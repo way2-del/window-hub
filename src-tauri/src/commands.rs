@@ -2127,6 +2127,18 @@ fn normalize_system_chip_order(raw: Vec<String>) -> Vec<String> {
     out
 }
 
+fn normalize_system_chips_overflow(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in raw {
+        let key = id.trim().to_ascii_lowercase();
+        if SYSTEM_CHIP_ORDER_KEYS.iter().any(|k| *k == key) && seen.insert(key.clone()) {
+            out.push(key);
+        }
+    }
+    out
+}
+
 pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
     let mut prefs: crate::win32::tray::TrayPrefs =
         if let Ok(Some(v)) = crate::db::with_conn(|c| crate::db::tray_get(c)) {
@@ -2157,6 +2169,7 @@ pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
     prefs.pinned_processes = enrich_pinned_processes(&prefs.pinned, prefs.pinned_processes);
     prefs.pinned = reconcile_pinned_ids(prefs.pinned, &prefs.pinned_processes);
     prefs.system_chip_order = normalize_system_chip_order(prefs.system_chip_order);
+    prefs.system_chips_overflow = normalize_system_chips_overflow(prefs.system_chips_overflow);
     prefs
 }
 
@@ -2187,6 +2200,7 @@ pub fn set_tray_prefs(
     muted_processes: Option<Vec<String>>,
     system_chips: Option<crate::win32::tray::SystemChipVisibility>,
     system_chip_order: Option<Vec<String>>,
+    system_chips_overflow: Option<Vec<String>>,
 ) -> Result<crate::win32::tray::TrayPrefs, String> {
     let mut heights = menu_heights.unwrap_or_default();
     heights.retain(|_, h| *h > 0);
@@ -2221,6 +2235,9 @@ pub fn set_tray_prefs(
         system_chips: system_chips.unwrap_or(prev.system_chips),
         system_chip_order: normalize_system_chip_order(
             system_chip_order.unwrap_or(prev.system_chip_order),
+        ),
+        system_chips_overflow: normalize_system_chips_overflow(
+            system_chips_overflow.unwrap_or(prev.system_chips_overflow),
         ),
     };
     crate::win32::tray::set_prefs(prefs.clone());

@@ -3,8 +3,8 @@
   z-index: 40;
   height: 56px;
   pointer-events: auto;
-  /* WebView2：极淡底保证可接 OLE drop，空白处仍靠 .shell pointer-events:none 点透 */
-  background: transparent;
+  /* WebView2：勿用全透明——alpha=0 会点透，OLE/HTML5 drop 进不来 */
+  background: rgba(0, 0, 0, 0.004);
 }
 
 .staging-catcher-inner {
