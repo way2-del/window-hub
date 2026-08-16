@@ -1043,7 +1043,12 @@ export default function DockApp() {
   /** Match Composition capsule: rest = content; hover = content + FAN_EXTRA (not 100%). */
   const chromeWide = barWide || fanCollapsing || !!draggingId;
   const chromeRestPx = restingBarWidth(displayItems, padX);
-  const chromeWidthPx = chromeWide ? chromeRestPx + DOCK_FAN_EXTRA : chromeRestPx;
+  // When wide, chrome used to fill the icons HWND and the 1px inset stroke sat on the
+  // GDI round-rect RGN edge — corners looked broken. Rest pose stays clean because
+  // chrome is already inset from the host. Keep the same inset when widened.
+  const chromeWidthPx = chromeWide
+    ? chromeRestPx + DOCK_FAN_EXTRA - 2
+    : chromeRestPx;
   const centers = useMemo(
     () => restingCenters(displayItems, padX),
     [displayItems, padX],

@@ -100,7 +100,9 @@ body.is-dock #root {
 .dock-chrome::after {
   content: "";
   position: absolute;
-  /* Outer edge matches glass capsule; stroke + inner shade over frost. */
+  /* Stroke must sit *inside* the Win32 icons RGN — outer-edge hairlines get
+     shaved at corners (worse when chrome is host-wide). Keep 1px inset stroke;
+     widened chrome width is also inset in DockApp.tsx. */
   inset: 0;
   border: none;
   border-radius: inherit;

@@ -735,7 +735,9 @@ fn apply_dock_glass_frost(
 ) -> Result<(), String> {
     let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
     apply_dock_glass_chrome(hwnd, dark, r);
-    set_dock_glass_capsule_region(hwnd, r);
+    // Composition owns the smooth capsule — a GDI SetWindowRgn here makes
+    // widened corners look broken/jagged (rest looks fine because frost is inset).
+    clear_window_region(hwnd);
     disable_blur_behind(hwnd);
 
     if crate::win32::dock_comp::uses_composition(r) {
@@ -776,53 +778,10 @@ fn strip_class_drop_shadow(hwnd: HWND) {
     }
 }
 
-/// Clip glass HWND to the capsule so Win11 cannot paint a light lip on a square top edge.
-fn set_dock_glass_capsule_region(hwnd: HWND, corner_radius_logical: u32) {
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::Graphics::Gdi::{CreateRectRgn, CreateRoundRectRgn, SetWindowRgn};
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
-
+fn clear_window_region(hwnd: HWND) {
+    use windows::Win32::Graphics::Gdi::SetWindowRgn;
     unsafe {
-        let mut rc = RECT::default();
-        if GetClientRect(hwnd, &mut rc).is_err() {
-            return;
-        }
-        let w = rc.right - rc.left;
-        let h = rc.bottom - rc.top;
-        if w <= 1 || h <= 1 {
-            return;
-        }
-        if corner_radius_logical == 0 {
-            // Still inset 1px from top to hide residual DWM lip on the square edge.
-            let dpi = GetDpiForWindow(hwnd);
-            let scale = if dpi > 0 {
-                dpi as f64 / 96.0
-            } else {
-                1.0
-            };
-            let inset = ((1.0 * scale).round() as i32).max(1);
-            let rgn = CreateRectRgn(0, inset, w + 1, h + 1);
-            if !rgn.is_invalid() {
-                let _ = SetWindowRgn(hwnd, rgn, true);
-            }
-            return;
-        }
-        let dpi = GetDpiForWindow(hwnd);
-        let scale = if dpi > 0 {
-            dpi as f64 / 96.0
-        } else {
-            1.0
-        };
-        let r = ((corner_radius_logical as f64) * scale).round().max(1.0) as i32;
-        let ell = (r * 2).clamp(2, w.min(h).max(2));
-        // 1px top inset — kills the last light hairline without changing chrome height much.
-        let inset = ((1.0 * scale).round() as i32).max(1);
-        let rgn = CreateRoundRectRgn(0, inset, w + 1, h + 1, ell, ell);
-        if rgn.is_invalid() {
-            return;
-        }
-        let _ = SetWindowRgn(hwnd, rgn, true);
+        let _ = SetWindowRgn(hwnd, None, true);
     }
 }
 
@@ -863,7 +822,8 @@ pub fn apply_dock_glass_round_frost_sized_pub(
 ) {
     let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
     apply_dock_glass_chrome(hwnd, None, r);
-    set_dock_glass_capsule_region(hwnd, r);
+    // Same as frost attach: leave region clear so Composition silhouette stays smooth when wide.
+    clear_window_region(hwnd);
     disable_blur_behind(hwnd);
     if crate::win32::dock_comp::uses_composition(r) {
         // Layout-only refresh: never ACCENT_DISABLED (that blacks out HostBackdrop).
