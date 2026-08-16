@@ -77,6 +77,8 @@ const STATUS_MENU_MARGIN = 8;
 
 /** Shared with openStatusMenuAtClientPoint (module scope) + DockApp leave handlers. */
 let dockStatusMenuOpen = false;
+/** Set by DockApp — collapse fan before status menu so headroom region closes. */
+let collapseDockFanForMenu: (() => void) | null = null;
 
 /** Icon slot width (matches CSS / Rust DOCK_ICON). */
 const ICON_SLOT = 40;
@@ -112,40 +114,37 @@ function fanScale(distancePx: number, maxScale: number): number {
 }
 
 /**
- * Fan keep zone = union of icon/sep hit boxes (not the full HWND-wide bar).
- * Side fan-pad is still part of `.dock-bar`, so bar left/right would keep mag
- * stuck when sliding off the leftmost/rightmost icon.
+ * Fan keep zone = per-icon / per-sep hit boxes (not the full bar AABB).
+ * Gaps between tiles must NOT keep magnification armed — that left headroom
+ * open and let the Win11 light caption bar stick above the chrome.
  */
 function pointerInFanIconZone(clientX: number, clientY: number, bar: HTMLElement): boolean {
   const nodes = bar.querySelectorAll<HTMLElement>(".dock-hit, .dock-sep");
-  let left = Infinity;
-  let right = -Infinity;
-  let top = Infinity;
-  let bottom = -Infinity;
+  const pad = 3;
   let any = false;
   for (let i = 0; i < nodes.length; i++) {
     const r = nodes[i].getBoundingClientRect();
     if (r.width < 1 || r.height < 1) continue;
     any = true;
-    left = Math.min(left, r.left);
-    right = Math.max(right, r.right);
-    top = Math.min(top, r.top);
-    bottom = Math.max(bottom, r.bottom);
+    if (
+      clientX >= r.left - pad &&
+      clientX <= r.right + pad &&
+      clientY >= r.top - pad &&
+      clientY <= r.bottom + pad
+    ) {
+      return true;
+    }
   }
   if (!any) {
     const br = bar.getBoundingClientRect();
-    left = br.left;
-    right = br.right;
-    top = br.top;
-    bottom = br.bottom;
+    return (
+      clientX >= br.left - pad &&
+      clientX <= br.right + pad &&
+      clientY >= br.top - pad &&
+      clientY <= br.bottom + pad
+    );
   }
-  const pad = 3;
-  return (
-    clientX >= left - pad &&
-    clientX <= right + pad &&
-    clientY >= top - pad &&
-    clientY <= bottom + pad
-  );
+  return false;
 }
 
 /** Resting (unscaled) centers relative to bar content left — avoids layout feedback. */
@@ -294,7 +293,14 @@ async function openStatusMenuAtClientPoint(
   const afterItemId = (itemId?.trim() || resolveAfterItemIdAtClientX(clientX) || "").trim() || null;
 
   // Hold AutoHide + skip FE collapse while the menu is open (pointer leaves chrome).
+  // Collapse fan first so icons HWND clips to chrome-only (no light headroom shell).
   dockStatusMenuOpen = true;
+  try {
+    collapseDockFanForMenu?.();
+  } catch {
+    /* ignore */
+  }
+  await invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(() => false);
   await invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
 
   const visible = await invoke<boolean>("is_status_menu_popup_open");
@@ -743,6 +749,10 @@ export default function DockApp() {
   };
   const beginCollapseRef = useRef(beginCollapseAfterFanRest);
   beginCollapseRef.current = beginCollapseAfterFanRest;
+  collapseDockFanForMenu = () => beginCollapseRef.current();
+  useEffect(() => () => {
+    collapseDockFanForMenu = null;
+  }, []);
 
   /** While fan/expand is active, watch all pointer moves — bar is HWND-wide so
    *  sliding into side pad never fires pointerleave, but must still snap mag. */
@@ -1140,6 +1150,12 @@ export default function DockApp() {
   const onBarPointerEnter = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (dndActiveRef.current || postDndFanBlockedRef.current) return;
     lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
+    const bar = barRef.current;
+    // Entering via a gap between icons must not widen / open headroom.
+    if (bar && !pointerInFanIconZone(e.clientX, e.clientY, bar)) {
+      pointerInsideRef.current = false;
+      return;
+    }
     pointerInsideRef.current = true;
     cancelCollapseTimer();
     if (fanCollapsing) setFanCollapsing(false);

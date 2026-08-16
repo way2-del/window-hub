@@ -400,14 +400,26 @@ unsafe extern "system" fn dock_nc_subclass_proc(
     }
     // Activation must not paint a caption strip into headroom (right-click menu).
     if msg == WM_NCACTIVATE {
+        // Quietly re-assert DWM attrs without FRAMECHANGED flash.
+        quiet_reassert_dock_dwm(hwnd);
+        // Only the icons layer is taller than chrome — never SetWindowRgn on glass.
+        let mut rc = RECT::default();
+        if GetClientRect(hwnd, &mut rc).is_ok() {
+            let h = (rc.bottom - rc.top).max(1);
+            let dpi = GetDpiForWindow(hwnd);
+            let scale = if dpi > 0 {
+                dpi as f64 / 96.0
+            } else {
+                1.0
+            };
+            let glass_h = (crate::dock::DOCK_H * scale).round().max(1.0) as i32;
+            if h > glass_h + 2 {
+                crate::dock::reclip_dock_icons_hwnd(hwnd.0 as isize);
+            }
+        }
         return windows::Win32::Foundation::LRESULT(1);
     }
     if msg == WM_NCHITTEST {
-        // Fan / width tween: full client hittable so magnified icons stay clickable.
-        if crate::dock::dock_hover_expanded() || crate::win32::dock_comp::width_tween_active() {
-            return windows::Win32::Foundation::LRESULT(HTCLIENT as isize);
-        }
-        // Rest: empty headroom above chrome passes through; chrome strip stays solid.
         let mut pt = POINT {
             x: (lparam.0 as u32 & 0xFFFF) as i16 as i32,
             y: ((lparam.0 as u32 >> 16) & 0xFFFF) as i16 as i32,
@@ -424,7 +436,16 @@ unsafe extern "system" fn dock_nc_subclass_proc(
                 };
                 let glass_h = (crate::dock::DOCK_H * scale).round().max(1.0) as i32;
                 let chrome_top = (h - glass_h).max(0);
-                if pt.y < chrome_top {
+                // Same caption-band inset as icons region — never hit-test there.
+                let headroom_top = crate::dock::dock_caption_band_px(scale, chrome_top);
+                if pt.y < headroom_top {
+                    return windows::Win32::Foundation::LRESULT(HTTRANSPARENT as isize);
+                }
+                let fan_open = crate::dock::dock_hover_expanded()
+                    || crate::win32::dock_comp::width_tween_active();
+                // Rest: empty headroom above chrome passes through.
+                // Fan: headroom stays solid so magnified icons remain clickable.
+                if !fan_open && pt.y < chrome_top {
                     return windows::Win32::Foundation::LRESULT(HTTRANSPARENT as isize);
                 }
             }
@@ -449,6 +470,39 @@ fn dock_root_for_strip(hwnd: HWND) -> HWND {
         } else {
             root
         }
+    }
+}
+
+/// Re-apply DWM caption kill without FRAMECHANGED / redraw (no flash).
+fn quiet_reassert_dock_dwm(hwnd: HWND) {
+    unsafe {
+        let policy = DWMNCRP_DISABLED;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let none = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            &none as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &none as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let thickness: u32 = 0;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            &thickness as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
     }
 }
 
@@ -592,6 +646,10 @@ pub fn strip_dock_windows(app: &tauri::AppHandle) {
             if let Ok(hwnd) = w.hwnd() {
                 // Quiet: right-click menu must not flash caption into headroom.
                 ensure_dock_titlebar_stripped_raw(hwnd.0 as isize);
+                // Icons: chrome-only region so residual light shell is clipped.
+                if label == "dock" {
+                    crate::dock::reclip_dock_icons_hwnd(hwnd.0 as isize);
+                }
             }
         }
     }
@@ -677,7 +735,7 @@ fn apply_dock_glass_frost(
 ) -> Result<(), String> {
     let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
     apply_dock_glass_chrome(hwnd, dark, r);
-    clear_window_region(hwnd);
+    set_dock_glass_capsule_region(hwnd, r);
     disable_blur_behind(hwnd);
 
     if crate::win32::dock_comp::uses_composition(r) {
@@ -718,10 +776,53 @@ fn strip_class_drop_shadow(hwnd: HWND) {
     }
 }
 
-fn clear_window_region(hwnd: HWND) {
-    use windows::Win32::Graphics::Gdi::SetWindowRgn;
+/// Clip glass HWND to the capsule so Win11 cannot paint a light lip on a square top edge.
+fn set_dock_glass_capsule_region(hwnd: HWND, corner_radius_logical: u32) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, CreateRoundRectRgn, SetWindowRgn};
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
     unsafe {
-        let _ = SetWindowRgn(hwnd, None, true);
+        let mut rc = RECT::default();
+        if GetClientRect(hwnd, &mut rc).is_err() {
+            return;
+        }
+        let w = rc.right - rc.left;
+        let h = rc.bottom - rc.top;
+        if w <= 1 || h <= 1 {
+            return;
+        }
+        if corner_radius_logical == 0 {
+            // Still inset 1px from top to hide residual DWM lip on the square edge.
+            let dpi = GetDpiForWindow(hwnd);
+            let scale = if dpi > 0 {
+                dpi as f64 / 96.0
+            } else {
+                1.0
+            };
+            let inset = ((1.0 * scale).round() as i32).max(1);
+            let rgn = CreateRectRgn(0, inset, w + 1, h + 1);
+            if !rgn.is_invalid() {
+                let _ = SetWindowRgn(hwnd, rgn, true);
+            }
+            return;
+        }
+        let dpi = GetDpiForWindow(hwnd);
+        let scale = if dpi > 0 {
+            dpi as f64 / 96.0
+        } else {
+            1.0
+        };
+        let r = ((corner_radius_logical as f64) * scale).round().max(1.0) as i32;
+        let ell = (r * 2).clamp(2, w.min(h).max(2));
+        // 1px top inset — kills the last light hairline without changing chrome height much.
+        let inset = ((1.0 * scale).round() as i32).max(1);
+        let rgn = CreateRoundRectRgn(0, inset, w + 1, h + 1, ell, ell);
+        if rgn.is_invalid() {
+            return;
+        }
+        let _ = SetWindowRgn(hwnd, rgn, true);
     }
 }
 
@@ -762,7 +863,7 @@ pub fn apply_dock_glass_round_frost_sized_pub(
 ) {
     let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
     apply_dock_glass_chrome(hwnd, None, r);
-    clear_window_region(hwnd);
+    set_dock_glass_capsule_region(hwnd, r);
     disable_blur_behind(hwnd);
     if crate::win32::dock_comp::uses_composition(r) {
         // Layout-only refresh: never ACCENT_DISABLED (that blacks out HostBackdrop).
@@ -801,6 +902,8 @@ pub fn apply_dock_icons_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
     }
     let _ = window.set_shadow(false);
     clear_webview_fill(window);
+    // Clip to chrome capsule so headroom cannot host a light caption band.
+    crate::dock::reclip_dock_icons_hwnd(hwnd.0 as isize);
     Ok(())
 }
 

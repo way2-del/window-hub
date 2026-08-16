@@ -14,8 +14,8 @@ body.is-dock {
   /* Fan paints into HWND headroom above the chrome — must not clip. */
   overflow: visible;
   --dock-chrome-h: 52px;
-  /* Shared hairline (chrome outline + separators). */
-  --dock-stroke: rgba(255, 255, 255, 0.18);
+  /* Shared hairline (side/bottom emphasis; top kept dim to avoid a white lip). */
+  --dock-stroke: rgba(255, 255, 255, 0.1);
 }
 
 body.is-dock,
@@ -63,10 +63,10 @@ body.is-dock #root {
    on a wide transparent layer often paints square top corners in WebView2. */
 .dock-chrome {
   --dock-radius: 20px;
+  /* No bright top inset — that read as the DWM “white lip” on the capsule. */
   --dock-shadow-in:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
     inset 0 -10px 18px rgba(0, 0, 0, 0.28),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
   position: absolute;
   bottom: 0;
   left: 0;
@@ -129,6 +129,13 @@ body.is-dock #root {
   background: transparent;
   box-shadow: none;
   overflow: visible;
+  /* Bar itself receives events so gaps can open the status menu; fan arming
+     is gated in JS to .dock-hit / .dock-sep only (see pointerInFanIconZone). */
+  pointer-events: auto;
+}
+
+.dock-hit,
+.dock-sep {
   pointer-events: auto;
 }
 
@@ -411,9 +418,8 @@ html[data-theme="light"] body.is-dock {
 
 html[data-theme="light"] .dock-chrome {
   --dock-shadow-in:
-    inset 0 1px 0 rgba(255, 255, 255, 0.55),
     inset 0 -8px 16px rgba(0, 0, 0, 0.1),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28);
   background: rgb(0 0 0 / 0.02);
   filter:
     drop-shadow(0 1px 2px rgb(0 0 0 / 0.16))

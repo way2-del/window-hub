@@ -708,9 +708,10 @@ pub(crate) fn dock_window_width(
 }
 
 /// Fixed headroom for `DOCK_MAG_SCALE` (slider removed).
-/// Extra 8px slack so the peaked icon is not clipped at the HWND top edge.
+/// Extra slack above peaked icons is also used to clip the Win11 light caption
+/// band at the HWND top (see `dock_caption_band_px`) without shaving glyphs.
 pub(crate) fn dock_headroom(_magnification: f64) -> f64 {
-    DOCK_ICON * (DOCK_MAG_SCALE - 1.0) + 8.0
+    DOCK_ICON * (DOCK_MAG_SCALE - 1.0) + 16.0
 }
 
 pub(crate) fn dock_window_height(magnification: f64) -> f64 {
@@ -720,6 +721,24 @@ pub(crate) fn dock_window_height(magnification: f64) -> f64 {
 /// Logical height of the interactive chrome strip (excludes fan headroom).
 pub(crate) fn dock_chrome_height() -> f64 {
     DOCK_H
+}
+
+/// Physical px to inset from HWND top so the DWM light caption band stays
+/// outside the visible region. Uses headroom slack; never eats into chrome.
+///
+/// Keeps only the vertical span peaked icons need; everything above is clipped.
+#[cfg(windows)]
+pub(crate) fn dock_caption_band_px(scale: f64, chrome_top: i32) -> i32 {
+    if chrome_top <= 0 {
+        return 0;
+    }
+    // Resting icon sits `(DOCK_H - DOCK_ICON)` above chrome bottom; peak grows
+    // `DOCK_ICON*(MAG-1)` — net extension into headroom:
+    let peak_into = ((DOCK_ICON * (DOCK_MAG_SCALE - 1.0) - (DOCK_H - DOCK_ICON)) * scale)
+        .round()
+        .max(0.0) as i32;
+    let keep = (peak_into + ((3.0 * scale).round() as i32).max(2)).max(4);
+    (chrome_top - keep).max(0)
 }
 
 fn dock_place_lock() -> &'static std::sync::Mutex<()> {
@@ -929,11 +948,17 @@ pub fn dock_set_hover_expand(
                     && !crate::win32::dock_comp::width_tween_active()
                     && crate::win32::dock_comp::capsule_near_target(expanded, content_px, host_px)
                 {
+                    // Re-assert silhouette (rest must stay chrome-only).
+                    win32_dock_icons_set_round(raw, prefs.corner_radius_px);
                     return true;
                 }
             }
             let gen = width_tween_gen().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             set_hover_expanded(expanded);
+            // Open headroom before fan paints; collapse keeps headroom until tween end.
+            if expanded {
+                win32_dock_icons_set_round(raw, prefs.corner_radius_px);
+            }
             let _ = win32_dock_tween_pair_width(
                 raw,
                 glass_hwnd,
@@ -1163,14 +1188,15 @@ fn win32_dock_tween_pair_width(
             Err(_) => {
                 let ox = ((host_f - to_w) * 0.5).max(0.0);
                 win32_dock_set_capsule(raw, to_w, glass_h as f32, ox, corner_radius_px, true);
-                win32_dock_icons_set_round(icons_hwnd_raw, corner_radius_px);
+                // End tween before reclip so collapse can drop headroom.
                 crate::win32::dock_comp::end_width_tween();
+                win32_dock_icons_set_round(icons_hwnd_raw, corner_radius_px);
                 return true;
             }
         };
         if tween_ms == 0 {
-            win32_dock_icons_set_round(icons_hwnd_raw, corner_radius_px);
             crate::win32::dock_comp::end_width_tween();
+            win32_dock_icons_set_round(icons_hwnd_raw, corner_radius_px);
             return true;
         }
 
@@ -1195,8 +1221,9 @@ fn win32_dock_tween_pair_width(
             }
             let ox = ((host - to) * 0.5).max(0.0);
             win32_dock_set_capsule(glass_raw, to, gh_f, ox, radius, true);
-            win32_dock_icons_set_round(icons, radius);
+            // End tween before reclip so rest pose becomes chrome-only.
             crate::win32::dock_comp::end_width_tween();
+            win32_dock_icons_set_round(icons, radius);
         });
         return true;
     }
@@ -1399,9 +1426,10 @@ fn dock_root_hwnd(hwnd_raw: isize) -> windows::Win32::Foundation::HWND {
     }
 }
 
-/// Clip the icons HWND to a capsule matching glass (bottom corners only so
-/// fan headroom is not shaved by top rounding). Prevents glyphs poking past
-/// large Composition radii on a square transparent window.
+/// Clip the icons HWND silhouette.
+///
+/// Rest: chrome capsule only. Fan/tween: headroom + chrome, but the top DWM
+/// caption band is still clipped (uses headroom slack — chrome unchanged).
 #[cfg(windows)]
 fn win32_dock_icons_set_round(hwnd_raw: isize, corner_radius_px: u32) {
     use windows::Win32::Foundation::RECT;
@@ -1413,11 +1441,11 @@ fn win32_dock_icons_set_round(hwnd_raw: isize, corner_radius_px: u32) {
     use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
     let hwnd = dock_root_hwnd(hwnd_raw);
+    // Keep headroom during collapse tween (fan still painting) even though
+    // `dock_hover_expanded` is already false.
+    let include_headroom =
+        dock_hover_expanded() || crate::win32::dock_comp::width_tween_active();
     unsafe {
-        if corner_radius_px == 0 {
-            let _ = SetWindowRgn(hwnd, None, true);
-            return;
-        }
         let mut rc = RECT::default();
         if GetClientRect(hwnd, &mut rc).is_err() {
             return;
@@ -1434,11 +1462,38 @@ fn win32_dock_icons_set_round(hwnd_raw: isize, corner_radius_px: u32) {
             1.0
         };
         let glass_h = (DOCK_H * scale).round().max(1.0) as i32;
+        let chrome_top = (h - glass_h).max(0);
+        // Clip the Win11 light caption band at HWND top. Chrome unchanged.
+        let headroom_top = dock_caption_band_px(scale, chrome_top);
+
+        // Rest / non-fan: chrome capsule only — clips any DWM light shell away.
+        if !include_headroom {
+            let chrome = if corner_radius_px == 0 {
+                CreateRectRgn(0, chrome_top, w + 1, h + 1)
+            } else {
+                let r = ((corner_radius_px as f64) * scale).round().max(1.0) as i32;
+                let ell = (r * 2).clamp(2, w.min(glass_h).max(2));
+                CreateRoundRectRgn(0, chrome_top, w + 1, h + 1, ell, ell)
+            };
+            if chrome.is_invalid() {
+                return;
+            }
+            let _ = SetWindowRgn(hwnd, chrome, true);
+            return;
+        }
+
+        // Fan / tween: headroom (minus caption band) + rounded chrome strip.
+        if corner_radius_px == 0 {
+            let full = CreateRectRgn(0, headroom_top, w + 1, h + 1);
+            if full.is_invalid() {
+                return;
+            }
+            let _ = SetWindowRgn(hwnd, full, true);
+            return;
+        }
         let r = ((corner_radius_px as f64) * scale).round().max(1.0) as i32;
         let ell = (r * 2).clamp(2, w.min(glass_h).max(2));
-        let chrome_top = (h - glass_h).max(0);
-        // Square headroom + upper chrome, OR bottom rounded chrome strip.
-        let top = CreateRectRgn(0, 0, w + 1, chrome_top + r);
+        let top = CreateRectRgn(0, headroom_top, w + 1, chrome_top + r);
         let bottom = CreateRoundRectRgn(0, chrome_top, w + 1, h + 1, ell, ell);
         let combined = CreateRectRgn(0, 0, 0, 0);
         if top.is_invalid() || bottom.is_invalid() || combined.is_invalid() {
@@ -1464,6 +1519,13 @@ fn win32_dock_icons_set_round(hwnd_raw: isize, corner_radius_px: u32) {
         // SetWindowRgn takes ownership of `combined`.
         let _ = SetWindowRgn(hwnd, combined, true);
     }
+}
+
+/// Re-apply icons silhouette after titlebar strip / focus (prefs radius).
+#[cfg(windows)]
+pub(crate) fn reclip_dock_icons_hwnd(hwnd_raw: isize) {
+    let prefs = load_dock_prefs();
+    win32_dock_icons_set_round(hwnd_raw, prefs.corner_radius_px);
 }
 
 /// Refresh glass corners after place/resize (Composition clip tracks HWND size).
@@ -1511,8 +1573,9 @@ fn win32_dock_clear_transparent(hwnd_raw: isize) {
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_TRANSPARENT,
     };
     let hwnd = dock_root_hwnd(hwnd_raw);
-    // Focus / long-press can reintroduce a native caption into headroom.
-    crate::win32::blur_glass::schedule_dock_titlebar_strip(hwnd.0 as isize);
+    // Quiet strip + chrome-only clip — avoid scheduled FRAMECHANGED flash.
+    crate::win32::blur_glass::ensure_dock_titlebar_stripped_raw(hwnd.0 as isize);
+    reclip_dock_icons_hwnd(hwnd.0 as isize);
     unsafe {
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
         if ex & WS_EX_TRANSPARENT.0 as i32 != 0 {
@@ -1526,6 +1589,7 @@ fn win32_dock_clear_transparent(hwnd_raw: isize) {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
+            reclip_dock_icons_hwnd(hwnd.0 as isize);
         }
     }
 }
