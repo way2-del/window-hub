@@ -187,7 +187,8 @@ async function revealFitted(_direction: "up" | "down") {
   await fitPopupToContent({
     width: POPUP_W,
     selector: ".status-menu-shell",
-    minHeight: 72,
+    // Wrap content tightly — do not floor at 72 (leaves a hollow top on 1-item menus).
+    minHeight: 36,
     maxHeight: 480,
     pinBottom,
   });
@@ -349,6 +350,9 @@ export default function StatusMenuPopupApp() {
     boot;
   const isRunningTile = !!dockItemId?.startsWith("running:");
   const isSeparator = dockItemKind === "separator";
+  /** Dock 图标/分割线：仅应用相关项。空 Dock / 岛标题：系统设置菜单。 */
+  const itemMenu = fromDock && !!dockItemId;
+  const systemMenu = !itemMenu;
   const shellClass = [
     "status-menu-shell",
     origin === "up" ? "is-origin-up" : "is-origin-down",
@@ -359,7 +363,7 @@ export default function StatusMenuPopupApp() {
 
   return (
     <div className={shellClass} role="menu">
-      {fromDock ? (
+      {itemMenu ? (
         <>
           {isRunningTile ? (
             <button
@@ -389,99 +393,116 @@ export default function StatusMenuPopupApp() {
             </button>
           ) : (
             <>
-              {dockItemId ? (
-                <>
-                  <button
-                    type="button"
-                    className="status-menu-item"
-                    role="menuitem"
-                    disabled={openingEditorRef.current}
-                    onClick={() => {
-                      if (openingEditorRef.current) return;
-                      openingEditorRef.current = true;
-                      void (async () => {
-                        try {
-                          // Open editor first — closing this HWND first aborts the invoke.
-                          await invoke("open_dock_icon_editor", {
-                            itemId: dockItemId || null,
-                          });
-                        } catch (e) {
-                          console.error("[StatusMenuPopup] open editor", e);
-                          openingEditorRef.current = false;
-                          return;
-                        }
-                        await closeSelf();
-                      })();
-                    }}
-                  >
-                    修改图标
-                  </button>
-                  <button
-                    type="button"
-                    className="status-menu-item"
-                    role="menuitem"
-                    onClick={() =>
-                      void run(async () => {
-                        await invoke("dock_add_separator", {
-                          afterItemId: afterItemId || dockItemId,
-                        });
-                      })
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                disabled={openingEditorRef.current}
+                onClick={() => {
+                  if (openingEditorRef.current) return;
+                  openingEditorRef.current = true;
+                  void (async () => {
+                    try {
+                      // Open editor first — closing this HWND first aborts the invoke.
+                      await invoke("open_dock_icon_editor", {
+                        itemId: dockItemId || null,
+                      });
+                    } catch (e) {
+                      console.error("[StatusMenuPopup] open editor", e);
+                      openingEditorRef.current = false;
+                      return;
                     }
-                  >
-                    在右侧添加分割线
-                  </button>
-                  {dockItemKind === "app" ? (
-                    <button
-                      type="button"
-                      className="status-menu-item is-danger"
-                      role="menuitem"
-                      onClick={() =>
-                        void run(async () => {
-                          await invoke("dock_unpin_item", {
-                            itemId: dockItemId,
-                          });
-                        })
-                      }
-                    >
-                      从 Dock 移除
-                    </button>
-                  ) : null}
-                </>
-              ) : (
+                    await closeSelf();
+                  })();
+                }}
+              >
+                修改图标
+              </button>
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() =>
+                  void run(async () => {
+                    await invoke("dock_add_separator", {
+                      afterItemId: afterItemId || dockItemId,
+                    });
+                  })
+                }
+              >
+                在右侧添加分割线
+              </button>
+              {dockItemKind === "app" ? (
                 <button
                   type="button"
-                  className="status-menu-item"
+                  className="status-menu-item is-danger"
                   role="menuitem"
                   onClick={() =>
                     void run(async () => {
-                      await invoke("dock_add_separator", {
-                        afterItemId: afterItemId,
+                      await invoke("dock_unpin_item", {
+                        itemId: dockItemId,
                       });
                     })
                   }
                 >
-                  在此处添加分割线
+                  从 Dock 移除
                 </button>
-              )}
+              ) : null}
             </>
           )}
-          <div className="status-menu-sep" role="separator" />
         </>
       ) : null}
-      <button
-        type="button"
-        className="status-menu-item"
-        role="menuitem"
-        onClick={() =>
-          void run(async () => {
-            await invoke("open_settings_window");
-          })
-        }
-      >
-        设置选项
-      </button>
-      {hiddenCount > 0 ? (
+
+      {systemMenu ? (
         <>
+          {fromDock ? (
+            <>
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() =>
+                  void run(async () => {
+                    await invoke("dock_add_separator", {
+                      afterItemId: afterItemId,
+                    });
+                  })
+                }
+              >
+                在此处添加分割线
+              </button>
+              <div className="status-menu-sep" role="separator" />
+            </>
+          ) : null}
+          <button
+            type="button"
+            className="status-menu-item"
+            role="menuitem"
+            onClick={() =>
+              void run(async () => {
+                await invoke("open_settings_window");
+              })
+            }
+          >
+            设置选项
+          </button>
+          {hiddenCount > 0 ? (
+            <>
+              <div className="status-menu-sep" role="separator" />
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() =>
+                  void run(async () => {
+                    await invoke("dock_restore_hidden_items");
+                  })
+                }
+              >
+                恢复隐藏图标（{hiddenCount}）
+              </button>
+            </>
+          ) : null}
           <div className="status-menu-sep" role="separator" />
           <button
             type="button"
@@ -489,76 +510,63 @@ export default function StatusMenuPopupApp() {
             role="menuitem"
             onClick={() =>
               void run(async () => {
-                await invoke("dock_restore_hidden_items");
+                await invoke("set_system_taskbar_visible", { visible: true });
               })
             }
           >
-            恢复隐藏图标（{hiddenCount}）
+            显示系统任务栏
+          </button>
+          <button
+            type="button"
+            className="status-menu-item"
+            role="menuitem"
+            onClick={() =>
+              void run(async () => {
+                await invoke("set_system_taskbar_visible", { visible: false });
+              })
+            }
+          >
+            隐藏系统任务栏
+          </button>
+          <button
+            type="button"
+            className="status-menu-item"
+            role="menuitem"
+            onClick={() =>
+              void run(async () => {
+                await invoke("show_desktop");
+              })
+            }
+          >
+            显示桌面
+          </button>
+          <div className="status-menu-sep" role="separator" />
+          <button
+            type="button"
+            className="status-menu-item"
+            role="menuitem"
+            onClick={() =>
+              void run(async () => {
+                await invoke("restart_app");
+              })
+            }
+          >
+            重启 window-hub
+          </button>
+          <button
+            type="button"
+            className="status-menu-item is-danger"
+            role="menuitem"
+            onClick={() =>
+              void run(async () => {
+                await invoke("exit_app");
+              })
+            }
+          >
+            退出 window-hub
           </button>
         </>
       ) : null}
-      <div className="status-menu-sep" role="separator" />
-      <button
-        type="button"
-        className="status-menu-item"
-        role="menuitem"
-        onClick={() =>
-          void run(async () => {
-            await invoke("set_system_taskbar_visible", { visible: true });
-          })
-        }
-      >
-        显示系统任务栏
-      </button>
-      <button
-        type="button"
-        className="status-menu-item"
-        role="menuitem"
-        onClick={() =>
-          void run(async () => {
-            await invoke("set_system_taskbar_visible", { visible: false });
-          })
-        }
-      >
-        隐藏系统任务栏
-      </button>
-      <button
-        type="button"
-        className="status-menu-item"
-        role="menuitem"
-        onClick={() =>
-          void run(async () => {
-            await invoke("show_desktop");
-          })
-        }
-      >
-        显示桌面
-      </button>
-      <div className="status-menu-sep" role="separator" />
-      <button
-        type="button"
-        className="status-menu-item"
-        role="menuitem"
-        onClick={() =>
-          void run(async () => {
-            await invoke("restart_app");
-          })
-        }
-      >
-        重启 window-hub
-      </button>
-      <button
-        type="button"
-        className="status-menu-item is-danger"
-        role="menuitem"
-        onClick={() =>
-          void run(async () => {
-            await invoke("exit_app");
-          })
-        }
-      >
-        退出 window-hub
-      </button>
     </div>
   );
 }

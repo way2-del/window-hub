@@ -163,6 +163,8 @@ type TrayPrefs = {
   pinned: string[];
   /** pin_key → 右键菜单高度；未设置则自动 */
   menu_heights?: Record<string, number>;
+  /** pin_key → 闪动是否通知上岛；缺省 true */
+  flash_notify?: Record<string, boolean>;
 };
 
 function trayPinKey(icon: TrayIconInfo): string {
@@ -172,6 +174,17 @@ function trayPinKey(icon: TrayIconInfo): string {
 
 function isTrayPinned(icon: TrayIconInfo, pinned: Set<string>): boolean {
   return pinned.has(trayPinKey(icon)) || pinned.has(icon.id);
+}
+
+/** Missing key = notify on flash (default). */
+function isFlashNotifyEnabled(
+  icon: TrayIconInfo,
+  map: Record<string, boolean>,
+): boolean {
+  const key = trayPinKey(icon);
+  if (map[key] === false) return false;
+  if (map[icon.id] === false) return false;
+  return true;
 }
 
 function isTrayResident(icon: TrayIconInfo): boolean {
@@ -401,6 +414,7 @@ export default function SettingsApp() {
   const [trays, setTrays] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
+  const [flashNotify, setFlashNotify] = useState<Record<string, boolean>>({});
   /** Drill-down into a tray icon settings card (list → detail). */
   const [trayDetailKey, setTrayDetailKey] = useState<string | null>(null);
   const [menuHeightDraft, setMenuHeightDraft] = useState("");
@@ -667,6 +681,7 @@ export default function SettingsApp() {
         setTrays(list);
         setPinned(prefs.pinned ?? []);
         setMenuHeights(prefs.menu_heights ?? {});
+        setFlashNotify(prefs.flash_notify ?? {});
       } catch {
         /* noop */
       }
@@ -700,6 +715,7 @@ export default function SettingsApp() {
     void listen<TrayPrefs>("tray-prefs", (ev) => {
       setPinned(ev.payload.pinned ?? []);
       setMenuHeights(ev.payload.menu_heights ?? {});
+      setFlashNotify(ev.payload.flash_notify ?? {});
     }).then((fn) => unsubs.push(fn));
     void listen<{ exclusivePluginId?: string | null }>("shortcuts-prefs", (ev) => {
       setShortcutsExclusiveId(ev.payload?.exclusivePluginId ?? "");
@@ -813,15 +829,18 @@ export default function SettingsApp() {
   async function persistTrayPrefs(
     nextPinned: string[],
     nextHeights: Record<string, number>,
+    nextFlashNotify: Record<string, boolean> = flashNotify,
   ) {
     setSaving(true);
     try {
       const prefs = await invoke<TrayPrefs>("set_tray_prefs", {
         pinned: nextPinned,
         menuHeights: nextHeights,
+        flashNotify: nextFlashNotify,
       });
       setPinned(prefs.pinned ?? nextPinned);
       setMenuHeights(prefs.menu_heights ?? nextHeights);
+      setFlashNotify(prefs.flash_notify ?? nextFlashNotify);
     } catch {
       /* noop */
     } finally {
@@ -837,7 +856,21 @@ export default function SettingsApp() {
       ? pinned.filter((x) => x !== key && x !== icon.id)
       : [...pinned.filter((x) => x !== icon.id), key];
     setPinned(next);
-    await persistTrayPrefs(next, menuHeights);
+    await persistTrayPrefs(next, menuHeights, flashNotify);
+  }
+
+  async function toggleFlashNotify(icon: TrayIconInfo) {
+    const key = trayPinKey(icon);
+    const on = isFlashNotifyEnabled(icon, flashNotify);
+    const next = { ...flashNotify };
+    delete next[icon.id];
+    if (on) {
+      next[key] = false;
+    } else {
+      delete next[key];
+    }
+    setFlashNotify(next);
+    await persistTrayPrefs(pinned, menuHeights, next);
   }
 
   function openTrayDetail(icon: TrayIconInfo) {
@@ -873,7 +906,7 @@ export default function SettingsApp() {
       nextHeights[id] = Math.round(Math.min(640, Math.max(48, parsed)));
     }
     setMenuHeights(nextHeights);
-    await persistTrayPrefs(pinned, nextHeights);
+    await persistTrayPrefs(pinned, nextHeights, flashNotify);
   }
 
   async function clearIconMenuHeight(id: string) {
@@ -885,7 +918,7 @@ export default function SettingsApp() {
     }
     setMenuHeights(nextHeights);
     setMenuHeightDraft("");
-    await persistTrayPrefs(pinned, nextHeights);
+    await persistTrayPrefs(pinned, nextHeights, flashNotify);
   }
 
   function toggleInstalled(id: string, enabled: boolean) {
@@ -1309,45 +1342,6 @@ export default function SettingsApp() {
                 </label>
               </section>
               <section className="settings-card">
-                <h2>消息通知</h2>
-                <p className="card-desc">
-                  微信等应用托盘图标闪动时，退出沉浸并在岛上落下消息提示（不自动消失）；点击打开应用或左滑均可清掉。展示时岛内描一圈绿色内边框。
-                </p>
-                <label className="pref-row">
-                  <span className="pref-row-text">
-                    <span className="pref-row-label">托盘闪动时在岛上提示</span>
-                    <span className="pref-row-desc">天气下坠，消息落入居中；点击打开并清除，或左滑划掉</span>
-                  </span>
-                  <button
-                    type="button"
-                    className={`pref-switch${islandPrefs.msgNotify ? " is-on" : ""}`}
-                    role="switch"
-                    aria-checked={islandPrefs.msgNotify}
-                    onClick={() => updateIslandPrefs({ msgNotify: !islandPrefs.msgNotify })}
-                  >
-                    <span className="pref-switch-knob" />
-                  </button>
-                </label>
-                <label className={`pref-row${islandPrefs.msgNotify ? "" : " is-disabled"}`}>
-                  <span className="pref-row-text">
-                    <span className="pref-row-label">默认提示文案</span>
-                    <span className="pref-row-desc">无具体通知内容时显示</span>
-                  </span>
-                  <input
-                    className="pref-input"
-                    type="text"
-                    value={islandPrefs.msgNotifyText}
-                    disabled={!islandPrefs.msgNotify}
-                    maxLength={24}
-                    spellCheck={false}
-                    onChange={(e) => updateIslandPrefs({ msgNotifyText: e.target.value })}
-                    onBlur={(e) =>
-                      updateIslandPrefs({ msgNotifyText: e.target.value.trim() || "收到一条消息" })
-                    }
-                  />
-                </label>
-              </section>
-              <section className="settings-card">
                 <h2>顶栏采样</h2>
                 <p className="card-desc">灵动岛顶栏颜色跟随当前窗口顶部边缘。</p>
                 <div className="mode-list">
@@ -1628,6 +1622,24 @@ export default function SettingsApp() {
                       </button>
                     </div>
 
+                    <div className="tray-detail-row">
+                      <div className="tray-detail-row-text">
+                        <div className="tray-detail-row-title">闪动时通知上岛</div>
+                        <div className="tray-detail-row-desc">
+                          开：该图标闪动时在灵动岛提示；关：闪动也不上岛
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`pref-switch${isFlashNotifyEnabled(detailIcon, flashNotify) ? " is-on" : ""}`}
+                        role="switch"
+                        aria-checked={isFlashNotifyEnabled(detailIcon, flashNotify)}
+                        onClick={() => void toggleFlashNotify(detailIcon)}
+                      >
+                        <span className="pref-switch-knob" />
+                      </button>
+                    </div>
+
                     <div className="tray-detail-divider" />
 
                     <div className="tray-detail-block">
@@ -1679,47 +1691,100 @@ export default function SettingsApp() {
             }
 
             return (
-              <section className="settings-card settings-card-grow">
-                {trays.length === 0 ? (
-                  <p className="tray-settings-empty">暂未收到托盘图标</p>
-                ) : (
-                  <div className="tray-settings-list">
-                    {trays.map((icon) => {
-                      const resident = isTrayResident(icon);
-                      return (
-                        <button
-                          key={icon.id}
-                          type="button"
-                          className="tray-settings-item"
-                          onClick={() => openTrayDetail(icon)}
-                        >
-                          {icon.icon_png_base64 ? (
-                            <img
-                              className="tray-settings-icon"
-                              src={`data:image/png;base64,${icon.icon_png_base64}`}
-                              alt=""
-                              draggable={false}
-                            />
-                          ) : (
-                            <span className="tray-settings-icon tray-settings-fallback">
-                              {trayLabel(icon).charAt(0).toUpperCase()}
+              <>
+                <section className="settings-card">
+                  <h2>消息通知</h2>
+                  <p className="card-desc">
+                    全局总开关与默认文案。每个托盘图标还可在详情里单独设置「闪动时通知上岛」。
+                  </p>
+                  <label className="pref-row">
+                    <span className="pref-row-text">
+                      <span className="pref-row-label">允许闪动通知上岛</span>
+                      <span className="pref-row-desc">
+                        关：所有托盘闪动都不上岛；开：再按各图标详情开关决定
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className={`pref-switch${islandPrefs.msgNotify ? " is-on" : ""}`}
+                      role="switch"
+                      aria-checked={islandPrefs.msgNotify}
+                      onClick={() =>
+                        updateIslandPrefs({ msgNotify: !islandPrefs.msgNotify })
+                      }
+                    >
+                      <span className="pref-switch-knob" />
+                    </button>
+                  </label>
+                  <label
+                    className={`pref-row${islandPrefs.msgNotify ? "" : " is-disabled"}`}
+                  >
+                    <span className="pref-row-text">
+                      <span className="pref-row-label">默认提示文案</span>
+                      <span className="pref-row-desc">无具体通知内容时显示</span>
+                    </span>
+                    <input
+                      className="pref-input"
+                      type="text"
+                      value={islandPrefs.msgNotifyText}
+                      disabled={!islandPrefs.msgNotify}
+                      maxLength={24}
+                      spellCheck={false}
+                      onChange={(e) =>
+                        updateIslandPrefs({ msgNotifyText: e.target.value })
+                      }
+                      onBlur={(e) =>
+                        updateIslandPrefs({
+                          msgNotifyText: e.target.value.trim() || "收到一条消息",
+                        })
+                      }
+                    />
+                  </label>
+                </section>
+                <section className="settings-card settings-card-grow">
+                  {trays.length === 0 ? (
+                    <p className="tray-settings-empty">暂未收到托盘图标</p>
+                  ) : (
+                    <div className="tray-settings-list">
+                      {trays.map((icon) => {
+                        const resident = isTrayResident(icon);
+                        return (
+                          <button
+                            key={icon.id}
+                            type="button"
+                            className="tray-settings-item"
+                            onClick={() => openTrayDetail(icon)}
+                          >
+                            {icon.icon_png_base64 ? (
+                              <img
+                                className="tray-settings-icon"
+                                src={`data:image/png;base64,${icon.icon_png_base64}`}
+                                alt=""
+                                draggable={false}
+                              />
+                            ) : (
+                              <span className="tray-settings-icon tray-settings-fallback">
+                                {trayLabel(icon).charAt(0).toUpperCase()}
+                              </span>
+                            )}
+                            <span className="tray-settings-meta">
+                              <span className="tray-settings-name">
+                                {trayLabel(icon)}
+                              </span>
+                              {resident ? (
+                                <span className="tray-settings-sub">系统常驻</span>
+                              ) : null}
                             </span>
-                          )}
-                          <span className="tray-settings-meta">
-                            <span className="tray-settings-name">{trayLabel(icon)}</span>
-                            {resident ? (
-                              <span className="tray-settings-sub">系统常驻</span>
-                            ) : null}
-                          </span>
-                          <span className="tray-settings-chevron" aria-hidden>
-                            ›
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
+                            <span className="tray-settings-chevron" aria-hidden>
+                              ›
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </>
             );
           })()}
 

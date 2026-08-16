@@ -38,19 +38,31 @@
 
 /* Independent popup window (same material path as plugin / tray) */
 .status-menu-shell {
+  /* Geometry tokens — see .cursor/skills/window-hub-status-menu */
+  --sm-pad-y: 6px;
+  --sm-pad-x: 6px;
+  --sm-item-pad-y: 8px;
+  --sm-item-pad-x: 14px;
+  --sm-item-gap: 2px;
+  --sm-sep-margin-y: 4px;
+  --sm-sep-margin-x: 10px;
+  --sm-radius: 10px;
+  --sm-font-size: 13px;
+
   width: 100%;
   height: 100%;
   min-height: 0;
-  padding: 8px 6px 10px;
+  padding: var(--sm-pad-y) var(--sm-pad-x);
   box-sizing: border-box;
   background: var(--glass-panel-bg, rgba(28, 28, 30, 0.72));
   color: var(--glass-fg, #f4f4f5);
   /* Match DWM ROUND so no light HWND edge peeks past a square CSS fill. */
   border: none;
-  border-radius: 10px;
+  border-radius: var(--sm-radius);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  justify-content: center;
+  gap: var(--sm-item-gap);
   overflow: hidden;
   /* Blur comes from Host SWCA/DWM — CSS backdrop-filter on transparent
      WebView2 cannot sample the desktop and fights the real glass. */
@@ -69,14 +81,11 @@
   pointer-events: none;
 }
 
-/* Top-bar dropdown: content sticks to top while HWND height grows downward. */
-.status-menu-shell.is-origin-down {
-  justify-content: flex-start;
-}
-
-/* Dock menu: content sticks to bottom while HWND grows upward. */
+/* Origin only affects open animation / pinBottom — not content packing.
+   HWND height must fit content (fitPopupToContent); leftover slack stays centered. */
+.status-menu-shell.is-origin-down,
 .status-menu-shell.is-origin-up {
-  justify-content: flex-end;
+  justify-content: center;
 }
 
 .status-menu-shell.is-revealing {
@@ -86,15 +95,17 @@
 .status-menu-item {
   display: block;
   width: 100%;
-  padding: 8px 16px;
+  flex: 0 0 auto;
+  padding: var(--sm-item-pad-y) var(--sm-item-pad-x);
   text-align: left;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--sm-font-size);
   font-weight: 500;
   line-height: 1.25;
   color: inherit;
   background: transparent;
   border: none;
+  border-radius: 6px;
   cursor: pointer;
 }
 
@@ -107,8 +118,9 @@
 }
 
 .status-menu-sep {
+  flex: 0 0 auto;
   height: 1px;
-  margin: 5px 12px;
+  margin: var(--sm-sep-margin-y) var(--sm-sep-margin-x);
   background: var(--glass-border, rgba(255, 255, 255, 0.12));
 }
 

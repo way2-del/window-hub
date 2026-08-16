@@ -42,6 +42,9 @@ pub struct TrayIconInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayAttention {
     pub id: String,
+    /// Reboot-stable key — matches TrayPrefs.flash_notify / pinned.
+    #[serde(default)]
+    pub pin_key: String,
     pub tooltip: String,
     pub process: String,
     pub icon_png_base64: String,
@@ -58,6 +61,9 @@ pub struct TrayPrefs {
     /// Per-icon right-click menu height (px). Missing id = auto measure.
     #[serde(default)]
     pub menu_heights: std::collections::HashMap<String, i32>,
+    /// Per-icon: flashing tray → island notify. Missing key = true (notify).
+    #[serde(default)]
+    pub flash_notify: std::collections::HashMap<String, bool>,
     /// Legacy global height (migrated into `menu_heights` on load if present).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu_height_px: Option<i32>,
@@ -279,6 +285,21 @@ mod win {
             new_heights.insert(nk, h);
         }
         prefs.menu_heights = new_heights;
+
+        let old_flash = std::mem::take(&mut prefs.flash_notify);
+        let mut new_flash = std::collections::HashMap::new();
+        for (k, v) in old_flash {
+            let nk = resolve(&k);
+            if nk != k {
+                changed = true;
+            }
+            // Prefer explicit false if both legacy id + pin_key collide.
+            new_flash
+                .entry(nk)
+                .and_modify(|e| *e = *e && v)
+                .or_insert(v);
+        }
+        prefs.flash_notify = new_flash;
         changed
     }
 
@@ -832,6 +853,7 @@ mod win {
             if info.flashing && !was_flashing && !attention_suppressed(&id) {
                 armed_attention = Some(TrayAttention {
                     id: info.id.clone(),
+                    pin_key: pin_key_of(&info),
                     tooltip: info.tooltip.clone(),
                     process: info.process.clone(),
                     icon_png_base64: info.icon_png_base64.clone(),

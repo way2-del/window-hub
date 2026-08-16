@@ -19,6 +19,8 @@ export type IslandNotifyRequest = {
   tray?: {
     /** Tray icon id — preferred coalesce key */
     iconId?: string;
+    /** Reboot-stable pin key for flash_notify prefs */
+    pinKey?: string;
     hwnd: number;
     uid: number;
     callbackMsg: number;
@@ -159,6 +161,34 @@ class IslandNotifyBus {
     this.current = null;
     this.emit();
     this.dequeue();
+  }
+
+  /** Drop current + queued banners from a source (e.g. turn off tray→island notify). */
+  dismissSource(source: "tray" | "plugin") {
+    this.queue = this.queue.filter((b) => b.source !== source);
+    if (this.current?.source === source) {
+      this.dismiss(this.current.id);
+    }
+  }
+
+  /** Drop tray banners matching icon id or pin key. */
+  dismissTrayIcon(keys: { iconId?: string; pinKey?: string }) {
+    const id = (keys.iconId || "").trim();
+    const pin = (keys.pinKey || "").trim();
+    const match = (b: IslandNotifyBanner) => {
+      if (b.source !== "tray" || !b.tray) return false;
+      const tid = (b.tray.iconId || "").trim();
+      const tpin = (b.tray.pinKey || "").trim();
+      if (id && tid && tid === id) return true;
+      if (pin && tpin && tpin === pin) return true;
+      if (pin && tid && tid === pin) return true;
+      if (id && tpin && tpin === id) return true;
+      return false;
+    };
+    this.queue = this.queue.filter((b) => !match(b));
+    if (this.current && match(this.current)) {
+      this.dismiss(this.current.id);
+    }
   }
 
   private show(banner: IslandNotifyBanner) {

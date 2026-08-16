@@ -29,6 +29,8 @@ export type TrayIconInfo = {
 export type TrayPrefs = {
   pinned: string[];
   menu_heights?: Record<string, number>;
+  /** pin_key → flash → island; missing = true */
+  flash_notify?: Record<string, boolean>;
 };
 
 /** Host-owned Input Indicator (not a Shell_NotifyIcon). */

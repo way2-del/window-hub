@@ -421,6 +421,7 @@ type Ambient = {
 
 type TrayAttention = {
   id: string;
+  pin_key?: string;
   tooltip: string;
   process: string;
   icon_png_base64: string;
@@ -676,6 +677,8 @@ function App() {
   const revealRef = useRef(0);
   const immersedRef = useRef(false);
   const islandPrefsRef = useRef(islandPrefs);
+  /** pin_key / id → flash→island; missing = true. Synced from tray-prefs. */
+  const trayFlashNotifyRef = useRef<Record<string, boolean>>({});
   const msgBannerRef = useRef<MsgBanner | null>(null);
   const notifyRef = useRef<HTMLDivElement>(null);
   const swipe = useRef<{
@@ -973,6 +976,15 @@ function App() {
   }
 
   function applyMsgBannerFromBus(b: IslandNotifyBanner) {
+    // 「闪动时通知上岛」关闭时：绝不把托盘 attention 落到岛上（含收起后补弹 / bus 订阅）
+    if (b.source === "tray" && !trayFlashNotifyAllowed({
+      id: b.tray?.iconId,
+      pinKey: b.tray?.pinKey,
+    })) {
+      console.info("[tray-attention] bus apply blocked: flash notify off", b.id);
+      islandNotifyBus.dismiss(b.id);
+      return;
+    }
     bumpIslandActivity();
     clearIdleTimer();
     const next = bannerFromBus(b);
@@ -998,11 +1010,23 @@ function App() {
     });
   }
 
+  /** Global msgNotify + per-icon flash_notify (missing = on). */
+  function trayFlashNotifyAllowed(keys: { id?: string; pinKey?: string }): boolean {
+    if (!islandPrefsRef.current.msgNotify) return false;
+    const map = trayFlashNotifyRef.current;
+    const pin = (keys.pinKey || "").trim();
+    const id = (keys.id || "").trim();
+    if (pin && map[pin] === false) return false;
+    if (id && map[id] === false) return false;
+    return true;
+  }
+
   /** 托盘闪动 → 通知总线（常驻，ttl=0） */
   function showMsgBanner(att: TrayAttention) {
     const prefs = islandPrefsRef.current;
-    if (!prefs.msgNotify) {
-      console.info("[tray-attention] skipped: msgNotify off", att.id);
+    const pinKey = (att.pin_key || "").trim();
+    if (!trayFlashNotifyAllowed({ id: att.id, pinKey })) {
+      console.info("[tray-attention] skipped: flash notify off", att.id, pinKey);
       return;
     }
     if (expandedRef.current || revealRef.current > 0.05) {
@@ -1021,6 +1045,7 @@ function App() {
     const title = (att.tooltip || att.process || "").trim();
     console.info("[tray-attention] show", {
       id: att.id,
+      pinKey,
       title,
       iconBytes: (att.icon_png_base64 || "").length,
     });
@@ -1033,6 +1058,7 @@ function App() {
       ttlMs: 0,
       tray: {
         iconId: att.id,
+        pinKey: pinKey || undefined,
         hwnd: att.hwnd,
         uid: att.uid,
         callbackMsg: att.callback_msg,
@@ -1048,6 +1074,7 @@ function App() {
   function syncFlashingTrayBanner(
     icons: Array<{
       id: string;
+      pin_key?: string;
       tooltip: string;
       process: string;
       icon_png_base64: string;
@@ -1068,10 +1095,17 @@ function App() {
     }
     if (msgBannerRef.current) return;
 
-    const flashing = icons.find((i) => i.flashing);
+    const flashing = icons.find((i) => {
+      if (!i.flashing) return false;
+      return trayFlashNotifyAllowed({
+        id: i.id,
+        pinKey: (i.pin_key || "").trim(),
+      });
+    });
     if (!flashing) return;
     showMsgBanner({
       id: flashing.id,
+      pin_key: flashing.pin_key,
       tooltip: flashing.tooltip,
       process: flashing.process,
       icon_png_base64: flashing.icon_png_base64,
@@ -1767,6 +1801,7 @@ function App() {
       applyMsgBannerFromBus(b);
     });
     let unlistenPrefs: (() => void) | undefined;
+    let unlistenTrayPrefs: (() => void) | undefined;
     let unlistenAttn: (() => void) | undefined;
     let unlistenTrayIcons: (() => void) | undefined;
     let unlistenPluginNotify: (() => void) | undefined;
@@ -1784,6 +1819,32 @@ function App() {
       setIslandPrefsState(applyIslandPrefsSnapshot(ev.payload));
     }).then((fn) => {
       unlistenPrefs = fn;
+    });
+    void invoke<{ flash_notify?: Record<string, boolean> }>("get_tray_prefs")
+      .then((p) => {
+        trayFlashNotifyRef.current = p.flash_notify ?? {};
+      })
+      .catch(() => undefined);
+    void listen<{ flash_notify?: Record<string, boolean> }>("tray-prefs", (ev) => {
+      trayFlashNotifyRef.current = ev.payload.flash_notify ?? {};
+      const cur = islandNotifyBus.getCurrent();
+      if (
+        cur?.source === "tray" &&
+        !trayFlashNotifyAllowed({
+          id: cur.tray?.iconId,
+          pinKey: cur.tray?.pinKey,
+        })
+      ) {
+        islandNotifyBus.dismiss(cur.id);
+      }
+      // Sweep queue for newly muted icons
+      for (const [k, v] of Object.entries(trayFlashNotifyRef.current)) {
+        if (v === false) {
+          islandNotifyBus.dismissTrayIcon({ pinKey: k, iconId: k });
+        }
+      }
+    }).then((fn) => {
+      unlistenTrayPrefs = fn;
     });
     const applyStagingBar = (
       pluginId: string,
@@ -2114,6 +2175,7 @@ function App() {
       unsubBus();
       unsubPlugins();
       unlistenPrefs?.();
+      unlistenTrayPrefs?.();
       unlistenAttn?.();
       unlistenTrayIcons?.();
       unlistenWindows?.();
@@ -2206,6 +2268,27 @@ function App() {
     islandPrefs.barResident,
     immersed,
   ]);
+
+  /** 关闭「闪动时通知上岛」：立刻撤掉岛上的托盘消息横幅（托盘图标仍可继续闪） */
+  useEffect(() => {
+    if (islandPrefs.msgNotify) return;
+    islandNotifyBus.dismissSource("tray");
+    const banner = msgBannerRef.current;
+    if (!banner || banner.source !== "tray") return;
+    const el = notifyRef.current;
+    if (el) {
+      el.style.transition = "";
+      el.style.transform = "";
+      el.style.opacity = "";
+    }
+    const id = banner.notifyId;
+    msgBannerRef.current = null;
+    setMsgBanner(null);
+    if (id) islandNotifyBus.dismiss(id);
+    else islandNotifyBus.dismiss();
+    scheduleImmerse();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [islandPrefs.msgNotify]);
 
   const effectivePullContent = (() => {
     const raw = scenarioPull ?? panelOverride ?? islandPrefs.pullContent;

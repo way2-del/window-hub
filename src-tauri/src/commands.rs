@@ -1028,6 +1028,7 @@ pub fn set_tray_prefs(
     app: AppHandle,
     pinned: Vec<String>,
     menu_heights: Option<std::collections::HashMap<String, i32>>,
+    flash_notify: Option<std::collections::HashMap<String, bool>>,
 ) -> Result<crate::win32::tray::TrayPrefs, String> {
     let mut heights = menu_heights.unwrap_or_default();
     heights.retain(|_, h| *h > 0);
@@ -1049,12 +1050,20 @@ pub fn set_tray_prefs(
             pinned.push(pk);
         }
     }
+    // Missing key = notify on (default). Omit arg → keep existing map.
+    let flash = match flash_notify {
+        Some(m) => m,
+        None => crate::win32::tray::get_prefs().flash_notify,
+    };
     let prefs = crate::win32::tray::TrayPrefs {
         pinned,
         menu_heights: heights,
+        flash_notify: flash,
         menu_height_px: None,
     };
     crate::win32::tray::set_prefs(prefs.clone());
+    // Re-read after normalize (pin_key rewrite).
+    let prefs = crate::win32::tray::get_prefs();
     save_tray_prefs(&prefs)?;
     let _ = app.emit("tray-prefs", &prefs);
     Ok(prefs)
