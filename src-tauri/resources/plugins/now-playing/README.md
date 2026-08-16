@@ -11,7 +11,9 @@
 | 岛下拉 | 迷你播放器；视觉对齐官方 **iOS 歌曲组件**（`Assets/PublicExample`）；右下角「打开应用」→ `hub.island.openBoundTray`（设置 → 情景临时 → 绑定托盘） |
 | 情景临时 | 健康有曲时 claim；Host 存在门禁 + 打开托盘绑定在全局设置「情景临时」二级页 |
 
-设置在 **插件市场 / 本插件已安装详情**（`apiBase`、`pollMs`、`barMode` 等插件 settings + Host 情景门禁 / 打开托盘绑定）。全局设置「情景临时」仅跳转到该详情页。
+设置在 **插件市场 / 本插件已安装详情**（`apiBase`、`pollMs`、`barMode`、`lyricOffsetMs` 等插件 settings + Host 情景门禁 / 打开托盘绑定）。全局设置「情景临时」仅跳转到该详情页。
+
+`lyricOffsetMs`：毫秒偏移（正数提前、负数延后）。Host 设置：同排 ±50 图标 / 重置 / 滑块 / 手改数值。
 
 ## 下拉 Panel 素材来源
 

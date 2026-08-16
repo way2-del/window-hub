@@ -37,6 +37,12 @@ declare global {
       };
       fetch: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
       media: { sendKey: (action: string) => Promise<unknown> };
+      everything: {
+        status: () => Promise<unknown>;
+        search: (query: string, opts?: Record<string, unknown>) => Promise<unknown>;
+        open: (path: string) => Promise<unknown>;
+        reveal: (path: string) => Promise<unknown>;
+      };
       popup: { close: () => Promise<unknown> };
       applyEffect: (material?: string) => Promise<unknown>;
     };
@@ -135,6 +141,15 @@ function ensureHub(pluginId: string) {
     media: {
       sendKey: (action: string) =>
         invoke("hub_media_send_key", withPlugin({ action })),
+    },
+    everything: {
+      status: () => invoke("hub_everything_status", withPlugin()),
+      search: (query: string, opts?: Record<string, unknown>) =>
+        invoke("hub_everything_search", withPlugin({ query: query || "", opts: opts ?? null })),
+      open: (path: string) =>
+        invoke("hub_everything_open", withPlugin({ path: path || "" })),
+      reveal: (path: string) =>
+        invoke("hub_everything_reveal", withPlugin({ path: path || "" })),
     },
     popup: {
       close: () => invoke("close_plugin_popup"),

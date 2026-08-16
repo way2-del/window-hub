@@ -50,6 +50,7 @@ description: >-
 |------|--------|------|
 | 快捷区常驻条 + 弹窗管理 | **窗口组** | `docs/plugins/examples/window-groups/`（`manage=custom`） |
 | 快捷区入口 + 可自建应用库 | **应用库** | `docs/plugins/examples/app-library/`（`manage=custom`） |
+| Everything 文件搜索 | **文件搜索** | `docs/plugins/examples/file-search/`（仅 `island.scenario` + Alt+空格；无快捷区；`everything.search`） |
 | 拖放暂存 + 岛栏 + 矮面板 | **中转站** | `docs/plugins/examples/transfer-station/` |
 | 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/`（shortcuts `manage=none`） |
 | 岛栏歌词自适应宽 + 迷你播放器 | **正在播放** | `docs/plugins/examples/now-playing/`（`island.scenario` + `adaptiveWidth`；健康 claim） |
@@ -123,6 +124,7 @@ my-plugin/
 | `notify` | `hub.notify`（需 slot `island.notify`） | 是 |
 | `network` | `hub.fetch(url, opts?)` + `permissions.network` 白名单 | 是 |
 | `clipboard.*` | **仅 schema 占位，无实现** — 勿调用 | 是（若声明） |
+| `everything.search` | `hub.everything.status/search/open/reveal`（需本机 Everything） | **是** |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。`claimScenario` / `releaseScenario` 需 `slots["island.scenario"]`（且 bar+panel）。
 
@@ -173,7 +175,7 @@ my-plugin/
 
 `plugin.json` → `settings[]`（`boolean|string|number|select|radio|multiSelect`）  
 值：`plugin_kv.__settings`，运行时 `hub.settings.*`（需 `storage`）。  
-Host 设置页自动渲染；中转站示例：`panelWidth` / `panelHeight`。
+Host 设置页自动渲染；中转站：`panelWidth` / `panelHeight`；快捷区弹窗：`popupWidth` / `popupHeight`（成语等）。
 
 ### 5. 持久化
 

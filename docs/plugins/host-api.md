@@ -20,6 +20,7 @@
 | `notify` | `hub.notify`（需 slot `island.notify`） | ✅ Popup / Panel / Shortcuts |
 | `clipboard.read` / `clipboard.write` | 剪贴板 | ❌ schema 占位，无 API |
 | `network` | `hub.fetch` + `permissions.network` 白名单 | ✅ |
+| `everything.search` | Everything 本机文件搜索 / 打开 / 定位（敏感；需本机 Everything 运行） | ✅ |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。  
 设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。  
@@ -81,6 +82,21 @@ DnD → `island.drop` 赢家。`excludeFromPullContent: true` → 不进下拉�
 ## `hub.popup.*`
 
 `open_plugin_popup` / `close_plugin_popup`；注入后读 `popup.css` / `popup.js`。快捷区可开弹窗；岛面板 **故意** 不注入 `popup.open`。
+
+默认尺寸 **320×480**。插件可通过 `settings` 声明 `popupWidth` / `popupHeight`（Host 读取并 clamp：宽 280–720、高 320–900）；亦可 `hub.popup.open({ width, height })` 覆盖。
+
+## `hub.everything.*`（需 `everything.search`）
+
+经 Host 内置 Everything SDK（`Everything64.dll` IPC）查询本机索引。**需本机 Everything 客户端正在运行。**
+
+| 方法 | 说明 |
+|------|------|
+| `status()` | `{ available, running, dbLoaded, version?, error? }` |
+| `search(query, opts?)` | `opts`: `max` / `offset` / `matchCase` / `matchWholeWord` / `matchPath` / `regex` / `pathPrefix` → `{ query, total, results[] }` |
+| `open(path)` | `ShellExecute` 打开文件或文件夹 |
+| `reveal(path)` | 资源管理器 `/select` 定位 |
+
+`results[]`：`{ name, path, fullPath, isFolder, isFile, size? }`。
 
 ## `hub.notify`
 

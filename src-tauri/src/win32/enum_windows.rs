@@ -163,7 +163,12 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
         let n = GetWindowTextW(hwnd, &mut title_buf);
         title_buf.truncate(n as usize);
         let title = String::from_utf16_lossy(&title_buf);
-        if title.trim().is_empty() {
+        let title_trim = title.trim();
+        if title_trim.is_empty() {
+            return BOOL(1);
+        }
+        // Desktop Window Manager internal HWND — not a user app (leaks into dock running).
+        if title_trim.eq_ignore_ascii_case("DWM Notification Window") {
             return BOOL(1);
         }
 
@@ -174,6 +179,12 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let (exe, exe_name) = process_exe(pid);
+        if exe_name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case("dwm.exe"))
+        {
+            return BOOL(1);
+        }
         let hwnd_i = hwnd.0 as isize;
 
         if let Ok(mut out) = ctx.out.lock() {

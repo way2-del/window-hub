@@ -85,6 +85,18 @@ actions: [
 | 排队 | 同时一条横幅 |
 | 点按钮 | 触发回调后 dismiss |
 
+## 与其它临时态共存（Host）
+
+主岛已被占用时，通知**不得盖住**栏内内容，改为主岛**下方独立胶囊**（顶边距 **4px**）：
+
+| 冲突源 | 行为 |
+|--------|------|
+| Alt+空格搜索（`searchMode`） | 搜索栏 / 下拉保持；通知叠在下方 |
+| 情景临时（正在播放等 `scenarioOwner`） | 歌词等摘要保持；通知叠在下方 |
+| 下拉展开（`expanded` / `reveal`） | 面板保持；通知叠在面板下方 |
+
+空闲常驻摘要时仍走岛内横幅落下（原 `is-notifying`）。冲突叠层时**强调描边只画在下方胶囊**，主岛不描边。实现：`src/App.tsx` `notifyStacked` / `.island-notify-stack` / `.bar-notify.is-stacked`。
+
 ## Manifest
 
 ```json

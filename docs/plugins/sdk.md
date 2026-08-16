@@ -50,7 +50,7 @@ hub.shortcuts.setBadge(badge)
 // hub.shortcuts.setPins / clearPins
 ```
 
-**已注入：** `hub.notify` / `hub.notify.onAction`、`hub.fetch`（三表面均有）。  
+**已注入：** `hub.notify` / `hub.notify.onAction`、`hub.fetch`（三表面均有；`fetch` 需 capability）。  
 **未注入（勿调用）：** `hub.clipboard.*`。
 
 ```ts
@@ -68,7 +68,7 @@ hub.fetch(url, { method?, headers?, body?, timeoutMs? }?)
 
 ## CapGate
 
-`capabilities` 必须覆盖所用 API。敏感项（`windows.focus`、`staging`、`network`、`notify` 等）在安装确认弹层明示。
+`capabilities` 必须覆盖所用 API。敏感项（`windows.focus`、`staging`、`network`、`notify`、`everything.search` 等）在安装确认弹层明示。
 
 Companion 脚本不在 CapGate 内，见 [companion-scripts.md](./companion-scripts.md)。
 
@@ -77,6 +77,7 @@ Companion 脚本不在 CapGate 内，见 [companion-scripts.md](./companion-scri
 | 插件 | 路径 | 表面 |
 |------|------|------|
 | 窗口组 | `examples/window-groups/` | shortcuts + popup |
+| 应用库 | `examples/app-library/` | shortcuts + popup |
 | 中转站 | `examples/transfer-station/` | drop + bar + panel |
 | 天气 | `examples/weather/` | bar + panel（隐形 shortcuts worker） |
 | 成语 | `examples/idiom/` | shortcuts 自画 chip（点击切换） |

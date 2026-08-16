@@ -15,6 +15,7 @@ const CAP_LABELS: Record<PluginCapability, string> = {
   "clipboard.write": "可写剪贴板",
   network: "可访问网络（受白名单限制）",
   staging: "可读写岛上暂存区（文件/文字/图片）",
+  "everything.search": "可经 Everything 搜索本机文件并打开路径",
 };
 
 /** Frontend CapGate — reject hub calls when capability missing. */
@@ -42,6 +43,7 @@ export function isSensitiveCapability(cap: PluginCapability): boolean {
     cap === "clipboard.write" ||
     cap === "staging" ||
     cap === "island.drop" ||
-    cap === "network"
+    cap === "network" ||
+    cap === "everything.search"
   );
 }

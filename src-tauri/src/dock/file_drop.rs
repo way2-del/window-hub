@@ -2,7 +2,10 @@
 //!
 //! Tauri/wry's default drag-drop handler fights HTML5 DnD and often leaves a
 //! "no drop" cursor on our frameless dock. We disable it on the dock window and
-//! register our own `IDropTarget` that always accepts `CF_HDROP`.
+//! register our own `IDropTarget`.
+//!
+//! Accepts both `CF_HDROP` (Explorer file paths) and Shell IDList / `IShellItem`
+//! payloads (Start menu, many shortcuts, long paths).
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -49,6 +52,12 @@ pub fn install_dock_file_drop(app: &AppHandle, hwnd_raw: isize) {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
 
+    if crate::win32::app_launch::is_process_elevated() {
+        eprintln!(
+            "[dock] file-drop: process is elevated — Explorer OLE drops are blocked by UIPI; run without admin"
+        );
+    }
+
     *DROP_APP.get_or_init(|| Mutex::new(None)).lock() = Some(app.clone());
 
     let root = HWND(hwnd_raw as *mut _);
@@ -83,11 +92,29 @@ pub fn install_dock_file_drop(app: &AppHandle, hwnd_raw: isize) {
     *DROP_KEEPALIVE
         .get_or_init(|| Mutex::new(DropTargetKeepAlive(Vec::new())))
         .lock() = DropTargetKeepAlive(targets);
-    eprintln!("[dock] file-drop: OLE target installed");
+    eprintln!(
+        "[dock] file-drop: OLE target installed ({} hwnds)",
+        DROP_KEEPALIVE.get().map(|m| m.lock().0.len()).unwrap_or(0)
+    );
 }
 
 #[cfg(not(windows))]
 pub fn install_dock_file_drop(_app: &AppHandle, _hwnd_raw: isize) {}
+
+/// Schedule a couple of rebinds so WebView2 child HWNDs get the drop target.
+#[cfg(windows)]
+pub fn schedule_dock_file_drop_rebind(app: &AppHandle, hwnd_raw: isize) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        for ms in [400u64, 1200, 2500] {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            install_dock_file_drop(&app, hwnd_raw);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn schedule_dock_file_drop_rebind(_app: &AppHandle, _hwnd_raw: isize) {}
 
 #[cfg(windows)]
 fn emit_phase(phase: &'static str, count: usize) {
@@ -103,6 +130,7 @@ fn pin_paths(paths: Vec<PathBuf>) {
         return;
     };
     if paths.is_empty() {
+        emit_phase("error", 0);
         return;
     }
     let list: Vec<String> = paths
@@ -110,6 +138,7 @@ fn pin_paths(paths: Vec<PathBuf>) {
         .map(|p| p.to_string_lossy().to_string())
         .collect();
     let count = list.len();
+    eprintln!("[dock] file-drop: pinning {count} path(s)");
     tauri::async_runtime::spawn(async move {
         match super::dock_pin_paths(app.clone(), list) {
             Ok(prefs) => {
@@ -131,37 +160,134 @@ fn pin_paths(paths: Vec<PathBuf>) {
 }
 
 #[cfg(windows)]
-fn collect_hdrop_paths(
-    data_obj: Option<&windows::Win32::System::Com::IDataObject>,
-) -> Option<(Vec<PathBuf>, windows::Win32::UI::Shell::HDROP)> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
+fn shell_idlist_format() -> u16 {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    let name: Vec<u16> = "Shell IDList Array\0".encode_utf16().collect();
+    unsafe { RegisterClipboardFormatW(PCWSTR(name.as_ptr())) as u16 }
+}
+
+#[cfg(windows)]
+fn formatetc(cf: u16) -> windows::Win32::System::Com::FORMATETC {
     use std::ptr;
     use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
-    use windows::Win32::System::Ole::CF_HDROP;
-    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
-
-    let obj = data_obj?;
-    let drop_format = FORMATETC {
-        cfFormat: CF_HDROP.0,
+    FORMATETC {
+        cfFormat: cf,
         ptd: ptr::null_mut(),
         dwAspect: DVASPECT_CONTENT.0,
         lindex: -1,
         tymed: TYMED_HGLOBAL.0 as u32,
+    }
+}
+
+#[cfg(windows)]
+fn data_object_looks_pinnable(
+    data_obj: Option<&windows::Win32::System::Com::IDataObject>,
+) -> bool {
+    use windows::Win32::System::Ole::CF_HDROP;
+    let Some(obj) = data_obj else {
+        return false;
     };
-    unsafe {
-        let medium = obj.GetData(&drop_format).ok()?;
+    let hdrop = formatetc(CF_HDROP.0);
+    if unsafe { obj.QueryGetData(&hdrop) }.is_ok() {
+        return true;
+    }
+    let idlist = formatetc(shell_idlist_format());
+    if unsafe { obj.QueryGetData(&idlist) }.is_ok() {
+        return true;
+    }
+    // Last resort: shell can often synthesize items even when QueryGetData is quirky.
+    collect_paths_from_data_object(Some(obj))
+        .map(|p| !p.is_empty())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn paths_from_shell_items(
+    data_obj: &windows::Win32::System::Com::IDataObject,
+) -> Option<Vec<PathBuf>> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{
+        IShellItemArray, SHCreateShellItemArrayFromDataObject, SIGDN_FILESYSPATH,
+        SIGDN_DESKTOPABSOLUTEPARSING,
+    };
+
+    let array =
+        unsafe { SHCreateShellItemArrayFromDataObject::<_, IShellItemArray>(data_obj) }.ok()?;
+    let count = unsafe { array.GetCount() }.ok()?;
+    if count == 0 {
+        return None;
+    }
+    let mut paths = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let Ok(item) = (unsafe { array.GetItemAt(i) }) else {
+            continue;
+        };
+        let mut resolved: Option<PathBuf> = None;
+        for sigdn in [SIGDN_FILESYSPATH, SIGDN_DESKTOPABSOLUTEPARSING] {
+            if let Ok(pw) = unsafe { item.GetDisplayName(sigdn) } {
+                if !pw.is_null() {
+                    let s = unsafe { pw.to_string().unwrap_or_default() };
+                    unsafe { CoTaskMemFree(Some(pw.0 as _)) };
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        resolved = Some(PathBuf::from(t));
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(p) = resolved {
+            paths.push(p);
+        }
+    }
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
+}
+
+#[cfg(windows)]
+fn paths_from_hdrop(
+    data_obj: &windows::Win32::System::Com::IDataObject,
+) -> Option<Vec<PathBuf>> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Ole::{ReleaseStgMedium, CF_HDROP};
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    let fmt = formatetc(CF_HDROP.0);
+    let mut medium = unsafe { data_obj.GetData(&fmt) }.ok()?;
+    let paths = unsafe {
         let hdrop = HDROP(medium.u.hGlobal.0 as _);
         let item_count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
-        let mut paths = Vec::with_capacity(item_count as usize);
+        let mut out = Vec::with_capacity(item_count as usize);
         for i in 0..item_count {
             let character_count = DragQueryFileW(hdrop, i, None) as usize;
             let mut path_buf = vec![0u16; character_count + 1];
             DragQueryFileW(hdrop, i, Some(&mut path_buf));
-            paths.push(OsString::from_wide(&path_buf[0..character_count]).into());
+            out.push(OsString::from_wide(&path_buf[0..character_count]).into());
         }
-        Some((paths, hdrop))
+        let _ = ReleaseStgMedium(&mut medium);
+        out
+    };
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
     }
+}
+
+#[cfg(windows)]
+fn collect_paths_from_data_object(
+    data_obj: Option<&windows::Win32::System::Com::IDataObject>,
+) -> Option<Vec<PathBuf>> {
+    let obj = data_obj?;
+    if let Some(paths) = paths_from_shell_items(obj) {
+        return Some(paths);
+    }
+    paths_from_hdrop(obj)
 }
 
 #[cfg(windows)]
@@ -193,8 +319,7 @@ impl windows::Win32::System::Ole::IDropTarget_Impl for DockPinDropTarget_Impl {
 
         let mut cpt = POINT { x: pt.x, y: pt.y };
         let _ = unsafe { ScreenToClient(self.hwnd, &mut cpt) };
-        let paths = collect_hdrop_paths(pdataobj).map(|(p, _)| p);
-        let valid = paths.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
+        let valid = data_object_looks_pinnable(pdataobj);
         unsafe {
             *pdweffect = if valid {
                 DROPEFFECT_COPY
@@ -203,7 +328,10 @@ impl windows::Win32::System::Ole::IDropTarget_Impl for DockPinDropTarget_Impl {
             };
         }
         if valid {
-            emit_phase("enter", paths.map(|p| p.len()).unwrap_or(0));
+            let count = collect_paths_from_data_object(pdataobj)
+                .map(|p| p.len())
+                .unwrap_or(1);
+            emit_phase("enter", count);
         }
         Ok(())
     }
@@ -234,18 +362,15 @@ impl windows::Win32::System::Ole::IDropTarget_Impl for DockPinDropTarget_Impl {
         pdweffect: *mut windows::Win32::System::Ole::DROPEFFECT,
     ) -> windows_core::Result<()> {
         use windows::Win32::System::Ole::DROPEFFECT_COPY;
-        use windows::Win32::UI::Shell::DragFinish;
 
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
         }
-        if let Some((paths, hdrop)) = collect_hdrop_paths(pdataobj) {
+        if let Some(paths) = collect_paths_from_data_object(pdataobj) {
             pin_paths(paths);
-            unsafe {
-                DragFinish(hdrop);
-            }
         } else {
-            emit_phase("leave", 0);
+            eprintln!("[dock] file-drop: Drop with no resolvable paths");
+            emit_phase("error", 0);
         }
         Ok(())
     }

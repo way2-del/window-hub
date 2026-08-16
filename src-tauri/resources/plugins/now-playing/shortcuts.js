@@ -19,6 +19,7 @@
     apiBase: "http://127.0.0.1:9863",
     pollMs: 1200,
     barMode: "lyric",
+    lyricOffsetMs: 0,
   };
   let lyricCache = { key: "", lines: [] };
   let lastStoreKey = "";
@@ -59,12 +60,17 @@
         .catch(function () {
           return {};
         })) || {};
+    const offsetRaw = Number(all.lyricOffsetMs);
+    const lyricOffsetMs = Number.isFinite(offsetRaw)
+      ? Math.max(-10000, Math.min(10000, Math.round(offsetRaw)))
+      : 0;
     settings = {
       apiBase:
         String(all.apiBase || "http://127.0.0.1:9863").trim() ||
         "http://127.0.0.1:9863",
       pollMs: Math.max(500, Number(all.pollMs) || 1200),
       barMode: String(all.barMode || "lyric"),
+      lyricOffsetMs: lyricOffsetMs,
     };
     return settings;
   }
@@ -253,7 +259,7 @@
               : 0;
           if (s.barMode !== "title") {
             const lines = await ensureLyrics(s.apiBase, track);
-            lyricLine = lyricAt(lines, progressMs);
+            lyricLine = lyricAt(lines, progressMs + (s.lyricOffsetMs || 0));
           }
         }
       } catch (err) {

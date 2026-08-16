@@ -64,6 +64,18 @@ export const MARKET_PLUGINS: MarketPlugin[] = [
     letter: "库",
   },
   {
+    exampleId: "file-search",
+    pluginId: "com.window-hub.file-search",
+    name: "文件搜索",
+    version: "1.3.0",
+    description:
+      "情景临时：Alt+空格先激活搜索栏；回车再展开下拉（Everything）。默认文件夹/历史，有关键字则显示结果。",
+    summary: "情景临时 · Alt+空格搜索",
+    categoryId: "island",
+    tint: "#7bd88f",
+    letter: "搜",
+  },
+  {
     exampleId: "idiom",
     pluginId: "com.window-hub.idiom",
     name: "成语",

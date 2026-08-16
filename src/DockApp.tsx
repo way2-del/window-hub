@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -91,11 +92,6 @@ const DOCK_FAN_EXTRA = 48;
  * so waiting the full 240ms feels laggy after AutoHide reveal.
  */
 const FAN_ARM_DELAY_MS = 90;
-/**
- * After snap-unmagnify (while is-fan-live kills width CSS tween), brief pause
- * before shrinking the glass so layout is committed at rest — prevents leak.
- */
-const FAN_COLLAPSE_SNAP_MS = 32;
 /** How many icon-widths the fan reaches on each side. */
 const MAG_RANGE = 2.25;
 /** Fixed magnification — not user-configurable (matches Rust DOCK_MAG_SCALE). */
@@ -113,6 +109,43 @@ function fanScale(distancePx: number, maxScale: number): number {
   const t = distancePx / reach;
   const w = Math.cos((t * Math.PI) / 2);
   return 1 + (maxScale - 1) * w * w;
+}
+
+/**
+ * Fan keep zone = union of icon/sep hit boxes (not the full HWND-wide bar).
+ * Side fan-pad is still part of `.dock-bar`, so bar left/right would keep mag
+ * stuck when sliding off the leftmost/rightmost icon.
+ */
+function pointerInFanIconZone(clientX: number, clientY: number, bar: HTMLElement): boolean {
+  const nodes = bar.querySelectorAll<HTMLElement>(".dock-hit, .dock-sep");
+  let left = Infinity;
+  let right = -Infinity;
+  let top = Infinity;
+  let bottom = -Infinity;
+  let any = false;
+  for (let i = 0; i < nodes.length; i++) {
+    const r = nodes[i].getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    any = true;
+    left = Math.min(left, r.left);
+    right = Math.max(right, r.right);
+    top = Math.min(top, r.top);
+    bottom = Math.max(bottom, r.bottom);
+  }
+  if (!any) {
+    const br = bar.getBoundingClientRect();
+    left = br.left;
+    right = br.right;
+    top = br.top;
+    bottom = br.bottom;
+  }
+  const pad = 3;
+  return (
+    clientX >= left - pad &&
+    clientX <= right + pad &&
+    clientY >= top - pad &&
+    clientY <= bottom + pad
+  );
 }
 
 /** Resting (unscaled) centers relative to bar content left — avoids layout feedback. */
@@ -444,7 +477,7 @@ export default function DockApp() {
   const expandSeqRef = useRef(0);
   /** True while pointer is inside the dock bar (gates fan arm). */
   const pointerInsideRef = useRef(false);
-  /** Last pointer client coords — resume fan after AutoHide show under cursor. */
+  /** Last pointer client coords — fan X while hovering / widen arm. */
   const lastPointerClientRef = useRef<{ x: number; y: number } | null>(null);
   /** Ignore flaky pointerleave while dock HWND slides up under the cursor. */
   const showSettleUntilRef = useRef(0);
@@ -481,9 +514,28 @@ export default function DockApp() {
   const disarmFan = () => {
     fanArmGenRef.current += 1;
     fanArmedRef.current = false;
-    setFanArmed(false);
     pendingFanXRef.current = null;
+    setFanArmed(false);
     setLocalX(null);
+  };
+
+  /** Commit rest scales immediately (hide slide must not paint magnified tiles). */
+  const snapFanToRestSync = () => {
+    fanArmGenRef.current += 1;
+    fanArmedRef.current = false;
+    pendingFanXRef.current = null;
+    if (fanMoveRafRef.current) {
+      cancelAnimationFrame(fanMoveRafRef.current);
+      fanMoveRafRef.current = 0;
+    }
+    pendingFanClientXRef.current = null;
+    flushSync(() => {
+      setFanCollapsing(true);
+      setFanArmed(false);
+      setLocalX(null);
+      setFanLive(false);
+      setBarWide(false);
+    });
   };
 
   const queueFanFromClientX = (clientX: number) => {
@@ -513,23 +565,25 @@ export default function DockApp() {
   const resumeHoverAfterShow = async () => {
     if (dndActiveRef.current || postDndFanBlockedRef.current) return;
     if (dockStatusMenuOpen) return;
-    let clientX = lastPointerClientRef.current?.x ?? null;
-    let clientY = lastPointerClientRef.current?.y ?? null;
-    if (clientX == null || clientY == null) {
-      try {
-        const pt = await invoke<[number, number] | null>("dock_pointer_client_xy");
-        if (!pt) return;
-        clientX = pt[0];
-        clientY = pt[1];
-        lastPointerClientRef.current = { x: clientX, y: clientY };
-      } catch {
-        return;
-      }
+    // Always sample the live OS cursor. Preferring lastPointerClientRef after hide→show
+    // (Alt+Tab out of fullscreen, Default mode) reused stale icon-zone coords and
+    // falsely armed magnification while the pointer was nowhere near the dock.
+    let clientX: number;
+    let clientY: number;
+    try {
+      const pt = await invoke<[number, number] | null>("dock_pointer_client_xy");
+      if (!pt) return;
+      clientX = pt[0];
+      clientY = pt[1];
+      lastPointerClientRef.current = { x: clientX, y: clientY };
+    } catch {
+      return;
     }
     const bar = barRef.current;
     if (!bar) return;
-    const rect = bar.getBoundingClientRect();
-    if (clientX < rect.left - 2 || clientX > rect.right + 2) return;
+    // Require the icon/sep hit union (X+Y) — bar-wide X alone matches cursors above the
+    // chrome when the HWND is already shown for non-hover reasons.
+    if (!pointerInFanIconZone(clientX, clientY, bar)) return;
     pointerInsideRef.current = true;
     cancelCollapseTimer();
     if (fanCollapsing) setFanCollapsing(false);
@@ -664,37 +718,77 @@ export default function DockApp() {
   };
 
   const beginCollapseAfterFanRest = () => {
-    // Fast leave must not shrink glass while slots are still mid CSS unmagnify
-    // (icons leak past the capsule). While `is-fan-live`, width has no transition —
-    // disarmFan snaps slots to rest, then we shrink glass.
+    // Leave / past icon peak: snap magnification immediately (any direction).
     pointerInsideRef.current = false;
     expandSeqRef.current += 1;
     cancelWidthTweenTimer();
     expandInflightRef.current = null;
     cancelCollapseTimer();
-    setFanCollapsing(true);
-    // Snap magnification off first (is-fan-live still on → no width tween).
-    if (!fanLive) setFanLive(true);
-    disarmFan();
+    snapFanToRestSync();
+    // Next frame: drop collapsing hold and collapse hover width (icons already at rest).
     collapseTimerRef.current = window.setTimeout(() => {
       collapseTimerRef.current = null;
-      setFanLive(false);
-      requestAnimationFrame(() => {
-        setFanCollapsing(false);
-        if (pointerInsideRef.current) return;
-        if (expandedRef.current || expandInflightRef.current === true) {
-          setExpanded(false);
-        } else {
-          // Expand response may have been cancelled — force BE + chrome rest.
-          expandedRef.current = false;
-          setBarWide(false);
-          void invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(
-            () => undefined,
-          );
-        }
-      });
-    }, FAN_COLLAPSE_SNAP_MS);
+      setFanCollapsing(false);
+      if (pointerInsideRef.current) return;
+      if (expandedRef.current || expandInflightRef.current === true) {
+        setExpanded(false);
+      } else {
+        expandedRef.current = false;
+        setBarWide(false);
+        void invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(
+          () => undefined,
+        );
+      }
+    }, 0);
   };
+  const beginCollapseRef = useRef(beginCollapseAfterFanRest);
+  beginCollapseRef.current = beginCollapseAfterFanRest;
+
+  /** While fan/expand is active, watch all pointer moves — bar is HWND-wide so
+   *  sliding into side pad never fires pointerleave, but must still snap mag. */
+  useEffect(() => {
+    if (!fanArmed && !fanLive && !fanCollapsing && !barWide) return;
+
+    const maybeCollapse = (clientX: number, clientY: number) => {
+      if (dndActiveRef.current || dockStatusMenuOpen || postDndFanBlockedRef.current) {
+        return;
+      }
+      if (performance.now() < showSettleUntilRef.current) return;
+      const bar = barRef.current;
+      if (!bar) return;
+      lastPointerClientRef.current = { x: clientX, y: clientY };
+      if (pointerInFanIconZone(clientX, clientY, bar)) return;
+      if (
+        fanArmedRef.current ||
+        pointerInsideRef.current ||
+        (expandedRef.current && collapseTimerRef.current == null)
+      ) {
+        beginCollapseRef.current();
+      }
+    };
+
+    const onMove = (e: PointerEvent) => {
+      maybeCollapse(e.clientX, e.clientY);
+    };
+    // Mouse left the webview entirely (OS desktop) — always snap.
+    const onDocLeave = () => {
+      if (dndActiveRef.current || dockStatusMenuOpen) return;
+      if (
+        fanArmedRef.current ||
+        pointerInsideRef.current ||
+        expandedRef.current
+      ) {
+        beginCollapseRef.current();
+      }
+    };
+
+    window.addEventListener("pointermove", onMove, true);
+    document.documentElement.addEventListener("mouseleave", onDocLeave);
+    return () => {
+      window.removeEventListener("pointermove", onMove, true);
+      document.documentElement.removeEventListener("mouseleave", onDocLeave);
+    };
+  }, [fanArmed, fanLive, fanCollapsing, barWide]);
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
 
@@ -962,6 +1056,9 @@ export default function DockApp() {
     return map;
   }, [displayItems, localX, maxScale, centers, fanArmed, draggingId]);
 
+  /** Bumped on AutoHide hide so icon DOM remounts — clears frozen mid-tween sizes. */
+  const [iconMountGen, setIconMountGen] = useState(0);
+
   // AutoHide show/hide — clear fan on hide; on show resume hover under stationary cursor.
   useEffect(() => {
     let unsub: (() => void) | undefined;
@@ -974,12 +1071,18 @@ export default function DockApp() {
         expandSeqRef.current += 1;
         expandInflightRef.current = null;
         pointerInsideRef.current = false;
+        // Drop cached pointer so the next show cannot revive fan from pre-hide hover.
+        lastPointerClientRef.current = null;
         showSettleUntilRef.current = 0;
-        setFanLive(false);
-        setBarWide(false);
-        setFanCollapsing(false);
-        disarmFan();
-        setExpanded(false);
+        expandedRef.current = false;
+        snapFanToRestSync();
+        setIconMountGen((n) => n + 1);
+        requestAnimationFrame(() => {
+          setFanCollapsing(false);
+        });
+        void invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(
+          () => undefined,
+        );
         return;
       }
       if (ev.payload?.visible === true) {
@@ -1001,12 +1104,25 @@ export default function DockApp() {
       unsub?.();
       cancelShowResumeTimers();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only listener; snap uses refs
   }, []);
 
   const onBarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!prefs || dndActiveRef.current) return;
     if (postDndFanBlockedRef.current) return;
     lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
+    const bar = barRef.current;
+    // Past magnified icon peak / bar sides → cancel mag immediately (any direction).
+    if (bar && !pointerInFanIconZone(e.clientX, e.clientY, bar)) {
+      if (
+        fanArmedRef.current ||
+        pointerInsideRef.current ||
+        (expandedRef.current && collapseTimerRef.current == null && !fanCollapsing)
+      ) {
+        beginCollapseAfterFanRest();
+      }
+      return;
+    }
     pointerInsideRef.current = true;
     cancelCollapseTimer();
     if (fanCollapsing) setFanCollapsing(false);
@@ -1299,10 +1415,28 @@ export default function DockApp() {
       onDragEnd={onDragEnd}
     >
       <div
-        className={`dock-shell${fanLive ? " is-fan-live" : ""}${chromeWide ? " is-bar-wide" : ""}${dropHover ? " is-drop-hover" : ""}${draggingId ? " is-dragging-item is-dnd-active" : ""}${dragRemoveArmed ? " is-dnd-remove" : ""}`}
+        className={`dock-shell${fanLive ? " is-fan-live" : ""}${fanCollapsing ? " is-fan-collapsing" : ""}${chromeWide ? " is-bar-wide" : ""}${dropHover ? " is-drop-hover" : ""}${draggingId ? " is-dragging-item is-dnd-active" : ""}${dragRemoveArmed ? " is-dnd-remove" : ""}`}
         data-mode={prefs.displayMode}
         data-mag={magOn ? "on" : "off"}
         onContextMenu={onBackgroundContextMenu}
+        onDragEnter={(e: ReactDragEvent) => {
+          e.preventDefault();
+          setDropHover(true);
+        }}
+        onDragOver={(e: ReactDragEvent) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          if (!dropHover) setDropHover(true);
+        }}
+        onDragLeave={(e: ReactDragEvent) => {
+          const related = e.relatedTarget as Node | null;
+          if (related && e.currentTarget.contains(related)) return;
+          setDropHover(false);
+        }}
+        onDrop={(e: ReactDragEvent) => {
+          e.preventDefault();
+          setDropHover(false);
+        }}
       >
         {compactTip && !draggingId && !dropHover ? (
           <div className="dock-compact-tip" role="status">
@@ -1315,12 +1449,8 @@ export default function DockApp() {
             aria-hidden
             style={
               {
-                borderRadius: cornerRadius,
                 ["--dock-radius" as string]: `${cornerRadius}px`,
-                left: "50%",
-                right: "auto",
                 width: chromeWidthPx,
-                transform: "translateX(-50%)",
               } as CSSProperties
             }
           />
@@ -1389,7 +1519,7 @@ export default function DockApp() {
                   const reorderable = canReorder(item);
                   return (
                     <Draggable
-                      key={item.id}
+                      key={`${item.id}#${iconMountGen}`}
                       draggableId={item.id}
                       index={index}
                       isDragDisabled={!reorderable}

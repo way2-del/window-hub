@@ -15,6 +15,7 @@ const MIRROR_EXAMPLE_ID: &str = "com.window-hub.mirror";
 const APP_LIBRARY_EXAMPLE_ID: &str = "com.window-hub.app-library";
 const IDIOM_EXAMPLE_ID: &str = "com.window-hub.idiom";
 const NOW_PLAYING_EXAMPLE_ID: &str = "com.window-hub.now-playing";
+const FILE_SEARCH_EXAMPLE_ID: &str = "com.window-hub.file-search";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,6 +211,7 @@ pub fn ensure_official_plugins(app: &AppHandle) {
         ("transfer-station", TRANSFER_EXAMPLE_ID),
         ("idiom", IDIOM_EXAMPLE_ID),
         ("now-playing", NOW_PLAYING_EXAMPLE_ID),
+        ("file-search", FILE_SEARCH_EXAMPLE_ID),
     ] {
         let reg = load_registry();
         let bundled = match resolve_example_plugin_dir(app, folder) {
@@ -273,6 +275,13 @@ pub fn pick_plugin_directory() -> Result<Option<String>, String> {
     Ok(dir.map(|p| p.to_string_lossy().to_string()))
 }
 
+fn remove_plugin_dir(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(path).map_err(|e| format!("删除插件目录失败: {e}"))
+}
+
 fn install_from_dir(app: &AppHandle, src: &Path, is_dev: bool) -> Result<InstalledPluginRecord, String> {
     let manifest = read_manifest_file(src)?;
     let (id, name, version, capabilities) = validate_manifest(&manifest)?;
@@ -290,9 +299,7 @@ fn install_from_dir(app: &AppHandle, src: &Path, is_dev: bool) -> Result<Install
 
     let root = plugins_root()?;
     let dest = root.join(&install_id);
-    if dest.exists() {
-        fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
-    }
+    remove_plugin_dir(&dest)?;
     copy_dir_recursive(src, &dest)?;
     // rewrite manifest with possibly rewritten id
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
@@ -371,9 +378,7 @@ pub fn uninstall_plugin(
     let record = reg.plugins.remove(idx);
     save_registry(&reg)?;
     let path = PathBuf::from(&record.path);
-    if path.exists() {
-        fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
-    }
+    remove_plugin_dir(&path)?;
     close_plugin_popup(&app);
     let _ = crate::db::with_conn(|c| crate::db::plugin_clear_all(c, &id));
     pins.inner_remove(&id);
@@ -454,6 +459,8 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("idiom")
     } else if id == "now-playing" || id == NOW_PLAYING_EXAMPLE_ID {
         Ok("now-playing")
+    } else if id == "file-search" || id == FILE_SEARCH_EXAMPLE_ID {
+        Ok("file-search")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

@@ -37,6 +37,7 @@ import {
   measureIslandBarLabelWidth,
   resolveIslandBarAdaptive,
   resolveIslandDropPluginId,
+  resolveIslandSearchPluginId,
   resolvePluginPanelShellSize,
   type IslandBarState,
 } from "./plugins/islandSlots";
@@ -54,10 +55,17 @@ import type { WindowInfo } from "./types";
 /** 默认插件面板展开尺寸（非中转站） */
 const VIEW_W_DEFAULT = 380;
 const VIEW_H_DEFAULT = 220;
-/** 岛贴屏顶后顶隙为 0；窗口高度 = 岛高 */
+/** 岛贴屏顶后顶隙为 0；窗口高度 = 岛高（+ 冲突通知叠层） */
 const TOP_GAP = 0;
 const ISLAND_BAR_H = 28;
+/** 冲突通知：主岛下方独立胶囊与顶边距 */
+const NOTIFY_STACK_GAP = 4;
+const NOTIFY_STACK_H = ISLAND_BAR_H;
 const ISLAND_COLLAPSED_W_DEFAULT = 300;
+/** Alt+Space 搜索态折叠岛宽（容纳搜索框） */
+const ISLAND_SEARCH_COLLAPSED_W = 460;
+/** 搜索框 ↔ 常驻摘要交接时长（与 .bar-weather 过渡对齐） */
+const SEARCH_CHROME_EXIT_MS = 420;
 /** 折叠目标宽（自适应歌词等）；与 liveExpanded 一样由 App 同步 */
 const liveCollapsed = { width: ISLAND_COLLAPSED_W_DEFAULT, height: ISLAND_BAR_H };
 function collapsedNow(): IslandSize {
@@ -65,6 +73,8 @@ function collapsedNow(): IslandSize {
 }
 /** 当前展开目标 / SVG 画布（中转站时变宽变矮）——由 App 每帧同步 */
 const liveExpanded = { width: VIEW_W_DEFAULT, height: VIEW_H_DEFAULT };
+/** 冲突通知叠层占用的窗口附加高度（与 paint 岛高解耦） */
+let liveNotifyStackExtra = 0;
 const HEIGHT_MS = 280;
 /** 展开/收起总时长：宽高交错，禁止出现「380×28 宽扁直角条」中间态 */
 const MORPH_MS = 420;
@@ -74,9 +84,9 @@ const SPRING_MS = 320;
 
 type IslandSize = { width: number; height: number };
 
-/** 窗口实际高度 = 岛高（贴顶，无额外顶隙） */
+/** 窗口实际高度 = 岛高 + 可选冲突通知叠层 */
 function winHeight(islandH: number) {
-  return TOP_GAP + islandH;
+  return TOP_GAP + islandH + liveNotifyStackExtra;
 }
 
 function lerp(a: number, b: number, t: number) {
@@ -518,7 +528,6 @@ function App() {
   const [scenarioOwner, setScenarioOwner] = useState<string | null>(null);
   const [scenarioBar, setScenarioBar] = useState<IslandBarState | null>(null);
   const [scenarioPull, setScenarioPull] = useState<string | null>(null);
-  const islandBar = overlayBar ?? scenarioBar ?? residentBar;
   const residentBarRef = useRef(residentBar);
   const overlayBarRef = useRef(overlayBar);
   const scenarioOwnerRef = useRef(scenarioOwner);
@@ -629,6 +638,34 @@ function App() {
    * 驱动 hub.panel.onEnter / onLeave（镜子等勿在折叠态开摄像头）。
    */
   const [panelActive, setPanelActive] = useState(false);
+  /** Alt+Space 全局搜索：岛栏变搜索框 + 打开 everything 面板会话 */
+  const [searchMode, setSearchMode] = useState(false);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [searchSubmit, setSearchSubmit] = useState<{
+    nonce: number;
+    query: string;
+  } | null>(null);
+  const searchModeRef = useRef(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  /** collapse 时保留搜索态（Alt+空格从展开切回「仅搜索栏」） */
+  const retainSearchModeRef = useRef(false);
+  const toggleIslandSearchHotkeyRef = useRef<(() => void | Promise<void>) | null>(
+    null,
+  );
+  /** Esc 退出过渡：先播动画再卸 DOM */
+  const [searchLeaving, setSearchLeaving] = useState(false);
+  const searchLeavingRef = useRef(false);
+  const searchLeaveTimerRef = useRef<number | null>(null);
+  /**
+   * 搜索 chrome 只认 Host searchMode / 离场动画，不跟 scenarioOwner 抖动
+   *（正在播放等会抢 claim，不能让输入框跟着丢）。
+   */
+  const showSearchChrome = searchMode || searchLeaving;
+  const searchActive = searchMode;
+  /** 搜索锁期间 Host chrome 优先于中转站 overlay（情景临时 > 常驻；搜索为 Host 情景） */
+  const islandBar = showSearchChrome
+    ? scenarioBar ?? residentBar
+    : overlayBar ?? scenarioBar ?? residentBar;
   /** 托盘闪动消息提示（岛内落下） */
   const [msgBanner, setMsgBanner] = useState<MsgBanner | null>(null);
   const gen = useRef(0);
@@ -679,12 +716,29 @@ function App() {
   shellPanelHRef.current = shellPanelH;
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
 
+  function isFileSearchPlugin(pluginId: string | null | undefined): boolean {
+    if (!pluginId) return false;
+    return (
+      pluginId === "com.window-hub.file-search" ||
+      pluginId === resolveIslandSearchPluginId()
+    );
+  }
+
+  /** Alt+空格 Host 搜索锁：期间禁止其它情景 claim / setBar 抢主人 */
+  function hostSearchLocksScenario(): boolean {
+    return searchModeRef.current || searchLeavingRef.current;
+  }
+
   /** 按当前岛栏文案重算折叠尺寸（收起结束时用，避免 liveCollapsed 过期导致错位） */
   function snapCollapsedFromBar(): IslandSize {
+    if (searchModeRef.current) {
+      liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
+      liveCollapsed.height = ISLAND_BAR_H;
+      return { width: ISLAND_SEARCH_COLLAPSED_W, height: ISLAND_BAR_H };
+    }
     const overlay = overlayBarRef.current;
     const scenario = scenarioBarRef.current;
     const resident = residentBarRef.current;
-    const dropId = dropPluginIdRef.current;
     const text = String(overlay?.text ?? scenario?.text ?? resident?.text ?? "");
     const pluginId =
       overlay?.pluginId ?? scenario?.pluginId ?? resident?.pluginId ?? null;
@@ -702,6 +756,25 @@ function App() {
   }
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
+
+  // 情景主人已是文件搜索 → 强制亮搜索 chrome（仅作兜底；主路径以 searchMode 为准）
+  useEffect(() => {
+    if (!isFileSearchPlugin(scenarioOwner)) return;
+    if (searchModeRef.current || searchLeavingRef.current) return;
+    searchModeRef.current = true;
+    setSearchMode(true);
+    liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
+    if (!expandedRef.current) {
+      syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
+    }
+  }, [scenarioOwner]);
+
+  // Alt+空格进入搜索态后，强制主窗焦点 + 输入框聚焦（与 claim 异步解耦）
+  useLayoutEffect(() => {
+    if (!searchActive || searchLeaving || expanded || pulling || springing) return;
+    void focusIslandSearchInput();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchActive, searchLeaving, expanded, pulling, springing]);
 
   useEffect(() => {
     const sync = () => {
@@ -732,6 +805,13 @@ function App() {
           Boolean(rec?.manifest.slots?.["island.scenario"]) &&
           barOk(owner);
         if (ok) return owner;
+        // 搜索锁中文件搜索被卸载才退 chrome；其它情景掉线不碰 searchMode
+        if (isFileSearchPlugin(owner) && searchModeRef.current) {
+          searchModeRef.current = false;
+          setSearchMode(false);
+          setSearchDraft("");
+          setSearchSubmit(null);
+        }
         setScenarioBar(null);
         setScenarioPull(null);
         return null;
@@ -1254,6 +1334,26 @@ function App() {
       setReveal(0);
       // 拖入会话覆盖仅本次展开有效；收起后恢复用户「下拉内容」
       setPanelOverride(null);
+      if (
+        searchModeRef.current ||
+        isFileSearchPlugin(scenarioOwnerRef.current)
+      ) {
+        if (retainSearchModeRef.current) {
+          retainSearchModeRef.current = false;
+          searchModeRef.current = true;
+          setSearchMode(true);
+          clearSearchLeaveTimer();
+          searchLeavingRef.current = false;
+          setSearchLeaving(false);
+          // 保留情景主人；折叠宽钉回搜索栏
+          liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
+          syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
+          void focusIslandSearchInput();
+        } else {
+          // 展开态 Esc/再热键：壳已 morph 完，chrome 再播交接
+          exitIslandSearchChrome({ animated: true });
+        }
+      }
     } finally {
       if (token === gen.current) {
         morphingRef.current = false;
@@ -1275,20 +1375,27 @@ function App() {
   function onIslandPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     if (expandedRef.current || busy.current) return;
     if (e.button !== 0) return;
-    // 消息提示：支持左滑划掉；点击仍打开应用
+    // 消息提示：仅「内联」横幅支持在主岛上左滑划掉；冲突叠层在独立胶囊上滑
     if (msgBannerRef.current) {
-      e.currentTarget.setPointerCapture(e.pointerId);
-      swipe.current = {
-        pointerId: e.pointerId,
-        startX: e.clientX,
-        startY: e.clientY,
-        dx: 0,
-        active: true,
-        moved: false,
-        dismissed: false,
-      };
-      bumpIslandActivity();
-      return;
+      const stackedConflict =
+        searchModeRef.current ||
+        Boolean(scenarioOwnerRef.current) ||
+        expandedRef.current ||
+        revealRef.current > 0.12;
+      if (!stackedConflict) {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        swipe.current = {
+          pointerId: e.pointerId,
+          startX: e.clientX,
+          startY: e.clientY,
+          dx: 0,
+          active: true,
+          moved: false,
+          dismissed: false,
+        };
+        bumpIslandActivity();
+        return;
+      }
     }
     // 未配置下拉内容：不进入下拉手势（岛栏 chip / 拖入仍走 openPluginSession）
     if (!canDefaultPullExpand()) return;
@@ -1667,6 +1774,7 @@ function App() {
     let unlistenBar: (() => void) | undefined;
     let unlistenScenario: (() => void) | undefined;
     let unlistenSession: (() => void) | undefined;
+    let unlistenSearchHotkey: (() => void) | undefined;
     let unsubPlugins = () => {};
     void bootstrapPlugins();
     void subscribeInstalledPlugins().then((fn) => {
@@ -1753,7 +1861,9 @@ function App() {
       const adaptive = resolveIslandBarAdaptive(p.pluginId).enabled;
 
       // Visible layer for DOM paint: overlay > scenario > resident
+      // 搜索 chrome 接管岛栏时禁止再把天气等常驻文案刷进 DOM
       const paintVisibleBar = (text: string, pluginId: string | null, showDot: boolean) => {
+        if (hostSearchLocksScenario()) return;
         if (overlayBarRef.current) return;
         if (barStagingTextRef.current) {
           barStagingTextRef.current.textContent = text;
@@ -1770,15 +1880,30 @@ function App() {
       };
 
       // 情景层：claim 主人，或 scenario 槽插件 setBar 时自动晋升（避免 claim/setBar 竞态）
+      // Host Alt+空格搜索锁：禁止其它情景靠 setBar 抢主人（正在播放歌词会高频抢）
       if (hasScenario && (isScenarioOwner || next)) {
         if (next && !scenarioGateAllows(p.pluginId)) {
-          if (isScenarioOwner) clearScenarioLayer();
+          if (isScenarioOwner && !hostSearchLocksScenario()) clearScenarioLayer();
           return;
         }
         if (next && scenarioOwnerRef.current !== p.pluginId) {
+          if (hostSearchLocksScenario() && !isFileSearchPlugin(p.pluginId)) {
+            return;
+          }
           scenarioOwnerRef.current = p.pluginId;
           setScenarioOwner(p.pluginId);
           setScenarioPull(`plugin:${p.pluginId}`);
+          if (isFileSearchPlugin(p.pluginId)) {
+            searchModeRef.current = true;
+            setSearchMode(true);
+          }
+        }
+        if (
+          hostSearchLocksScenario() &&
+          !isFileSearchPlugin(p.pluginId) &&
+          scenarioOwnerRef.current !== p.pluginId
+        ) {
+          return;
         }
         const prev = scenarioBarRef.current;
         if (adaptive && next && prev && prev.pluginId === next.pluginId) {
@@ -1797,6 +1922,10 @@ function App() {
         return;
       }
       if (isScenarioOwner && !next) {
+        if (hostSearchLocksScenario() && isFileSearchPlugin(p.pluginId)) {
+          // 搜索锁下忽略文件搜索空 setBar，避免冲掉 Host chrome
+          return;
+        }
         setScenarioBar(null);
         const fallback = residentBarRef.current;
         paintVisibleBar(fallback?.text ?? "", fallback?.pluginId ?? null, false);
@@ -1841,18 +1970,47 @@ function App() {
       const pluginId = typeof ev.payload?.pluginId === "string" ? ev.payload.pluginId : "";
       if (!pluginId) return;
       if (action === "claim") {
+        // Host 搜索锁：其它情景（正在播放等）不得抢 Alt+空格主人
+        if (hostSearchLocksScenario() && !isFileSearchPlugin(pluginId)) {
+          return;
+        }
         if (!scenarioGateAllows(pluginId)) {
-          clearScenarioLayer();
+          if (!hostSearchLocksScenario()) clearScenarioLayer();
           return;
         }
         scenarioOwnerRef.current = pluginId;
         setScenarioOwner(pluginId);
         setScenarioPull(`plugin:${pluginId}`);
-        setScenarioBar((prev) => (prev?.pluginId === pluginId ? prev : null));
+        // 文件搜索 claim = 立即接管岛栏为搜索框（与 Host Alt+空格同源）
+        if (isFileSearchPlugin(pluginId)) {
+          searchModeRef.current = true;
+          setSearchMode(true);
+          liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
+          syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
+          queueMicrotask(() => {
+            void focusIslandSearchInput();
+          });
+        } else if (!searchModeRef.current) {
+          setScenarioBar((prev) => (prev?.pluginId === pluginId ? prev : null));
+        }
         return;
       }
       if (action === "release") {
         if (scenarioOwnerRef.current !== pluginId) return;
+        // 搜索锁下忽略非文件搜索的 release（防止正在播放 release 清掉搜索情景）
+        if (hostSearchLocksScenario() && !isFileSearchPlugin(pluginId)) {
+          return;
+        }
+        if (isFileSearchPlugin(pluginId)) {
+          // 仅插件主动 release：若 Host 仍在搜索锁中，保持 chrome，只同步层
+          if (searchModeRef.current) {
+            return;
+          }
+          searchModeRef.current = false;
+          setSearchMode(false);
+          setSearchDraft("");
+          setSearchSubmit(null);
+        }
         clearScenarioLayer();
       }
     }).then((fn) => {
@@ -1870,6 +2028,12 @@ function App() {
       }
     }).then((fn) => {
       unlistenSession = fn;
+    });
+    void listen("island-search-hotkey", () => {
+      console.info("[island-search] hotkey");
+      void toggleIslandSearchHotkeyRef.current?.();
+    }).then((fn) => {
+      unlistenSearchHotkey = fn;
     });
     void listen<TrayAttention>("tray-attention", (ev) => {
       console.info("[tray-attention] event", ev.payload?.id, ev.payload?.tooltip);
@@ -1958,6 +2122,7 @@ function App() {
       unlistenBar?.();
       unlistenScenario?.();
       unlistenSession?.();
+      unlistenSearchHotkey?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2004,7 +2169,7 @@ function App() {
   useEffect(() => {
     // 展开 / 拖放高亮 / 通知：暂停沉浸。中转站有内容不阻断。
     // 独立托盘弹窗不再退出沉浸（与左侧状态菜单一致，保持常驻透底）。
-    if (expanded || pulling || springing || reveal > 0.02 || msgBanner || dropTarget) {
+    if (expanded || pulling || springing || reveal > 0.02 || msgBanner || dropTarget || showSearchChrome) {
       clearIdleTimer();
       if (immersedRef.current) {
         immersedRef.current = false;
@@ -2030,6 +2195,7 @@ function App() {
     reveal,
     msgBanner,
     dropTarget,
+    showSearchChrome,
     // 只看「有谁占栏」，勿依赖文案：歌词 setBar 每秒变 text 会反复清/排 immerse 定时器 → 整机卡
     overlayBar?.pluginId,
     scenarioBar?.pluginId,
@@ -2047,6 +2213,20 @@ function App() {
     if (!pid) return raw || "";
     return pluginRegistry.get(pid)?.enabled ? raw : "";
   })();
+  /**
+   * 主岛已被临时占用时，通知不得盖住栏内内容，改为下方独立胶囊：
+   * Alt+空格搜索 / 情景临时（正在播放等）/ 下拉展开。
+   */
+  const notifyConflict =
+    showSearchChrome ||
+    Boolean(scenarioOwner) ||
+    expanded ||
+    pulling ||
+    reveal > 0.12;
+  const notifyStacked = Boolean(msgBanner) && notifyConflict;
+  const notifyInline = Boolean(msgBanner) && !notifyConflict;
+  const weatherBarExiting =
+    notifyInline || (searchActive && !searchLeaving);
   const activePanelPluginId = parsePluginPanelId(effectivePullContent);
   const stagingBar = islandBar?.text ?? "";
   const dropPluginName = dropPluginId
@@ -2070,9 +2250,31 @@ function App() {
           ?.excludeFromBarResident,
     );
 
+  // 冲突通知叠层：拉高/收回窗口附加高度（不改 SVG 岛身尺寸）
+  useLayoutEffect(() => {
+    const extra = notifyStacked ? NOTIFY_STACK_GAP + NOTIFY_STACK_H : 0;
+    if (liveNotifyStackExtra === extra) return;
+    liveNotifyStackExtra = extra;
+    const islandH = Math.max(ISLAND_BAR_H, sizeRef.current.height);
+    lastWinH.current = winHeight(islandH);
+    void setBarHeight(islandH);
+  }, [notifyStacked]);
+
   // 岛栏折叠宽自适应：slots.island.bar.adaptiveWidth（如正在播放长歌词）
   useLayoutEffect(() => {
-    if (expanded || pulling || springing || reveal > 0.02 || msgBanner) return;
+    if (
+      expanded ||
+      pulling ||
+      springing ||
+      reveal > 0.02 ||
+      notifyInline ||
+      showSearchChrome
+    ) {
+      if (searchActive && !searchLeaving && !expanded) {
+        syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
+      }
+      return;
+    }
     const text =
       dropTarget && dropPluginId
         ? `${dropPluginName}|松开存入`
@@ -2094,18 +2296,40 @@ function App() {
     springing,
     reveal,
     msgBanner,
+    showSearchChrome,
+    searchActive,
+    searchLeaving,
+    notifyInline,
   ]);
 
   // 文案以 ref 为准（adaptive 高频路径不 setState）；其它重渲染后对齐 DOM
+  // 搜索激活时禁止把天气常驻刷回 span；离场动画期间允许刷回以便交接
   useLayoutEffect(() => {
+    if (searchModeRef.current && !searchLeavingRef.current) return;
+    if (
+      isFileSearchPlugin(scenarioOwnerRef.current) &&
+      !searchLeavingRef.current
+    ) {
+      return;
+    }
     const el = barStagingTextRef.current;
     if (!el) return;
     const text =
       dropTarget && dropPluginId
         ? `${dropPluginName}|松开存入`
-        : (overlayBar ?? residentBarRef.current)?.text ?? "";
+        : (overlayBar ?? scenarioBar ?? residentBar)?.text ?? "";
     if (el.textContent !== text) el.textContent = text;
-  }, [overlayBar, residentBar, dropTarget, dropPluginId, dropPluginName]);
+  }, [
+    overlayBar,
+    scenarioBar,
+    residentBar,
+    dropTarget,
+    dropPluginId,
+    dropPluginName,
+    searchMode,
+    scenarioOwner,
+    searchLeaving,
+  ]);
 
   const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
   const viewH = activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT;
@@ -2182,6 +2406,201 @@ function App() {
     if (!expandedRef.current) {
       void expand({ force: true });
     }
+  }
+
+  async function focusIslandSearchInput() {
+    try {
+      await getCurrentWindow().setFocus();
+    } catch {
+      /* ignore */
+    }
+    const tryFocus = (left: number) => {
+      const el = searchInputRef.current;
+      if (el) {
+        el.focus({ preventScroll: true });
+        el.select();
+        return;
+      }
+      if (left > 0) requestAnimationFrame(() => tryFocus(left - 1));
+    };
+    queueMicrotask(() => tryFocus(10));
+    window.setTimeout(() => tryFocus(4), 40);
+    window.setTimeout(() => tryFocus(2), 120);
+  }
+
+  function clearSearchLeaveTimer() {
+    if (searchLeaveTimerRef.current != null) {
+      window.clearTimeout(searchLeaveTimerRef.current);
+      searchLeaveTimerRef.current = null;
+    }
+  }
+
+  /** 立刻卸掉搜索逻辑态（情景 / mode）；draft 可延后清以免离场闪空 */
+  function clearSearchChromeState(opts?: { clearDraft?: boolean }) {
+    searchModeRef.current = false;
+    setSearchMode(false);
+    if (opts?.clearDraft !== false) {
+      setSearchDraft("");
+      setSearchSubmit(null);
+    }
+    setPanelOverride(null);
+    if (isFileSearchPlugin(scenarioOwnerRef.current)) {
+      const searchPid =
+        resolveIslandSearchPluginId() ?? "com.window-hub.file-search";
+      clearScenarioLayer();
+      void invoke("hub_island_release_scenario", {
+        pluginId: searchPid,
+      }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * 退出岛栏搜索 chrome。
+   * animated：搜索框上滑淡出、常驻摘要回弹（Esc / Alt+空格折叠态）。
+   */
+  function exitIslandSearchChrome(opts?: { animated?: boolean }) {
+    const active =
+      searchModeRef.current ||
+      isFileSearchPlugin(scenarioOwnerRef.current) ||
+      searchLeavingRef.current;
+    if (!active) return;
+
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const animated = opts?.animated !== false && !reduceMotion;
+
+    if (!animated) {
+      clearSearchLeaveTimer();
+      searchLeavingRef.current = false;
+      setSearchLeaving(false);
+      clearSearchChromeState({ clearDraft: true });
+      snapCollapsedFromBar();
+      syncCollapsedIslandWidth(liveCollapsed.width);
+      return;
+    }
+
+    if (searchLeavingRef.current) return;
+    searchLeavingRef.current = true;
+    setSearchLeaving(true);
+    // 先清逻辑态，让天气文案可刷回；DOM 仍因 searchLeaving 保留搜索框播离场
+    clearSearchChromeState({ clearDraft: false });
+    queueMicrotask(() => {
+      snapCollapsedFromBar();
+      syncCollapsedIslandWidth(liveCollapsed.width);
+    });
+    clearSearchLeaveTimer();
+    searchLeaveTimerRef.current = window.setTimeout(() => {
+      searchLeaveTimerRef.current = null;
+      searchLeavingRef.current = false;
+      setSearchLeaving(false);
+      setSearchDraft("");
+      setSearchSubmit(null);
+    }, SEARCH_CHROME_EXIT_MS);
+  }
+
+  async function enterIslandSearchMode() {
+    clearSearchLeaveTimer();
+    searchLeavingRef.current = false;
+    setSearchLeaving(false);
+    const FALLBACK = "com.window-hub.file-search";
+    const pluginId = resolveIslandSearchPluginId() ?? FALLBACK;
+    const rec = pluginRegistry.get(pluginId);
+    const canClaim =
+      Boolean(rec?.enabled) &&
+      Boolean(rec?.manifest.slots?.["island.scenario"]) &&
+      (rec?.manifest.capabilities ?? []).includes("island.bar") &&
+      (rec?.manifest.capabilities ?? []).includes("island.panel") &&
+      scenarioGateAllows(pluginId);
+
+    bumpIslandActivity();
+    // 先亮搜索栏（不依赖 claim 成败）
+    searchModeRef.current = true;
+    setSearchMode(true);
+    setSearchDraft("");
+    setSearchSubmit(null);
+    liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
+
+    if (canClaim) {
+      scenarioOwnerRef.current = pluginId;
+      setScenarioOwner(pluginId);
+      setScenarioPull(`plugin:${pluginId}`);
+      // 搜索态由 Host chrome 画输入框，不再用 setBar 文案占位
+      setScenarioBar({
+        pluginId,
+        text: " ",
+        title: "Alt+空格 · Everything",
+      });
+      try {
+        await invoke("hub_island_claim_scenario", { pluginId });
+      } catch (err) {
+        console.warn("[island-search] claimScenario", err);
+      }
+      armPluginSession(pluginId);
+    } else if (!rec?.enabled) {
+      console.warn(
+        "[island-search] plugin missing/disabled:",
+        pluginId,
+        "— still showing search chrome",
+      );
+    }
+
+    // 仅激活折叠搜索栏；若当前已展开则收起但保留搜索态
+    if (expandedRef.current) {
+      retainSearchModeRef.current = true;
+      void collapse();
+    } else {
+      syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
+      void focusIslandSearchInput();
+    }
+  }
+
+  async function toggleIslandSearchMode() {
+    // 离场动画中再按热键 → 取消离场并重新进入（避免「时好时坏」被吞）
+    if (searchLeavingRef.current) {
+      clearSearchLeaveTimer();
+      searchLeavingRef.current = false;
+      setSearchLeaving(false);
+      await enterIslandSearchMode();
+      return;
+    }
+    if (searchModeRef.current) {
+      if (expandedRef.current) {
+        // 下拉已开：收起并退出搜索（壳 morph；chrome 在 collapse 末尾清）
+        retainSearchModeRef.current = false;
+        void collapse();
+      } else {
+        exitIslandSearchChrome({ animated: true });
+      }
+      return;
+    }
+    await enterIslandSearchMode();
+  }
+  toggleIslandSearchHotkeyRef.current = () => {
+    void toggleIslandSearchMode();
+  };
+
+  function submitIslandSearch() {
+    const pluginId = resolveIslandSearchPluginId();
+    const q = searchDraft.trim();
+    bumpIslandActivity();
+    if (pluginId) {
+      armPluginSession(pluginId);
+      if (scenarioOwnerRef.current !== pluginId) {
+        scenarioOwnerRef.current = pluginId;
+        setScenarioOwner(pluginId);
+      }
+      setScenarioPull(`plugin:${pluginId}`);
+    }
+    // 有无关键字均可：回车唤醒下拉；空 → 首页双卡片，有字 → 结果
+    if (!expandedRef.current) {
+      void expand({ force: true }).then(() => {
+        setSearchSubmit({ nonce: Date.now(), query: q });
+        queueMicrotask(() => searchInputRef.current?.focus());
+      });
+      return;
+    }
+    setSearchSubmit({ nonce: Date.now(), query: q });
   }
 
   async function ingestDrop(dt: DataTransfer | null) {
@@ -2333,6 +2752,173 @@ function App() {
 
   const shellExpanded = expanded || reveal > 0.2;
 
+  function renderNotifyBanner(opts: { stacked: boolean }) {
+    if (!msgBanner) return null;
+    return (
+      <div
+        className={`bar-notify${opts.stacked ? " is-stacked" : ""}`}
+        key={msgBanner.key}
+        ref={notifyRef}
+        role="button"
+        tabIndex={0}
+        data-notify-accent={msgBanner.accentColor || undefined}
+        style={
+          opts.stacked
+            ? ({
+                ["--notify-stack-accent" as string]:
+                  msgBanner.accentColor || "#34c759",
+              } as CSSProperties)
+            : undefined
+        }
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          if (!opts.stacked || e.button !== 0) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          swipe.current = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startY: e.clientY,
+            dx: 0,
+            active: true,
+            moved: false,
+            dismissed: false,
+          };
+          bumpIslandActivity();
+        }}
+        onPointerMove={opts.stacked ? onIslandPointerMove : undefined}
+        onPointerUp={opts.stacked ? onIslandPointerUp : undefined}
+        onPointerCancel={opts.stacked ? onIslandPointerCancel : undefined}
+        onClick={(e) => {
+          e.stopPropagation();
+          const banner = msgBannerRef.current;
+          if (!banner) return;
+          if (banner.source === "plugin") {
+            const pluginId = banner.pluginId;
+            dismissMsgBanner();
+            if (pluginId) {
+              const runtime = pluginRegistry.get(pluginId);
+              const hasPanel =
+                !!runtime?.enabled &&
+                !!runtime.manifest.slots?.["island.panel"] &&
+                (runtime.manifest.capabilities ?? []).includes("island.panel");
+              if (hasPanel) void openPluginSession(pluginId);
+            }
+            return;
+          }
+          void (async () => {
+            try {
+              if (
+                banner.hwnd != null &&
+                banner.callbackMsg != null &&
+                banner.uid != null
+              ) {
+                await invoke("invoke_tray_icon", {
+                  id: banner.trayIconId,
+                  hwnd: banner.hwnd,
+                  callbackMsg: banner.callbackMsg,
+                  uid: banner.uid,
+                  version: banner.version ?? 0,
+                  action: "left",
+                });
+              }
+            } catch (err) {
+              console.error(err);
+            } finally {
+              try {
+                await invoke("clear_tray_attention", {
+                  id: banner.trayIconId,
+                  hwnd: banner.hwnd ?? 0,
+                  uid: banner.uid ?? 0,
+                });
+              } catch {
+                /* noop */
+              }
+              dismissMsgBanner();
+            }
+          })();
+        }}
+      >
+        <div className="bar-notify-slot is-start">
+          {(() => {
+            const act = actionsForSlot(msgBanner.actions, "start");
+            if (!act) return null;
+            return (
+              <button
+                type="button"
+                className="bar-notify-action"
+                style={{ background: act.background }}
+                {...hostTipPointerProps(act.label || act.id)}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void hideChromeHoverTip();
+                  fireNotifyAction(act);
+                }}
+              >
+                {act.iconPng ? (
+                  <img
+                    className="bar-notify-action-icon"
+                    src={`data:image/png;base64,${act.iconPng}`}
+                    alt=""
+                    draggable={false}
+                  />
+                ) : (
+                  act.label
+                )}
+              </button>
+            );
+          })()}
+        </div>
+        <div className="bar-notify-main">
+          {msgBanner.iconPng ? (
+            <img
+              className="bar-notify-icon"
+              src={`data:image/png;base64,${msgBanner.iconPng}`}
+              alt=""
+              draggable={false}
+            />
+          ) : (
+            <span className="bar-notify-fallback" aria-hidden>
+              {(msgBanner.title || "消").charAt(0).toUpperCase()}
+            </span>
+          )}
+          <span className="bar-notify-text">{msgBanner.text}</span>
+        </div>
+        <div className="bar-notify-slot is-end">
+          {(() => {
+            const act = actionsForSlot(msgBanner.actions, "end");
+            if (!act) return null;
+            return (
+              <button
+                type="button"
+                className="bar-notify-action"
+                style={{ background: act.background }}
+                {...hostTipPointerProps(act.label || act.id)}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void hideChromeHoverTip();
+                  fireNotifyAction(act);
+                }}
+              >
+                {act.iconPng ? (
+                  <img
+                    className="bar-notify-action-icon"
+                    src={`data:image/png;base64,${act.iconPng}`}
+                    alt=""
+                    draggable={false}
+                  />
+                ) : (
+                  act.label
+                )}
+              </button>
+            );
+          })()}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className={`shell${shellExpanded ? " is-expanded" : ""}`}
@@ -2381,7 +2967,7 @@ function App() {
         colorVariant="colorful"
         strength={0.7}
         borderRadius={Math.round(islandBottomRadius(size.width, size.height))}
-        active={USE_NOTIFY_BORDER_BEAM && !!msgBanner}
+        active={USE_NOTIFY_BORDER_BEAM && notifyInline}
         className="island-beam"
         style={
           {
@@ -2397,7 +2983,7 @@ function App() {
         }
       >
         <div
-          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${msgBanner ? " is-notifying" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar || dropTarget ? " has-staging" : ""}${resolveIslandBarAdaptive(barPluginId).enabled ? " has-adaptive-bar" : ""}`}
+          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${notifyInline ? " is-notifying" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar || dropTarget ? " has-staging" : ""}${resolveIslandBarAdaptive(barPluginId).enabled ? " has-adaptive-bar" : ""}`}
           role="button"
           tabIndex={0}
           aria-expanded={expanded}
@@ -2411,7 +2997,9 @@ function App() {
           data-chrome={
             dropTarget ? "dark" : immersed ? chromeCenter.scheme : "dark"
           }
-          data-notify-accent={msgBanner?.accentColor || undefined}
+          data-notify-accent={
+            notifyInline ? msgBanner?.accentColor || undefined : undefined
+          }
           onDragEnter={onIslandDragEnter}
           onDragOver={onIslandDragOver}
           onDragLeave={onIslandDragLeave}
@@ -2435,7 +3023,8 @@ function App() {
           onClick={() => {
             // 左滑划掉 / 明显滑动后忽略 click，避免误开应用
             if (swipe.current?.dismissed || swipe.current?.moved) return;
-            const banner = msgBannerRef.current;
+            // 冲突叠层通知不在主岛内，点主岛不处理横幅
+            const banner = notifyInline ? msgBannerRef.current : null;
             if (banner) {
               // 插件通知：点横幅 → 下拉该插件面板看详情；左右按钮走 actions（非托盘跳转）
               if (banner.source === "plugin") {
@@ -2516,11 +3105,11 @@ function App() {
                 clipPath="url(#wh-island-inner-clip)"
                 style={
                   {
-                    stroke: msgBanner
-                      ? msgBanner.accentColor || "#ff2d55"
+                    // 仅内联通知描主岛；冲突叠层时描边给下方胶囊
+                    stroke: notifyInline
+                      ? msgBanner?.accentColor || "#ff2d55"
                       : "transparent",
-                    // 中心线落在轮廓上，clip 后只留内侧 ≈ 1px
-                    strokeWidth: msgBanner ? 2 : 0,
+                    strokeWidth: notifyInline ? 2 : 0,
                   } as CSSProperties
                 }
               />
@@ -2531,8 +3120,12 @@ function App() {
             ref={islandUiRef}
             className="island-ui"
           >
-            <div className={`island-bar${msgBanner ? " is-notifying" : ""}`}>
-              <div className={`bar-weather${msgBanner ? " is-exiting" : ""}`}>
+            <div
+              className={`island-bar${notifyInline ? " is-notifying" : ""}${
+                searchActive && !searchLeaving ? " is-searching" : ""
+              }${searchLeaving ? " is-search-leaving" : ""}`}
+            >
+              <div className={`bar-weather${weatherBarExiting ? " is-exiting" : ""}`}>
                 {barText ? (
                   <div
                     className={`bar-staging${dropTarget ? " is-drop-hint" : ""}`}
@@ -2542,7 +3135,7 @@ function App() {
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (dropTarget) return;
+                      if (dropTarget || showSearchChrome) return;
                       void hideChromeHoverTip();
                       const pid = barPluginId;
                       if (!pid) return;
@@ -2557,7 +3150,7 @@ function App() {
                       if (e.key !== "Enter" && e.key !== " ") return;
                       e.preventDefault();
                       e.stopPropagation();
-                      if (dropTarget) return;
+                      if (dropTarget || showSearchChrome) return;
                       void hideChromeHoverTip();
                       const pid = barPluginId;
                       if (!pid) return;
@@ -2576,87 +3169,71 @@ function App() {
                   </div>
                 ) : null}
               </div>
-              {msgBanner ? (
-                <div className="bar-notify" key={msgBanner.key} ref={notifyRef}>
-                  <div className="bar-notify-slot is-start">
-                    {(() => {
-                      const act = actionsForSlot(msgBanner.actions, "start");
-                      if (!act) return null;
-                      return (
-                        <button
-                          type="button"
-                          className="bar-notify-action"
-                          style={{ background: act.background }}
-                          {...hostTipPointerProps(act.label || act.id)}
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void hideChromeHoverTip();
-                            fireNotifyAction(act);
-                          }}
-                        >
-                          {act.iconPng ? (
-                            <img
-                              className="bar-notify-action-icon"
-                              src={`data:image/png;base64,${act.iconPng}`}
-                              alt=""
-                              draggable={false}
-                            />
-                          ) : (
-                            act.label
-                          )}
-                        </button>
-                      );
-                    })()}
-                  </div>
-                  <div className="bar-notify-main">
-                    {msgBanner.iconPng ? (
-                      <img
-                        className="bar-notify-icon"
-                        src={`data:image/png;base64,${msgBanner.iconPng}`}
-                        alt=""
-                        draggable={false}
-                      />
-                    ) : (
-                      <span className="bar-notify-fallback" aria-hidden>
-                        {(msgBanner.title || "消").charAt(0).toUpperCase()}
-                      </span>
-                    )}
-                    <span className="bar-notify-text">{msgBanner.text}</span>
-                  </div>
-                  <div className="bar-notify-slot is-end">
-                    {(() => {
-                      const act = actionsForSlot(msgBanner.actions, "end");
-                      if (!act) return null;
-                      return (
-                        <button
-                          type="button"
-                          className="bar-notify-action"
-                          style={{ background: act.background }}
-                          {...hostTipPointerProps(act.label || act.id)}
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void hideChromeHoverTip();
-                            fireNotifyAction(act);
-                          }}
-                        >
-                          {act.iconPng ? (
-                            <img
-                              className="bar-notify-action-icon"
-                              src={`data:image/png;base64,${act.iconPng}`}
-                              alt=""
-                              draggable={false}
-                            />
-                          ) : (
-                            act.label
-                          )}
-                        </button>
-                      );
-                    })()}
-                  </div>
+              {showSearchChrome ? (
+                <div
+                  className={`bar-search${searchLeaving ? " is-exiting" : ""}`}
+                  key="island-search"
+                >
+                  <svg
+                    className="bar-search-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden
+                  >
+                    <circle
+                      cx="10.5"
+                      cy="10.5"
+                      r="6.25"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                    />
+                    <path
+                      d="M15.2 15.2L20 20"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                  <input
+                    ref={searchInputRef}
+                    className="bar-search-input"
+                    type="search"
+                    enterKeyHint="search"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="全局搜索，一搜全有"
+                    value={searchDraft}
+                    onChange={(e) => setSearchDraft(e.target.value)}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        submitIslandSearch();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        if (expandedRef.current) {
+                          retainSearchModeRef.current = false;
+                          void collapse();
+                        } else void toggleIslandSearchMode();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="bar-search-btn"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      submitIslandSearch();
+                    }}
+                  >
+                    搜索
+                  </button>
                 </div>
               ) : null}
+              {notifyInline ? renderNotifyBanner({ stacked: false }) : null}
             </div>
 
             <div
@@ -2668,6 +3245,7 @@ function App() {
                 <IslandPanelHost
                   pullContent={effectivePullContent}
                   active={panelActive}
+                  searchSubmit={searchSubmit}
                   onPanelClose={() => {
                     if (expandedRef.current) void collapse();
                   }}
@@ -2677,6 +3255,19 @@ function App() {
           </div>
         </div>
       </BorderBeam>
+      {notifyStacked ? (
+        <div
+          className="island-notify-stack"
+          style={
+            {
+              top: size.height + NOTIFY_STACK_GAP,
+              ["--notify-stack-max-w" as string]: `${Math.max(160, Math.min(size.width, 420))}px`,
+            } as CSSProperties
+          }
+        >
+          {renderNotifyBanner({ stacked: true })}
+        </div>
+      ) : null}
     </div>
   );
 }

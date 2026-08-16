@@ -385,9 +385,12 @@ unsafe extern "system" fn dock_nc_subclass_proc(
     _id: usize,
     _data: usize,
 ) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_MOUSEACTIVATE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT, HTCLIENT,
-        MA_NOACTIVATE,
+        GetClientRect, WM_MOUSEACTIVATE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT,
+        HTCLIENT, HTTRANSPARENT, MA_NOACTIVATE,
     };
     if msg == WM_NCCALCSIZE && wparam.0 != 0 {
         return windows::Win32::Foundation::LRESULT(0);
@@ -400,6 +403,32 @@ unsafe extern "system" fn dock_nc_subclass_proc(
         return windows::Win32::Foundation::LRESULT(1);
     }
     if msg == WM_NCHITTEST {
+        // Fan / width tween: full client hittable so magnified icons stay clickable.
+        if crate::dock::dock_hover_expanded() || crate::win32::dock_comp::width_tween_active() {
+            return windows::Win32::Foundation::LRESULT(HTCLIENT as isize);
+        }
+        // Rest: empty headroom above chrome passes through; chrome strip stays solid.
+        let mut pt = POINT {
+            x: (lparam.0 as u32 & 0xFFFF) as i16 as i32,
+            y: ((lparam.0 as u32 >> 16) & 0xFFFF) as i16 as i32,
+        };
+        if ScreenToClient(hwnd, &mut pt).as_bool() {
+            let mut rc = RECT::default();
+            if GetClientRect(hwnd, &mut rc).is_ok() {
+                let h = (rc.bottom - rc.top).max(1);
+                let dpi = GetDpiForWindow(hwnd);
+                let scale = if dpi > 0 {
+                    dpi as f64 / 96.0
+                } else {
+                    1.0
+                };
+                let glass_h = (crate::dock::DOCK_H * scale).round().max(1.0) as i32;
+                let chrome_top = (h - glass_h).max(0);
+                if pt.y < chrome_top {
+                    return windows::Win32::Foundation::LRESULT(HTTRANSPARENT as isize);
+                }
+            }
+        }
         return windows::Win32::Foundation::LRESULT(HTCLIENT as isize);
     }
     if msg == WM_MOUSEACTIVATE {
@@ -426,6 +455,16 @@ fn dock_root_for_strip(hwnd: HWND) -> HWND {
 /// Drop caption chrome + keep a comctl subclass first in the chain so Win11
 /// cannot paint a light title-bar strip into dock headroom.
 pub fn strip_dock_native_titlebar(hwnd: HWND) {
+    strip_dock_native_titlebar_inner(hwnd, true);
+}
+
+/// Quiet path for focus / context-menu: only FRAMECHANGED when styles actually
+/// change. Blind redraw was flashing a light “window form” above the glass.
+pub fn ensure_dock_titlebar_stripped(hwnd: HWND) {
+    strip_dock_native_titlebar_inner(hwnd, false);
+}
+
+fn strip_dock_native_titlebar_inner(hwnd: HWND, force_frame: bool) {
     use windows::Win32::Graphics::Gdi::{RedrawWindow, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
@@ -444,12 +483,14 @@ pub fn strip_dock_native_titlebar(hwnd: HWND) {
             | WS_BORDER.0;
         // Force popup frame — overlapped styles reintroduce a Win11 caption band.
         let new_style = (style & !kill) | WS_POPUP.0;
-        if new_style != style {
+        let style_changed = new_style != style;
+        if style_changed {
             SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
         }
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         let new_ex = (ex | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) & !WS_EX_APPWINDOW.0;
-        if new_ex != ex {
+        let ex_changed = new_ex != ex;
+        if ex_changed {
             SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex as i32);
         }
         // Remove+re-add so we stay the *newest* subclass after WebView2/Tao hooks.
@@ -463,21 +504,6 @@ pub fn strip_dock_native_titlebar(hwnd: HWND) {
             DWMWA_NCRENDERING_POLICY,
             &policy as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
-        );
-        let _ = SetWindowPos(
-            hwnd,
-            HWND::default(),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-        let _ = RedrawWindow(
-            hwnd,
-            None,
-            None,
-            RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW,
         );
         let none = DWMWA_COLOR_NONE;
         let _ = DwmSetWindowAttribute(
@@ -505,6 +531,24 @@ pub fn strip_dock_native_titlebar(hwnd: HWND) {
             &thickness as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
         );
+        // FRAMECHANGED + sync redraw is what flashes the light strip on right-click.
+        if force_frame || style_changed || ex_changed {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND::default(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            let _ = RedrawWindow(
+                hwnd,
+                None,
+                None,
+                RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW,
+            );
+        }
     }
 }
 
@@ -513,14 +557,27 @@ pub fn strip_dock_native_titlebar_raw(hwnd_raw: isize) {
     strip_dock_native_titlebar(HWND(hwnd_raw as _));
 }
 
+pub fn ensure_dock_titlebar_stripped_raw(hwnd_raw: isize) {
+    ensure_dock_titlebar_stripped(HWND(hwnd_raw as _));
+}
+
 /// WebView2 often re-subclasses after first show — re-strip on a short schedule
 /// so the light caption bar never sticks until the user clicks a few times.
 pub fn schedule_dock_titlebar_strip(hwnd_raw: isize) {
     strip_dock_native_titlebar_raw(hwnd_raw);
     std::thread::spawn(move || {
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
         for ms in [16_u64, 50, 120, 300, 700, 1500] {
             std::thread::sleep(std::time::Duration::from_millis(ms));
-            strip_dock_native_titlebar_raw(hwnd_raw);
+            let hwnd = dock_root_for_strip(HWND(hwnd_raw as _));
+            // Don't poke a tucked AutoHide dock — FRAMECHANGED can flash a strip.
+            unsafe {
+                if !IsWindowVisible(hwnd).as_bool() {
+                    continue;
+                }
+            }
+            // Delayed passes stay quiet unless styles drifted back.
+            ensure_dock_titlebar_stripped_raw(hwnd_raw);
         }
     });
 }
@@ -533,7 +590,8 @@ pub fn strip_dock_windows(app: &tauri::AppHandle) {
             let _ = w.set_decorations(false);
             let _ = w.set_title("");
             if let Ok(hwnd) = w.hwnd() {
-                schedule_dock_titlebar_strip(hwnd.0 as isize);
+                // Quiet: right-click menu must not flash caption into headroom.
+                ensure_dock_titlebar_stripped_raw(hwnd.0 as isize);
             }
         }
     }

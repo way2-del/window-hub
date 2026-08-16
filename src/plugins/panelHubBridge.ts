@@ -37,6 +37,10 @@ const ALLOWED_CMDS = new Set([
   "hub_media_send_key",
   "hub_notify",
   "hub_fetch",
+  "hub_everything_status",
+  "hub_everything_search",
+  "hub_everything_open",
+  "hub_everything_reveal",
 ]);
 
 export function isAllowedPanelHubCmd(cmd: string): boolean {
@@ -147,6 +151,21 @@ export function panelHubBootstrapScript(pluginId: string): string {
         return invoke("hub_media_send_key", withPlugin({ action: action }));
       }
     },
+    everything: {
+      status: function () { return invoke("hub_everything_status", withPlugin()); },
+      search: function (query, opts) {
+        return invoke("hub_everything_search", withPlugin({
+          query: query || "",
+          opts: opts || null
+        }));
+      },
+      open: function (path) {
+        return invoke("hub_everything_open", withPlugin({ path: path || "" }));
+      },
+      reveal: function (path) {
+        return invoke("hub_everything_reveal", withPlugin({ path: path || "" }));
+      }
+    },
     panel: {
       close: function () {
         window.parent.postMessage({ channel: "${WH_PANEL_HUB}", cmd: "panel.close", args: {} }, "*");
@@ -192,6 +211,14 @@ export function panelHubBootstrapScript(pluginId: string): string {
     for (var i = 0; i < list.length; i++) {
       try { list[i](); } catch (_) {}
     }
+  });
+  window.addEventListener("message", function (ev) {
+    var d = ev && ev.data;
+    if (!d || d.channel !== "island-search-fwd") return;
+    if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+    try {
+      window.dispatchEvent(new CustomEvent("wh-island-search", { detail: d }));
+    } catch (_) {}
   });
   var notifyFn = function (opts) {
     return invoke("hub_notify", withPlugin({

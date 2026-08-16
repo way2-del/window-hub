@@ -23,6 +23,7 @@ import type { PluginCapability, PluginSettingField } from "./plugins/types";
 import { subscribeSystemDark, syncGlassCss } from "./glassPrefs";
 import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginsMarketPanel from "./PluginsMarketPanel";
+import PrefSelect from "./components/PrefSelect";
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
@@ -69,6 +70,29 @@ type DockPrefs = {
   /** Overflow-hidden pin ids (restore via dock right-click). */
   hiddenItemIds: string[];
 };
+
+type AutostartBackend = "service" | "task" | "none";
+
+type GeneralPrefs = {
+  startOnBoot: boolean;
+  startOnBootBackend: AutostartBackend;
+  /** Optional toast after one-shot UAC for service install/uninstall. */
+  notice?: string | null;
+};
+
+const AUTOSTART_OPTIONS: { id: AutostartBackend; label: string; desc: string }[] = [
+  { id: "none", label: "关闭", desc: "不开机自启；会清除服务与计划任务残留" },
+  {
+    id: "task",
+    label: "计划任务（推荐）",
+    desc: "登录时启动，无需管理员；稳定且不影响从资源管理器拖放文件",
+  },
+  {
+    id: "service",
+    label: "系统服务",
+    desc: "安装/卸载时临时请求管理员（会提示并弹 UAC）；日常以普通权限运行",
+  },
+];
 
 const DOCK_MODES: { id: DockDisplayMode; label: string; desc: string }[] = [
   { id: "default", label: "默认显示模式", desc: "常驻贴底；全屏游戏时隐藏" },
@@ -384,6 +408,26 @@ export default function SettingsApp() {
   const [dockPrefs, setDockPrefs] = useState<DockPrefs>(() => normalizeDockPrefs(null));
   const [dockMsg, setDockMsg] = useState("");
   const [dockBusy, setDockBusy] = useState(false);
+  const [generalPrefs, setGeneralPrefs] = useState<GeneralPrefs>({
+    startOnBoot: false,
+    startOnBootBackend: "none",
+  });
+
+  const normalizeGeneralPrefs = (gp: Partial<GeneralPrefs> & { startOnBoot?: boolean }): GeneralPrefs => {
+    const backend: AutostartBackend =
+      gp.startOnBootBackend === "service" || gp.startOnBootBackend === "task" || gp.startOnBootBackend === "none"
+        ? gp.startOnBootBackend
+        : gp.startOnBoot
+          ? "task"
+          : "none";
+    return {
+      startOnBoot: backend !== "none",
+      startOnBootBackend: backend,
+      notice: typeof gp.notice === "string" ? gp.notice : null,
+    };
+  };
+  const [generalMsg, setGeneralMsg] = useState("");
+  const [generalBusy, setGeneralBusy] = useState(false);
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
   /** scenario pluginId → whether openTrayKey is bound (plugin settings). */
   const [scenarioOpenBound, setScenarioOpenBound] = useState<Record<string, boolean>>({});
@@ -532,6 +576,30 @@ export default function SettingsApp() {
     }
   };
 
+  const persistGeneralPrefs = async (
+    patch: Partial<Pick<GeneralPrefs, "startOnBootBackend">>,
+  ) => {
+    const next = {
+      startOnBootBackend: patch.startOnBootBackend ?? generalPrefs.startOnBootBackend,
+      startOnBoot: (patch.startOnBootBackend ?? generalPrefs.startOnBootBackend) !== "none",
+      runAsAdmin: false,
+    };
+    setGeneralBusy(true);
+    setGeneralMsg("");
+    try {
+      const saved = normalizeGeneralPrefs(await invoke<GeneralPrefs>("set_general_prefs", { prefs: next }));
+      setGeneralPrefs(saved);
+      if (saved.notice) {
+        setGeneralMsg(saved.notice);
+      }
+    } catch (err) {
+      console.error(err);
+      setGeneralMsg(String(err));
+    } finally {
+      setGeneralBusy(false);
+    }
+  };
+
   const importDockIni = async () => {
     setDockBusy(true);
     setDockMsg("");
@@ -611,6 +679,12 @@ export default function SettingsApp() {
       try {
         const dp = await invoke<DockPrefs>("get_dock_prefs");
         setDockPrefs(normalizeDockPrefs(dp));
+      } catch {
+        /* noop */
+      }
+      try {
+        const gp = await invoke<GeneralPrefs>("get_general_prefs");
+        setGeneralPrefs(normalizeGeneralPrefs(gp));
       } catch {
         /* noop */
       }
@@ -1036,6 +1110,37 @@ export default function SettingsApp() {
         <div className="settings-main-body">
           {nav === "general" && (
             <>
+              <section className="settings-card">
+                <h2>启动</h2>
+                <p className="card-desc">
+                  推荐「计划任务」：无需管理员、登录即启。系统服务仅在安装/卸载时临时请求管理员（会先提示再弹
+                  UAC），日常界面始终普通权限运行。
+                </p>
+                <div className="pref-row" style={{ marginBottom: 12 }}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">开机自启</span>
+                    <span className="pref-row-desc">
+                      {AUTOSTART_OPTIONS.find((o) => o.id === generalPrefs.startOnBootBackend)
+                        ?.desc ?? ""}
+                    </span>
+                  </span>
+                  <PrefSelect
+                    ariaLabel="开机自启"
+                    disabled={generalBusy}
+                    value={generalPrefs.startOnBootBackend}
+                    options={AUTOSTART_OPTIONS.map((o) => ({
+                      value: o.id,
+                      label: o.label,
+                    }))}
+                    onChange={(next) =>
+                      void persistGeneralPrefs({
+                        startOnBootBackend: next as AutostartBackend,
+                      })
+                    }
+                  />
+                </div>
+                {generalMsg ? <p className="card-desc">{generalMsg}</p> : null}
+              </section>
               <section className="settings-card">
                 <h2>快捷区</h2>
                 <p className="card-desc">

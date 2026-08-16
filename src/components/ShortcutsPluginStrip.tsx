@@ -254,6 +254,14 @@ export default function ShortcutsPluginStrip({
               typeof d.args?.preferGroupId === "string" && d.args.preferGroupId
                 ? d.args.preferGroupId
                 : null;
+            const width =
+              typeof d.args?.width === "number" && Number.isFinite(d.args.width)
+                ? d.args.width
+                : null;
+            const height =
+              typeof d.args?.height === "number" && Number.isFinite(d.args.height)
+                ? d.args.height
+                : null;
             const open = await invoke<boolean>("is_plugin_popup_open").catch(() => false);
             const { x, y } = await popupAnchorFromEl(wrapRef.current);
             await invoke("open_plugin_popup", {
@@ -261,6 +269,8 @@ export default function ShortcutsPluginStrip({
               x,
               y,
               preferGroupId,
+              width,
+              height,
             });
             // If already open, Rust emits prefer-group; still call open for idempotent path.
             void open;

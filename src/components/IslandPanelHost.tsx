@@ -17,6 +17,8 @@ type Props = {
   /** 岛完全展开后为 true；收起一开始为 false。驱动 panel onEnter/onLeave */
   active: boolean;
   onPanelClose?: () => void;
+  /** Alt+Space 岛栏回车：把 query 转发给当前面板 iframe */
+  searchSubmit?: { nonce: number; query: string } | null;
 };
 
 function postPanelLifecycle(
@@ -34,7 +36,12 @@ function postPanelLifecycle(
   );
 }
 
-export default function IslandPanelHost({ pullContent, active, onPanelClose }: Props) {
+export default function IslandPanelHost({
+  pullContent,
+  active,
+  onPanelClose,
+  searchSubmit,
+}: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
@@ -250,6 +257,21 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
     });
     return () => un?.();
   }, [pluginId, enabled]);
+
+  useEffect(() => {
+    if (!pluginId || !enabled || !searchSubmit) return;
+    const frame = iframeRef.current?.contentWindow;
+    frame?.postMessage(
+      {
+        channel: "island-search-fwd",
+        pluginId,
+        action: "submit",
+        query: searchSubmit.query ?? "",
+        nonce: searchSubmit.nonce,
+      },
+      "*",
+    );
+  }, [pluginId, enabled, searchSubmit]);
 
   useEffect(() => {
     if (!pluginId || !srcdoc || !enabled) return;

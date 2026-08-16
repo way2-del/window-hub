@@ -12,16 +12,16 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use host::{
-    ambient_get, ambient_set, dock_get, dock_set, island_get, island_set, launchers_list,
-    launchers_replace_all, material_get, material_set, meta_get, meta_set, shortcuts_get,
-    shortcuts_set, tray_get, tray_set, IslandPrefsRow, LauncherRow,
+    ambient_get, ambient_set, dock_get, dock_set, general_get, general_set, island_get, island_set,
+    launchers_list, launchers_replace_all, material_get, material_set, meta_get, meta_set,
+    shortcuts_get, shortcuts_set, tray_get, tray_set, IslandPrefsRow, LauncherRow,
 };
 pub use migrate::migrate_legacy_files;
 
 /// Official weather plugin id (settings / storage live in `plugin_kv`).
 pub const WEATHER_PLUGIN_ID: &str = "com.window-hub.weather";
 
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 const PLUGIN_KEY_MAX_BYTES: usize = 512 * 1024;
 const PLUGIN_TOTAL_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SYSTEM_KEY_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -175,6 +175,21 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
+    if ver < 10 {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS prefs_general (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              data_json TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| e.to_string())?;
+    }
+
     // Additive host tables for installs already past schema bumps.
     conn.execute_batch(
         r#"
@@ -184,6 +199,11 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS prefs_dock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prefs_general (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL

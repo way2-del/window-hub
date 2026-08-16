@@ -3,6 +3,8 @@ mod companion_scripts;
 mod db;
 mod dock;
 mod ecs;
+#[cfg(windows)]
+mod everything;
 mod hub_fetch_guard;
 mod plugin_hub;
 mod plugin_install;
@@ -20,6 +22,30 @@ use crate::ecs::{spawn_ecs_thread, EcsHandle};
 use crate::plugin_hub::ShortcutsPinStore;
 use crate::win32::appbar;
 use crate::windows_service::WindowsService;
+
+/// Windows Service entry for `--autostart-svc` (no Tauri UI).
+#[cfg(windows)]
+pub fn run_autostart_service() {
+    crate::win32::autostart_svc::run_autostart_service();
+}
+
+/// One-shot elevated helper: install SCM autostart then exit.
+#[cfg(windows)]
+pub fn install_autostart_service_once() -> Result<(), String> {
+    crate::win32::app_launch::install_service_elevated_helper()
+}
+
+/// One-shot elevated helper: uninstall SCM autostart then exit.
+#[cfg(windows)]
+pub fn uninstall_autostart_service_once() -> Result<(), String> {
+    crate::win32::app_launch::uninstall_service_elevated_helper()
+}
+
+/// Block duplicate GUI launches (MessageBox + exit). No-op for the service entry.
+#[cfg(windows)]
+pub fn ensure_single_instance() {
+    crate::win32::single_instance::ensure_single_instance_or_exit();
+}
 
 /// 因全屏游戏隐藏顶栏时为 true；watchdog 期间勿重挂 AppBar / 几何。
 static HIDDEN_FOR_FULLSCREEN: AtomicBool = AtomicBool::new(false);
@@ -224,6 +250,8 @@ pub fn run() {
                 e
             })?;
             app.manage(db);
+            // Drop legacy AppCompat RUNASADMIN so the GUI never stays elevated.
+            let _ = crate::win32::app_launch::clear_legacy_admin_flag();
             let handle = spawn_ecs_thread(app.handle().clone());
             app.manage(handle);
             app.manage(initial_material_state());
@@ -254,6 +282,8 @@ pub fn run() {
             spawn_wifi_watcher(app.handle().clone());
             crate::companion_scripts::start_hub_associated_launchers();
             crate::dock::bootstrap_dock(app.handle());
+            #[cfg(windows)]
+            crate::win32::island_search_hotkey::spawn_island_search_hotkey(app.handle().clone());
 
             Ok(())
         })
@@ -274,7 +304,9 @@ pub fn run() {
                     if *focused && (window.label() == "dock" || window.label() == "dock-glass") {
                         #[cfg(windows)]
                         if let Ok(hwnd) = window.hwnd() {
-                            crate::win32::blur_glass::schedule_dock_titlebar_strip(
+                            // Quiet ensure — schedule+FRAMECHANGED on every click flashes
+                            // a light caption strip into magnification headroom.
+                            crate::win32::blur_glass::ensure_dock_titlebar_stripped_raw(
                                 hwnd.0 as isize,
                             );
                         }
@@ -399,6 +431,10 @@ pub fn run() {
             plugin_hub::hub_shortcuts_list_pins,
             plugin_hub::hub_shortcuts_set_badge,
             plugin_hub::hub_plugin_read_text,
+            plugin_hub::hub_everything_status,
+            plugin_hub::hub_everything_search,
+            plugin_hub::hub_everything_open,
+            plugin_hub::hub_everything_reveal,
             plugin_install::list_installed_plugins,
             plugin_install::pick_whpx_file,
             plugin_install::pick_plugin_directory,
@@ -497,6 +533,9 @@ pub fn run() {
             commands::show_desktop,
             commands::restart_app,
             commands::exit_app,
+            win32::app_launch::get_general_prefs,
+            win32::app_launch::set_general_prefs,
+            win32::app_launch::relaunch_app,
             commands::hub_staging_list,
             commands::hub_staging_summary,
             commands::hub_staging_add_text,

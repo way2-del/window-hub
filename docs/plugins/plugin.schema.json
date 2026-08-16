@@ -233,7 +233,8 @@
           "clipboard.read",
           "clipboard.write",
           "network",
-          "staging"
+          "staging",
+          "everything.search"
         ]
       },
       "uniqueItems": true
@@ -276,7 +277,7 @@
         "h": {
           "type": "number",
           "minimum": 1,
-          "maximum": 220
+          "maximum": 320
         }
       }
     },

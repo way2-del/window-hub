@@ -1,0 +1,52 @@
+---
+description: >-
+  Window Hub 系统 UI 主题色规范 — 岛栏/设置/WLAN/输入法/托盘弹窗等 Host 自绘界面
+  统一使用输入法同款绿色强调色（--sys-accent），禁止再用系统蓝。
+globs: src/**/*.{css,tsx,ts}
+alwaysApply: false
+---
+
+# 系统 UI 主题色（绿色强调）
+
+Host **系统界面**（非第三方插件内容）的交互强调色统一为输入法标记同款绿色，与 macOS / 设置开关语义一致。
+
+## Token（`App.css` / `settings.css` `:root`）
+
+| Token | 值 | 用途 |
+|-------|-----|------|
+| `--sys-accent` | `#34c759` | 主强调：开关开态、选中、主按钮、连接态图标 |
+| `--sys-accent-soft` | `#3dd68c` | 徽章 / IME 方块 / 岛栏圆点 |
+| `--sys-accent-press` | `#30d158` | 按下 / 浅色主题主强调 |
+| `--sys-accent-fg-on` | `#0f1115` | 绿底上的文字/图标 |
+| `--sys-accent-muted` | `rgba(52,199,89,0.16)` | 选中行浅底 |
+| `--sys-accent-border` | `rgba(52,199,89,0.55)` | 聚焦描边（如下拉打开） |
+| `--sys-accent-glow` | `rgba(61,214,140,0.85)` | 轻微光晕 |
+
+组件局部可用别名，但必须指向 token，例如：
+
+```css
+.wifi-popup-shell {
+  --wifi-accent: var(--sys-accent);
+}
+```
+
+## 适用范围（必须用绿色）
+
+- 灵动岛 Host chrome、状态菜单、托盘弹窗
+- **WLAN** / Wi‑Fi 认证对话框（开关、已连接图标、焦点、主按钮）
+- **输入法 / 语言**弹出与岛栏 IME 方块
+- 设置页开关开态、下拉选中/聚焦、主操作按钮强调
+- `GlobalDialog` 主按钮、系统级勾选 `accent-color`
+
+## 禁止
+
+- 在系统 UI 新写 `#0a84ff` / `#007aff` 等 **iOS 系统蓝** 作为强调色
+- 为 WLAN 单独保留蓝色主题
+- 把插件 iframe 内业务品牌色强行改成绿色（插件可用自有色；Host chrome 仍跟 `--sys-accent`）
+
+## 实现检查
+
+- [ ] 新控件开态 / 选中 / focus 使用 `var(--sys-accent*)`，无硬编码蓝
+- [ ] 绿底文字对比度用 `--sys-accent-fg-on`
+- [ ] 深浅主题都验证：浅色可用 `--sys-accent-press`
+- [ ] 改强调色时同步 `App.css` 与 `settings.css` 的 `:root` token

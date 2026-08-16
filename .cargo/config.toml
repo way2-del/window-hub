@@ -1,0 +1,4 @@
+﻿# Faster MSVC linking (rust-lld from: rustup component add llvm-tools).
+# Stuck at N-2/N is usually link.exe — rust-lld is typically much faster.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

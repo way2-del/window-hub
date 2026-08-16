@@ -64,7 +64,7 @@ description: >-
 | 列表行内边距 | ≈ 9–10px |
 | 表单控件圆角 | 6–8px |
 
-窗口尺寸默认 Host **320×480**（`PLUGIN_POPUP_W/H`）；内容按窄宽布局，勿假定更大。
+窗口尺寸默认 Host **320×480**（`PLUGIN_POPUP_W/H`）；插件可用 `settings.popupWidth` / `popupHeight` 或 `hub.popup.open({ width, height })` 自定义（clamp 见 host-api）。内容按窗宽布局，勿假定固定像素。
 
 ## 自检
 

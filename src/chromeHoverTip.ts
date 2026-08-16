@@ -191,8 +191,6 @@ const DOCK_TIP_SETTLE_MS = 420;
 const DOCK_TIP_HIDE_GRACE_MS = 120;
 
 let dockTipEl: HTMLElement | null = null;
-let dockTipText = "";
-let dockTipGap = 8;
 let dockTipShowTimer: ReturnType<typeof setTimeout> | null = null;
 let dockTipHideTimer: ReturnType<typeof setTimeout> | null = null;
 let dockTipVisibleFor: HTMLElement | null = null;
@@ -236,8 +234,6 @@ function scheduleDockTipShow(el: HTMLElement, text: string, gap: number) {
   clearDockTipHideTimer();
   clearDockTipShowTimer();
   dockTipEl = el;
-  dockTipText = text;
-  dockTipGap = gap;
 
   // Switching icons: keep tip hidden until settle completes — do not hide/show
   // on every enter (that was the flash when skimming the bar).
@@ -256,7 +252,6 @@ function scheduleDockTipShow(el: HTMLElement, text: string, gap: number) {
 function scheduleDockTipHide() {
   clearDockTipShowTimer();
   dockTipEl = null;
-  dockTipText = "";
   clearDockTipHideTimer();
   dockTipHideTimer = setTimeout(() => {
     dockTipHideTimer = null;

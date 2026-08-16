@@ -1,6 +1,11 @@
 //! Win32 helpers for window enumeration, parking, capture, and input.
 
 pub mod ambient;
+pub mod app_launch;
+#[cfg(windows)]
+pub mod autostart_svc;
+#[cfg(windows)]
+pub mod single_instance;
 pub mod appbar;
 #[cfg(windows)]
 pub mod blur_glass;
@@ -26,3 +31,5 @@ pub mod tray_registry;
 pub mod tray_uia;
 pub mod input_lang;
 pub mod wifi;
+#[cfg(windows)]
+pub mod island_search_hotkey;

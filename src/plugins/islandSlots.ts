@@ -31,6 +31,31 @@ export function resolveIslandDropPluginId(): string | null {
   return listIslandDropPlugins()[0]?.pluginId ?? null;
 }
 
+/** Enabled Everything 搜索情景：everything.search + island.scenario + panel + bar. */
+export function resolveIslandSearchPluginId(): string | null {
+  const FALLBACK = "com.window-hub.file-search";
+  const list = pluginRegistry.listAll().filter(
+    (p) =>
+      p.enabled &&
+      (p.manifest.capabilities ?? []).includes("everything.search") &&
+      (p.manifest.capabilities ?? []).includes("island.panel") &&
+      (p.manifest.capabilities ?? []).includes("island.bar") &&
+      Boolean(p.manifest.slots?.["island.scenario"]) &&
+      Boolean(p.manifest.slots?.["island.panel"]) &&
+      Boolean(p.manifest.slots?.["island.bar"]),
+  );
+  list.sort((a, b) => {
+    const ao = a.manifest.slots?.["island.scenario"]?.order ?? 100;
+    const bo = b.manifest.slots?.["island.scenario"]?.order ?? 100;
+    return ao - bo;
+  });
+  if (list[0]?.pluginId) return list[0].pluginId;
+  // 官方 id 兜底：即使 slots 尚未升级也能先亮搜索栏
+  const fb = pluginRegistry.get(FALLBACK);
+  if (fb?.enabled) return FALLBACK;
+  return null;
+}
+
 export function listIslandBarPlugins() {
   return pluginRegistry
     .listAll()

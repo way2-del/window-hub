@@ -56,7 +56,7 @@ function WifiIcon({
   accent?: boolean;
 }) {
   const level = signalLevel(signal);
-  const color = accent ? "var(--wifi-accent, #0a84ff)" : "currentColor";
+  const color = accent ? "var(--wifi-accent, var(--sys-accent, #34c759))" : "currentColor";
   const tip = level >= 1 || accent ? 1 : 0.22;
   const mid = level >= 2 ? 1 : 0.22;
   const outer = level >= 3 ? 1 : 0.22;

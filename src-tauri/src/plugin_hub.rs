@@ -614,6 +614,78 @@ pub fn hub_plugin_read_text(plugin_id: String, relative_path: String) -> Result<
     fs::read_to_string(&canon_file).map_err(|e| format!("read asset: {e}"))
 }
 
+const EVERYTHING_CAP: &str = "everything.search";
+
+#[tauri::command]
+pub fn hub_everything_status(plugin_id: String) -> Result<Value, String> {
+    assert_capability(&plugin_id, EVERYTHING_CAP)?;
+    #[cfg(windows)]
+    {
+        return Ok(serde_json::to_value(crate::everything::status()).unwrap_or(Value::Null));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = plugin_id;
+        Ok(serde_json::json!({
+            "available": false,
+            "running": false,
+            "dbLoaded": false,
+            "error": "Everything SDK is Windows-only"
+        }))
+    }
+}
+
+#[tauri::command]
+pub fn hub_everything_search(
+    plugin_id: String,
+    query: String,
+    opts: Option<Value>,
+) -> Result<Value, String> {
+    assert_capability(&plugin_id, EVERYTHING_CAP)?;
+    #[cfg(windows)]
+    {
+        let parsed: Option<crate::everything::EverythingSearchOpts> = match opts {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(serde_json::from_value(v).map_err(|e| e.to_string())?),
+        };
+        let result = crate::everything::search(&query, parsed)?;
+        Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (plugin_id, query, opts);
+        Err("Everything SDK is Windows-only".into())
+    }
+}
+
+#[tauri::command]
+pub fn hub_everything_open(plugin_id: String, path: String) -> Result<(), String> {
+    assert_capability(&plugin_id, EVERYTHING_CAP)?;
+    #[cfg(windows)]
+    {
+        crate::everything::open_path(&path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (plugin_id, path);
+        Err("Everything SDK is Windows-only".into())
+    }
+}
+
+#[tauri::command]
+pub fn hub_everything_reveal(plugin_id: String, path: String) -> Result<(), String> {
+    assert_capability(&plugin_id, EVERYTHING_CAP)?;
+    #[cfg(windows)]
+    {
+        crate::everything::reveal_path(&path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (plugin_id, path);
+        Err("Everything SDK is Windows-only".into())
+    }
+}
+
 /// Build `window.hub` injection for plugin popups (trusted pluginId).
 pub fn hub_init_script(plugin_id: &str) -> String {
     format!(
@@ -750,6 +822,13 @@ pub fn hub_init_script(plugin_id: &str) -> String {
     media: {{
       sendKey: (action) =>
         invoke("hub_media_send_key", withPlugin({{ action: action }})),
+    }},
+    everything: {{
+      status: () => invoke("hub_everything_status", withPlugin()),
+      search: (query, opts) =>
+        invoke("hub_everything_search", withPlugin({{ query: query || "", opts: opts || null }})),
+      open: (path) => invoke("hub_everything_open", withPlugin({{ path: path || "" }})),
+      reveal: (path) => invoke("hub_everything_reveal", withPlugin({{ path: path || "" }})),
     }},
     panel: {{
       close: () => invoke("close_plugin_popup"),

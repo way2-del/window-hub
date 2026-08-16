@@ -24,6 +24,10 @@ const ALLOWED_CMDS = new Set([
   "hub_media_send_key",
   "hub_island_set_bar",
   "hub_island_clear_bar",
+  "hub_everything_status",
+  "hub_everything_search",
+  "hub_everything_open",
+  "hub_everything_reveal",
 ]);
 
 export function isAllowedShortcutsHubCmd(cmd: string): boolean {
@@ -176,6 +180,21 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
     media: {
       sendKey: function (action) {
         return invoke("hub_media_send_key", withPlugin({ action: action }));
+      }
+    },
+    everything: {
+      status: function () { return invoke("hub_everything_status", withPlugin()); },
+      search: function (query, opts) {
+        return invoke("hub_everything_search", withPlugin({
+          query: query || "",
+          opts: opts || null
+        }));
+      },
+      open: function (path) {
+        return invoke("hub_everything_open", withPlugin({ path: path || "" }));
+      },
+      reveal: function (path) {
+        return invoke("hub_everything_reveal", withPlugin({ path: path || "" }));
       }
     },
     foreground: {

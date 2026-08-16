@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import type { PluginSettingField } from "../plugins/types";
 import { OPEN_TRAY_SETTING_KEY } from "../scenarioGates";
 import OpenTraySetting from "./OpenTraySetting";
+import PluginOffsetNumberField from "./PluginOffsetNumberField";
+import PrefSelect from "./PrefSelect";
 
 type Props = {
   pluginId: string;
@@ -51,8 +53,9 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
     return () => un?.();
   }, [pluginId]);
 
-  const setField = async (key: string, value: unknown) => {
-    setBusy(true);
+  const setField = async (key: string, value: unknown, opts?: { quiet?: boolean }) => {
+    const quiet = Boolean(opts?.quiet);
+    if (!quiet) setBusy(true);
     setError(null);
     try {
       const next = await invoke<Record<string, unknown>>("hub_settings_set", {
@@ -64,7 +67,7 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
     } catch (err) {
       setError(String(err));
     } finally {
-      setBusy(false);
+      if (!quiet) setBusy(false);
     }
   };
 
@@ -114,29 +117,25 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
         }
         if (field.type === "select") {
           return (
-            <label key={field.key} className="pref-row">
+            <div key={field.key} className="pref-row">
               <span className="pref-row-text">
                 <span className="pref-row-label">{field.label}</span>
                 {desc ? <span className="pref-row-desc">{desc}</span> : null}
               </span>
-              <select
-                className="pref-select"
+              <PrefSelect
+                ariaLabel={field.label}
                 disabled={busy}
                 value={optionKey(value)}
-                onChange={(e) => {
-                  const opt = (field.options ?? []).find(
-                    (o) => optionKey(o.value) === e.target.value,
-                  );
+                options={(field.options ?? []).map((o) => ({
+                  value: optionKey(o.value),
+                  label: o.label,
+                }))}
+                onChange={(next) => {
+                  const opt = (field.options ?? []).find((o) => optionKey(o.value) === next);
                   if (opt) void setField(field.key, opt.value);
                 }}
-              >
-                {(field.options ?? []).map((o) => (
-                  <option key={optionKey(o.value)} value={optionKey(o.value)}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+              />
+            </div>
           );
         }
         if (field.type === "radio") {
@@ -196,6 +195,17 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
           );
         }
         if (field.type === "number") {
+          if (typeof field.min === "number" && typeof field.max === "number") {
+            return (
+              <PluginOffsetNumberField
+                key={field.key}
+                field={field}
+                value={value}
+                disabled={busy}
+                onCommit={(n) => void setField(field.key, n, { quiet: true })}
+              />
+            );
+          }
           return (
             <label key={field.key} className="pref-row">
               <span className="pref-row-text">

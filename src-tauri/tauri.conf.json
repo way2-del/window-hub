@@ -42,7 +42,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -52,12 +52,14 @@
     ],
     "resources": [
       "resources/window_hub_trayhook.dll",
+      "resources/Everything64.dll",
       "resources/plugins/window-groups",
       "resources/plugins/transfer-station",
       "resources/plugins/weather",
       "resources/plugins/mirror",
       "resources/plugins/app-library",
-      "resources/plugins/idiom"
+      "resources/plugins/idiom",
+      "resources/plugins/file-search"
     ]
   }
 }

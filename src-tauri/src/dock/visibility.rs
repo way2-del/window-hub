@@ -220,6 +220,17 @@ impl DockVisibility {
             u8::from(visible),
             u8::from(animate)
         );
+        if !visible {
+            super::set_hover_expanded_pub(false);
+            let _ = app.emit(
+                "dock-visibility",
+                &DockVisibilityState {
+                    visible: false,
+                    reason: if animate { "apply-anim" } else { "apply-snap" }.into(),
+                },
+            );
+            std::thread::sleep(Duration::from_millis(48));
+        }
         super::place_dock_window(app, &prefs, visible, animate);
         if let Ok(mut g) = self.inner.lock() {
             g.shown = visible;
@@ -233,13 +244,15 @@ impl DockVisibility {
             }
             g.last_reason = if animate { "apply-anim" } else { "apply-snap" }.into();
         }
-        let _ = app.emit(
-            "dock-visibility",
-            &DockVisibilityState {
-                visible,
-                reason: if animate { "apply-anim" } else { "apply-snap" }.into(),
-            },
-        );
+        if visible {
+            let _ = app.emit(
+                "dock-visibility",
+                &DockVisibilityState {
+                    visible,
+                    reason: if animate { "apply-anim" } else { "apply-snap" }.into(),
+                },
+            );
+        }
     }
 
     fn tick(self: &Arc<Self>, app: &AppHandle) {
@@ -372,6 +385,17 @@ impl DockVisibility {
                 why
             );
             let prefs = super::load_dock_prefs();
+            // Hide: notify FE to snap fan *before* the slide. This poll thread is not
+            // the UI thread, so WebView can commit rest scales during a short wait —
+            // otherwise magnified tiles paint through the tween and freeze mid-CSS
+            // when the HWND hides.
+            if !target {
+                super::set_hover_expanded_pub(false);
+                if let Some(ref state) = emit {
+                    let _ = app.emit("dock-visibility", state);
+                }
+                std::thread::sleep(Duration::from_millis(48));
+            }
             super::place_dock_window(app, &prefs, target, animate);
             if let Ok(mut g) = self.inner.lock() {
                 g.shown = target;
@@ -385,8 +409,11 @@ impl DockVisibility {
                     super::set_hover_expanded_pub(false);
                 }
             }
-            if let Some(state) = emit {
-                let _ = app.emit("dock-visibility", &state);
+            // Show: emit after place (settle). Hide already emitted above.
+            if target {
+                if let Some(state) = emit {
+                    let _ = app.emit("dock-visibility", &state);
+                }
             }
         }
     }
@@ -492,8 +519,9 @@ impl DockVisibility {
                 }
 
                 if shown {
-                    // Keep only while over the chrome strip — fan headroom above
-                    // the bar is transparent paint space and must not block hide.
+                    // Rest: chrome strip only (empty headroom must not block hide).
+                    // Hover-expanded: chrome + fan headroom — magnified icon hits
+                    // extend there; excluding them hid the dock while fan stayed on.
                     pointer_in_dock_chrome(app, &mi, scale, bottom_off, pt.x, pt.y)
                 } else {
                     // Hidden: thin bottom strip only.
@@ -609,9 +637,11 @@ fn point_on_activation_strip(
     x >= mi.rcMonitor.left && x < mi.rcMonitor.right
 }
 
-/// Dock keep area while shown: resting **content** chrome only, centered in
-/// the icons HWND. Never trust the glass HWND width — live resize bugs made it
-/// span almost the full monitor and AutoHide could not leave.
+/// Dock keep area while shown: resting **content** width, centered in the icons
+/// HWND. Height is chrome-only at rest; when hover-expanded (fan live), include
+/// magnification headroom so moving onto a peaked icon does not start AutoHide.
+/// Never trust the glass HWND width — live resize bugs made it span almost the
+/// full monitor and AutoHide could not leave.
 #[cfg(windows)]
 fn dock_chrome_keep_rect(
     app: &AppHandle,
@@ -619,29 +649,42 @@ fn dock_chrome_keep_rect(
     scale: f64,
     bottom_off: u32,
 ) -> (i32, i32, i32, i32) {
-    let chrome_h = (super::dock_chrome_height() * scale).round().max(1.0) as i32;
     let prefs = super::load_dock_prefs();
+    let expanded = super::dock_hover_expanded();
+    let chrome_h = (super::dock_chrome_height() * scale).round().max(1.0) as i32;
+    let keep_h = if expanded {
+        (super::dock_window_height(prefs.magnification) * scale)
+            .round()
+            .max(chrome_h as f64) as i32
+    } else {
+        chrome_h
+    };
     let layout = super::dock_layout_items(&prefs);
     let logical_keep = super::dock_window_width(
         &layout,
         prefs.corner_radius_px,
-        super::dock_hover_expanded(),
+        expanded,
     );
     let content_w = (logical_keep * scale).round().max(1.0) as i32;
 
-    if let Some((l, _t, r, b)) = dock_root_screen_rect(app).filter(|(_l, t, _r, _b)| {
+    if let Some((l, wt, r, b)) = dock_root_screen_rect(app).filter(|(_l, t, _r, _b)| {
         *t < mi.rcMonitor.bottom - 4
     }) {
         let win_w = r - l;
         let left = l + ((win_w - content_w) / 2).max(0);
-        let top = (b - chrome_h).max(mi.rcMonitor.top);
+        // Prefer live HWND top when expanded (exact headroom); else chrome strip.
+        let top = if expanded {
+            wt.max(mi.rcMonitor.top)
+        } else {
+            (b - keep_h).max(mi.rcMonitor.top)
+        };
         return (left, top, left + content_w, b);
     }
     if let Some((gl, _gt, gr, gb)) = dock_glass_screen_rect(app) {
         if gb > mi.rcMonitor.top + 4 {
             let mid = (gl + gr) / 2;
             let left = mid - content_w / 2;
-            let top = (gb - chrome_h).max(mi.rcMonitor.top);
+            let top = (gb - keep_h).max(mi.rcMonitor.top);
             return (left, top, left + content_w, gb);
         }
     }
@@ -650,7 +693,11 @@ fn dock_chrome_keep_rect(
         scale,
         bottom_off,
         logical_keep,
-        super::dock_chrome_height(),
+        if expanded {
+            super::dock_window_height(prefs.magnification)
+        } else {
+            super::dock_chrome_height()
+        },
     )
 }
 

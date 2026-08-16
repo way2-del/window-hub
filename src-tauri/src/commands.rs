@@ -554,6 +554,81 @@ pub fn is_status_menu_popup_open(app: AppHandle) -> bool {
 
 const PLUGIN_POPUP_W: f64 = 320.0;
 const PLUGIN_POPUP_H: f64 = 480.0;
+const PLUGIN_POPUP_W_MIN: f64 = 280.0;
+const PLUGIN_POPUP_W_MAX: f64 = 720.0;
+const PLUGIN_POPUP_H_MIN: f64 = 320.0;
+const PLUGIN_POPUP_H_MAX: f64 = 900.0;
+
+fn clamp_popup_size(w: f64, h: f64) -> (f64, f64) {
+    (
+        w.clamp(PLUGIN_POPUP_W_MIN, PLUGIN_POPUP_W_MAX),
+        h.clamp(PLUGIN_POPUP_H_MIN, PLUGIN_POPUP_H_MAX),
+    )
+}
+
+fn number_from_settings(v: &serde_json::Value, key: &str) -> Option<f64> {
+    let n = v.get(key)?;
+    if let Some(x) = n.as_f64() {
+        return Some(x);
+    }
+    if let Some(x) = n.as_i64() {
+        return Some(x as f64);
+    }
+    if let Some(s) = n.as_str() {
+        return s.parse().ok();
+    }
+    None
+}
+
+/// Resolve popup size: invoke args → plugin settings popupWidth/Height → defaults.
+fn resolve_plugin_popup_size(
+    plugin_id: &str,
+    width: Option<f64>,
+    height: Option<f64>,
+) -> (f64, f64) {
+    let mut w = width.filter(|x| x.is_finite() && *x > 0.0);
+    let mut h = height.filter(|x| x.is_finite() && *x > 0.0);
+    if w.is_none() || h.is_none() {
+        if let Ok(Some(raw)) =
+            crate::db::with_conn(|c| crate::db::plugin_get_system(c, plugin_id, "__settings"))
+        {
+            if w.is_none() {
+                w = number_from_settings(&raw, "popupWidth");
+            }
+            if h.is_none() {
+                h = number_from_settings(&raw, "popupHeight");
+            }
+        }
+        // Fill from manifest defaults when still missing
+        if w.is_none() || h.is_none() {
+            if let Some(rec) = crate::plugin_install::find_installed_plugin(plugin_id) {
+                if let Some(settings) = rec.manifest.get("settings").and_then(|s| s.as_array()) {
+                    for field in settings {
+                        let key = field.get("key").and_then(|k| k.as_str()).unwrap_or("");
+                        if w.is_none() && key == "popupWidth" {
+                            w = field.get("default").and_then(|d| {
+                                d.as_f64()
+                                    .or_else(|| d.as_i64().map(|i| i as f64))
+                                    .or_else(|| d.as_str().and_then(|s| s.parse().ok()))
+                            });
+                        }
+                        if h.is_none() && key == "popupHeight" {
+                            h = field.get("default").and_then(|d| {
+                                d.as_f64()
+                                    .or_else(|| d.as_i64().map(|i| i as f64))
+                                    .or_else(|| d.as_str().and_then(|s| s.parse().ok()))
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    clamp_popup_size(
+        w.unwrap_or(PLUGIN_POPUP_W),
+        h.unwrap_or(PLUGIN_POPUP_H),
+    )
+}
 
 fn popup_plugin_id_of(win: &WebviewWindow) -> Option<String> {
     let url = win.url().ok()?;
@@ -607,6 +682,8 @@ pub async fn open_plugin_popup(
     x: f64,
     y: f64,
     prefer_group_id: Option<String>,
+    width: Option<f64>,
+    height: Option<f64>,
 ) -> Result<(), String> {
     close_sibling_popups(&app, "plugin-popup");
 
@@ -616,6 +693,8 @@ pub async fn open_plugin_popup(
         return Err("plugin disabled".into());
     }
     crate::plugin_hub::assert_capability(&plugin_id, "popup")?;
+
+    let (popup_w, popup_h) = resolve_plugin_popup_size(&plugin_id, width, height);
 
     // Ensure popup entry exists (and asset scope for any future direct loads)
     let popup = plugin_popup_path(&record)?;
@@ -632,6 +711,7 @@ pub async fn open_plugin_popup(
             if let Some(gid) = prefer_group_id.as_ref().filter(|s| !s.is_empty()) {
                 let _ = app.emit("plugin-popup-prefer-group", gid);
             }
+            let _ = existing.set_size(LogicalSize::new(popup_w, popup_h));
             let _ = existing.set_position(LogicalPosition::new(x, y));
             let _ = existing.set_focus();
             let _ = app.emit("plugin-popup-opened", &plugin_id);
@@ -658,7 +738,7 @@ pub async fn open_plugin_popup(
                 .and_then(|v| v.as_str())
                 .unwrap_or("插件"),
         )
-        .inner_size(PLUGIN_POPUP_W, PLUGIN_POPUP_H)
+        .inner_size(popup_w, popup_h)
         .resizable(false)
         .maximizable(false)
         .minimizable(false)
@@ -1751,6 +1831,9 @@ pub fn show_desktop() -> Result<(), String> {
 
 #[tauri::command]
 pub fn restart_app(app: AppHandle) -> Result<(), String> {
+    // Allow SCM autostart to treat this as a normal handoff, not a user quit.
+    #[cfg(windows)]
+    crate::win32::autostart_svc::clear_user_quit();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
     if let Ok(cwd) = std::env::current_dir() {
@@ -1763,6 +1846,9 @@ pub fn restart_app(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn exit_app(app: AppHandle) {
+    // Stop WindowHubAutoStart from immediately relaunching the GUI.
+    #[cfg(windows)]
+    crate::win32::autostart_svc::signal_user_quit();
     app.exit(0);
 }
 

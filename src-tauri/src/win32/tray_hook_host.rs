@@ -68,6 +68,15 @@ pub fn resolve_dll_path() -> Option<PathBuf> {
     candidates.push(manifest.join("resources").join("window_hub_trayhook.dll"));
     for profile in ["debug", "release"] {
         candidates.push(manifest.join("target").join(profile).join("window_hub_trayhook.dll"));
+        // Preferred: trayhook artifacts live under package target/ (tauri-dev safe).
+        candidates.push(
+            manifest
+                .join("target")
+                .join("trayhook")
+                .join(profile)
+                .join("window_hub_trayhook.dll"),
+        );
+        // Legacy path (avoid using in new builds — triggers tauri watch loops).
         candidates.push(
             manifest
                 .join("trayhook")

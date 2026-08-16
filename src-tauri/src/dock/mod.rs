@@ -850,7 +850,9 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     let y = if shown {
         y_shown
     } else {
-        y_shown + phys_h + 4
+        // Fully below monitor (same rule as Win32 geom) — not y_shown+h which
+        // can remain on-screen when bottom_offset is large.
+        origin.y + screen.height as i32 + phys_h + 64
     };
     let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
     if let Some(g) = &glass {
@@ -1577,8 +1579,21 @@ fn win32_dock_geom(
         let want_bottom = rc.bottom - margin;
         let x = rc.left + ((rc.right - rc.left - w) / 2).max(0);
         let y_shown = want_bottom - h;
-        // Park fully below the visible edge (top past the bottom by a full height).
-        let y_hidden = want_bottom + h + 8;
+        // Prefer live HWND height — WebView/DWM chrome can exceed logical `h`.
+        let actual_h = {
+            use windows::Win32::Foundation::RECT;
+            use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+            let mut wr = RECT::default();
+            if GetWindowRect(hwnd, &mut wr).is_ok() {
+                (wr.bottom - wr.top).max(h)
+            } else {
+                h
+            }
+        };
+        // Park fully below the *monitor* bottom. Never use want_bottom here —
+        // large bottom_offset made `want_bottom + h` still intersect the screen
+        // (a translucent headroom strip left above the taskbar / dock).
+        let y_hidden = rc.bottom + actual_h + 64;
         Some(DockGeom {
             x,
             y_shown,
@@ -1633,6 +1648,29 @@ fn win32_dock_slide_root(
     };
     let glass_h = (DOCK_H * scale).round().max(1.0) as i32;
     let glass_w = (glass_logical_w * scale).round().max(1.0) as i32;
+
+    unsafe fn force_pair_hide(
+        hwnd: windows::Win32::Foundation::HWND,
+        glass: Option<windows::Win32::Foundation::HWND>,
+    ) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IsWindowVisible, ShowWindow, SW_HIDE,
+        };
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        if let Some(gh) = glass {
+            let _ = ShowWindow(gh, SW_HIDE);
+        }
+        // WebView2 / DWM sometimes resurrect visibility after style tweaks —
+        // second pass if still painted.
+        if IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        if let Some(gh) = glass {
+            if IsWindowVisible(gh).as_bool() {
+                let _ = ShowWindow(gh, SW_HIDE);
+            }
+        }
+    }
 
     unsafe fn set_pair_pos(
         hwnd: windows::Win32::Foundation::HWND,
@@ -1809,9 +1847,13 @@ fn win32_dock_slide_root(
             } else {
                 SW_HIDE
             };
-            let _ = ShowWindow(hwnd, cmd);
-            if let Some(gh) = glass {
-                let _ = ShowWindow(gh, cmd);
+            if shown {
+                let _ = ShowWindow(hwnd, cmd);
+                if let Some(gh) = glass {
+                    let _ = ShowWindow(gh, cmd);
+                }
+            } else {
+                force_pair_hide(hwnd, glass);
             }
             eprintln!(
                 "[dock-place] snap shown={} y={}",
@@ -1883,10 +1925,7 @@ fn win32_dock_slide_root(
                     glass_h,
                     corner_radius_px,
                 );
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                if let Some(gh) = glass {
-                    let _ = ShowWindow(gh, SW_HIDE);
-                }
+                force_pair_hide(hwnd, glass);
             } else {
                 set_pair_pos(
                     hwnd,
@@ -1914,11 +1953,24 @@ fn win32_dock_slide_root(
                     glass_h,
                     corner_radius_px,
                 );
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                if let Some(gh) = glass {
-                    let _ = ShowWindow(gh, SW_HIDE);
+                force_pair_hide(hwnd, glass);
+            }
+            // Final park: if DWM left any pixel on the monitor, shove + hide again.
+            if let Some(top) = read_y(hwnd) {
+                if top < geom.y_hidden - 2 {
+                    set_pair_pos(
+                        hwnd,
+                        glass,
+                        glass_raw,
+                        geom,
+                        geom.y_hidden,
+                        glass_w,
+                        glass_h,
+                        corner_radius_px,
+                    );
                 }
             }
+            force_pair_hide(hwnd, glass);
             eprintln!(
                 "[dock-place] hide anim y {}→{} (now={:?})",
                 y_from,
@@ -2648,6 +2700,7 @@ async fn ensure_dock_window_inner(
         #[cfg(windows)]
         if let Ok(hwnd) = existing.hwnd() {
             file_drop::install_dock_file_drop(app, hwnd.0 as isize);
+            file_drop::schedule_dock_file_drop_rebind(app, hwnd.0 as isize);
         }
         sync_dock_visual(app, vis);
         return Ok(());
@@ -2690,13 +2743,7 @@ async fn ensure_dock_window_inner(
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::blur_glass::schedule_dock_titlebar_strip(hwnd.0 as isize);
         file_drop::install_dock_file_drop(app, hwnd.0 as isize);
-        // WebView2 children appear a tick later — re-bind drop targets.
-        let app_drop = app.clone();
-        let hwnd_raw = hwnd.0 as isize;
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            file_drop::install_dock_file_drop(&app_drop, hwnd_raw);
-        });
+        file_drop::schedule_dock_file_drop_rebind(app, hwnd.0 as isize);
     }
     // Snap whole window to shown/hidden rest pose (no CSS half-state).
     sync_dock_visual(app, vis);

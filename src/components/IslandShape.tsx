@@ -1,4 +1,4 @@
 /**
- * @deprecated 使用 IslandCornerPatches；保留以免旧引用报错。
+ * @deprecated App.tsx inlines IslandCornerPatches; kept so old imports resolve.
  */
 export { default } from "./IslandCornerPatches";

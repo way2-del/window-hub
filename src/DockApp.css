@@ -24,10 +24,10 @@ body.is-dock #root {
 }
 
 /* Full window is transparent; glass lives on the fixed-height chrome strip.
-   Headroom above the bar is paint-only — never capture pointer there so
-   AutoHide / clicks fall through (same chrome-only keep rect as visibility.rs).
-   Magnified glyphs may paint into headroom via overflow:visible; empty air
-   above icons must NOT arm or hold fan. */
+   Empty headroom above the bar is paint-only in the webview (pointer-events
+   none) so clicks fall through. Magnified glyphs still hit-test via taller
+   .dock-hit. AutoHide keep-rect mirrors this: chrome-only at rest, chrome +
+   headroom while hover-expanded (see visibility.rs dock_chrome_keep_rect). */
 .dock-shell {
   box-sizing: border-box;
   position: relative;
@@ -58,19 +58,36 @@ body.is-dock #root {
 
 /* Visible dock height — never grows with magnification.
    Acrylic is painted by sibling `dock-glass` only. Stroke must sit *inside*
-   the Win32 icons RGN — outer-edge hairlines get shaved at bottom-right. */
+   the Win32 icons RGN — outer-edge hairlines get shaved at bottom-right.
+   Outer shade uses filter:drop-shadow (follows rounded alpha). Plain box-shadow
+   on a wide transparent layer often paints square top corners in WebView2. */
 .dock-chrome {
   --dock-radius: 20px;
+  --dock-shadow-in:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -10px 18px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   position: absolute;
   bottom: 0;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
   height: var(--dock-chrome-h);
+  /* Capsule: never exceed half-height or top corners go “flat + square shadow”. */
+  border-radius: min(var(--dock-radius), calc(var(--dock-chrome-h) / 2));
   pointer-events: none;
   border: none;
   outline: none;
-  background: transparent;
   box-shadow: none;
   box-sizing: border-box;
-  /* Same ms + bezier as Composition DOCK_WIDTH_TWEEN_MS — px→px (not %). */
+  /* Near-invisible fill = alpha shape for drop-shadow (must be rounded). */
+  background: rgb(255 255 255 / 0.02);
+  filter:
+    drop-shadow(0 1px 2px rgb(0 0 0 / 0.4))
+    drop-shadow(0 6px 14px rgb(0 0 0 / 0.42))
+    drop-shadow(0 14px 32px rgb(0 0 0 / 0.28));
+  /* Same ms + bezier as Composition DOCK_WIDTH_TWEEN_MS — px→px (not %).
+     Center via left/right + margin:auto — avoid translateX (breaks radius shadow). */
   transition: width 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -83,11 +100,14 @@ body.is-dock #root {
 .dock-chrome::after {
   content: "";
   position: absolute;
-  /* Outer edge matches glass capsule; stroke paints inside so glass doesn't peek. */
+  /* Outer edge matches glass capsule; stroke + inner shade over frost. */
   inset: 0;
   border: none;
-  border-radius: var(--dock-radius);
-  box-shadow: inset 0 0 0 1px var(--dock-stroke);
+  border-radius: inherit;
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 1px var(--dock-stroke),
+    var(--dock-shadow-in);
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -210,11 +230,8 @@ body.is-dock #root {
   user-select: none;
   -webkit-user-select: none;
   outline: none;
-  /* Rest / collapse only — tracking must not tween (see is-fan-live). */
-  transition:
-    width 160ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 120ms ease;
-  will-change: width;
+  /* Rest opacity only — slot width must snap with fan or leave feels “stuck”. */
+  transition: opacity 120ms ease;
 }
 
 .dock-item.is-unpinable {
@@ -231,7 +248,9 @@ body.is-dock #root {
 }
 
 .dock-shell.is-drop-hover .dock-chrome::after {
-  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.45);
+  box-shadow:
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.45),
+    var(--dock-shadow-in);
 }
 
 .dock-shell.is-dragging-item .dock-item:not(.is-dragging) {
@@ -261,8 +280,17 @@ body.is-dock #root {
 /* While tracking the pointer, snap slot widths every frame — 160ms width
    tween was why fan felt sticky / not following after drop. */
 .dock-shell.is-fan-live .dock-item,
-.dock-shell.is-fan-live .dock-hit {
+.dock-shell.is-fan-live .dock-hit,
+.dock-shell.is-fan-collapsing .dock-item,
+.dock-shell.is-fan-collapsing .dock-hit {
   transition: opacity 120ms ease;
+}
+
+/* Tile size must snap with the fan — a leftover width/height tween here is what
+   left icons stuck magnified after fast leave / AutoHide (window hid mid-tween). */
+.dock-shell.is-fan-live .dock-icon-tile,
+.dock-shell.is-fan-collapsing .dock-icon-tile {
+  transition: none;
 }
 
 /* Icon tile grows in layout px (bottom-aligned into headroom). */
@@ -274,10 +302,8 @@ body.is-dock #root {
   place-items: center;
   border-radius: 0;
   background: transparent;
-  transition:
-    width 160ms cubic-bezier(0.22, 1, 0.36, 1),
-    height 160ms cubic-bezier(0.22, 1, 0.36, 1);
-  will-change: width, height;
+  /* Snap with fan — same freeze risk as tile if HWND hides mid-tween. */
+  transition: none;
 }
 
 .dock-item.is-magnified {
@@ -293,7 +319,8 @@ body.is-dock #root {
   will-change: transform;
 }
 
-/* Unified squircle tile — solid plate when icon has no baked background. */
+/* Tile size follows --dock-scale instantly — a width/height tween here freezes
+   magnified when AutoHide hides the HWND mid-transition. */
 .dock-icon-tile {
   --dock-icon-r: calc(8px * var(--dock-scale, 1));
   width: calc(32px * var(--dock-scale, 1));
@@ -304,10 +331,7 @@ body.is-dock #root {
   overflow: hidden;
   border-radius: var(--dock-icon-r);
   background: transparent;
-  transition:
-    width 160ms cubic-bezier(0.22, 1, 0.36, 1),
-    height 160ms cubic-bezier(0.22, 1, 0.36, 1);
-  will-change: width, height;
+  transition: none;
 }
 
 .dock-icon-tile.needs-plate {
@@ -385,12 +409,26 @@ html[data-theme="light"] body.is-dock {
   --dock-stroke: rgba(0, 0, 0, 0.16);
 }
 
+html[data-theme="light"] .dock-chrome {
+  --dock-shadow-in:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -8px 16px rgba(0, 0, 0, 0.1),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  background: rgb(0 0 0 / 0.02);
+  filter:
+    drop-shadow(0 1px 2px rgb(0 0 0 / 0.16))
+    drop-shadow(0 6px 14px rgb(0 0 0 / 0.18))
+    drop-shadow(0 14px 28px rgb(0 0 0 / 0.12));
+}
+
 html[data-theme="light"] .dock-sep::before {
   background: var(--dock-stroke);
 }
 
 html[data-theme="light"] .dock-shell.is-drop-hover .dock-chrome::after {
-  box-shadow: inset 0 0 0 1.5px rgba(0, 0, 0, 0.28);
+  box-shadow:
+    inset 0 0 0 1.5px rgba(0, 0, 0, 0.28),
+    var(--dock-shadow-in);
 }
 
 html[data-theme="light"] .dock-dot.is-on {
