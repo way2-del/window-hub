@@ -27,6 +27,7 @@ import {
   showChromeHoverTip,
   dockIconTipPointerProps,
   installChromeHoverTipGlobalDismiss,
+  isInteractiveChromeHoverTipLive,
 } from "./chromeHoverTip";
 import { DockStartIcon, DockTrashIcon, DOCK_START_BG, DOCK_TRASH_BG, DOCK_AUTO_PLATE_BG } from "./dockIcons";
 import { useDockIconPlate } from "./dockIconPlate";
@@ -60,6 +61,8 @@ type DockPrefs = {
   magnification?: number;
   cornerRadiusPx?: number;
   hiddenItemIds?: string[];
+  hoverWindowPreview?: boolean;
+  hoverPreviewDelayMs?: number;
 };
 
 type HubWindow = {
@@ -74,6 +77,8 @@ const STATUS_MENU_W = 200;
 const STATUS_MENU_H = 340;
 const STATUS_MENU_GAP = 8;
 const STATUS_MENU_MARGIN = 8;
+/** Keep dock visible after cold launch bounce (~2 simple hops). */
+const LAUNCH_HOLD_MS = 1100;
 
 /** Shared with openStatusMenuAtClientPoint (module scope) + DockApp leave handlers. */
 let dockStatusMenuOpen = false;
@@ -86,9 +91,12 @@ const ICON_GAP = 6;
 const BAR_PAD_X_MIN = 2;
 /** Visual rule is 1px; hit/layout slot is wider for drag. Keep in sync with CSS. */
 const SEP_LAYOUT_W = 16;
-/** Match Rust `DOCK_FAN_EXTRA` — host HWND / expanded chrome width. */
-const DOCK_FAN_EXTRA = 48;
-/** Chrome / Composition width tween is 240ms (DockApp.css + Rust DOCK_WIDTH_TWEEN_MS). */
+/** Match Rust `dock_fan_extra` — host HWND / expanded chrome width pad. */
+function dockFanExtra(magnification: number): number {
+  const m = Math.min(2.5, Math.max(1, Number.isFinite(magnification) ? magnification : 1.6));
+  if (m <= 1.001) return 0;
+  return Math.round(ICON_SLOT * (m - 1) * 2);
+}
 /**
  * Arm fan before the glass tween fully finishes — pad already exists mid-widen,
  * so waiting the full 240ms feels laggy after AutoHide reveal.
@@ -96,8 +104,8 @@ const DOCK_FAN_EXTRA = 48;
 const FAN_ARM_DELAY_MS = 90;
 /** How many icon-widths the fan reaches on each side. */
 const MAG_RANGE = 2.25;
-/** Fixed magnification — not user-configurable (matches Rust DOCK_MAG_SCALE). */
-const DOCK_MAG = 1.6;
+/** Default when prefs missing (matches Rust DOCK_MAG_SCALE). */
+const DOCK_MAG_DEFAULT = 1.6;
 
 /** Match Rust `dock_pad_x` — keep glyphs inside large capsule corners. */
 function dockPadX(cornerRadiusPx: number): number {
@@ -474,6 +482,9 @@ export default function DockApp() {
   const [fanArmed, setFanArmed] = useState(false);
   /** Extend stack hit height through headroom while hovering. */
   const [fanLive, setFanLive] = useState(false);
+  /** Settings slider: force middle-icon fan on the live Dock. */
+  const [settingsMagPreview, setSettingsMagPreview] = useState(false);
+  const settingsMagPreviewRef = useRef(false);
   /** Chrome stroke width tracks expand tween (not fanLive — that snapped early). */
   const [barWide, setBarWide] = useState(false);
   /** Hold chrome/glass wide while finishing unmagnify → then shrink (no icon leak). */
@@ -495,6 +506,10 @@ export default function DockApp() {
   const layoutSigRef = useRef("");
   const winExeSigRef = useRef("");
   const winRunSigRef = useRef("");
+  /** App launch click — bounce icon + delay collapse (~2.5s). */
+  const [launchBounceId, setLaunchBounceId] = useState<string | null>(null);
+  const launchHoldUntilRef = useRef(0);
+  const launchHoldTimerRef = useRef<number | null>(null);
 
   const cancelCollapseTimer = () => {
     if (collapseTimerRef.current != null) {
@@ -502,6 +517,17 @@ export default function DockApp() {
       collapseTimerRef.current = null;
     }
   };
+
+  const clearLaunchHold = () => {
+    if (launchHoldTimerRef.current != null) {
+      window.clearTimeout(launchHoldTimerRef.current);
+      launchHoldTimerRef.current = null;
+    }
+    launchHoldUntilRef.current = 0;
+    setLaunchBounceId(null);
+  };
+
+  const isLaunchHolding = () => performance.now() < launchHoldUntilRef.current;
 
   const cancelWidthTweenTimer = () => {
     if (widthTweenTimerRef.current != null) {
@@ -725,6 +751,8 @@ export default function DockApp() {
 
   const beginCollapseAfterFanRest = () => {
     // Leave / past icon peak: snap magnification immediately (any direction).
+    // Launch bounce window: keep dock open until the hold timer ends.
+    if (isLaunchHolding()) return;
     pointerInsideRef.current = false;
     expandSeqRef.current += 1;
     cancelWidthTweenTimer();
@@ -735,7 +763,7 @@ export default function DockApp() {
     collapseTimerRef.current = window.setTimeout(() => {
       collapseTimerRef.current = null;
       setFanCollapsing(false);
-      if (pointerInsideRef.current) return;
+      if (pointerInsideRef.current || isLaunchHolding()) return;
       if (expandedRef.current || expandInflightRef.current === true) {
         setExpanded(false);
       } else {
@@ -754,6 +782,14 @@ export default function DockApp() {
     collapseDockFanForMenu = null;
   }, []);
 
+  useEffect(() => () => {
+    if (launchHoldTimerRef.current != null) {
+      window.clearTimeout(launchHoldTimerRef.current);
+      launchHoldTimerRef.current = null;
+    }
+    void invoke("dock_set_interaction_hold", { hold: false }).catch(() => undefined);
+  }, []);
+
   /** While fan/expand is active, watch all pointer moves — bar is HWND-wide so
    *  sliding into side pad never fires pointerleave, but must still snap mag. */
   useEffect(() => {
@@ -763,6 +799,10 @@ export default function DockApp() {
       if (dndActiveRef.current || dockStatusMenuOpen || postDndFanBlockedRef.current) {
         return;
       }
+      if (settingsMagPreviewRef.current) return;
+      // Preview tip is above the dock — keep fan while the user reaches it.
+      if (isInteractiveChromeHoverTipLive()) return;
+      if (isLaunchHolding()) return;
       if (performance.now() < showSettleUntilRef.current) return;
       const bar = barRef.current;
       if (!bar) return;
@@ -783,6 +823,8 @@ export default function DockApp() {
     // Mouse left the webview entirely (OS desktop) — always snap.
     const onDocLeave = () => {
       if (dndActiveRef.current || dockStatusMenuOpen) return;
+      if (settingsMagPreviewRef.current) return;
+      if (isInteractiveChromeHoverTipLive()) return;
       if (
         fanArmedRef.current ||
         pointerInsideRef.current ||
@@ -926,6 +968,38 @@ export default function DockApp() {
     void listen("material-prefs", () => {
       void applyMaterial();
     }).then((u) => unsubs.push(u));
+    void listen<{ active?: boolean; magnification?: number }>("dock-mag-preview", (e) => {
+      if (cancelled) return;
+      const active = !!e.payload?.active;
+      settingsMagPreviewRef.current = active;
+      setSettingsMagPreview(active);
+      if (active) {
+        // Bypass setExpanded — it disarmFan()s on widen, which would flash rest scales.
+        cancelCollapseTimer();
+        setFanCollapsing(false);
+        pointerInsideRef.current = true;
+        expandSeqRef.current += 1;
+        cancelWidthTweenTimer();
+        expandInflightRef.current = true;
+        fanArmedRef.current = true;
+        setFanArmed(true);
+        setFanLive(true);
+        void invoke<boolean>("dock_set_hover_expand", { expanded: true })
+          .then((ok) => {
+            if (!settingsMagPreviewRef.current) return;
+            expandInflightRef.current = null;
+            if (!ok) return;
+            expandedRef.current = true;
+            setBarWide(true);
+          })
+          .catch(() => {
+            expandInflightRef.current = null;
+          });
+      } else {
+        pointerInsideRef.current = false;
+        beginCollapseRef.current();
+      }
+    }).then((u) => unsubs.push(u));
     void listen<{ newlyHidden?: number; totalHidden?: number }>("dock-compacted", (e) => {
       if (cancelled) return;
       const n = e.payload?.newlyHidden ?? 0;
@@ -1021,8 +1095,15 @@ export default function DockApp() {
     return () => window.removeEventListener("pointermove", onMove);
   }, [draggingId]);
 
-  const maxScale = DOCK_MAG;
-  const magOn = true;
+  const maxScale = Math.min(
+    2.5,
+    Math.max(
+      1,
+      Number.isFinite(prefs?.magnification) ? Number(prefs?.magnification) : DOCK_MAG_DEFAULT,
+    ),
+  );
+  const fanExtra = dockFanExtra(maxScale);
+  const magOn = maxScale > 1.001;
 
   const activeIds = useMemo(() => {
     const set = new Set<string>();
@@ -1040,25 +1121,39 @@ export default function DockApp() {
 
   const padX = dockPadX(prefs?.cornerRadiusPx ?? 20);
   const cornerRadius = prefs?.cornerRadiusPx ?? 20;
-  /** Match Composition capsule: rest = content; hover = content + FAN_EXTRA (not 100%). */
-  const chromeWide = barWide || fanCollapsing || !!draggingId;
+  /** Match Composition capsule: rest = content; hover = content + fan pad (not 100%). */
+  const chromeWide = barWide || fanCollapsing || !!draggingId || settingsMagPreview;
   const chromeRestPx = restingBarWidth(displayItems, padX);
   // When wide, chrome used to fill the icons HWND and the 1px inset stroke sat on the
   // GDI round-rect RGN edge — corners looked broken. Rest pose stays clean because
   // chrome is already inset from the host. Keep the same inset when widened.
   const chromeWidthPx = chromeWide
-    ? chromeRestPx + DOCK_FAN_EXTRA - 2
+    ? chromeRestPx + fanExtra - (fanExtra > 0 ? 2 : 0)
     : chromeRestPx;
   const centers = useMemo(
     () => restingCenters(displayItems, padX),
     [displayItems, padX],
   );
 
+  /** Peak at the middle icon (Settings mag preview). */
+  const previewPeakX = useMemo(() => {
+    const xs: number[] = [];
+    for (const item of displayItems) {
+      if (item.kind === "separator") continue;
+      const c = centers.get(item.id);
+      if (c != null) xs.push(c);
+    }
+    if (!xs.length) return chromeRestPx / 2;
+    return xs[Math.floor((xs.length - 1) / 2)] ?? xs[0];
+  }, [displayItems, centers, chromeRestPx]);
+
   const scales = useMemo(() => {
     const map = new Map<string, number>();
     // During dnd, keep resting widths so hello-pangea/dnd's dimension model stays valid.
-    // Hover fan is unchanged whenever not dragging.
-    if (draggingId || !fanArmed || localX == null) return map;
+    if (draggingId) return map;
+    const fanX = settingsMagPreview ? previewPeakX : localX;
+    if (!settingsMagPreview && (!fanArmed || localX == null)) return map;
+    if (fanX == null) return map;
     for (const item of displayItems) {
       if (item.kind === "separator") continue;
       const c = centers.get(item.id);
@@ -1066,10 +1161,19 @@ export default function DockApp() {
         map.set(item.id, 1);
         continue;
       }
-      map.set(item.id, fanScale(Math.abs(localX - c), maxScale));
+      map.set(item.id, fanScale(Math.abs(fanX - c), maxScale));
     }
     return map;
-  }, [displayItems, localX, maxScale, centers, fanArmed, draggingId]);
+  }, [
+    displayItems,
+    localX,
+    maxScale,
+    centers,
+    fanArmed,
+    draggingId,
+    settingsMagPreview,
+    previewPeakX,
+  ]);
 
   /** Bumped on AutoHide hide so icon DOM remounts — clears frozen mid-tween sizes. */
   const [iconMountGen, setIconMountGen] = useState(0);
@@ -1090,6 +1194,8 @@ export default function DockApp() {
         lastPointerClientRef.current = null;
         showSettleUntilRef.current = 0;
         expandedRef.current = false;
+        settingsMagPreviewRef.current = false;
+        setSettingsMagPreview(false);
         snapFanToRestSync();
         setIconMountGen((n) => n + 1);
         requestAnimationFrame(() => {
@@ -1129,6 +1235,7 @@ export default function DockApp() {
     const bar = barRef.current;
     // Past magnified icon peak / bar sides → cancel mag immediately (any direction).
     if (bar && !pointerInFanIconZone(e.clientX, e.clientY, bar)) {
+      if (isLaunchHolding()) return;
       if (
         fanArmedRef.current ||
         pointerInsideRef.current ||
@@ -1176,7 +1283,7 @@ export default function DockApp() {
   };
 
   const onBarPointerLeave = () => {
-    if (dndActiveRef.current || dockStatusMenuOpen) return;
+    if (dndActiveRef.current || dockStatusMenuOpen || isLaunchHolding()) return;
     // AutoHide slide-up under cursor often fires a spurious leave — ignore during settle.
     if (performance.now() < showSettleUntilRef.current) {
       void resumeHoverAfterShow();
@@ -1192,7 +1299,7 @@ export default function DockApp() {
   };
 
   const onBarPointerCancel = () => {
-    if (dndActiveRef.current || dockStatusMenuOpen) return;
+    if (dndActiveRef.current || dockStatusMenuOpen || isLaunchHolding()) return;
     if (performance.now() < showSettleUntilRef.current) {
       void resumeHoverAfterShow();
       return;
@@ -1211,7 +1318,41 @@ export default function DockApp() {
     cancelCollapseTimer();
     setFanLive(false);
     disarmFan();
-    setExpanded(false);
+
+    // Already running → focus only (no bounce / long hold).
+    const alreadyOpen =
+      item.id.startsWith("running:") || activeIds.has(item.id);
+
+    if (alreadyOpen) {
+      clearLaunchHold();
+      try {
+        await invoke("dock_launch_item", { itemId: item.id });
+      } catch (e) {
+        console.error(e);
+      }
+      beginCollapseAfterFanRest();
+      return;
+    }
+
+    // Cold launch: bounce + keep dock open briefly.
+    clearLaunchHold();
+    setLaunchBounceId(item.id);
+    launchHoldUntilRef.current = performance.now() + LAUNCH_HOLD_MS;
+    void invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
+    launchHoldTimerRef.current = window.setTimeout(() => {
+      launchHoldTimerRef.current = null;
+      setLaunchBounceId(null);
+      launchHoldUntilRef.current = 0;
+      void invoke("dock_set_interaction_hold", { hold: false }).catch(() => undefined);
+      const bar = barRef.current;
+      const pt = lastPointerClientRef.current;
+      if (bar && pt && pointerInFanIconZone(pt.x, pt.y, bar)) {
+        pointerInsideRef.current = true;
+        return;
+      }
+      beginCollapseAfterFanRest();
+    }, LAUNCH_HOLD_MS);
+
     try {
       // Do not focus the dock HWND — Win11 may paint a native "Dock" title bar
       // into the transparent headroom on activation.
@@ -1555,8 +1696,15 @@ export default function DockApp() {
                           ref={dragProvided.innerRef}
                           {...dragProvided.draggableProps}
                           {...dragProvided.dragHandleProps}
-                          className={`dock-item${running ? " is-running" : ""}${scale > 1.02 ? " is-magnified" : ""}${snapshot.isDragging ? " is-dragging" : ""}${reorderable ? " is-unpinable" : ""}`}
-                          {...(draggingId ? {} : dockIconTipPointerProps(label, { gap: 8 }))}
+                          className={`dock-item${running ? " is-running" : ""}${scale > 1.02 ? " is-magnified" : ""}${snapshot.isDragging ? " is-dragging" : ""}${reorderable ? " is-unpinable" : ""}${launchBounceId === item.id ? " is-launching" : ""}`}
+                          {...(draggingId
+                            ? {}
+                            : dockIconTipPointerProps(label, {
+                                gap: 8,
+                                windowPreviewItemId:
+                                  prefs?.hoverWindowPreview && running ? item.id : null,
+                                settleMs: prefs?.hoverPreviewDelayMs,
+                              }))}
                           style={
                             {
                               ...dragProvided.draggableProps.style,

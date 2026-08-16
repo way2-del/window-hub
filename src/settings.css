@@ -308,6 +308,22 @@ a {
   line-height: 1.35;
 }
 
+.dock-mag-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.dock-mag-value {
+  min-width: 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  opacity: 0.85;
+  color: #f3f4f6;
+}
+
 .pref-switch {
   position: relative;
   width: 42px;

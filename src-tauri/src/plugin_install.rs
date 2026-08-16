@@ -16,6 +16,7 @@ const APP_LIBRARY_EXAMPLE_ID: &str = "com.window-hub.app-library";
 const IDIOM_EXAMPLE_ID: &str = "com.window-hub.idiom";
 const NOW_PLAYING_EXAMPLE_ID: &str = "com.window-hub.now-playing";
 const FILE_SEARCH_EXAMPLE_ID: &str = "com.window-hub.file-search";
+const SYSMON_EXAMPLE_ID: &str = "com.window-hub.sysmon";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +27,10 @@ pub struct InstalledPluginRecord {
     pub path: String,
     pub enabled: bool,
     pub is_dev: bool,
+    /// Absolute path of the folder the user imported (directory install only).
+    /// On startup we re-copy from here so edits don't require re-import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_source: Option<String>,
     pub capabilities: Vec<String>,
     pub manifest: Value,
 }
@@ -305,6 +310,17 @@ fn install_from_dir(app: &AppHandle, src: &Path, is_dev: bool) -> Result<Install
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
     fs::write(dest.join("plugin.json"), text).map_err(|e| e.to_string())?;
 
+    let dev_source = if is_dev {
+        Some(
+            src.canonicalize()
+                .unwrap_or_else(|_| src.to_path_buf())
+                .to_string_lossy()
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
     let record = InstalledPluginRecord {
         id: install_id,
         name,
@@ -312,6 +328,7 @@ fn install_from_dir(app: &AppHandle, src: &Path, is_dev: bool) -> Result<Install
         path: dest.to_string_lossy().to_string(),
         enabled: true,
         is_dev,
+        dev_source,
         capabilities,
         manifest,
     };
@@ -320,6 +337,39 @@ fn install_from_dir(app: &AppHandle, src: &Path, is_dev: bool) -> Result<Install
     save_registry(&reg)?;
     emit_plugins(app, &reg);
     Ok(record)
+}
+
+pub fn resync_dev_plugins(app: &AppHandle) {
+    let reg = load_registry();
+    let jobs: Vec<(String, String)> = reg
+        .plugins
+        .iter()
+        .filter(|p| p.is_dev)
+        .filter_map(|p| {
+            p.dev_source
+                .as_ref()
+                .map(|s| (p.id.clone(), s.clone()))
+        })
+        .collect();
+
+    for (id, src_s) in jobs {
+        let src = PathBuf::from(&src_s);
+        if !src.is_dir() || !src.join("plugin.json").is_file() {
+            eprintln!("[plugins] dev {id} source missing: {src_s}");
+            continue;
+        }
+        match install_from_dir(app, &src, true) {
+            Ok(_) => eprintln!("[plugins] resynced dev {id} ← {src_s}"),
+            Err(e) => eprintln!("[plugins] resync {id} failed: {e}"),
+        }
+    }
+
+    for rec in load_registry().plugins.iter().filter(|p| p.is_dev && p.dev_source.is_none()) {
+        eprintln!(
+            "[plugins] dev {} has no source path — re-import the folder once to enable auto-sync on restart",
+            rec.id
+        );
+    }
 }
 
 #[tauri::command]
@@ -461,6 +511,8 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("now-playing")
     } else if id == "file-search" || id == FILE_SEARCH_EXAMPLE_ID {
         Ok("file-search")
+    } else if id == "sysmon" || id == SYSMON_EXAMPLE_ID {
+        Ok("sysmon")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

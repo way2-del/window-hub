@@ -28,6 +28,7 @@ const ALLOWED_CMDS = new Set([
   "hub_everything_search",
   "hub_everything_open",
   "hub_everything_reveal",
+  "hub_sysmon_snapshot",
 ]);
 
 export function isAllowedShortcutsHubCmd(cmd: string): boolean {
@@ -196,6 +197,9 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
       reveal: function (path) {
         return invoke("hub_everything_reveal", withPlugin({ path: path || "" }));
       }
+    },
+    sysmon: {
+      snapshot: function () { return invoke("hub_sysmon_snapshot", withPlugin()); }
     },
     foreground: {
       get: function () { return invoke("get_foreground_app", {}); },

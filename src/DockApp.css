@@ -319,6 +319,35 @@ body.is-dock #root {
   z-index: 2;
 }
 
+/* Launch click feedback — two simple bounces. */
+.dock-item.is-launching {
+  z-index: 3;
+}
+
+.dock-item.is-launching .dock-hit {
+  animation: dock-launch-bounce 0.9s ease-out 1;
+  will-change: transform;
+}
+
+@keyframes dock-launch-bounce {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  20% {
+    transform: translate3d(0, -14px, 0);
+  }
+  40% {
+    transform: translate3d(0, 0, 0);
+  }
+  60% {
+    transform: translate3d(0, -8px, 0);
+  }
+  80% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
 .dock-icon-draw {
   display: grid;
   place-items: center;
@@ -454,5 +483,9 @@ html[data-theme="light"] .dock-compact-tip {
   .dock-icon-tile,
   .dock-dot {
     transition: none;
+  }
+
+  .dock-item.is-launching .dock-hit {
+    animation: none;
   }
 }

@@ -2253,6 +2253,101 @@ body.is-chrome-hover-tip #root {
   letter-spacing: 0.03em;
 }
 
+.chrome-hover-tip-root.has-preview .chrome-hover-tip-box {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.chrome-hover-tip-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 280px;
+  padding: 0 2px;
+}
+
+.chrome-hover-tip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chrome-hover-tip-close {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--glass-fg, #f4f4f5);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease;
+}
+
+.chrome-hover-tip-close.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chrome-hover-tip-close:hover {
+  background: rgba(255, 80, 80, 0.85);
+  color: #fff;
+}
+
+.chrome-hover-tip-preview-wrap {
+  position: relative;
+  max-width: 280px;
+}
+
+.chrome-hover-tip-preview {
+  display: block;
+  width: 100%;
+  max-width: 280px;
+  height: auto;
+  border-radius: 6px;
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+  user-select: none;
+}
+
+.chrome-hover-tip-root.has-preview .chrome-hover-tip-line:not(.chrome-hover-tip-title) {
+  padding: 0 2px;
+  max-width: 280px;
+}
+
+.chrome-hover-tip-root.is-interactive {
+  pointer-events: auto;
+}
+
+.chrome-hover-tip-root.is-interactive .chrome-hover-tip-box {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+html[data-theme="light"] .chrome-hover-tip-close {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="light"] .chrome-hover-tip-close:hover {
+  background: rgba(220, 38, 38, 0.9);
+  color: #fff;
+}
+
 html[data-theme="light"] body.is-chrome-hover-tip,
 html[data-theme="light"] body.is-chrome-hover-tip #root,
 html[data-theme="light"] .chrome-hover-tip-root {

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
@@ -585,14 +585,13 @@ pub fn hub_shortcuts_set_badge(
     Ok(())
 }
 
-#[tauri::command]
-pub fn hub_plugin_read_text(plugin_id: String, relative_path: String) -> Result<String, String> {
+/// Resolve a plugin-relative asset to a canonical absolute path (must stay under install root).
+fn resolve_plugin_asset(plugin_id: &str, relative_path: &str) -> Result<PathBuf, String> {
     let record =
-        find_installed_plugin(&plugin_id).ok_or_else(|| "plugin not installed".to_string())?;
+        find_installed_plugin(plugin_id).ok_or_else(|| "plugin not installed".to_string())?;
     if !record.enabled {
         return Err("plugin disabled".into());
     }
-    // allow popup assets without requiring a specific capability beyond install
     let rel = relative_path.replace('\\', "/");
     if rel.is_empty()
         || rel.contains("..")
@@ -611,10 +610,34 @@ pub fn hub_plugin_read_text(plugin_id: String, relative_path: String) -> Result<
     if !canon_file.starts_with(&canon_root) {
         return Err("path escapes plugin root".into());
     }
+    if !canon_file.is_file() {
+        return Err("asset not found: not a file".into());
+    }
+    Ok(canon_file)
+}
+
+/// Strip Windows `\\?\` verbatim prefix so `convertFileSrc` / asset protocol can use the path.
+fn path_for_frontend(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/")
+}
+
+#[tauri::command]
+pub fn hub_plugin_read_text(plugin_id: String, relative_path: String) -> Result<String, String> {
+    let canon_file = resolve_plugin_asset(&plugin_id, &relative_path)?;
     fs::read_to_string(&canon_file).map_err(|e| format!("read asset: {e}"))
 }
 
+/// Absolute path for a plugin asset (for Host `convertFileSrc` / `<script src>`).
+/// Prefer this for large JS (e.g. file-search `board.js`) instead of inlining into srcdoc.
+#[tauri::command]
+pub fn hub_plugin_asset_path(plugin_id: String, relative_path: String) -> Result<String, String> {
+    let canon_file = resolve_plugin_asset(&plugin_id, &relative_path)?;
+    Ok(path_for_frontend(&canon_file))
+}
+
 const EVERYTHING_CAP: &str = "everything.search";
+const SYSMON_CAP: &str = "system.monitor";
 
 #[tauri::command]
 pub fn hub_everything_status(plugin_id: String) -> Result<Value, String> {
@@ -684,6 +707,13 @@ pub fn hub_everything_reveal(plugin_id: String, path: String) -> Result<(), Stri
         let _ = (plugin_id, path);
         Err("Everything SDK is Windows-only".into())
     }
+}
+
+#[tauri::command]
+pub fn hub_sysmon_snapshot(plugin_id: String) -> Result<Value, String> {
+    assert_capability(&plugin_id, SYSMON_CAP)?;
+    let snap = crate::sysmon::snapshot();
+    serde_json::to_value(snap).map_err(|e| e.to_string())
 }
 
 /// Build `window.hub` injection for plugin popups (trusted pluginId).
@@ -829,6 +859,9 @@ pub fn hub_init_script(plugin_id: &str) -> String {
         invoke("hub_everything_search", withPlugin({{ query: query || "", opts: opts || null }})),
       open: (path) => invoke("hub_everything_open", withPlugin({{ path: path || "" }})),
       reveal: (path) => invoke("hub_everything_reveal", withPlugin({{ path: path || "" }})),
+    }},
+    sysmon: {{
+      snapshot: () => invoke("hub_sysmon_snapshot", withPlugin()),
     }},
     panel: {{
       close: () => invoke("close_plugin_popup"),

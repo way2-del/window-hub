@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:file-search-board": "npx esbuild scripts/file-search-board.tsx --bundle --format=iife --outfile=src-tauri/resources/plugins/file-search/board.js --jsx=automatic --minify --loader:.css=text && node -e \"require('fs').copyFileSync('src-tauri/resources/plugins/file-search/board.js','docs/plugins/examples/file-search/board.js')\"",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:build": "tauri build",
@@ -17,12 +18,14 @@
     "@tauri-apps/api": "^2",
     "border-beam": "^1.3.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-grid-layout": "^2.2.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@types/react-grid-layout": "^1.3.6",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

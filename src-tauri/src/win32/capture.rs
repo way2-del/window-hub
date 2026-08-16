@@ -59,6 +59,44 @@ fn bgra_is_blank(bgra: &[u8]) -> bool {
     avg >= 248
 }
 
+/// GetWindowDC / StretchBlt on DWM-GPU windows often returns a near-black frame
+/// that is not "blank" by the white/zero checks above.
+#[cfg(windows)]
+fn bgra_is_mostly_black(bgra: &[u8]) -> bool {
+    if bgra.len() < 16 {
+        return true;
+    }
+    let px = bgra.len() / 4;
+    let step = (px / 96).max(1);
+    let mut sum = 0u64;
+    let mut bright = 0u32;
+    let mut n = 0u32;
+    for i in (0..px).step_by(step) {
+        let o = i * 4;
+        let b = bgra[o] as u64;
+        let g = bgra[o + 1] as u64;
+        let r = bgra[o + 2] as u64;
+        // Rec.601-ish luma without divide until the end.
+        let y = (r * 30 + g * 59 + b * 11) / 100;
+        sum += y;
+        if y >= 40 {
+            bright += 1;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return true;
+    }
+    let avg = sum / n as u64;
+    // Near-black with almost no mid/highlight samples → failed GPU blit.
+    avg <= 14 && bright * 20 < n
+}
+
+#[cfg(windows)]
+fn bgra_looks_usable(bgra: &[u8]) -> bool {
+    !bgra_is_blank(bgra) && !bgra_is_mostly_black(bgra)
+}
+
 #[cfg(windows)]
 unsafe fn dibits_bgra(
     hdc: windows::Win32::Graphics::Gdi::HDC,
@@ -181,35 +219,44 @@ unsafe fn capture_printwindow_bgra(
         SelectObject,
     };
     use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+    const PW_CLIENTONLY: u32 = 0x1;
     const PW_RENDERFULLCONTENT: u32 = 0x2;
-    let hdc_win = GetDC(hwnd);
-    if hdc_win.is_invalid() {
-        return None;
-    }
-    let hdc_mem = CreateCompatibleDC(hdc_win);
-    if hdc_mem.is_invalid() {
-        ReleaseDC(hwnd, hdc_win);
-        return None;
-    }
-    let hbmp = CreateCompatibleBitmap(hdc_win, w, h);
-    if hbmp.is_invalid() {
+
+    let try_flags = |flags: u32| -> Option<Vec<u8>> {
+        let hdc_win = GetDC(hwnd);
+        if hdc_win.is_invalid() {
+            return None;
+        }
+        let hdc_mem = CreateCompatibleDC(hdc_win);
+        if hdc_mem.is_invalid() {
+            ReleaseDC(hwnd, hdc_win);
+            return None;
+        }
+        let hbmp = CreateCompatibleBitmap(hdc_win, w, h);
+        if hbmp.is_invalid() {
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(hwnd, hdc_win);
+            return None;
+        }
+        let old = SelectObject(hdc_mem, hbmp);
+        let printed = PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(flags)).as_bool();
+        let bgra = if printed {
+            dibits_bgra(hdc_mem, hbmp, w, h)
+        } else {
+            None
+        };
+        let _ = SelectObject(hdc_mem, old);
+        let _ = DeleteObject(hbmp);
         let _ = DeleteDC(hdc_mem);
         ReleaseDC(hwnd, hdc_win);
-        return None;
-    }
-    let old = SelectObject(hdc_mem, hbmp);
-    let flags = PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT);
-    let printed = PrintWindow(hwnd, hdc_mem, flags).as_bool();
-    let bgra = if printed {
-        dibits_bgra(hdc_mem, hbmp, w, h)
-    } else {
-        None
+        bgra
     };
-    let _ = SelectObject(hdc_mem, old);
-    let _ = DeleteObject(hbmp);
-    let _ = DeleteDC(hdc_mem);
-    ReleaseDC(hwnd, hdc_win);
-    bgra
+
+    // Full content first (GPU / Chromium); client-only as second attempt.
+    try_flags(PW_RENDERFULLCONTENT)
+        .filter(|b| bgra_looks_usable(b))
+        .or_else(|| try_flags(PW_CLIENTONLY | PW_RENDERFULLCONTENT).filter(|b| bgra_looks_usable(b)))
+        .or_else(|| try_flags(PW_RENDERFULLCONTENT))
 }
 
 #[cfg(windows)]
@@ -251,6 +298,102 @@ fn encode_jpeg_bgra(bgra: &[u8], full_w: i32, full_h: i32, roi: Roi) -> Result<C
         width: cw as u32,
         height: ch as u32,
     })
+}
+
+/// Convert BGRA → RGB, optionally downscale, encode JPEG once (no decode round-trip).
+#[cfg(windows)]
+fn encode_jpeg_bgra_thumb(
+    bgra: &[u8],
+    full_w: i32,
+    full_h: i32,
+    max_w: u32,
+    max_h: u32,
+) -> Result<CapturedFrame, String> {
+    use image::{imageops, ImageBuffer, Rgb};
+    use std::io::Cursor;
+
+    let cw = full_w.max(1) as u32;
+    let ch = full_h.max(1) as u32;
+    let mut rgb = vec![0u8; (cw as usize) * (ch as usize) * 3];
+    for row in 0..ch as usize {
+        for col in 0..cw as usize {
+            let si = (row * cw as usize + col) * 4;
+            let di = (row * cw as usize + col) * 3;
+            rgb[di] = bgra[si + 2];
+            rgb[di + 1] = bgra[si + 1];
+            rgb[di + 2] = bgra[si];
+        }
+    }
+    let img: ImageBuffer<Rgb<u8>, _> =
+        ImageBuffer::from_raw(cw, ch, rgb).ok_or("ImageBuffer failed")?;
+    let thumb = imageops::thumbnail(&img, max_w.max(1), max_h.max(1));
+    let (tw, th) = (thumb.width(), thumb.height());
+    let mut cursor = Cursor::new(Vec::new());
+    // Lower quality = smaller / faster encode for hover tips.
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 72);
+    enc.encode(thumb.as_raw(), tw, th, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("JPEG encode: {e}"))?;
+    Ok(CapturedFrame {
+        jpeg: cursor.into_inner(),
+        width: tw,
+        height: th,
+    })
+}
+
+/// Stretch-blit window DC into a small bitmap (much faster than full-size PrintWindow).
+#[cfg(windows)]
+unsafe fn capture_windowdc_thumb_bgra(
+    hwnd: windows::Win32::Foundation::HWND,
+    src_w: i32,
+    src_h: i32,
+    dst_w: i32,
+    dst_h: i32,
+) -> Option<Vec<u8>> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetWindowDC,
+        ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, HALFTONE, SRCCOPY,
+    };
+    let hdc_win = GetWindowDC(hwnd);
+    if hdc_win.is_invalid() {
+        return None;
+    }
+    let hdc_mem = CreateCompatibleDC(hdc_win);
+    if hdc_mem.is_invalid() {
+        ReleaseDC(hwnd, hdc_win);
+        return None;
+    }
+    let hbmp = CreateCompatibleBitmap(hdc_win, dst_w, dst_h);
+    if hbmp.is_invalid() {
+        let _ = DeleteDC(hdc_mem);
+        ReleaseDC(hwnd, hdc_win);
+        return None;
+    }
+    let old = SelectObject(hdc_mem, hbmp);
+    let _ = SetStretchBltMode(hdc_mem, HALFTONE);
+    let ok = StretchBlt(
+        hdc_mem,
+        0,
+        0,
+        dst_w,
+        dst_h,
+        hdc_win,
+        0,
+        0,
+        src_w,
+        src_h,
+        SRCCOPY,
+    )
+    .as_bool();
+    let bgra = if ok {
+        dibits_bgra(hdc_mem, hbmp, dst_w, dst_h)
+    } else {
+        None
+    };
+    let _ = SelectObject(hdc_mem, old);
+    let _ = DeleteObject(hbmp);
+    let _ = DeleteDC(hdc_mem);
+    ReleaseDC(hwnd, hdc_win);
+    bgra
 }
 
 #[cfg(windows)]
@@ -328,7 +471,123 @@ pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, S
     }
 }
 
+/// Capture the window's own pixels (PrintWindow / window DC) — never screen blit.
+/// Used for Dock hover previews so overlapping chrome / other apps don't become "the screen".
+#[cfg(windows)]
+pub fn capture_window_owned_jpeg(hwnd_raw: isize) -> Result<CapturedFrame, String> {
+    capture_window_owned_thumb_jpeg(hwnd_raw, 280, 168)
+}
+
+/// Dock / owned preview: prefer PrintWindow (works for many GPU apps), reject black frames.
+/// Minimized windows: try PrintWindow with normal size; if that fails, briefly
+/// restore without activating, capture, then minimize again.
+#[cfg(windows)]
+pub fn capture_window_owned_thumb_jpeg(
+    hwnd_raw: isize,
+    max_w: u32,
+    max_h: u32,
+) -> Result<CapturedFrame, String> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowPlacement, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, ShowWindow,
+        WINDOWPLACEMENT, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+    };
+
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return Err("Invalid window".into());
+        }
+
+        let iconic = IsIconic(hwnd).as_bool();
+        if !iconic && !IsWindowVisible(hwnd).as_bool() {
+            return Err("window not visible".into());
+        }
+
+        let (full_w, full_h) = if iconic {
+            let mut place = WINDOWPLACEMENT::default();
+            place.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            GetWindowPlacement(hwnd, &mut place).map_err(|e| format!("GetWindowPlacement: {e}"))?;
+            let r = place.rcNormalPosition;
+            ((r.right - r.left).max(1), (r.bottom - r.top).max(1))
+        } else {
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd, &mut rect).map_err(|e| format!("GetWindowRect: {e}"))?;
+            ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1))
+        };
+        if full_w > 8192 || full_h > 8192 {
+            return Err("window size out of range".into());
+        }
+
+        let max_w = max_w.max(1);
+        let max_h = max_h.max(1);
+
+        let try_capture = |hwnd: HWND, full_w: i32, full_h: i32| -> Option<CapturedFrame> {
+            let scale = (max_w as f64 / full_w as f64)
+                .min(max_h as f64 / full_h as f64)
+                .min(1.0);
+            let dst_w = ((full_w as f64) * scale).round().max(1.0) as i32;
+            let dst_h = ((full_h as f64) * scale).round().max(1.0) as i32;
+
+            if let Some(buf) =
+                capture_printwindow_bgra(hwnd, full_w, full_h).filter(|b| bgra_looks_usable(b))
+            {
+                return encode_jpeg_bgra_thumb(&buf, full_w, full_h, max_w, max_h).ok();
+            }
+            if let Some(buf) =
+                capture_windowdc_bgra(hwnd, full_w, full_h).filter(|b| bgra_looks_usable(b))
+            {
+                return encode_jpeg_bgra_thumb(&buf, full_w, full_h, max_w, max_h).ok();
+            }
+            if let Some(buf) = capture_windowdc_thumb_bgra(hwnd, full_w, full_h, dst_w, dst_h)
+                .filter(|b| bgra_looks_usable(b))
+            {
+                return encode_jpeg_bgra_thumb(&buf, dst_w, dst_h, max_w, max_h).ok();
+            }
+            None
+        };
+
+        if let Some(frame) = try_capture(hwnd, full_w, full_h) {
+            return Ok(frame);
+        }
+
+        // Minimized: PrintWindow often fails while iconic — soft-restore without
+        // stealing focus, capture, then put it back on the taskbar.
+        if iconic {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // Re-read live size after restore (dpi / snap may differ from placement).
+            let mut rect = RECT::default();
+            let (rw, rh) = if GetWindowRect(hwnd, &mut rect).is_ok() {
+                ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1))
+            } else {
+                (full_w, full_h)
+            };
+            let frame = try_capture(hwnd, rw, rh);
+            let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+            if let Some(frame) = frame {
+                return Ok(frame);
+            }
+        }
+
+        Err("owned window capture blank/black".into())
+    }
+}
+
 #[cfg(not(windows))]
 pub fn capture_window_jpeg(_hwnd_raw: isize, _roi: Roi) -> Result<CapturedFrame, String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn capture_window_owned_jpeg(_hwnd_raw: isize) -> Result<CapturedFrame, String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn capture_window_owned_thumb_jpeg(
+    _hwnd_raw: isize,
+    _max_w: u32,
+    _max_h: u32,
+) -> Result<CapturedFrame, String> {
     Err("Windows only".into())
 }

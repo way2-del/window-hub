@@ -1,4 +1,4 @@
-mod commands;
+﻿mod commands;
 mod companion_scripts;
 mod db;
 mod dock;
@@ -9,6 +9,7 @@ mod hub_fetch_guard;
 mod plugin_hub;
 mod plugin_install;
 mod staging;
+mod sysmon;
 mod win32;
 mod windows_service;
 
@@ -262,6 +263,8 @@ pub fn run() {
             app.manage(pins);
             let _ = crate::plugin_install::list_installed_plugins_sync();
             crate::plugin_install::ensure_official_plugins(app.handle());
+            // Directory-imported (__dev) plugins are copies — refresh from source on launch.
+            crate::plugin_install::resync_dev_plugins(app.handle());
             crate::win32::ambient::set_mode(commands::load_ambient_mode());
             crate::win32::tray::set_prefs(commands::load_tray_prefs());
 
@@ -431,10 +434,12 @@ pub fn run() {
             plugin_hub::hub_shortcuts_list_pins,
             plugin_hub::hub_shortcuts_set_badge,
             plugin_hub::hub_plugin_read_text,
+            plugin_hub::hub_plugin_asset_path,
             plugin_hub::hub_everything_status,
             plugin_hub::hub_everything_search,
             plugin_hub::hub_everything_open,
             plugin_hub::hub_everything_reveal,
+            plugin_hub::hub_sysmon_snapshot,
             plugin_install::list_installed_plugins,
             plugin_install::pick_whpx_file,
             plugin_install::pick_plugin_directory,
@@ -507,6 +512,8 @@ pub fn run() {
             commands::set_system_taskbar_visible,
             dock::get_dock_prefs,
             dock::set_dock_prefs,
+            dock::dock_preview_magnification,
+            dock::dock_end_magnification_preview,
             dock::import_dockico_ini,
             dock::pick_dockico_file,
             dock::pick_dock_icon_file,
@@ -519,9 +526,14 @@ pub fn run() {
             dock::open_dock_icon_editor,
             dock::close_dock_icon_editor,
             dock::dock_launch_item,
+            dock::dock_capture_window_preview,
+            dock::dock_item_window_count,
+            dock::dock_close_item_windows,
+            dock::close_window_hwnd,
             dock::dock_set_mouse_near_bottom,
             dock::dock_set_live_width,
             dock::dock_set_interaction_hold,
+            dock::dock_set_preview_tip_keep,
             dock::dock_set_hover_expand,
             dock::dock_pointer_client_xy,
             dock::get_dock_display_items,

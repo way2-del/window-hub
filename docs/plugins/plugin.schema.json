@@ -234,7 +234,8 @@
           "clipboard.write",
           "network",
           "staging",
-          "everything.search"
+          "everything.search",
+          "system.monitor"
         ]
       },
       "uniqueItems": true

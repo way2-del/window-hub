@@ -247,13 +247,19 @@ pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(
 /// uses `DWMSBT_MAINWINDOW` + caption color none.
 pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
     let hwnd = hwnd_of(window)?;
+    let is_dark = dark.unwrap_or(true);
+
+    // Dark + backdrop FIRST — clearing SWCA before this paints a white frame flash.
+    apply_mica_chrome(hwnd, Some(is_dark));
+    set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
+
     // Drop SWCA so SYSTEMBACKDROP owns the full frame (caption included).
     let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
     let _ = window_vibrancy::clear_acrylic(window);
     let _ = window_vibrancy::clear_blur(window);
     clear_webview_fill(window);
 
-    let is_dark = dark.unwrap_or(true);
+    // Re-assert after clear (some builds drop immersive mode when SWCA is disabled).
     apply_mica_chrome(hwnd, Some(is_dark));
     set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
 
@@ -287,6 +293,36 @@ pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> 
         );
     }
 
+    clear_webview_fill(window);
+    Ok(())
+}
+
+/// Re-hit dark + system Mica without clear/SWCA teardown (no white flash).
+pub fn reassert_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    let hwnd = hwnd_of(window)?;
+    let is_dark = dark.unwrap_or(true);
+    apply_mica_chrome(hwnd, Some(is_dark));
+    set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
+    unsafe {
+        let caption = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            &caption as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let text: u32 = if is_dark {
+            0x00_F5_F4_F4
+        } else {
+            0x00_1E_1C_1C
+        };
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TEXT_COLOR,
+            &text as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
     clear_webview_fill(window);
     Ok(())
 }

@@ -21,6 +21,12 @@ fn set_dock_menu_hold(app: &AppHandle, hold: bool) {
     }
 }
 
+fn set_dock_preview_tip_keep(app: &AppHandle, keep: bool) {
+    if let Some(vis) = app.try_state::<Arc<DockVisibility>>() {
+        vis.set_preview_tip_keep(keep);
+    }
+}
+
 #[derive(Deserialize)]
 pub struct AttachArgs {
     pub hwnd: isize,
@@ -228,7 +234,8 @@ pub async fn open_settings_window(
         .filter(|s| !s.is_empty());
 
     if let Some(existing) = app.get_webview_window("settings") {
-        apply_saved_material(&existing, &state);
+        // Already painted — soft reassert only (full deferred clear flashes white).
+        reassert_saved_material(&existing, &state);
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -285,9 +292,9 @@ pub async fn open_settings_window(
     .build()
     .map_err(|e| format!("open settings failed: {e}"))?;
 
-    // Show first, then apply DWM mica (HWND/WebView ready). Deferred retries cover first-open race.
-    let _ = win.show();
+    // Mica before show — avoids a white undecorated frame on first paint.
     apply_saved_material(&win, &state);
+    let _ = win.show();
     let _ = win.set_focus();
     Ok(())
 }
@@ -816,8 +823,18 @@ fn apply_saved_material(window: &tauri::WebviewWindow, state: &MaterialState) {
     crate::win32::material::apply_prefs_deferred(window, &prefs);
 }
 
+/// Soft reassert (settings / icon editor) — no clear cycle, avoids open/focus flash.
+fn reassert_saved_material(window: &tauri::WebviewWindow, state: &MaterialState) {
+    let prefs = read_material_prefs(state);
+    let _ = crate::win32::material::reassert_prefs(window, &prefs);
+}
+
 pub fn apply_saved_material_pub(window: &tauri::WebviewWindow, state: &MaterialState) {
     apply_saved_material(window, state);
+}
+
+pub fn reassert_saved_material_pub(window: &tauri::WebviewWindow, state: &MaterialState) {
+    reassert_saved_material(window, state);
 }
 
 /// Re-apply materials to every open popup after prefs change.
@@ -1225,6 +1242,15 @@ pub struct ChromeHoverTipPayload {
     /// `above` | `below` (default). Dock tips sit above the icon.
     #[serde(default)]
     pub placement: Option<String>,
+    /// Optional live window thumbnail (JPEG base64, no data: prefix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_jpeg_base64: Option<String>,
+    /// When set with a preview image, tip is interactive (close button).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hwnd: Option<i64>,
+    /// Dock item id — click preview launches/focuses like clicking the icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 const CHROME_HOVER_TIP_W: f64 = 160.0;
@@ -1236,6 +1262,7 @@ const CHROME_TIP_HOST_LABELS: &[&str] = &[
     "dock",
     "tray-popup",
     "status-menu-popup",
+    "chrome-hover-tip",
 ];
 
 #[cfg(windows)]
@@ -1295,6 +1322,7 @@ fn hide_chrome_hover_tip_sync(app: &AppHandle) {
     if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
         *g = None;
     }
+    set_dock_preview_tip_keep(app, false);
     if let Some(w) = app.get_webview_window("chrome-hover-tip") {
         let _ = w.hide();
     }
@@ -1344,6 +1372,9 @@ pub async fn show_chrome_hover_tip(
     x: f64,
     y: f64,
     placement: Option<String>,
+    image_jpeg_base64: Option<String>,
+    hwnd: Option<i64>,
+    item_id: Option<String>,
     #[allow(unused_variables)] epoch: Option<u64>,
 ) -> Result<(), String> {
     let lines: Vec<String> = lines
@@ -1352,7 +1383,10 @@ pub async fn show_chrome_hover_tip(
         .filter(|s| !s.is_empty())
         .take(8)
         .collect();
-    if lines.is_empty() {
+    let image = image_jpeg_base64
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if lines.is_empty() && image.is_none() {
         return close_chrome_hover_tip(app, None).await;
     }
 
@@ -1362,14 +1396,26 @@ pub async fn show_chrome_hover_tip(
     let placement = placement
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| s == "above" || s == "below");
+    let interactive = image.is_some() && hwnd.map(|h| h != 0).unwrap_or(false);
+    let item_id = item_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let payload = ChromeHoverTipPayload {
         lines,
         x,
         y,
         placement,
+        image_jpeg_base64: image,
+        hwnd: if interactive { hwnd } else { None },
+        item_id: if interactive { item_id } else { None },
     };
     if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
         *g = Some(payload.clone());
+    }
+    // Hold AutoHide for interactive previews. Only arm here — never clear on a
+    // non-interactive refresh (progressive title-first tip must not drop keep).
+    if interactive {
+        set_dock_preview_tip_keep(&app, true);
     }
 
     let still_current =
@@ -1385,7 +1431,7 @@ pub async fn show_chrome_hover_tip(
         let _ = existing.set_always_on_top(true);
         let _ = existing.unminimize();
         let _ = existing.show();
-        let _ = existing.set_ignore_cursor_events(true);
+        let _ = existing.set_ignore_cursor_events(!interactive);
         if !still_current() {
             let _ = existing.hide();
             return Ok(());
@@ -1431,7 +1477,7 @@ pub async fn show_chrome_hover_tip(
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
     apply_saved_material(&win, &state);
-    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.set_ignore_cursor_events(!interactive);
     let _ = win.set_always_on_top(true);
     let _ = win.show();
     apply_saved_material(&win, &state);

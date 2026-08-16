@@ -20,8 +20,9 @@ use super::{DockActivationPosition, DockDisplayMode};
 const POLL_MS: u64 = 50;
 /// Brief settle after show anim — blocks leave while the pointer settles onto the bar.
 const SETTLE_MS: u64 = 900;
-/// Minimum reveal strip thickness (logical px).
-const REVEAL_THICK_MIN: u32 = 24;
+/// Hidden-state reveal: logical px at the monitor bottom edge (prefs may be thinner).
+/// Kept tiny so “slightly above the bottom” does not show the dock.
+const REVEAL_THICK_MAX: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +46,8 @@ struct VisInner {
     busy: bool,
     /// Frontend drag / modal — keep AutoHide from collapsing the bar.
     interaction_hold: bool,
+    /// Interactive window-preview tip is open — keep AutoHide while cursor moves onto it.
+    preview_tip_keep: bool,
     /// When `Some`, hide only after this instant if still unwanted.
     hide_deadline: Option<Instant>,
     /// When the HWND last finished a show transition.
@@ -68,13 +71,14 @@ impl DockVisibility {
                 force_show: false,
                 mouse_near: false,
                 activation_position: DockActivationPosition::ScreenBottom,
-                activation_thickness_px: 20,
+                activation_thickness_px: 2,
                 bottom_offset_px: 0,
                 hide_linger_ms: 800,
                 desired: false,
                 shown: false,
                 busy: false,
                 interaction_hold: false,
+                preview_tip_keep: false,
                 hide_deadline: None,
                 shown_at: None,
                 near_streak: 0,
@@ -114,7 +118,7 @@ impl DockVisibility {
     ) {
         if let Ok(mut g) = self.inner.lock() {
             g.activation_position = position;
-            g.activation_thickness_px = thickness_px.clamp(4, 64);
+            g.activation_thickness_px = thickness_px.clamp(1, 64);
             g.bottom_offset_px = bottom_offset_px.min(400);
             g.hide_linger_ms = hide_linger_ms.clamp(200, 10_000);
         }
@@ -146,6 +150,18 @@ impl DockVisibility {
         if let Ok(mut g) = self.inner.lock() {
             g.interaction_hold = hold;
             if hold {
+                g.hide_deadline = None;
+                g.desired = true;
+            }
+        }
+    }
+
+    /// Keep AutoHide while an interactive Dock window-preview tip is visible
+    /// (cursor must leave the dock HWND to reach the tip above it).
+    pub fn set_preview_tip_keep(&self, keep: bool) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.preview_tip_keep = keep;
+            if keep {
                 g.hide_deadline = None;
                 g.desired = true;
             }
@@ -498,7 +514,7 @@ impl DockVisibility {
                     g.activation_thickness_px,
                     g.bottom_offset_px,
                     g.shown,
-                    g.interaction_hold,
+                    g.interaction_hold || g.preview_tip_keep,
                 )
             };
             if hold {
@@ -522,10 +538,14 @@ impl DockVisibility {
                     // Rest: chrome strip only (empty headroom must not block hide).
                     // Hover-expanded: chrome + fan headroom — magnified icon hits
                     // extend there; excluding them hid the dock while fan stayed on.
-                    pointer_in_dock_chrome(app, &mi, scale, bottom_off, pt.x, pt.y)
+                    if pointer_in_dock_chrome(app, &mi, scale, bottom_off, pt.x, pt.y) {
+                        return true;
+                    }
+                    // Preview tip sits above the icons HWND — treat as keep zone.
+                    pointer_in_chrome_hover_tip(app, pt.x, pt.y)
                 } else {
-                    // Hidden: thin bottom strip only.
-                    let reveal_thick = thick_log.max(REVEAL_THICK_MIN);
+                    // Hidden: razor strip on the monitor bottom edge only.
+                    let reveal_thick = thick_log.clamp(1, REVEAL_THICK_MAX);
                     point_on_activation_strip(
                         app,
                         &mi,
@@ -626,11 +646,12 @@ fn point_on_activation_strip(
 ) -> bool {
     let _ = app;
     let _ = activation;
-    let thick = ((thick_log as f64) * scale).round().clamp(4.0, 120.0) as i32;
+    let thick = ((thick_log as f64) * scale).round().clamp(1.0, 16.0) as i32;
     let margin = ((bottom_off as f64) * scale).round() as i32;
-    let zone_bottom = mi.rcMonitor.bottom - margin;
-    let zone_top = zone_bottom - thick;
-    // Inclusive bottom — last pixel row must activate.
+    // rcMonitor.bottom is exclusive — last visible row is bottom - 1.
+    let zone_bottom = mi.rcMonitor.bottom - 1 - margin;
+    let zone_top = zone_bottom - thick + 1;
+    // Inclusive [zone_top, zone_bottom] on the last physical pixel rows.
     if y < zone_top || y > zone_bottom {
         return false;
     }
@@ -663,6 +684,7 @@ fn dock_chrome_keep_rect(
     let logical_keep = super::dock_window_width(
         &layout,
         prefs.corner_radius_px,
+        prefs.magnification,
         expanded,
     );
     let content_w = (logical_keep * scale).round().max(1.0) as i32;
@@ -743,6 +765,44 @@ fn pointer_in_dock_chrome(
 ) -> bool {
     let (l, t, r, b) = dock_chrome_keep_rect(app, mi, scale, bottom_off);
     x >= l && x < r && y >= t && y < b
+}
+
+/// Screen-space hit of the chrome-hover-tip HWND (window preview sits above Dock).
+#[cfg(windows)]
+fn pointer_in_chrome_hover_tip(app: &AppHandle, x: i32, y: i32) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetWindowRect, GA_ROOT};
+
+    let Some(tip) = app.get_webview_window("chrome-hover-tip") else {
+        return false;
+    };
+    let Ok(visible) = tip.is_visible() else {
+        return false;
+    };
+    if !visible {
+        return false;
+    }
+    let Ok(hwnd) = tip.hwnd() else {
+        return false;
+    };
+    unsafe {
+        let h = HWND(hwnd.0 as _);
+        let root = GetAncestor(h, GA_ROOT);
+        let root = if root.0.is_null() { h } else { root };
+        let mut wr = RECT::default();
+        if GetWindowRect(root, &mut wr).is_err() {
+            return false;
+        }
+        if wr.right <= wr.left || wr.bottom <= wr.top {
+            return false;
+        }
+        // Small pad so the gap between dock top and tip bottom does not start leave.
+        const PAD: i32 = 10;
+        x >= wr.left.saturating_sub(PAD)
+            && x < wr.right.saturating_add(PAD)
+            && y >= wr.top.saturating_sub(PAD)
+            && y < wr.bottom.saturating_add(PAD)
+    }
 }
 
 /// Bottom-anchored rest pose in screen px (overlap tests).
@@ -874,6 +934,7 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
             let logical_w = super::dock_window_width(
                 &layout,
                 prefs.corner_radius_px,
+                prefs.magnification,
                 super::dock_hover_expanded(),
             );
             let logical_h = super::dock_window_height(prefs.magnification);

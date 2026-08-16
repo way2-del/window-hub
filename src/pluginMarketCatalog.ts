@@ -1,4 +1,4 @@
-/** Built-in example plugins surfaced as the local “plugin market”. */
+﻿/** Built-in example plugins surfaced as the local “plugin market”. */
 
 export type MarketCategoryId = "shortcuts" | "island";
 
@@ -69,7 +69,7 @@ export const MARKET_PLUGINS: MarketPlugin[] = [
     name: "文件搜索",
     version: "1.3.0",
     description:
-      "情景临时：Alt+空格先激活搜索栏；回车再展开下拉（Everything）。默认文件夹/历史，有关键字则显示结果。",
+      "情景临时：Alt+空格搜索。空态为可自定义卡片组网格；有关键字则 Everything 结果。",
     summary: "情景临时 · Alt+空格搜索",
     categoryId: "island",
     tint: "#7bd88f",
@@ -86,6 +86,18 @@ export const MARKET_PLUGINS: MarketPlugin[] = [
     categoryId: "shortcuts",
     tint: "#ff9f0a",
     letter: "成",
+  },
+  {
+    exampleId: "sysmon",
+    pluginId: "com.window-hub.sysmon",
+    name: "系统监控",
+    version: "1.0.0",
+    description:
+      "快捷区风扇随 max(CPU,GPU) 温度加速；弹窗查看 CPU / 内存 / 磁盘 / 温度。",
+    summary: "快捷区风扇与系统状态",
+    categoryId: "shortcuts",
+    tint: "#64d2ff",
+    letter: "监",
   },
   {
     exampleId: "transfer-station",

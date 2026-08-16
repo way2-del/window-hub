@@ -15,7 +15,8 @@ export type PluginCapability =
   | "clipboard.write"
   | "network"
   | "staging"
-  | "everything.search";
+  | "everything.search"
+  | "system.monitor";
 
 export type ShortcutsAction = "expand" | "popup.open" | "panel.open" | "command";
 

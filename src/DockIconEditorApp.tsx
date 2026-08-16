@@ -42,6 +42,7 @@ type DockPrefs = {
   items: DockItem[];
   hotkey: string;
   hiddenItemIds?: string[];
+  hoverWindowPreview?: boolean;
 };
 
 /** Matches Rust `default_icon_scale` (0.9 → 90%). */

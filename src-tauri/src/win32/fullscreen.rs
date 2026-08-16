@@ -42,6 +42,7 @@ mod win {
         matches!(
             class_name(hwnd).as_str(),
             "WindowHubAppBarHost"
+            | "WindowHubDockAppBarHost"
                 | "Shell_TrayWnd"
                 | "Shell_SecondaryTrayWnd"
                 | "Progman"

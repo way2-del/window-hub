@@ -125,6 +125,7 @@ my-plugin/
 | `network` | `hub.fetch(url, opts?)` + `permissions.network` 白名单 | 是 |
 | `clipboard.*` | **仅 schema 占位，无实现** — 勿调用 | 是（若声明） |
 | `everything.search` | `hub.everything.status/search/open/reveal`（需本机 Everything） | **是** |
+| `system.monitor` | `hub.sysmon.snapshot`（CPU/内存/磁盘/温度） | **是** |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。`claimScenario` / `releaseScenario` 需 `slots["island.scenario"]`（且 bar+panel）。
 

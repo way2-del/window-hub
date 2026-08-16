@@ -155,7 +155,7 @@ if (kind === "settings" || kind === "dock-icon-editor") {
   root.innerHTML =
     kind === "dock-icon-editor"
       ? '<div style="padding:24px;color:#f4f4f5;font-family:Segoe UI,sans-serif;background:#1c1c1e;min-height:100vh">正在加载修改图标…</div>'
-      : '<div style="padding:24px;color:var(--glass-fg,#f4f4f5);font-family:Segoe UI,sans-serif;background:var(--glass-panel-bg,rgba(32,32,34,0.55));min-height:100vh">正在加载设置…</div>';
+      : '<div style="padding:24px;color:#f4f4f5;font-family:Segoe UI,sans-serif;background:#1c1c1e;min-height:100vh">正在加载设置…</div>';
 }
 if (
   kind === "dock" ||

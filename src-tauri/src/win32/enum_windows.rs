@@ -109,6 +109,7 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
                 | "ForegroundStaging"
                 | "XamlExplorerHostIslandWindow"
                 | "WindowHubAppBarHost"
+                | "WindowHubDockAppBarHost"
         ) {
             return false;
         }
@@ -243,9 +244,31 @@ pub fn focus_window(hwnd: isize) -> Result<(), String> {
     }
 }
 
+/// Ask a top-level window to close (WM_CLOSE). Does not force-kill.
+#[cfg(windows)]
+pub fn close_window(hwnd: isize) -> Result<(), String> {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PostMessageW, WM_CLOSE};
+
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        if !IsWindow(h).as_bool() {
+            return Err("window no longer exists".into());
+        }
+        PostMessageW(h, WM_CLOSE, WPARAM(0), LPARAM(0))
+            .map_err(|e| format!("PostMessage WM_CLOSE: {e}"))?;
+        Ok(())
+    }
+}
+
 #[cfg(not(windows))]
 pub fn focus_window(_hwnd: isize) -> Result<(), String> {
     Err("focus_window is only available on Windows".into())
+}
+
+#[cfg(not(windows))]
+pub fn close_window(_hwnd: isize) -> Result<(), String> {
+    Err("close_window is only available on Windows".into())
 }
 
 /// Parse `hwnd:123` or raw numeric string into hwnd.

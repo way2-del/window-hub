@@ -59,7 +59,8 @@
       "resources/plugins/mirror",
       "resources/plugins/app-library",
       "resources/plugins/idiom",
-      "resources/plugins/file-search"
+      "resources/plugins/file-search",
+      "resources/plugins/sysmon"
     ]
   }
 }

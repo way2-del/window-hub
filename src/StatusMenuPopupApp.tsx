@@ -208,6 +208,7 @@ export default function StatusMenuPopupApp() {
     dockItemId: string | null;
     dockItemKind: string | null;
     afterItemId: string | null;
+    windowCount: number;
   } | null>(null);
   const [entered, setEntered] = useState(false);
   const revealGen = useRef(0);
@@ -231,12 +232,20 @@ export default function StatusMenuPopupApp() {
       const dockItemId = readDockItemId();
       const afterItemId = readAfterItemId() ?? dockItemId;
       let dockItemKind: string | null = null;
+      let windowCount = 0;
       if (dockItemId) {
         try {
           const items = await invoke<DockMenuItem[]>("get_dock_display_items");
           dockItemKind = items.find((it) => it.id === dockItemId)?.kind ?? null;
         } catch {
           dockItemKind = null;
+        }
+        try {
+          windowCount = await invoke<number>("dock_item_window_count", {
+            itemId: dockItemId,
+          });
+        } catch {
+          windowCount = 0;
         }
       }
       if (cancelled) return;
@@ -249,6 +258,7 @@ export default function StatusMenuPopupApp() {
         dockItemId,
         dockItemKind,
         afterItemId,
+        windowCount,
       });
     };
 
@@ -346,13 +356,22 @@ export default function StatusMenuPopupApp() {
     return <div className="status-menu-shell is-booting" aria-hidden />;
   }
 
-  const { hiddenCount, origin, fromDock, dockItemId, dockItemKind, afterItemId } =
-    boot;
+  const {
+    hiddenCount,
+    origin,
+    fromDock,
+    dockItemId,
+    dockItemKind,
+    afterItemId,
+    windowCount,
+  } = boot;
   const isRunningTile = !!dockItemId?.startsWith("running:");
   const isSeparator = dockItemKind === "separator";
   /** Dock 图标/分割线：仅应用相关项。空 Dock / 岛标题：系统设置菜单。 */
   const itemMenu = fromDock && !!dockItemId;
   const systemMenu = !itemMenu;
+  const canCloseWindows =
+    itemMenu && !isSeparator && windowCount > 0 && (isRunningTile || dockItemKind === "app");
   const shellClass = [
     "status-menu-shell",
     origin === "up" ? "is-origin-up" : "is-origin-down",
@@ -435,7 +454,7 @@ export default function StatusMenuPopupApp() {
               {dockItemKind === "app" ? (
                 <button
                   type="button"
-                  className="status-menu-item is-danger"
+                  className="status-menu-item"
                   role="menuitem"
                   onClick={() =>
                     void run(async () => {
@@ -450,6 +469,22 @@ export default function StatusMenuPopupApp() {
               ) : null}
             </>
           )}
+          {canCloseWindows ? (
+            <button
+              type="button"
+              className="status-menu-item is-danger"
+              role="menuitem"
+              onClick={() =>
+                void run(async () => {
+                  await invoke("dock_close_item_windows", {
+                    itemId: dockItemId,
+                  });
+                })
+              }
+            >
+              关闭窗口
+            </button>
+          ) : null}
         </>
       ) : null}
 

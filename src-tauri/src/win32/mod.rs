@@ -7,6 +7,7 @@ pub mod autostart_svc;
 #[cfg(windows)]
 pub mod single_instance;
 pub mod appbar;
+pub mod dock_appbar;
 #[cfg(windows)]
 pub mod blur_glass;
 #[cfg(windows)]

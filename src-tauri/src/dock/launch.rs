@@ -11,6 +11,54 @@ pub fn matching_windows(item: &DockItem, windows: &[WindowInfo]) -> Vec<WindowIn
         .collect()
 }
 
+/// Prefer a visible, non-minimized top-level match for thumbnails / focus.
+pub fn best_matching_window(item: &DockItem, windows: &[WindowInfo]) -> Option<WindowInfo> {
+    let matched = matching_windows(item, windows);
+    if matched.is_empty() {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
+        };
+        let score = |w: &WindowInfo| -> (i32, i64) {
+            let hwnd = HWND(w.hwnd as *mut _);
+            unsafe {
+                if !IsWindow(hwnd).as_bool() {
+                    return (0, 0);
+                }
+                let iconic = IsIconic(hwnd).as_bool();
+                let visible = IsWindowVisible(hwnd).as_bool();
+                let mut rect = RECT::default();
+                let area = if GetWindowRect(hwnd, &mut rect).is_ok() {
+                    let ww = (rect.right - rect.left).max(0) as i64;
+                    let hh = (rect.bottom - rect.top).max(0) as i64;
+                    ww.saturating_mul(hh)
+                } else {
+                    0
+                };
+                let rank = if !iconic && visible {
+                    3
+                } else if visible {
+                    2
+                } else if iconic {
+                    1
+                } else {
+                    0
+                };
+                (rank, area)
+            }
+        };
+        matched.into_iter().max_by(|a, b| score(a).cmp(&score(b)))
+    }
+    #[cfg(not(windows))]
+    {
+        matched.into_iter().next()
+    }
+}
+
 pub fn item_matches_window(item: &DockItem, w: &WindowInfo) -> bool {
     if item.kind != "app" {
         return false;
@@ -47,7 +95,7 @@ pub fn launch_or_focus(item: &DockItem) -> Result<(), String> {
         _ => {
             let wins = list_windows(None);
             let matched = matching_windows(item, &wins);
-            if let Some(w) = matched.first() {
+            if let Some(w) = best_matching_window(item, &wins).or_else(|| matched.first().cloned()) {
                 focus_window(w.hwnd)
             } else {
                 launch_app(item)

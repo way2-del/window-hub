@@ -1,0 +1,86 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+html,
+body {
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+  display: flex;
+  align-items: center;
+  /* Follow status-bar chrome (light/dark) */
+  color: var(--wh-chrome-fg, rgba(255, 255, 255, 0.94));
+  text-shadow: var(--wh-chrome-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
+  font-family: var(
+    --wh-chrome-font-family,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif
+  );
+  user-select: none;
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.sm-strip {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  padding: 0;
+}
+
+.sm-fan-btn {
+  display: inline-grid;
+  place-items: center;
+  width: calc(var(--wh-bar-h, 28px) - 2px);
+  height: calc(var(--wh-bar-h, 28px) - 2px);
+  margin: 0;
+  padding: 0;
+  border: none !important;
+  border-radius: 6px;
+  background: transparent !important;
+  color: inherit;
+  text-shadow: inherit;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.sm-fan-btn:hover {
+  background: rgba(127, 127, 127, 0.14) !important;
+}
+
+.sm-fan {
+  width: 15px;
+  height: 15px;
+  display: block;
+  color: inherit;
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sm-fan {
+    transform: none !important;
+  }
+}

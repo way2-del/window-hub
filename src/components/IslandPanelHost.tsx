@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { parsePluginPanelId } from "../plugins/panelProviders";
 import { pluginRegistry } from "../plugins/registry";
@@ -21,6 +21,12 @@ type Props = {
   searchSubmit?: { nonce: number; query: string } | null;
 };
 
+type PendingPanelScripts = {
+  token: string;
+  boardJs: string;
+  panelJs: string;
+};
+
 function postPanelLifecycle(
   frame: Window | null | undefined,
   pluginId: string,
@@ -36,6 +42,83 @@ function postPanelLifecycle(
   );
 }
 
+/** Load optional board.js — prefer asset protocol (no IPC size risk), fall back to read_text. */
+async function loadOptionalBoardJs(
+  pluginId: string,
+  relativePath: string,
+): Promise<string> {
+  try {
+    const abs = await invoke<string>("hub_plugin_asset_path", {
+      pluginId,
+      relativePath,
+    });
+    const res = await fetch(convertFileSrc(abs));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    if (!text.includes("FileSearchBoard")) {
+      throw new Error("board.js missing FileSearchBoard (truncated?)");
+    }
+    return text;
+  } catch (assetErr) {
+    try {
+      const text = await invoke<string>("hub_plugin_read_text", {
+        pluginId,
+        relativePath,
+      });
+      if (text && !text.includes("FileSearchBoard")) {
+        console.warn(
+          "[IslandPanelHost] board.js IPC payload missing FileSearchBoard",
+          text.length,
+        );
+      }
+      return text;
+    } catch (ipcErr) {
+      console.warn("[IslandPanelHost] board.js load failed", {
+        assetErr,
+        ipcErr,
+      });
+      return "";
+    }
+  }
+}
+
+/** Inject classic scripts via textContent — avoids srcdoc HTML/`</script>`/blob races. */
+function injectPanelScripts(
+  doc: Document,
+  pending: PendingPanelScripts,
+): void {
+  if (doc.documentElement.dataset.whPanelScripts === pending.token) return;
+  doc.documentElement.dataset.whPanelScripts = pending.token;
+
+  const run = (code: string, label: string) => {
+    if (!code) return;
+    const el = doc.createElement("script");
+    el.textContent = code;
+    try {
+      (doc.body ?? doc.documentElement).appendChild(el);
+    } catch (e) {
+      console.error(`[IslandPanelHost] inject ${label} failed`, e);
+      try {
+        (doc.defaultView as Window & { __whBoardErr?: string }).__whBoardErr =
+          String(e);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  // board first so window.FileSearchBoard exists before panel.js boots
+  run(pending.boardJs, "board.js");
+  const win = doc.defaultView as (Window & { FileSearchBoard?: unknown; __whBoardErr?: string }) | null;
+  if (pending.boardJs && win && !win.FileSearchBoard) {
+    win.__whBoardErr =
+      win.__whBoardErr ||
+      `board.js 已注入但未导出 FileSearchBoard (${pending.boardJs.length} chars)`;
+    console.error("[IslandPanelHost]", win.__whBoardErr);
+  }
+  run(pending.panelJs, "panel.js");
+}
+
 export default function IslandPanelHost({
   pullContent,
   active,
@@ -43,6 +126,7 @@ export default function IslandPanelHost({
   searchSubmit,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const pendingScriptsRef = useRef<PendingPanelScripts | null>(null);
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
   const [registryEpoch, setRegistryEpoch] = useState(0);
@@ -56,6 +140,7 @@ export default function IslandPanelHost({
 
   useEffect(() => {
     if (!pluginId || !enabled) {
+      pendingScriptsRef.current = null;
       setSrcdoc(null);
       setPanelError(pluginId && !enabled ? "插件已禁用" : null);
       return;
@@ -74,7 +159,7 @@ export default function IslandPanelHost({
           : panel.includes("\\")
             ? panel.slice(0, panel.lastIndexOf("\\") + 1)
             : "";
-        const [css, js] = await Promise.all([
+        const [css, js, boardJs] = await Promise.all([
           invoke<string>("hub_plugin_read_text", {
             pluginId,
             relativePath: `${dir}panel.css`,
@@ -83,12 +168,24 @@ export default function IslandPanelHost({
             pluginId,
             relativePath: `${dir}panel.js`,
           }).catch(() => ""),
+          loadOptionalBoardJs(pluginId, `${dir}board.js`),
         ]);
         if (cancelled) return;
+        if (boardJs) {
+          console.info(
+            `[IslandPanelHost] board.js ready (${boardJs.length} chars)`,
+          );
+        } else {
+          console.warn("[IslandPanelHost] board.js not available for", pluginId);
+        }
         // Strip link/script tags whether href is panel.css or ./panel.css
         html = html.replace(/<link[^>]*href=["'][^"']*panel\.css["'][^>]*>/gi, "");
         html = html.replace(
           /<script[^>]*src=["'][^"']*panel\.js["'][^>]*>\s*<\/script>/gi,
+          "",
+        );
+        html = html.replace(
+          /<script[^>]*src=["'][^"']*board\.js["'][^>]*>\s*<\/script>/gi,
           "",
         );
         // Base dark shell before plugin CSS — avoids white flash / system scrollbar
@@ -105,7 +202,6 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
         const boot = `<script>${panelHubBootstrapScript(pluginId)}</script>`;
         // Island shell is always black — never inject host light theme into panel iframe
         const themeAttr = ` data-theme="dark"`;
-        const bodyJs = js ? `<script>${js}</script>` : "";
         if (/<html\b/i.test(html)) {
           html = html.replace(/<html\b([^>]*)>/i, (_m, attrs: string) => {
             const cleaned = String(attrs).replace(/\s*data-theme=("|')[^"']*\1/i, "");
@@ -117,13 +213,20 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
         const injected = /<head[^>]*>/i.test(html)
           ? html.replace(/<head[^>]*>/i, (m) => `${m}${boot}`)
           : `${boot}${html}`;
-        const withJs = /<\/body>/i.test(injected)
-          ? injected.replace(/<\/body>/i, `${bodyJs}</body>`)
-          : `${injected}${bodyJs}`;
-        setSrcdoc(withJs);
+        // Do NOT embed board/panel into srcdoc — inject via textContent on iframe load
+        // (same pattern as PluginPopupHost; avoids HTML parse + blob/src races).
+        const token = `${pluginId}:${Date.now()}:${boardJs.length}:${js.length}`;
+        pendingScriptsRef.current = {
+          token,
+          boardJs,
+          panelJs: js,
+        };
+        if (cancelled) return;
+        setSrcdoc(injected);
         setPanelError(null);
       } catch (e) {
         if (!cancelled) {
+          pendingScriptsRef.current = null;
           setSrcdoc(null);
           setPanelError(String(e));
         }
@@ -275,7 +378,25 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
 
   useEffect(() => {
     if (!pluginId || !srcdoc || !enabled) return;
-    postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, active);
+    const iframe = iframeRef.current;
+    const pending = pendingScriptsRef.current;
+    if (!iframe || !pending) return;
+    const tryInject = () => {
+      const doc = iframe.contentDocument;
+      if (!doc || doc.readyState === "loading") return false;
+      injectPanelScripts(doc, pending);
+      return true;
+    };
+    if (tryInject()) {
+      postPanelLifecycle(iframe.contentWindow, pluginId, activeRef.current);
+      return;
+    }
+    const onLoad = () => {
+      tryInject();
+      postPanelLifecycle(iframe.contentWindow, pluginId, activeRef.current);
+    };
+    iframe.addEventListener("load", onLoad);
+    return () => iframe.removeEventListener("load", onLoad);
   }, [active, pluginId, srcdoc, enabled]);
 
   if (!pullContent || !pluginId) {
@@ -311,8 +432,14 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
       allow="camera"
       onLoad={() => {
         if (!pluginId) return;
-        // iframe 重载后 phase 复位为 leave；按当前 active 补发
-        postPanelLifecycle(iframeRef.current?.contentWindow, pluginId, activeRef.current);
+        const doc = iframeRef.current?.contentDocument;
+        const pending = pendingScriptsRef.current;
+        if (doc && pending) injectPanelScripts(doc, pending);
+        postPanelLifecycle(
+          iframeRef.current?.contentWindow,
+          pluginId,
+          activeRef.current,
+        );
       }}
     />
   );

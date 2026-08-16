@@ -11,12 +11,14 @@ body {
 }
 
 #root {
+  --grid-gap: 10px;
+  --row-unit: 108px;
   box-sizing: border-box;
   height: 100%;
   padding: 4px 2px 2px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 button {
@@ -33,28 +35,216 @@ button {
   border-radius: 14px;
   background: rgba(255, 214, 10, 0.16);
   color: #9a7b00;
+  flex-shrink: 0;
 }
 
-.cards {
+/* ---- home toolbar / tabs ---- */
+
+.home-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 0 2px;
+  min-height: 28px;
+}
+
+.folder-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.folder-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.folder-tab {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(235, 235, 245, 0.45);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.folder-tab:hover {
+  color: rgba(235, 235, 245, 0.75);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.folder-tab.is-active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.folder-tab.is-add {
+  width: 26px;
+  padding: 4px 0;
+  text-align: center;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.tool-btn {
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(235, 235, 245, 0.72);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.tool-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.tool-btn.is-primary {
+  color: #fff;
+  background: rgba(48, 209, 88, 0.35);
+}
+
+.tool-btn.danger {
+  color: #ff8a80;
+  background: rgba(255, 69, 58, 0.18);
+}
+
+/* ---- board grid ---- */
+
+.board-mount {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-.card {
+.board-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.board-rgl {
+  flex: 1;
+  min-height: 0 !important;
+  height: 100% !important;
+  max-height: 100%;
+}
+
+.board-rgl .react-grid-item {
+  transition: none;
+}
+
+.board-rgl .react-grid-item.cssTransforms {
+  transition: transform 120ms ease, width 120ms ease, height 120ms ease;
+}
+
+.board-rgl .react-grid-item.react-draggable-dragging,
+.board-rgl .react-grid-item.resizing {
+  transition: none;
+  z-index: 3;
+  opacity: 0.96;
+}
+
+/* Drop/resize ghost — match card radius (18px) */
+.board-rgl .react-grid-item.react-grid-placeholder {
+  background: rgba(255, 69, 58, 0.28) !important;
+  border: 1.5px solid rgba(255, 69, 58, 0.55);
+  border-radius: 18px !important;
+  opacity: 1 !important;
+  box-sizing: border-box;
+}
+
+/* SE corner grip — gray arc hugging card radius, round caps */
+.board-rgl .react-grid-item > .react-resizable-handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.board-rgl.is-editing .react-grid-item > .react-resizable-handle.react-resizable-handle-se {
+  display: block;
+  opacity: 1;
+  pointer-events: auto;
+  width: 28px;
+  height: 28px;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  padding: 0;
+  background: none;
+  background-image: none;
+}
+
+.board-rgl.is-editing .react-grid-item > .react-resizable-handle.react-resizable-handle-se::after {
+  content: "";
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: none;
+  /* Arc along bottom-right corner; round stroke caps via SVG */
+  background: center / contain no-repeat
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M2.5 13.5 H7.5 Q13.5 13.5 13.5 7.5 V2.5' stroke='%238E8E93' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.board-rgl.is-editing .react-grid-item:hover > .react-resizable-handle.react-resizable-handle-se::after,
+.board-rgl.is-editing .react-grid-item.resizing > .react-resizable-handle.react-resizable-handle-se::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M2.5 13.5 H7.5 Q13.5 13.5 13.5 7.5 V2.5' stroke='%2363666E' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.card-group {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px 14px;
-  border-radius: 20px;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border-radius: 18px;
   background: #ffffff;
   color: #3a3a3c;
   border: 1px solid rgba(255, 255, 255, 0.9);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+}
+
+.card-group.is-editing {
+  outline: 1px dashed rgba(10, 132, 255, 0.35);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.card-head.is-drag {
+  cursor: grab;
+}
+
+.card-head.is-drag:active {
+  cursor: grabbing;
 }
 
 .card-title {
@@ -62,41 +252,111 @@ button {
   font-weight: 600;
   color: rgba(60, 60, 67, 0.42);
   letter-spacing: 0.02em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.folder-row {
+.card-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-content: flex-start;
-  overflow: auto;
-  min-height: 0;
-  flex: 1;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
-.folder-tile {
-  width: 56px;
+.card-action {
+  width: 22px;
+  height: 22px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(60, 60, 67, 0.55);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.card-action:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.card-action.danger {
+  color: #ff453a;
+}
+
+.card-badge {
+  font-size: 10px;
+  color: rgba(60, 60, 67, 0.35);
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+/* ---- pins ---- */
+
+.pin-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--pin-cols, 4), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--pin-rows, 2), minmax(0, 1fr));
+  gap: 4px 6px;
+  align-content: stretch;
+  justify-items: center;
+  align-items: center;
+  overflow: hidden;
+}
+
+.pin-tile {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  max-width: 64px;
+  min-width: 0;
+  min-height: 0;
+  padding: 2px 1px;
+  border-radius: 10px;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
-.folder-icon {
-  width: 46px;
-  height: 46px;
-  border-radius: 14px;
+.pin-tile:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.pin-tile.is-add:hover {
+  background: rgba(10, 132, 255, 0.06);
+}
+
+.pin-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
   display: grid;
   place-items: center;
   color: #fff;
-  font-size: 16px;
+  font-size: 12px;
   font-weight: 700;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  flex: 0 0 auto;
 }
 
-.folder-name {
-  max-width: 56px;
+.pin-icon.is-add {
+  background: rgba(60, 60, 67, 0.08);
+  color: rgba(60, 60, 67, 0.45);
+  box-shadow: none;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.pin-name {
+  max-width: 100%;
+  flex: 0 0 auto;
   font-size: 10px;
+  line-height: 1.15;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
@@ -104,22 +364,38 @@ button {
   color: rgba(60, 60, 67, 0.55);
 }
 
+.pin-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  color: #fff;
+  background: rgba(255, 69, 58, 0.9);
+}
+
+/* ---- history ---- */
+
 .hist-list {
   flex: 1;
   min-height: 0;
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .hist-row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   text-align: left;
-  padding: 7px 6px;
-  border-radius: 10px;
+  padding: 5px 6px;
+  border-radius: 8px;
 }
 
 .hist-row:hover {
@@ -127,15 +403,16 @@ button {
 }
 
 .hist-dot {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: #ff453a;
   flex-shrink: 0;
 }
 
 .hist-text {
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.25;
   color: #3a3a3c;
   white-space: nowrap;
   overflow: hidden;
@@ -145,9 +422,107 @@ button {
 .empty-mini {
   font-size: 11px;
   color: rgba(60, 60, 67, 0.4);
-  padding: 10px 2px;
+  padding: 8px 2px;
   line-height: 1.45;
 }
+
+/* ---- compact chip editor (island inline, no big modal) ---- */
+
+.chip-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0 4px 0 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  width: auto;
+  max-width: none;
+}
+
+.chip-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  padding: 0;
+  color: inherit;
+}
+
+.chip-ico {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
+.chip-btn.ok {
+  color: #fff;
+  background: rgba(48, 209, 88, 0.45);
+}
+
+.chip-btn.ok:hover {
+  background: rgba(48, 209, 88, 0.6);
+}
+
+.chip-btn.cancel {
+  color: rgba(235, 235, 245, 0.78);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.chip-btn.cancel:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.chip-input {
+  width: 24px; /* ~2 Chinese chars at 12px; JS measures exact */
+  min-width: 24px;
+  max-width: 120px;
+  flex: 0 0 auto;
+  height: 22px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 0 2px;
+  box-sizing: content-box;
+}
+
+.chip-edit.is-on-card {
+  background: rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  max-width: calc(100% - 8px);
+}
+
+.chip-edit.is-on-card .chip-input {
+  color: #3a3a3c;
+  font-size: 11px;
+  font-weight: 600;
+  max-width: 140px;
+}
+
+.chip-edit.is-on-card .chip-btn.cancel {
+  color: rgba(60, 60, 67, 0.55);
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.chip-edit.is-on-card .chip-btn.cancel:hover {
+  color: #3a3a3c;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.card-head.is-renaming {
+  cursor: default;
+}
+
+/* ---- results ---- */
 
 .results-meta {
   display: flex;
@@ -165,6 +540,11 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.results-meta-text.is-flash {
+  color: #64d2ff;
+  font-weight: 600;
 }
 
 .results-meta .link {
@@ -196,8 +576,8 @@ button {
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  gap: 11px;
-  padding: 6px 2px 4px 4px;
+  gap: 10px;
+  padding: 4px 2px 12px 4px;
   overflow: auto;
   scrollbar-width: none;
 }
@@ -258,17 +638,149 @@ button {
 }
 
 .hit {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 28px;
+  gap: 2px;
+  align-items: stretch;
+  border-radius: 12px;
+}
+
+.hit:hover,
+.hit.is-menu-open {
+  background: rgba(10, 132, 255, 0.08);
+}
+
+.hit-main {
   display: grid;
   grid-template-columns: 30px 1fr auto;
   gap: 8px;
   align-items: center;
   text-align: left;
-  padding: 8px 8px;
+  padding: 8px 4px 8px 8px;
   border-radius: 12px;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
 }
 
-.hit:hover {
-  background: rgba(10, 132, 255, 0.08);
+.hit-more {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  margin: 4px 4px 4px 0;
+  border-radius: 10px;
+  border: 0;
+  background: transparent;
+  color: rgba(60, 60, 67, 0.45);
+  cursor: pointer;
+  padding: 0;
+}
+
+.hit-more:hover,
+.hit-more.is-open {
+  background: rgba(60, 60, 67, 0.08);
+  color: #3a3a3c;
+}
+
+.hit-more-ico {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.hit-menu {
+  position: fixed;
+  z-index: 40;
+  width: min(220px, calc(100vw - 24px));
+  max-height: min(240px, 48vh);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: #1c1c1e;
+  color: #f4f4f5;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.hit-menu-head {
+  padding: 10px 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.hit-menu-note {
+  padding: 0 12px 8px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.hit-menu-body {
+  overflow: auto;
+  padding: 0 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hit-menu-section-label {
+  padding: 4px 8px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.hit-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 0;
+  background: transparent;
+  color: #f4f4f5;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.hit-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.hit-menu-item.is-disabled,
+.hit-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.hit-menu-item-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hit-menu-item-cap {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.hit-menu-empty {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
 }
 
 .hit-kind {

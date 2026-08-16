@@ -110,7 +110,7 @@ pub struct DockPrefs {
     /// After pointer leaves Dock/activation strip, wait this many ms before hiding.
     #[serde(default = "default_hide_linger_ms")]
     pub hide_linger_ms: u32,
-    /// Hover icon scale is fixed in Host (`DOCK_MAG_SCALE`); kept for serde compat.
+    /// Max icon scale on hover (1 = off, up to 2.5). Drives fan headroom + hover width pad.
     #[serde(default = "default_magnification")]
     pub magnification: f64,
     /// Logical px corner radius for the glass strip (0 = square; max 30 ≈ half of ~DOCK_H).
@@ -121,6 +121,12 @@ pub struct DockPrefs {
     /// Running matches still show; restore via status-menu right-click.
     #[serde(default)]
     pub hidden_item_ids: Vec<String>,
+    /// Hover a running app icon → show live window thumbnail above the Dock.
+    #[serde(default)]
+    pub hover_window_preview: bool,
+    /// Delay before showing hover preview (ms). Default 120.
+    #[serde(default = "default_hover_preview_delay_ms")]
+    pub hover_preview_delay_ms: u32,
 }
 
 fn default_hotkey() -> String {
@@ -132,11 +138,15 @@ fn default_activation_position() -> String {
 }
 
 fn default_activation_thickness_px() -> u32 {
-    20
+    2
 }
 
 fn default_hide_linger_ms() -> u32 {
     800
+}
+
+fn default_hover_preview_delay_ms() -> u32 {
+    120
 }
 
 fn default_magnification() -> f64 {
@@ -226,6 +236,8 @@ impl Default for DockPrefs {
             magnification: default_magnification(),
             corner_radius_px: default_corner_radius_px(),
             hidden_item_ids: Vec::new(),
+            hover_window_preview: false,
+            hover_preview_delay_ms: default_hover_preview_delay_ms(),
         }
     }
 }
@@ -242,9 +254,14 @@ impl DockPrefs {
     fn normalize(mut self) -> Self {
         self.display_mode = self.mode().as_str().into();
         self.activation_position = self.activation().as_str().into();
-        self.activation_thickness_px = self.activation_thickness_px.clamp(4, 64);
+        // Legacy default was 20 (+ code floor 24) — felt mid-air. Snap to edge.
+        if self.activation_thickness_px >= 16 {
+            self.activation_thickness_px = default_activation_thickness_px();
+        }
+        self.activation_thickness_px = self.activation_thickness_px.clamp(1, 64);
         self.bottom_offset_px = self.bottom_offset_px.min(400);
         self.hide_linger_ms = self.hide_linger_ms.clamp(200, 10_000);
+        self.hover_preview_delay_ms = self.hover_preview_delay_ms.min(2_000);
         self.magnification = clamp_magnification(self.magnification);
         self.corner_radius_px = self.corner_radius_px.min(30);
         for it in &mut self.items {
@@ -257,16 +274,34 @@ impl DockPrefs {
     }
 }
 
+fn dock_prefs_mem() -> &'static parking_lot::Mutex<Option<DockPrefs>> {
+    static MEM: std::sync::OnceLock<parking_lot::Mutex<Option<DockPrefs>>> =
+        std::sync::OnceLock::new();
+    MEM.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+fn remember_dock_prefs(prefs: &DockPrefs) {
+    *dock_prefs_mem().lock() = Some(prefs.clone());
+}
+
 pub fn load_dock_prefs() -> DockPrefs {
+    {
+        let g = dock_prefs_mem().lock();
+        if let Some(ref p) = *g {
+            return p.clone();
+        }
+    }
     let raw = crate::db::with_conn(|c| crate::db::dock_get(c))
         .ok()
         .flatten();
-    let Some(v) = raw else {
-        return DockPrefs::default();
+    let prefs = match raw {
+        Some(v) => serde_json::from_value::<DockPrefs>(v)
+            .unwrap_or_default()
+            .normalize(),
+        None => DockPrefs::default(),
     };
-    serde_json::from_value::<DockPrefs>(v)
-        .unwrap_or_default()
-        .normalize()
+    remember_dock_prefs(&prefs);
+    prefs
 }
 
 pub fn save_dock_prefs(prefs: &DockPrefs) -> Result<(), String> {
@@ -276,8 +311,55 @@ pub fn save_dock_prefs(prefs: &DockPrefs) -> Result<(), String> {
     for item in &mut stored.items {
         item.icon_png = None;
     }
-    let v = serde_json::to_value(stored).map_err(|e| e.to_string())?;
-    crate::db::with_conn(|c| crate::db::dock_set(c, &v))
+    let v = serde_json::to_value(&stored).map_err(|e| e.to_string())?;
+    crate::db::with_conn(|c| crate::db::dock_set(c, &v))?;
+    // Keep runtime cache in sync (paths-only is fine; callers use with_icons when needed).
+    remember_dock_prefs(&stored);
+    Ok(())
+}
+
+/// Live-update magnification while the Settings slider is dragged (no disk write).
+/// Emits `dock-mag-preview` so the real Dock fans the middle icons to this scale.
+#[tauri::command]
+pub fn dock_preview_magnification(
+    app: AppHandle,
+    vis: State<'_, Arc<DockVisibility>>,
+    magnification: f64,
+) -> Result<f64, String> {
+    let mag = clamp_magnification(magnification);
+    let mut prefs = load_dock_prefs();
+    let mag_changed = (prefs.magnification - mag).abs() >= 0.0005;
+    if mag_changed {
+        prefs.magnification = mag;
+        remember_dock_prefs(&prefs);
+        invalidate_dock_layout_cache();
+        vis.apply_prefs(&prefs);
+        let out = with_icons(prefs.clone());
+        let _ = app.emit("dock-prefs", &out);
+    }
+    // Cursor is in Settings — hold AutoHide open so the live middle-icon fan is visible.
+    vis.set_interaction_hold(true);
+    if prefs.enabled && !vis.ui_shown() {
+        vis.apply_dock_shown(&app, true, false);
+    } else if prefs.enabled {
+        place_dock_window(&app, &prefs, true, false);
+    }
+    let _ = app.emit(
+        "dock-mag-preview",
+        serde_json::json!({ "active": true, "magnification": mag }),
+    );
+    Ok(mag)
+}
+
+/// Clear Settings-driven fan preview on the live Dock (after slider commit / leave).
+#[tauri::command]
+pub fn dock_end_magnification_preview(
+    app: AppHandle,
+    vis: State<'_, Arc<DockVisibility>>,
+) -> Result<(), String> {
+    vis.set_interaction_hold(false);
+    let _ = app.emit("dock-mag-preview", serde_json::json!({ "active": false }));
+    Ok(())
 }
 
 /// Persist item list changes (pin / unpin / import) after materializing owned icons.
@@ -574,7 +656,7 @@ fn dock_auto_compact(prefs: &mut DockPrefs, monitor_logical_w: f64) -> usize {
 
     loop {
         let layout = dock_merge_running(prefs, false);
-        if dock_expanded_width(&layout, prefs.corner_radius_px) <= budget {
+        if dock_expanded_width(&layout, prefs.corner_radius_px, prefs.magnification) <= budget {
             break;
         }
         // Prefer hiding unopened pins near trash (end of pin list).
@@ -628,11 +710,71 @@ const DOCK_GAP: f64 = 6.0;
 const DOCK_PAD_X_MIN: f64 = 2.0;
 /// Hit/layout width for separators (1px rule centered). Keep in sync with DockApp.css.
 const DOCK_SEP: f64 = 16.0;
-/// Fixed hover magnification (not user-configurable).
+/// Default / baseline hover magnification (also used when prefs are missing).
 pub(crate) const DOCK_MAG_SCALE: f64 = 1.6;
-/// Fixed total extra logical width when hovering (not dynamically measured).
-const DOCK_FAN_EXTRA: f64 = 48.0;
 const DOCK_GLASS_LABEL: &str = "dock-glass";
+
+/// Modes that permanently occupy the bottom edge → reserve work area (like top status strip).
+pub(crate) fn mode_reserves_bottom_work_area(mode: DockDisplayMode) -> bool {
+    matches!(
+        mode,
+        DockDisplayMode::Always
+            | DockDisplayMode::AlwaysFullscreen
+            | DockDisplayMode::Layered
+            | DockDisplayMode::Default
+    )
+}
+
+/// Register / release bottom AppBar so maximized windows stop above the Dock chrome.
+pub(crate) fn sync_dock_bottom_appbar(app: &AppHandle, prefs: &DockPrefs, shown: bool) {
+    #[cfg(windows)]
+    {
+        let want = prefs.enabled
+            && mode_reserves_bottom_work_area(prefs.mode())
+            && match prefs.mode() {
+                // Default hides for exclusive fullscreen — drop reservation with the bar.
+                DockDisplayMode::Default => shown,
+                _ => true,
+            };
+        let was = crate::win32::dock_appbar::is_registered();
+        if want {
+            if let Some(w) = app.get_webview_window("dock") {
+                if let Ok(h) = w.hwnd() {
+                    let raw = h.0 as isize;
+                    if was {
+                        crate::win32::dock_appbar::sync(raw);
+                    } else {
+                        crate::win32::dock_appbar::register(raw);
+                        // Work-area claim can reset framed Mica to light — reassert once.
+                        reassert_settings_material(app);
+                    }
+                    return;
+                }
+            }
+        }
+        if was {
+            crate::win32::dock_appbar::suspend();
+            reassert_settings_material(app);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, prefs, shown);
+    }
+}
+
+/// Taskbar auto-hide / AppBar SETPOS can wipe `DWMWA_USE_IMMERSIVE_DARK_MODE` on the
+/// open settings frame, leaving a white Mica nav while CSS stays dark. Soft reassert.
+pub(crate) fn reassert_settings_material(app: &AppHandle) {
+    let Some(state) = app.try_state::<MaterialState>() else {
+        return;
+    };
+    for label in ["settings", "dock-icon-editor"] {
+        if let Some(w) = app.get_webview_window(label) {
+            crate::commands::reassert_saved_material_pub(&w, &*state);
+        }
+    }
+}
 
 /// Horizontal inset so icon plates stay inside the capsule flat (large radius
 /// otherwise clips through the rounded glass silhouette).
@@ -659,9 +801,22 @@ pub(crate) fn set_hover_expanded_pub(v: bool) {
     set_hover_expanded(v);
 }
 
-/// Magnification is fixed — prefs field kept for serde compat only.
-fn clamp_magnification(_m: f64) -> f64 {
-    DOCK_MAG_SCALE
+fn clamp_magnification(m: f64) -> f64 {
+    if !m.is_finite() {
+        return DOCK_MAG_SCALE;
+    }
+    m.clamp(1.0, 2.5)
+}
+
+/// Extra logical width needed for the hover fan at `magnification`.
+/// Calibrated so `1.6×` → 48px (legacy `DOCK_FAN_EXTRA`).
+pub(crate) fn dock_fan_extra(magnification: f64) -> f64 {
+    let m = clamp_magnification(magnification);
+    if m <= 1.001 {
+        return 0.0;
+    }
+    // Linear in (mag-1): at 1.6 → 48; at 2.0 → 80; at 2.5 → 120.
+    (DOCK_ICON * (m - 1.0) * 2.0).round().max(0.0)
 }
 
 /// Base content width (unscaled icon slots) — rest glass / icons width.
@@ -680,38 +835,44 @@ pub(crate) fn dock_content_width(items: &[DockItem], corner_radius_px: u32) -> f
     w.max(120.0)
 }
 
-/// Hover width = content + fixed pad (no per-frame fan measurement).
-pub(crate) fn dock_expanded_width(items: &[DockItem], corner_radius_px: u32) -> f64 {
-    dock_content_width(items, corner_radius_px) + DOCK_FAN_EXTRA
+/// Hover width = content + fan pad for current magnification.
+pub(crate) fn dock_expanded_width(
+    items: &[DockItem],
+    corner_radius_px: u32,
+    magnification: f64,
+) -> f64 {
+    dock_content_width(items, corner_radius_px) + dock_fan_extra(magnification)
 }
 
 /// Outer HWND width for icons/glass.
 ///
-/// Composition path: always `content + FAN_EXTRA` so hover widen never calls
+/// Composition path: always expanded host so hover widen never calls
 /// `SetWindowPos` (DWM size-then-x causes left-then-recenter). Rest/expand is
 /// only the frosted capsule Size/Offset inside that fixed host.
 pub(crate) fn dock_window_width(
     items: &[DockItem],
     corner_radius_px: u32,
+    magnification: f64,
     expanded: bool,
 ) -> f64 {
     #[cfg(windows)]
     if crate::win32::dock_comp::uses_composition(corner_radius_px) {
         let _ = expanded;
-        return dock_expanded_width(items, corner_radius_px);
+        return dock_expanded_width(items, corner_radius_px, magnification);
     }
     if expanded {
-        dock_expanded_width(items, corner_radius_px)
+        dock_expanded_width(items, corner_radius_px, magnification)
     } else {
         dock_content_width(items, corner_radius_px)
     }
 }
 
-/// Fixed headroom for `DOCK_MAG_SCALE` (slider removed).
-/// Extra slack above peaked icons is also used to clip the Win11 light caption
-/// band at the HWND top (see `dock_caption_band_px`) without shaving glyphs.
-pub(crate) fn dock_headroom(_magnification: f64) -> f64 {
-    DOCK_ICON * (DOCK_MAG_SCALE - 1.0) + 16.0
+/// Vertical headroom above chrome for peaked icons at `magnification`.
+/// Extra slack also clips the Win11 light caption band at the HWND top
+/// (see `dock_caption_band_px`) without shaving glyphs.
+pub(crate) fn dock_headroom(magnification: f64) -> f64 {
+    let m = clamp_magnification(magnification);
+    DOCK_ICON * (m - 1.0) + 16.0
 }
 
 pub(crate) fn dock_window_height(magnification: f64) -> f64 {
@@ -732,9 +893,10 @@ pub(crate) fn dock_caption_band_px(scale: f64, chrome_top: i32) -> i32 {
     if chrome_top <= 0 {
         return 0;
     }
+    let mag = clamp_magnification(load_dock_prefs().magnification);
     // Resting icon sits `(DOCK_H - DOCK_ICON)` above chrome bottom; peak grows
     // `DOCK_ICON*(MAG-1)` — net extension into headroom:
-    let peak_into = ((DOCK_ICON * (DOCK_MAG_SCALE - 1.0) - (DOCK_H - DOCK_ICON)) * scale)
+    let peak_into = ((DOCK_ICON * (mag - 1.0) - (DOCK_H - DOCK_ICON)) * scale)
         .round()
         .max(0.0) as i32;
     let keep = (peak_into + ((3.0 * scale).round() as i32).max(2)).max(4);
@@ -795,7 +957,12 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     let layout = dock_layout_items(prefs);
     // Keep icons + glass the same width; honor hover-expand so place/relayout
     // does not yank the bar back to rest mid-hover (icons leaked past glass).
-    let width = dock_window_width(&layout, prefs.corner_radius_px, dock_hover_expanded());
+    let width = dock_window_width(
+        &layout,
+        prefs.corner_radius_px,
+        prefs.magnification,
+        dock_hover_expanded(),
+    );
     let glass_w = width;
     let height = dock_window_height(prefs.magnification);
     let glass = app.get_webview_window(DOCK_GLASS_LABEL);
@@ -841,6 +1008,7 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
                 if shown {
                     win32_dock_clear_transparent(hwnd.0 as isize);
                 }
+                sync_dock_bottom_appbar(app, prefs, shown);
                 return;
             }
         }
@@ -854,6 +1022,7 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
 
     let Ok(Some(monitor)) = win.current_monitor() else {
         let _ = win.set_ignore_cursor_events(!shown);
+        sync_dock_bottom_appbar(app, prefs, shown);
         return;
     };
     let scale = monitor.scale_factor();
@@ -894,6 +1063,7 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
         let _ = win.hide();
     }
     let _ = win.set_ignore_cursor_events(!shown);
+    sync_dock_bottom_appbar(app, prefs, shown);
 }
 
 /// Generation for in-flight width tweens — a newer expand/collapse cancels the old one.
@@ -901,6 +1071,13 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
 fn width_tween_gen() -> &'static std::sync::atomic::AtomicU64 {
     static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     &GEN
+}
+
+/// Keep AutoHide while an interactive Dock window-preview tip is visible
+/// (cursor must leave the dock HWND to reach the tip above it).
+#[tauri::command]
+pub fn dock_set_preview_tip_keep(vis: State<'_, Arc<DockVisibility>>, keep: bool) {
+    vis.set_preview_tip_keep(keep);
 }
 
 /// Keep AutoHide from hiding while the dock UI holds an interaction (icon dnd).
@@ -925,7 +1102,7 @@ pub fn dock_set_hover_expand(
     let prefs = load_dock_prefs();
     let layout = dock_layout_items(&prefs);
     let content_w = dock_content_width(&layout, prefs.corner_radius_px);
-    let host_w = dock_expanded_width(&layout, prefs.corner_radius_px);
+    let host_w = dock_expanded_width(&layout, prefs.corner_radius_px, prefs.magnification);
     let logical_h = dock_window_height(prefs.magnification);
     let Some(win) = app.get_webview_window("dock") else {
         return false;
@@ -1019,7 +1196,8 @@ pub fn dock_set_live_width(app: AppHandle, vis: State<'_, Arc<DockVisibility>>, 
     let prefs = load_dock_prefs();
     let layout = dock_layout_items(&prefs);
     let rest = dock_content_width(&layout, prefs.corner_radius_px);
-    let expanded = width.is_finite() && width > rest + DOCK_FAN_EXTRA * 0.5;
+    let expanded =
+        width.is_finite() && width > rest + dock_fan_extra(prefs.magnification) * 0.5;
     dock_set_hover_expand(app, vis, expanded)
 }
 
@@ -2110,8 +2288,11 @@ pub async fn set_dock_prefs(
             let _ = g.set_always_on_top(top);
             let _ = g.set_ignore_cursor_events(true);
         }
+        // Taskbar / work-area churn from mode changes can bleach settings Mica.
+        reassert_settings_material(&app);
     } else {
         vis.stop();
+        crate::win32::dock_appbar::suspend();
         if let Some(w) = app.get_webview_window("dock") {
             let _ = w.close();
         }
@@ -2119,6 +2300,7 @@ pub async fn set_dock_prefs(
             let _ = g.close();
         }
         apply_taskbar_for_dock(false);
+        reassert_settings_material(&app);
     }
     Ok(next)
 }
@@ -2620,6 +2802,159 @@ pub fn dock_launch_item(item_id: String) -> Result<(), String> {
     launch_or_focus(&item)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockWindowPreviewDto {
+    pub jpeg_base64: String,
+    pub width: u32,
+    pub height: u32,
+    pub title: String,
+    pub hwnd: isize,
+    /// True when live capture failed (e.g. minimized) and a previous frame was reused.
+    #[serde(default)]
+    pub from_cache: bool,
+}
+
+#[derive(Clone)]
+struct DockPreviewCacheEntry {
+    jpeg_base64: String,
+    width: u32,
+    height: u32,
+    title: String,
+    hwnd: isize,
+}
+
+static DOCK_PREVIEW_CACHE: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<String, DockPreviewCacheEntry>>,
+> = std::sync::OnceLock::new();
+
+fn dock_preview_cache() -> &'static parking_lot::Mutex<std::collections::HashMap<String, DockPreviewCacheEntry>>
+{
+    DOCK_PREVIEW_CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn cache_dock_preview(item_id: &str, entry: DockPreviewCacheEntry) {
+    let mut g = dock_preview_cache().lock();
+    g.insert(item_id.to_string(), entry);
+    // Soft cap — drop arbitrary extras if huge.
+    if g.len() > 48 {
+        let drop_n = g.len() - 40;
+        let keys: Vec<String> = g.keys().take(drop_n).cloned().collect();
+        for k in keys {
+            g.remove(&k);
+        }
+    }
+}
+
+fn cached_dock_preview(item_id: &str) -> Option<DockWindowPreviewDto> {
+    let g = dock_preview_cache().lock();
+    g.get(item_id).map(|e| DockWindowPreviewDto {
+        jpeg_base64: e.jpeg_base64.clone(),
+        width: e.width,
+        height: e.height,
+        title: e.title.clone(),
+        hwnd: e.hwnd,
+        from_cache: true,
+    })
+}
+
+/// Capture a live thumbnail for the window matching a Dock item (if running).
+/// Minimized windows reuse the last good preview when a live grab is impossible.
+#[tauri::command]
+pub fn dock_capture_window_preview(item_id: String) -> Result<Option<DockWindowPreviewDto>, String> {
+    let prefs = load_dock_prefs();
+    let items = dock_merge_running(&prefs, false);
+    let Some(item) = items.into_iter().find(|i| i.id == item_id) else {
+        return Ok(None);
+    };
+    if item.kind != "app" {
+        return Ok(None);
+    }
+    let wins = crate::win32::enum_windows::list_windows(None);
+    let Some(w) = launch::best_matching_window(&item, &wins) else {
+        return Ok(cached_dock_preview(&item_id));
+    };
+
+    #[cfg(windows)]
+    {
+        use base64::Engine;
+        use crate::win32::capture::capture_window_owned_thumb_jpeg;
+        match capture_window_owned_thumb_jpeg(w.hwnd, 240, 144) {
+            Ok(frame) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.jpeg);
+                let dto = DockWindowPreviewDto {
+                    jpeg_base64: b64.clone(),
+                    width: frame.width,
+                    height: frame.height,
+                    title: w.title.clone(),
+                    hwnd: w.hwnd,
+                    from_cache: false,
+                };
+                cache_dock_preview(
+                    &item_id,
+                    DockPreviewCacheEntry {
+                        jpeg_base64: b64,
+                        width: frame.width,
+                        height: frame.height,
+                        title: w.title.clone(),
+                        hwnd: w.hwnd,
+                    },
+                );
+                Ok(Some(dto))
+            }
+            Err(_) => Ok(cached_dock_preview(&item_id)),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = w;
+        Ok(cached_dock_preview(&item_id))
+    }
+}
+
+/// How many top-level windows match this dock item (for context menu).
+#[tauri::command]
+pub fn dock_item_window_count(item_id: String) -> Result<u32, String> {
+    let prefs = load_dock_prefs();
+    let items = dock_merge_running(&prefs, false);
+    let Some(item) = items.into_iter().find(|i| i.id == item_id) else {
+        return Ok(0);
+    };
+    if item.kind != "app" {
+        return Ok(0);
+    }
+    let wins = crate::win32::enum_windows::list_windows(None);
+    Ok(launch::matching_windows(&item, &wins).len() as u32)
+}
+
+/// Close matching windows for a dock item (WM_CLOSE). Returns how many were signaled.
+#[tauri::command]
+pub fn dock_close_item_windows(item_id: String) -> Result<u32, String> {
+    let prefs = load_dock_prefs();
+    let items = dock_merge_running(&prefs, false);
+    let Some(item) = items.into_iter().find(|i| i.id == item_id) else {
+        return Ok(0);
+    };
+    if item.kind != "app" {
+        return Ok(0);
+    }
+    let wins = crate::win32::enum_windows::list_windows(None);
+    let matched = launch::matching_windows(&item, &wins);
+    let mut n = 0u32;
+    for w in matched {
+        if crate::win32::enum_windows::close_window(w.hwnd).is_ok() {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Close one window by hwnd (preview tip close button).
+#[tauri::command]
+pub fn close_window_hwnd(hwnd: isize) -> Result<(), String> {
+    crate::win32::enum_windows::close_window(hwnd)
+}
+
 /// Pinned items + running apps not on the dock (before trash), with icons.
 #[tauri::command]
 pub fn get_dock_display_items(app: AppHandle) -> Vec<DockItem> {
@@ -2701,7 +3036,12 @@ async fn ensure_dock_window_inner(
     vis.start(app.clone());
 
     let layout = dock_layout_items(prefs);
-    let width = dock_window_width(&layout, prefs.corner_radius_px, dock_hover_expanded());
+    let width = dock_window_width(
+        &layout,
+        prefs.corner_radius_px,
+        prefs.magnification,
+        dock_hover_expanded(),
+    );
     let glass_w = width;
     let height = dock_window_height(prefs.magnification);
 

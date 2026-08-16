@@ -21,6 +21,7 @@
 | `clipboard.read` / `clipboard.write` | 剪贴板 | ❌ schema 占位，无 API |
 | `network` | `hub.fetch` + `permissions.network` 白名单 | ✅ |
 | `everything.search` | Everything 本机文件搜索 / 打开 / 定位（敏感；需本机 Everything 运行） | ✅ |
+| `system.monitor` | 本机 CPU / 内存 / 磁盘 / 温度快照（敏感） | ✅ |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。  
 设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。  
@@ -97,6 +98,16 @@ DnD → `island.drop` 赢家。`excludeFromPullContent: true` → 不进下拉�
 | `reveal(path)` | 资源管理器 `/select` 定位 |
 
 `results[]`：`{ name, path, fullPath, isFolder, isFile, size? }`。
+
+## `hub.sysmon.*`（需 `system.monitor`）
+
+基座 Rust 采样本机状态（`sysinfo` + 可选 NVIDIA NVML）。
+
+| 方法 | 说明 |
+|------|------|
+| `snapshot()` | `{ cpu, memory, disks[], temperatures[], cpuTempC?, gpuTempC?, effectiveTempC?, updatedAtMs }` |
+
+`effectiveTempC` = `max(cpuTempC, gpuTempC)`（仅有一侧时用该侧）。Windows 温度为 best-effort；无传感器时字段为 `null`。
 
 ## `hub.notify`
 

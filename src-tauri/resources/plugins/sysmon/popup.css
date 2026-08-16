@@ -1,0 +1,153 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: #f4f4f5;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    sans-serif;
+  user-select: none;
+}
+
+#app.wg-shell {
+  box-sizing: border-box;
+  height: 100vh;
+  padding: var(--wh-popup-pad-top, 12px) var(--wh-popup-pad-x, 12px)
+    var(--wh-popup-pad-bottom, 14px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--wh-popup-gap, 10px);
+  overflow: hidden;
+}
+
+.sm-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sm-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.sm-eff {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.78;
+  font-variant-numeric: tabular-nums;
+}
+
+.sm-eff strong {
+  font-size: 18px;
+  font-weight: 700;
+  color: #ff9f0a;
+  opacity: 1;
+}
+
+.sm-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+}
+
+.sm-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sm-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.sm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.sm-row-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.88;
+}
+
+.sm-row-value {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.95;
+}
+
+.sm-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.sm-bar > i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.55);
+  transition: width 280ms ease;
+}
+
+.sm-bar.is-warm > i {
+  background: #ff9f0a;
+}
+
+.sm-bar.is-hot > i {
+  background: #ff453a;
+}
+
+.sm-muted {
+  font-size: 12px;
+  opacity: 0.5;
+  font-weight: 600;
+}
+
+.sm-foot {
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.42;
+  font-weight: 600;
+}
+
+html[data-theme="light"] body,
+html[data-theme="light"] #app.wg-shell {
+  color: #1c1c1e;
+}
+
+html[data-theme="light"] .sm-bar {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+html[data-theme="light"] .sm-bar > i {
+  background: rgba(0, 0, 0, 0.45);
+}

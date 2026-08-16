@@ -41,6 +41,7 @@ const ALLOWED_CMDS = new Set([
   "hub_everything_search",
   "hub_everything_open",
   "hub_everything_reveal",
+  "hub_sysmon_snapshot",
 ]);
 
 export function isAllowedPanelHubCmd(cmd: string): boolean {
@@ -165,6 +166,9 @@ export function panelHubBootstrapScript(pluginId: string): string {
       reveal: function (path) {
         return invoke("hub_everything_reveal", withPlugin({ path: path || "" }));
       }
+    },
+    sysmon: {
+      snapshot: function () { return invoke("hub_sysmon_snapshot", withPlugin()); }
     },
     panel: {
       close: function () {

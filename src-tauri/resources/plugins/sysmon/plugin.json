@@ -1,0 +1,41 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.sysmon",
+  "name": "系统监控",
+  "version": "1.0.0",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "快捷区风扇随温度转速变化；弹窗查看 CPU / 内存 / 磁盘 / 温度。",
+  "entry": {
+    "popup": "popup.html",
+    "shortcuts": "shortcuts.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "系统监控",
+      "order": 35,
+      "action": "popup.open",
+      "manage": "none"
+    }
+  },
+  "settings": [
+    {
+      "key": "popupWidth",
+      "type": "number",
+      "label": "弹窗宽度",
+      "default": 360,
+      "min": 300,
+      "max": 520
+    },
+    {
+      "key": "popupHeight",
+      "type": "number",
+      "label": "弹窗高度",
+      "default": 440,
+      "min": 360,
+      "max": 720
+    }
+  ],
+  "capabilities": ["shortcuts", "storage", "popup", "system.monitor"]
+}

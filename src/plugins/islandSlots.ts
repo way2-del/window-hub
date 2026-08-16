@@ -226,7 +226,8 @@ export function resolvePluginPanelShellSize(
   const h = Math.round(Number(defaults.h ?? PANEL_VIEW_H_DEFAULT));
   return {
     w: Math.max(280, Math.min(720, Number.isFinite(w) ? w : PANEL_VIEW_W_DEFAULT)),
-    h: Math.max(120, Math.min(320, Number.isFinite(h) ? h : PANEL_VIEW_H_DEFAULT)),
+    // File-search type rail needs ~340 island H (bar + insets eat ~54px).
+    h: Math.max(120, Math.min(400, Number.isFinite(h) ? h : PANEL_VIEW_H_DEFAULT)),
   };
 }
 

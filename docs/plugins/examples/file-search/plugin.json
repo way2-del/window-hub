@@ -2,10 +2,10 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.file-search",
   "name": "文件搜索",
-  "version": "1.3.1",
+  "version": "1.5.3",
   "official": true,
   "logo": "icon.svg",
-  "description": "情景临时：Alt+空格先激活搜索栏；回车（可空）再展开下拉（Everything）。搜索结果左侧按类型/后缀过滤。需本机已运行 Everything。",
+  "description": "情景临时：Alt+空格搜索。空态为可自定义卡片组网格（分类/拖拽/改大小）；有关键字则类型过滤 + Everything 结果。需本机已运行 Everything。",
   "entry": {
     "panel": "panel.html"
   },
@@ -18,7 +18,7 @@
       "excludeFromBarResident": true
     },
     "island.panel": {
-      "defaultSize": { "w": 560, "h": 280 },
+      "defaultSize": { "w": 560, "h": 400 },
       "excludeFromPullContent": true
     }
   },

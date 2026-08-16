@@ -153,15 +153,39 @@ pub fn apply_prefs(window: &WebviewWindow, prefs: &MaterialPrefs) -> Result<(), 
     crate::win32::blur_glass::apply_effect(window, prefs.kind, dark, prefs.acrylic_alpha)
 }
 
+/// Soft reassert for framed settings (no clear/SWCA teardown → no white flash).
+#[cfg(windows)]
+pub fn reassert_prefs(window: &WebviewWindow, prefs: &MaterialPrefs) -> Result<(), String> {
+    let prefs = prefs.clone().normalize();
+    let dark = Some(resolve_dark(prefs.dark));
+    match window.label() {
+        "settings" | "dock-icon-editor" if matches!(prefs.kind, WindowMaterial::MicaAlt) => {
+            crate::win32::blur_glass::reassert_settings_frame_mica(window, dark)
+        }
+        _ => apply_prefs(window, &prefs),
+    }
+}
+
 #[cfg(windows)]
 pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
     let prefs = prefs.clone().normalize();
+    let label = window.label().to_string();
     let _ = apply_prefs(window, &prefs);
     let win = window.clone();
+    // Framed settings: one late soft retry. Five full clear/reapply cycles flash white.
+    let delays: &'static [u64] = if label == "settings" || label == "dock-icon-editor" {
+        &[180]
+    } else {
+        &[40, 100, 220, 450, 800]
+    };
     std::thread::spawn(move || {
-        for ms in [40_u64, 100, 220, 450, 800] {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            let _ = apply_prefs(&win, &prefs);
+        for ms in delays {
+            std::thread::sleep(std::time::Duration::from_millis(*ms));
+            if label == "settings" || label == "dock-icon-editor" {
+                let _ = reassert_prefs(&win, &prefs);
+            } else {
+                let _ = apply_prefs(&win, &prefs);
+            }
         }
     });
 }
@@ -178,6 +202,11 @@ pub fn clear(_window: &WebviewWindow) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn apply_prefs(_window: &WebviewWindow, _prefs: &MaterialPrefs) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn reassert_prefs(_window: &WebviewWindow, _prefs: &MaterialPrefs) -> Result<(), String> {
     Ok(())
 }
 

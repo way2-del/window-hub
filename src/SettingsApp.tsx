@@ -69,6 +69,10 @@ type DockPrefs = {
   cornerRadiusPx: number;
   /** Overflow-hidden pin ids (restore via dock right-click). */
   hiddenItemIds: string[];
+  /** Hover running app → live window thumbnail above Dock. */
+  hoverWindowPreview: boolean;
+  /** Delay before showing hover preview (ms). */
+  hoverPreviewDelayMs: number;
 };
 
 type AutostartBackend = "service" | "task" | "none";
@@ -97,9 +101,9 @@ const AUTOSTART_OPTIONS: { id: AutostartBackend; label: string; desc: string }[]
 const DOCK_MODES: { id: DockDisplayMode; label: string; desc: string }[] = [
   { id: "default", label: "默认显示模式", desc: "常驻贴底；全屏游戏时隐藏" },
   { id: "layered", label: "叠层显示模式", desc: "常驻并保持置顶" },
-  { id: "autoHide", label: "自动隐藏模式", desc: "鼠标靠近激活区时显示" },
+  { id: "autoHide", label: "自动隐藏模式", desc: "鼠标贴屏幕最底边时显示" },
   { id: "smartHide", label: "智能隐藏模式", desc: "窗口与 Dock 重叠时隐藏" },
-  { id: "always", label: "始终显示模式", desc: "始终显示（普通窗口之上）" },
+  { id: "always", label: "始终显示模式", desc: "始终显示，并预留底部工作区（最大化窗口不会盖住 Dock）" },
   { id: "hotkey", label: "热键显示模式", desc: "Ctrl+Alt+D 切换显隐" },
   { id: "alwaysFullscreen", label: "始终显示包括全屏", desc: "尽量在全屏时也保持显示" },
   { id: "desktop", label: "桌面显示模式", desc: "仅在桌面前景时显示" },
@@ -108,7 +112,7 @@ const DOCK_MODES: { id: DockDisplayMode; label: string; desc: string }[] = [
 /** Host-fixed geometry — not exposed in Settings. */
 const DOCK_FIXED = {
   activationPosition: "screenBottom" as const,
-  activationThicknessPx: 20,
+  activationThicknessPx: 2,
   bottomOffsetPx: 0,
   cornerRadiusPx: 20,
 };
@@ -127,6 +131,11 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
       Math.max(1, Number.isFinite(Number(dp?.magnification)) ? Number(dp?.magnification) : 1.6),
     ),
     hiddenItemIds: Array.isArray(dp?.hiddenItemIds) ? dp.hiddenItemIds.map(String) : [],
+    hoverWindowPreview: !!dp?.hoverWindowPreview,
+    hoverPreviewDelayMs: Math.min(
+      2000,
+      Math.max(0, Number.isFinite(Number(dp?.hoverPreviewDelayMs)) ? Number(dp?.hoverPreviewDelayMs) : 120),
+    ),
   };
 }
 
@@ -588,6 +597,24 @@ export default function SettingsApp() {
     } finally {
       setDockBusy(false);
     }
+  };
+
+  /** Live Dock geometry while dragging the mag slider — memory only, no disk write. */
+  const previewDockMagnification = (raw: number) => {
+    const n = Math.min(2.5, Math.max(1, Number.isFinite(raw) ? raw : 1.6));
+    setDockPrefs((p) => ({ ...p, magnification: n }));
+    void invoke("dock_preview_magnification", { magnification: n }).catch(console.error);
+  };
+
+  const commitDockMagnification = (raw: number) => {
+    const n = Math.min(2.5, Math.max(1, Number.isFinite(raw) ? raw : 1.6));
+    void (async () => {
+      try {
+        await persistDockPrefs({ magnification: n });
+      } finally {
+        await invoke("dock_end_magnification_preview").catch(() => undefined);
+      }
+    })();
   };
 
   const persistGeneralPrefs = async (
@@ -1505,6 +1532,98 @@ export default function SettingsApp() {
                     onBlur={(e) => {
                       const n = Math.min(10000, Math.max(200, Number(e.target.value) || 800));
                       void persistDockPrefs({ hideLingerMs: n });
+                    }}
+                    style={{ width: 88, textAlign: "right" }}
+                  />
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">悬停放大</span>
+                    <span className="pref-row-desc">
+                      拖动时底部 Dock 中间图标会实时按该倍率放大；松手后写入本机偏好。
+                    </span>
+                  </span>
+                  <span className="dock-mag-controls">
+                    <input
+                      type="range"
+                      min={1}
+                      max={2.5}
+                      step={0.1}
+                      value={dockPrefs.magnification}
+                      disabled={!dockPrefs.enabled || dockBusy}
+                      onChange={(e) => previewDockMagnification(Number(e.target.value))}
+                      onPointerUp={(e) =>
+                        commitDockMagnification(
+                          Number((e.target as HTMLInputElement).value),
+                        )
+                      }
+                      onPointerCancel={(e) =>
+                        commitDockMagnification(
+                          Number((e.target as HTMLInputElement).value),
+                        )
+                      }
+                      onBlur={(e) =>
+                        commitDockMagnification(Number(e.target.value))
+                      }
+                      onKeyUp={(e) =>
+                        commitDockMagnification(
+                          Number((e.target as HTMLInputElement).value),
+                        )
+                      }
+                      style={{ width: 120 }}
+                    />
+                    <span className="dock-mag-value">
+                      {dockPrefs.magnification.toFixed(1)}×
+                    </span>
+                  </span>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">悬停窗口预览</span>
+                    <span className="pref-row-desc">
+                      鼠标放在正在运行的应用图标上时，显示该窗口实时缩略图
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.hoverWindowPreview ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.hoverWindowPreview}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() =>
+                      void persistDockPrefs({
+                        hoverWindowPreview: !dockPrefs.hoverWindowPreview,
+                      })
+                    }
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label
+                  className={`pref-row${dockPrefs.enabled && dockPrefs.hoverWindowPreview ? "" : " is-disabled"}`}
+                >
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">预览延迟</span>
+                    <span className="pref-row-desc">
+                      悬停多久后开始显示预览（毫秒，默认 120；不含截图耗时）
+                    </span>
+                  </span>
+                  <input
+                    className="pref-select"
+                    type="number"
+                    min={0}
+                    max={2000}
+                    step={20}
+                    value={dockPrefs.hoverPreviewDelayMs}
+                    disabled={!dockPrefs.enabled || !dockPrefs.hoverWindowPreview || dockBusy}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (!Number.isFinite(n)) return;
+                      setDockPrefs((p) => ({ ...p, hoverPreviewDelayMs: n }));
+                    }}
+                    onBlur={(e) => {
+                      const n = Math.min(2000, Math.max(0, Number(e.target.value) || 120));
+                      void persistDockPrefs({ hoverPreviewDelayMs: n });
                     }}
                     style={{ width: 88, textAlign: "right" }}
                   />
