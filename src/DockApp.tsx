@@ -102,6 +102,8 @@ function dockFanExtra(magnification: number): number {
  * so waiting the full 240ms feels laggy after AutoHide reveal.
  */
 const FAN_ARM_DELAY_MS = 90;
+/** Leave: ease icons back to rest before collapsing hover width. */
+const FAN_REST_MS = 220;
 /** How many icon-widths the fan reaches on each side. */
 const MAG_RANGE = 2.25;
 /** Default when prefs missing (matches Rust DOCK_MAG_SCALE). */
@@ -489,6 +491,13 @@ export default function DockApp() {
   const [barWide, setBarWide] = useState(false);
   /** Hold chrome/glass wide while finishing unmagnify → then shrink (no icon leak). */
   const [fanCollapsing, setFanCollapsing] = useState(false);
+  /** Frozen peak X while easing scales back to 1 on leave (null = rest). */
+  const [collapseFanX, setCollapseFanX] = useState<number | null>(null);
+  /** 1 → 0 while leaving; multiplies fan scale for a real shrink (not CSS-var tween). */
+  const [collapseT, setCollapseT] = useState(1);
+  const fanCollapsingRef = useRef(false);
+  const collapseAnimGenRef = useRef(0);
+  const collapseRafRef = useRef(0);
   const widthTweenTimerRef = useRef(null as number | null);
   /** Ignore stale dock_set_hover_expand responses after rapid enter/leave. */
   const expandSeqRef = useRef(0);
@@ -553,6 +562,12 @@ export default function DockApp() {
 
   /** Commit rest scales immediately (hide slide must not paint magnified tiles). */
   const snapFanToRestSync = () => {
+    collapseAnimGenRef.current += 1;
+    fanCollapsingRef.current = false;
+    if (collapseRafRef.current) {
+      cancelAnimationFrame(collapseRafRef.current);
+      collapseRafRef.current = 0;
+    }
     fanArmGenRef.current += 1;
     fanArmedRef.current = false;
     pendingFanXRef.current = null;
@@ -562,12 +577,111 @@ export default function DockApp() {
     }
     pendingFanClientXRef.current = null;
     flushSync(() => {
-      setFanCollapsing(true);
+      setFanCollapsing(false);
       setFanArmed(false);
       setLocalX(null);
+      setCollapseFanX(null);
+      setCollapseT(0);
       setFanLive(false);
       setBarWide(false);
     });
+  };
+
+  const cancelCollapseEase = () => {
+    collapseAnimGenRef.current += 1;
+    fanCollapsingRef.current = false;
+    if (collapseRafRef.current) {
+      cancelAnimationFrame(collapseRafRef.current);
+      collapseRafRef.current = 0;
+    }
+    cancelCollapseTimer();
+    setFanCollapsing(false);
+    setCollapseFanX(null);
+    setCollapseT(0);
+  };
+
+  const finishCollapseWidth = () => {
+    fanCollapsingRef.current = false;
+    setFanCollapsing(false);
+    setCollapseFanX(null);
+    setCollapseT(0);
+    setLocalX(null);
+    if (pointerInsideRef.current || isLaunchHolding()) return;
+    if (expandedRef.current || expandInflightRef.current === true) {
+      setExpanded(false);
+    } else {
+      expandedRef.current = false;
+      setBarWide(false);
+      void invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(
+        () => undefined,
+      );
+    }
+  };
+
+  /**
+   * Leave dock: ease magnified icons to rest (rAF), then collapse hover width.
+   * Ignores re-entrancy while collapsing — pointermove must not reset the ease.
+   */
+  const beginCollapseAfterFanRest = () => {
+    if (isLaunchHolding()) return;
+    if (fanCollapsingRef.current) return;
+    pointerInsideRef.current = false;
+    expandSeqRef.current += 1;
+    cancelWidthTweenTimer();
+    expandInflightRef.current = null;
+    cancelCollapseTimer();
+
+    const peak = localX;
+    const hadFan = peak != null || fanArmedRef.current || fanLive;
+
+    fanArmGenRef.current += 1;
+    fanArmedRef.current = false;
+    pendingFanXRef.current = null;
+    if (fanMoveRafRef.current) {
+      cancelAnimationFrame(fanMoveRafRef.current);
+      fanMoveRafRef.current = 0;
+    }
+    pendingFanClientXRef.current = null;
+
+    if (!hadFan || peak == null) {
+      fanCollapsingRef.current = false;
+      setFanCollapsing(false);
+      setCollapseFanX(null);
+      setCollapseT(0);
+      setLocalX(null);
+      setFanArmed(false);
+      setFanLive(false);
+      finishCollapseWidth();
+      return;
+    }
+
+    fanCollapsingRef.current = true;
+    setFanCollapsing(true);
+    setFanArmed(false);
+    setFanLive(false);
+    setCollapseFanX(peak);
+    setCollapseT(1);
+
+    const gen = ++collapseAnimGenRef.current;
+    const t0 = performance.now();
+    if (collapseRafRef.current) {
+      cancelAnimationFrame(collapseRafRef.current);
+      collapseRafRef.current = 0;
+    }
+    const tick = (now: number) => {
+      if (gen !== collapseAnimGenRef.current) return;
+      const u = Math.min(1, (now - t0) / FAN_REST_MS);
+      // Ease-out cubic — shrink feels quick then settles.
+      const eased = 1 - (1 - u) ** 3;
+      setCollapseT(1 - eased);
+      if (u < 1) {
+        collapseRafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      collapseRafRef.current = 0;
+      finishCollapseWidth();
+    };
+    collapseRafRef.current = requestAnimationFrame(tick);
   };
 
   const queueFanFromClientX = (clientX: number) => {
@@ -618,7 +732,9 @@ export default function DockApp() {
     if (!pointerInFanIconZone(clientX, clientY, bar)) return;
     pointerInsideRef.current = true;
     cancelCollapseTimer();
-    if (fanCollapsing) setFanCollapsing(false);
+    if (fanCollapsing || fanCollapsingRef.current) {
+      cancelCollapseEase();
+    }
     setFanLive(true);
     queueFanFromClientX(clientX);
     if (!expandedRef.current && expandInflightRef.current !== true) {
@@ -749,35 +865,48 @@ export default function DockApp() {
       });
   };
 
-  const beginCollapseAfterFanRest = () => {
-    // Leave / past icon peak: snap magnification immediately (any direction).
-    // Launch bounce window: keep dock open until the hold timer ends.
-    if (isLaunchHolding()) return;
+  const beginCollapseRef = useRef(beginCollapseAfterFanRest);
+  beginCollapseRef.current = beginCollapseAfterFanRest;
+
+  /**
+   * Status menu: backend already forces `dock_set_hover_expand(false)` (chrome-only
+   * clip). FE must match immediately — the leave ease timer was cancelled on
+   * `status-menu-popup-opened`, leaving expandedRef true so the next hover armed
+   * fan scales without reopening headroom (icons clipped inside chrome).
+   */
+  const forceCollapseForMenuSync = () => {
     pointerInsideRef.current = false;
     expandSeqRef.current += 1;
     cancelWidthTweenTimer();
-    expandInflightRef.current = null;
     cancelCollapseTimer();
-    snapFanToRestSync();
-    // Next frame: drop collapsing hold and collapse hover width (icons already at rest).
-    collapseTimerRef.current = window.setTimeout(() => {
-      collapseTimerRef.current = null;
+    collapseAnimGenRef.current += 1;
+    fanCollapsingRef.current = false;
+    if (collapseRafRef.current) {
+      cancelAnimationFrame(collapseRafRef.current);
+      collapseRafRef.current = 0;
+    }
+    expandInflightRef.current = null;
+    expandedRef.current = false;
+    fanArmGenRef.current += 1;
+    fanArmedRef.current = false;
+    pendingFanXRef.current = null;
+    if (fanMoveRafRef.current) {
+      cancelAnimationFrame(fanMoveRafRef.current);
+      fanMoveRafRef.current = 0;
+    }
+    pendingFanClientXRef.current = null;
+    flushSync(() => {
       setFanCollapsing(false);
-      if (pointerInsideRef.current || isLaunchHolding()) return;
-      if (expandedRef.current || expandInflightRef.current === true) {
-        setExpanded(false);
-      } else {
-        expandedRef.current = false;
-        setBarWide(false);
-        void invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(
-          () => undefined,
-        );
-      }
-    }, 0);
+      setFanArmed(false);
+      setLocalX(null);
+      setCollapseFanX(null);
+      setCollapseT(0);
+      setFanLive(false);
+      setBarWide(false);
+    });
   };
-  const beginCollapseRef = useRef(beginCollapseAfterFanRest);
-  beginCollapseRef.current = beginCollapseAfterFanRest;
-  collapseDockFanForMenu = () => beginCollapseRef.current();
+
+  collapseDockFanForMenu = () => forceCollapseForMenuSync();
   useEffect(() => () => {
     collapseDockFanForMenu = null;
   }, []);
@@ -808,6 +937,7 @@ export default function DockApp() {
       if (!bar) return;
       lastPointerClientRef.current = { x: clientX, y: clientY };
       if (pointerInFanIconZone(clientX, clientY, bar)) return;
+      if (fanCollapsingRef.current) return;
       if (
         fanArmedRef.current ||
         pointerInsideRef.current ||
@@ -849,7 +979,7 @@ export default function DockApp() {
     let unClose: (() => void) | undefined;
     void listen("status-menu-popup-opened", () => {
       dockStatusMenuOpen = true;
-      cancelCollapseTimer();
+      // Hold only — fan/expand already snapped in openStatusMenuAtClientPoint.
       void invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
     }).then((fn) => {
       unOpen = fn;
@@ -975,8 +1105,7 @@ export default function DockApp() {
       setSettingsMagPreview(active);
       if (active) {
         // Bypass setExpanded — it disarmFan()s on widen, which would flash rest scales.
-        cancelCollapseTimer();
-        setFanCollapsing(false);
+        cancelCollapseEase();
         pointerInsideRef.current = true;
         expandSeqRef.current += 1;
         cancelWidthTweenTimer();
@@ -1151,8 +1280,19 @@ export default function DockApp() {
     const map = new Map<string, number>();
     // During dnd, keep resting widths so hello-pangea/dnd's dimension model stays valid.
     if (draggingId) return map;
-    const fanX = settingsMagPreview ? previewPeakX : localX;
-    if (!settingsMagPreview && (!fanArmed || localX == null)) return map;
+    const fanX = settingsMagPreview
+      ? previewPeakX
+      : fanCollapsing
+        ? collapseFanX
+        : localX;
+    if (
+      !settingsMagPreview &&
+      !fanCollapsing &&
+      (!fanArmed || localX == null)
+    ) {
+      return map;
+    }
+    if (fanCollapsing && (fanX == null || collapseT <= 0.001)) return map;
     if (fanX == null) return map;
     for (const item of displayItems) {
       if (item.kind === "separator") continue;
@@ -1161,7 +1301,10 @@ export default function DockApp() {
         map.set(item.id, 1);
         continue;
       }
-      map.set(item.id, fanScale(Math.abs(fanX - c), maxScale));
+      const full = fanScale(Math.abs(fanX - c), maxScale);
+      // Leave ease: interpolate full fan → 1 (JS driven; CSS vars don't tween reliably).
+      const s = fanCollapsing ? 1 + (full - 1) * collapseT : full;
+      map.set(item.id, s);
     }
     return map;
   }, [
@@ -1173,6 +1316,9 @@ export default function DockApp() {
     draggingId,
     settingsMagPreview,
     previewPeakX,
+    fanCollapsing,
+    collapseFanX,
+    collapseT,
   ]);
 
   /** Bumped on AutoHide hide so icon DOM remounts — clears frozen mid-tween sizes. */
@@ -1236,6 +1382,7 @@ export default function DockApp() {
     // Past magnified icon peak / bar sides → cancel mag immediately (any direction).
     if (bar && !pointerInFanIconZone(e.clientX, e.clientY, bar)) {
       if (isLaunchHolding()) return;
+      if (fanCollapsingRef.current) return;
       if (
         fanArmedRef.current ||
         pointerInsideRef.current ||
@@ -1247,7 +1394,9 @@ export default function DockApp() {
     }
     pointerInsideRef.current = true;
     cancelCollapseTimer();
-    if (fanCollapsing) setFanCollapsing(false);
+    if (fanCollapsing || fanCollapsingRef.current) {
+      cancelCollapseEase();
+    }
     if (!fanLive) setFanLive(true);
     // Widen at most once per hover session; moves only update fan X.
     if (!expandedRef.current && expandInflightRef.current !== true) {
@@ -1270,7 +1419,9 @@ export default function DockApp() {
     }
     pointerInsideRef.current = true;
     cancelCollapseTimer();
-    if (fanCollapsing) setFanCollapsing(false);
+    if (fanCollapsing || fanCollapsingRef.current) {
+      cancelCollapseEase();
+    }
     setFanLive(true);
     // From default width only when this session is not already wide.
     if (!expandedRef.current && expandInflightRef.current !== true) {
@@ -1704,6 +1855,7 @@ export default function DockApp() {
                                 windowPreviewItemId:
                                   prefs?.hoverWindowPreview && running ? item.id : null,
                                 settleMs: prefs?.hoverPreviewDelayMs,
+                                iconPngBase64: item.iconPng || null,
                               }))}
                           style={
                             {

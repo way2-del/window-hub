@@ -17,6 +17,25 @@ function toNum(v: unknown, fallback: number) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Explicit unit, else size-like keys → px, otherwise ms (legacy offset fields). */
+function resolveUnit(field: PluginSettingField): string {
+  const raw = typeof field.unit === "string" ? field.unit.trim() : "";
+  if (raw) return raw;
+  if (/width|height|size|radius|gap|pad|inset/i.test(field.key)) return "px";
+  return "ms";
+}
+
+function resolveStep(field: PluginSettingField, unit: string): number {
+  if (typeof field.step === "number" && field.step > 0) return field.step;
+  return unit === "px" ? 10 : 50;
+}
+
+function unitLabel(unit: string): string {
+  if (unit === "ms") return "毫秒";
+  if (unit === "px") return "像素";
+  return unit;
+}
+
 /** Circular undo / redo arrow (no numeral). */
 function StepIcon({ dir }: { dir: "minus" | "plus" }) {
   const ccw = dir === "minus";
@@ -47,8 +66,7 @@ function StepIcon({ dir }: { dir: "minus" | "plus" }) {
 }
 
 /**
- * Offset control: label row + control row
- * (−50 | slider | +50 | editable ms | reset)
+ * Ranged number control: (−step | slider | +step | editable value + unit | reset)
  */
 export default function PluginOffsetNumberField({
   field,
@@ -58,7 +76,8 @@ export default function PluginOffsetNumberField({
 }: Props) {
   const min = typeof field.min === "number" ? field.min : -10000;
   const max = typeof field.max === "number" ? field.max : 10000;
-  const step = typeof field.step === "number" && field.step > 0 ? field.step : 50;
+  const unit = resolveUnit(field);
+  const step = resolveStep(field, unit);
   const def = toNum(field.default, 0);
   const committed = clamp(Math.round(toNum(value, def)), min, max);
 
@@ -107,7 +126,11 @@ export default function PluginOffsetNumberField({
 
   const commitDraft = () => {
     setEditing(false);
-    const raw = draft.trim().replace(/ms$/i, "").trim();
+    const unitEsc = unit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const raw = draft
+      .trim()
+      .replace(new RegExp(`${unitEsc}$`, "i"), "")
+      .trim();
     if (raw === "" || raw === "-" || raw === "+") {
       setDraft(String(local));
       return;
@@ -120,7 +143,9 @@ export default function PluginOffsetNumberField({
     flush(parsed);
   };
 
-  const stepLabel = `${Math.abs(Math.round(step))}ms`;
+  const stepCaption = `${Math.abs(Math.round(step))}${unit}`;
+  const resetTitle =
+    def === 0 ? "重置为 0" : `重置为默认 ${Math.round(def)}${unit}`;
 
   return (
     <div className={`plugin-offset${disabled ? " is-disabled" : ""}`}>
@@ -136,12 +161,12 @@ export default function PluginOffsetNumberField({
           type="button"
           className="plugin-offset-step"
           disabled={disabled || local <= min}
-          title={`减少 ${stepLabel}`}
-          aria-label={`减少 ${stepLabel}`}
+          title={`减少 ${stepCaption}`}
+          aria-label={`减少 ${stepCaption}`}
           onClick={() => nudge(-step)}
         >
           <StepIcon dir="minus" />
-          <span className="plugin-offset-step-caption">{stepLabel}</span>
+          <span className="plugin-offset-step-caption">{stepCaption}</span>
         </button>
 
         <input
@@ -167,12 +192,12 @@ export default function PluginOffsetNumberField({
           type="button"
           className="plugin-offset-step"
           disabled={disabled || local >= max}
-          title={`增加 ${stepLabel}`}
-          aria-label={`增加 ${stepLabel}`}
+          title={`增加 ${stepCaption}`}
+          aria-label={`增加 ${stepCaption}`}
           onClick={() => nudge(step)}
         >
           <StepIcon dir="plus" />
-          <span className="plugin-offset-step-caption">{stepLabel}</span>
+          <span className="plugin-offset-step-caption">{stepCaption}</span>
         </button>
 
         <label className="plugin-offset-value">
@@ -181,7 +206,7 @@ export default function PluginOffsetNumberField({
             inputMode="numeric"
             className="plugin-offset-input"
             disabled={disabled}
-            aria-label={`${field.label}（毫秒）`}
+            aria-label={`${field.label}（${unitLabel(unit)}）`}
             value={editing ? draft : String(local)}
             onFocus={() => {
               setEditing(true);
@@ -204,7 +229,7 @@ export default function PluginOffsetNumberField({
             }}
           />
           <span className="plugin-offset-unit" aria-hidden>
-            ms
+            {unit}
           </span>
         </label>
 
@@ -212,8 +237,8 @@ export default function PluginOffsetNumberField({
           type="button"
           className="plugin-offset-reset"
           disabled={disabled || local === def}
-          title="重置为 0"
-          aria-label="重置偏移"
+          title={resetTitle}
+          aria-label={resetTitle}
           onClick={() => flush(def)}
         >
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden>

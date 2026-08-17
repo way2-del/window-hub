@@ -2842,3 +2842,48 @@ body.is-dock-icon-editor #root {
 html[data-theme="light"] .dock-icon-editor-preview-stage {
   background: rgba(0, 0, 0, 0.06);
 }
+
+/* Shortcuts scope (dedicated settings page) */
+.shortcuts-scope-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 10px;
+}
+.shortcuts-scope-card {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--fg, #fff) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg, #fff) 10%, transparent);
+}
+.shortcuts-scope-card.is-worker {
+  opacity: 0.78;
+}
+.shortcuts-scope-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.shortcuts-scope-name {
+  font-size: 14px;
+  font-weight: 650;
+}
+.shortcuts-scope-id {
+  font-size: 11px;
+  opacity: 0.55;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.shortcuts-scope-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fg, #fff) 12%, transparent);
+}
+.shortcuts-scope-modes {
+  margin-top: 4px;
+}
+.shortcuts-scope-picker-block {
+  margin-top: 10px;
+}

@@ -15,6 +15,7 @@ type TipPayload = {
   y: number;
   placement?: "above" | "below" | string | null;
   imageJpegBase64?: string | null;
+  iconPngBase64?: string | null;
   hwnd?: number | null;
   itemId?: string | null;
 };
@@ -25,6 +26,7 @@ function normalizeTip(p: Partial<TipPayload> | null | undefined): TipPayload | n
     ? p.lines.map(String).filter(Boolean).slice(0, 8)
     : [];
   const imageJpegBase64 = (p.imageJpegBase64 || "").trim() || undefined;
+  const iconPngBase64 = (p.iconPngBase64 || "").trim() || undefined;
   if (!lines.length && !imageJpegBase64) return null;
   const hwndRaw = p.hwnd;
   const hwnd =
@@ -38,9 +40,35 @@ function normalizeTip(p: Partial<TipPayload> | null | undefined): TipPayload | n
     y: Number(p.y) || 0,
     placement: p.placement === "above" ? "above" : "below",
     imageJpegBase64,
+    iconPngBase64,
     hwnd,
     itemId,
   };
+}
+
+function blobFp(s: string | null | undefined): string {
+  if (!s) return "";
+  const n = s.length;
+  if (n <= 64) return `${n}:${s}`;
+  return `${n}:${s.slice(0, 32)}:${s.slice(-32)}`;
+}
+
+function tipPayloadEq(a: TipPayload | null, b: TipPayload | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.lines.length !== b.lines.length) return false;
+  for (let i = 0; i < a.lines.length; i++) {
+    if (a.lines[i] !== b.lines[i]) return false;
+  }
+  return (
+    blobFp(a.imageJpegBase64) === blobFp(b.imageJpegBase64) &&
+    blobFp(a.iconPngBase64) === blobFp(b.iconPngBase64) &&
+    a.hwnd === b.hwnd &&
+    a.itemId === b.itemId &&
+    a.placement === b.placement &&
+    Math.abs(a.x - b.x) < 0.75 &&
+    Math.abs(a.y - b.y) < 0.75
+  );
 }
 
 /** Match PluginPopupHost: glass CSS tokens + DWM material on this HWND. */
@@ -68,7 +96,8 @@ async function fitTipWindow(box: HTMLElement, tip: TipPayload) {
   }
   box.style.width = "max-content";
   box.style.height = "auto";
-  box.style.maxWidth = tip.imageJpegBase64 ? "300px" : "360px";
+  // Preview width follows real window aspect (set on img); do not clamp tip width.
+  box.style.maxWidth = tip.imageJpegBase64 ? "none" : "360px";
   void box.offsetWidth;
 
   const rect = box.getBoundingClientRect();
@@ -116,9 +145,13 @@ export default function ChromeHoverTipApp() {
         /* noop */
       }
       unShow = await listen<TipPayload>("chrome-hover-tip-show", (ev) => {
+        const next = normalizeTip(ev.payload);
+        setTip((prev) => {
+          if (tipPayloadEq(prev, next)) return prev;
+          return next;
+        });
         setRightHover(false);
-        setTip(normalizeTip(ev.payload));
-        void applyTipGlass();
+        if (next) void applyTipGlass();
       });
       unHide = await listen("chrome-hover-tip-hide", () => {
         setRightHover(false);
@@ -150,9 +183,10 @@ export default function ChromeHoverTipApp() {
       if (!el) return;
       void fitTipWindow(el, tip).catch(() => undefined);
     };
+    // Fit immediately so leave-watch hit-tests the real tip rect (not the 160×48 stub).
+    // Delayed fit left a gap above the Dock → tip vanished before clicks landed.
     timers.push(window.setTimeout(run, 0));
-    timers.push(window.setTimeout(run, 40));
-    timers.push(window.setTimeout(run, 120));
+    timers.push(window.setTimeout(run, 48));
     return () => {
       for (const id of timers) window.clearTimeout(id);
     };
@@ -165,6 +199,9 @@ export default function ChromeHoverTipApp() {
   const interactive = Boolean(tip.imageJpegBase64 && tip.hwnd);
   const title = tip.lines[0] || "";
   const extraLines = tip.lines.slice(1);
+  const iconSrc = tip.iconPngBase64
+    ? `data:image/png;base64,${tip.iconPngBase64}`
+    : null;
 
   async function onCloseWindow() {
     if (!tip?.hwnd) return;
@@ -233,6 +270,14 @@ export default function ChromeHoverTipApp() {
         {tip.imageJpegBase64 ? (
           <>
             <div className="chrome-hover-tip-title-row">
+              {iconSrc ? (
+                <img
+                  className="chrome-hover-tip-icon"
+                  src={iconSrc}
+                  alt=""
+                  draggable={false}
+                />
+              ) : null}
               <div className="chrome-hover-tip-line is-lead chrome-hover-tip-title">{title}</div>
               {interactive ? (
                 <button
@@ -259,11 +304,41 @@ export default function ChromeHoverTipApp() {
             </div>
             <div className="chrome-hover-tip-preview-wrap">
               <img
+                key={blobFp(tip.imageJpegBase64)}
                 className="chrome-hover-tip-preview"
                 src={`data:image/jpeg;base64,${tip.imageJpegBase64}`}
                 alt=""
                 draggable={false}
-                onLoad={() => {
+                onLoad={(e) => {
+                  // Same height for all; width = height × real capture aspect (full window).
+                  const img = e.currentTarget;
+                  const nw = img.naturalWidth;
+                  const nh = img.naturalHeight;
+                  if (nw > 0 && nh > 0) {
+                    const wrap = img.parentElement;
+                    const hCss =
+                      (wrap && getComputedStyle(wrap).getPropertyValue("--dock-preview-h")) ||
+                      "160px";
+                    let h = Math.max(1, parseFloat(hCss) || 160);
+                    let w = Math.max(1, Math.round((h * nw) / nh));
+                    // Only if tip would exceed most of the screen: scale both axes
+                    // so the full window still fits (never crop / never distort).
+                    const maxW = Math.max(
+                      160,
+                      Math.floor((window.screen?.availWidth || window.innerWidth || 1200) * 0.72),
+                    );
+                    if (w > maxW) {
+                      const s = maxW / w;
+                      w = maxW;
+                      h = Math.max(48, Math.round(h * s));
+                    }
+                    img.style.width = `${w}px`;
+                    img.style.height = `${h}px`;
+                    if (wrap) {
+                      wrap.style.width = `${w}px`;
+                      wrap.style.height = `${h}px`;
+                    }
+                  }
                   const el = boxRef.current;
                   if (el && tip) void fitTipWindow(el, tip).catch(() => undefined);
                 }}
@@ -276,14 +351,31 @@ export default function ChromeHoverTipApp() {
             ))}
           </>
         ) : (
-          tip.lines.map((line, i) => (
-            <div
-              key={`${i}-${line.slice(0, 12)}`}
-              className={`chrome-hover-tip-line${i === 0 ? " is-lead" : ""}`}
-            >
-              {line}
-            </div>
-          ))
+          <>
+            {iconSrc ? (
+              <div className="chrome-hover-tip-title-row">
+                <img
+                  className="chrome-hover-tip-icon"
+                  src={iconSrc}
+                  alt=""
+                  draggable={false}
+                />
+                {title ? (
+                  <div className="chrome-hover-tip-line is-lead chrome-hover-tip-title">
+                    {title}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {(iconSrc ? tip.lines.slice(1) : tip.lines).map((line, i) => (
+              <div
+                key={`${i}-${line.slice(0, 12)}`}
+                className={`chrome-hover-tip-line${!iconSrc && i === 0 ? " is-lead" : ""}`}
+              >
+                {line}
+              </div>
+            ))}
+          </>
         )}
       </div>
     </div>

@@ -69,7 +69,8 @@ hub.panel.onLeave(cb)   // 收起一开始（摄像头等重资源必须在此 s
 
 | 内容 | 宽 × 高 |
 |------|---------|
-| 默认 / 天气 / 镜子 | `defaultSize` 或 380 × 220 |
+| 默认 / 镜子 | `defaultSize` 或 380 × 220 |
+| 天气 | `defaultSize` **380 × 248**（含岛栏；勿再压到 ≤200，三卡会被裁） |
 | 中转站 | `settings.panelWidth` × `settings.panelHeight`（默认 560×152） |
 
 ## 官方插件

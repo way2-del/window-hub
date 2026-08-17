@@ -84,7 +84,14 @@ DnD → `island.drop` 赢家。`excludeFromPullContent: true` → 不进下拉�
 
 `open_plugin_popup` / `close_plugin_popup`；注入后读 `popup.css` / `popup.js`。快捷区可开弹窗；岛面板 **故意** 不注入 `popup.open`。
 
-默认尺寸 **320×480**。插件可通过 `settings` 声明 `popupWidth` / `popupHeight`（Host 读取并 clamp：宽 280–720、高 320–900）；亦可 `hub.popup.open({ width, height })` 覆盖。
+默认尺寸 **320×480**。插件可通过 `settings` 声明 `popupWidth` / `popupHeight`（Host 读取并 clamp：宽 **280–2400**、高 **320–1600**）；亦可 `hub.popup.open({ width, height, resizable?, windowedFullscreen? })` 覆盖。
+
+| 方法 | 说明 |
+|------|------|
+| `open(opts?)` | 打开托管弹窗；`nativeFrame: true` → **系统标题栏**（同设置窗口，可最小化/最大化/关闭）；`windowedFullscreen: true` 原生窗则 maximize，无边框则铺满工作区；`resizable: true` 可拖拽改尺寸 |
+| `close()` | 关闭 |
+| `resize({ width, height })` | 调整已打开弹窗尺寸（经 clamp） |
+| `openAsWindow(opts?)` | 关闭当前无边框弹窗并重开为**系统标题栏**窗口（Excalidraw「窗口化」按钮） |
 
 ## `hub.everything.*`（需 `everything.search`）
 

@@ -158,22 +158,37 @@ pub fn apply_prefs(window: &WebviewWindow, prefs: &MaterialPrefs) -> Result<(), 
 pub fn reassert_prefs(window: &WebviewWindow, prefs: &MaterialPrefs) -> Result<(), String> {
     let prefs = prefs.clone().normalize();
     let dark = Some(resolve_dark(prefs.dark));
-    match window.label() {
-        "settings" | "dock-icon-editor" if matches!(prefs.kind, WindowMaterial::MicaAlt) => {
-            crate::win32::blur_glass::reassert_settings_frame_mica(window, dark)
-        }
-        _ => apply_prefs(window, &prefs),
+    let framed_mica = matches!(prefs.kind, WindowMaterial::MicaAlt)
+        && match window.label() {
+            "settings" | "dock-icon-editor" | "plugin-window" => true,
+            "plugin-popup" => {
+                crate::win32::blur_glass::is_native_frame_plugin_popup(window)
+            }
+            _ => false,
+        };
+    if framed_mica {
+        crate::win32::blur_glass::reassert_settings_frame_mica(window, dark)
+    } else {
+        apply_prefs(window, &prefs)
     }
 }
 
 #[cfg(windows)]
 pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
+    use tauri::Manager;
+
     let prefs = prefs.clone().normalize();
     let label = window.label().to_string();
+    let app = window.app_handle().clone();
+    let hwnd0 = window.hwnd().ok().map(|h| h.0 as isize);
+    let framed = label == "settings"
+        || label == "dock-icon-editor"
+        || label == "plugin-window"
+        || (label == "plugin-popup"
+            && crate::win32::blur_glass::is_native_frame_plugin_popup(window));
     let _ = apply_prefs(window, &prefs);
-    let win = window.clone();
-    // Framed settings: one late soft retry. Five full clear/reapply cycles flash white.
-    let delays: &'static [u64] = if label == "settings" || label == "dock-icon-editor" {
+    // Framed Mica windows: one late soft retry. Five full clear/reapply cycles flash white.
+    let delays: &'static [u64] = if framed {
         &[180]
     } else {
         &[40, 100, 220, 450, 800]
@@ -181,7 +196,22 @@ pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
     std::thread::spawn(move || {
         for ms in delays {
             std::thread::sleep(std::time::Duration::from_millis(*ms));
-            if label == "settings" || label == "dock-icon-editor" {
+            let Some(win) = app.get_webview_window(&label) else {
+                return;
+            };
+            // Window was closed/recreated (e.g. Excalidraw 弹窗→窗口化): stop touching dead HWND.
+            let hwnd1 = win.hwnd().ok().map(|h| h.0 as isize);
+            if hwnd0.is_some() && hwnd0 != hwnd1 {
+                return;
+            }
+            if let Some(h) = hwnd1 {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+                if !unsafe { IsWindow(HWND(h as _)) }.as_bool() {
+                    return;
+                }
+            }
+            if framed {
                 let _ = reassert_prefs(&win, &prefs);
             } else {
                 let _ = apply_prefs(&win, &prefs);

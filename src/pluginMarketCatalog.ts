@@ -100,6 +100,18 @@ export const MARKET_PLUGINS: MarketPlugin[] = [
     letter: "监",
   },
   {
+    exampleId: "excalidraw",
+    pluginId: "com.window-hub.excalidraw",
+    name: "Excalidraw",
+    version: "1.0.7",
+    description:
+      "快捷区较大弹窗可向右拖宽并记住大小；超过最大宽度自动全屏独立窗口。画布自动保存，首次需联网。",
+    summary: "快捷区画板 · 拖宽记忆",
+    categoryId: "shortcuts",
+    tint: "#6965db",
+    letter: "板",
+  },
+  {
     exampleId: "transfer-station",
     pluginId: "com.window-hub.transfer-station",
     name: "中转站",

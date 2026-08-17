@@ -2259,6 +2259,9 @@ body.is-chrome-hover-tip #root {
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
+  /* Preview drives tip width (true window aspect); title stretches to match. */
+  width: max-content;
+  max-width: none;
 }
 
 .chrome-hover-tip-title-row {
@@ -2268,6 +2271,22 @@ body.is-chrome-hover-tip #root {
   min-width: 0;
   max-width: 280px;
   padding: 0 2px;
+}
+
+.chrome-hover-tip-root.has-preview .chrome-hover-tip-title-row {
+  max-width: none;
+  width: 100%;
+}
+
+.chrome-hover-tip-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+  user-select: none;
 }
 
 .chrome-hover-tip-title {
@@ -2309,25 +2328,35 @@ body.is-chrome-hover-tip #root {
 }
 
 .chrome-hover-tip-preview-wrap {
+  /* Unified height; width set in JS = height × JPEG aspect (full window, no crop). */
+  --dock-preview-h: 160px;
   position: relative;
-  max-width: 280px;
+  height: var(--dock-preview-h);
+  width: max-content;
+  margin: 0 auto;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.22);
+  flex: 0 0 auto;
 }
 
 .chrome-hover-tip-preview {
   display: block;
-  width: 100%;
-  max-width: 280px;
-  height: auto;
+  height: var(--dock-preview-h);
+  width: auto;
   border-radius: 6px;
-  object-fit: contain;
-  background: rgba(0, 0, 0, 0.22);
+  /* Exact pixel box matches aspect — show entire capture, never crop/stretch. */
+  object-fit: fill;
+  /* Prefer crisp downscale from HiDPI capture; avoid browser soft upscale look. */
+  image-rendering: -webkit-optimize-contrast;
+  background: transparent;
   pointer-events: none;
   user-select: none;
 }
 
 .chrome-hover-tip-root.has-preview .chrome-hover-tip-line:not(.chrome-hover-tip-title) {
   padding: 0 2px;
-  max-width: 280px;
+  max-width: none;
 }
 
 .chrome-hover-tip-root.is-interactive {

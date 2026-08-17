@@ -29,6 +29,8 @@ const ALLOWED_CMDS = new Set([
   "hub_everything_open",
   "hub_everything_reveal",
   "hub_sysmon_snapshot",
+  "resize_plugin_popup",
+  "set_plugin_popup_windowed_fullscreen",
 ]);
 
 export function isAllowedShortcutsHubCmd(cmd: string): boolean {
@@ -150,7 +152,16 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
     },
     popup: {
       open: function (opts) { hostCmd("popup.open", opts || {}); },
-      close: function () { return invoke("close_plugin_popup", {}); }
+      close: function () { return invoke("close_plugin_popup", {}); },
+      resize: function (opts) {
+        return invoke("resize_plugin_popup", {
+          width: opts && typeof opts.width === "number" ? opts.width : 320,
+          height: opts && typeof opts.height === "number" ? opts.height : 480
+        });
+      },
+      setWindowedFullscreen: function (enabled) {
+        return invoke("set_plugin_popup_windowed_fullscreen", { enabled: !!enabled });
+      }
     },
     island: {
       setBar: function (opts) {
@@ -343,7 +354,7 @@ export async function buildShortcutsSrcdoc(pluginId: string, entryPath: string):
   const shellCss = `<style id="wh-shortcuts-shell">
 *{box-sizing:border-box;border:none!important;outline:none!important;box-shadow:none!important}
 :root{--wh-bar-h:${barH}px}
-html,body{margin:0;padding:0;overflow:hidden!important;background:transparent!important;height:var(--wh-bar-h,${barH}px);max-height:var(--wh-bar-h,${barH}px);width:max-content;min-width:${barH}px;scrollbar-width:none;color:var(--wh-chrome-fg,rgba(255,255,255,.94));text-shadow:var(--wh-chrome-shadow,0 1px 2px rgba(0,0,0,.35));display:flex;align-items:center}
+html,body{margin:0;padding:0;overflow:hidden!important;background:transparent!important;height:var(--wh-bar-h,${barH}px);max-height:var(--wh-bar-h,${barH}px);width:max-content;min-width:${barH}px;scrollbar-width:none;color:var(--wh-chrome-fg,rgba(255,255,255,.94));text-shadow:var(--wh-chrome-shadow,0 1px 2px rgba(0,0,0,.35));display:flex;align-items:center;transition:color 220ms ease,text-shadow 220ms ease}
 button{border:none!important;background:transparent!important;outline:none!important;box-shadow:none!important;-webkit-appearance:none!important;appearance:none!important;border-radius:0!important;color:inherit;font:inherit}
 .wg-chip.is-manage{position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;width:${barH}px!important;min-width:${barH}px!important;height:var(--wh-bar-h,${barH}px)!important;max-height:var(--wh-bar-h,${barH}px)!important;padding:0!important;margin:0!important;line-height:0!important;text-shadow:none!important}
 .wg-chip.is-manage .wg-chip-icon{position:absolute!important;left:50%!important;top:50%!important;width:13px!important;height:13px!important;margin:0!important;padding:0!important;transform:translate(-50%,-50%)!important;display:block!important;overflow:visible!important;text-shadow:none!important;filter:none!important;pointer-events:none!important}

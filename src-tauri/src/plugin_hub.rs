@@ -870,6 +870,21 @@ pub fn hub_init_script(plugin_id: &str) -> String {
     }},
     popup: {{
       close: () => invoke("close_plugin_popup"),
+      resize: (opts) =>
+        invoke("resize_plugin_popup", {{
+          width: opts && typeof opts.width === "number" ? opts.width : 320,
+          height: opts && typeof opts.height === "number" ? opts.height : 480,
+        }}),
+      setWindowedFullscreen: (enabled) =>
+        invoke("set_plugin_popup_windowed_fullscreen", {{ enabled: !!enabled }}),
+      /** Close frameless popup and reopen as settings-like OS window (deferred; avoids PostMessage-on-dead-HWND). */
+      openAsWindow: (opts) =>
+        invoke("schedule_plugin_popup_as_window", {{
+          pluginId: PLUGIN_ID,
+          width: opts && typeof opts.width === "number" ? opts.width : 1120,
+          height: opts && typeof opts.height === "number" ? opts.height : 720,
+          windowedFullscreen: !!(opts && opts.windowedFullscreen),
+        }}),
     }},
     applyEffect: (material) =>
       material

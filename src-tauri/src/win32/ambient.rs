@@ -220,6 +220,63 @@ mod win {
         }
     }
 
+    /// In-process HWNDs that ambient MAY sample (plugin OS windows).
+    /// Default same-process exclusion skips island/settings/tray — but maximized
+    /// `plugin-window` must be a valid 吸色 target like Chrome/VS Code.
+    static AMBIENT_ALLOW_HWND: std::sync::atomic::AtomicIsize =
+        std::sync::atomic::AtomicIsize::new(0);
+    /// Extra top inset (physical px) when sampling an allowed plugin window.
+    /// `0` = sample the OS title bar (same as Chrome/VS Code).
+    static AMBIENT_ALLOW_TOP_INSET: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(0);
+
+    /// Always store / compare **root** HWND (Tauri `.hwnd()` may be a child).
+    fn root_hwnd_isize(hwnd_raw: isize) -> isize {
+        if hwnd_raw == 0 {
+            return 0;
+        }
+        unsafe {
+            let h = HWND(hwnd_raw as *mut _);
+            let root = GetAncestor(h, GA_ROOT);
+            if root.0.is_null() {
+                hwnd_raw
+            } else {
+                root.0 as isize
+            }
+        }
+    }
+
+    /// Register / clear an in-process window as an ambient sample target.
+    pub fn set_ambient_sample_target(hwnd: Option<isize>, top_inset_px: i32) {
+        use std::sync::atomic::Ordering;
+        let root = hwnd.map(root_hwnd_isize).filter(|&h| h != 0);
+        AMBIENT_ALLOW_HWND.store(root.unwrap_or(0), Ordering::SeqCst);
+        AMBIENT_ALLOW_TOP_INSET.store(top_inset_px.max(0), Ordering::SeqCst);
+        // Force settle restart so island leaves a wallpaper lock for this HWND.
+        if let Ok(mut gate) = GATE.lock() {
+            gate.target_key = isize::MIN;
+            gate.settle_started = None;
+            gate.locked = None;
+            gate.last_avg = None;
+        }
+        SETTLING.store(true, Ordering::SeqCst);
+    }
+
+    fn is_ambient_allowed_hwnd(hwnd: HWND) -> bool {
+        use std::sync::atomic::Ordering;
+        let allow = AMBIENT_ALLOW_HWND.load(Ordering::SeqCst);
+        if allow == 0 {
+            return false;
+        }
+        let raw = hwnd.0 as isize;
+        raw == allow || root_hwnd_isize(raw) == allow
+    }
+
+    fn ambient_allow_top_inset() -> i32 {
+        use std::sync::atomic::Ordering;
+        AMBIENT_ALLOW_TOP_INSET.load(Ordering::SeqCst).max(0)
+    }
+
     fn is_cloaked(hwnd: HWND) -> bool {
         unsafe {
             let mut cloaked: u32 = 0;
@@ -258,8 +315,13 @@ mod win {
         }
         if let Some(me) = self_hwnd {
             let mine = HWND(me as *mut _);
-            // 主顶栏 / 设置窗 / 托盘弹窗同属本进程，绝不能当吸色目标（否则会染黑顶栏）
-            if hwnd.0 as isize == me || same_process(hwnd, mine) {
+            // Island itself must never be the sample target.
+            if hwnd.0 as isize == me {
+                return true;
+            }
+            // Same process: skip Host chrome (settings/tray/dock/…), but allow
+            // registered plugin OS windows so maximized Excalidraw 吸色 works.
+            if same_process(hwnd, mine) && !is_ambient_allowed_hwnd(hwnd) {
                 return true;
             }
         }
@@ -693,6 +755,26 @@ mod win {
         }
     }
 
+    /// Average RGB of the desktop wallpaper top strip (never samples a window HWND).
+    #[allow(dead_code)]
+    pub fn wallpaper_avg_rgb() -> (u8, u8, u8) {
+        if let Some(path) = wallpaper_path() {
+            if let Some((rgb, _)) = load_wallpaper_top_row(&path) {
+                let mut sr = 0u64;
+                let mut sg = 0u64;
+                let mut sb = 0u64;
+                for chunk in rgb.chunks_exact(3) {
+                    sr += u64::from(chunk[0]);
+                    sg += u64::from(chunk[1]);
+                    sb += u64::from(chunk[2]);
+                }
+                let n = (rgb.len() / 3).max(1) as u64;
+                return ((sr / n) as u8, (sg / n) as u8, (sb / n) as u8);
+            }
+        }
+        desktop_solid_rgb()
+    }
+
     /// Always sample live (settings / first paint). Also seeds the settle gate.
     pub fn sample(self_hwnd: Option<isize>) -> AmbientStrip {
         let target = pick_target(self_hwnd);
@@ -967,8 +1049,14 @@ mod win {
             let right_limit = (frame.right - wr.left).clamp(left_inset + 1, win_w);
             let vis_w = (right_limit - left_inset).max(1);
 
-            // 2nd visible row — skip hairline / border highlight
-            let y0 = (top_inset + 1).clamp(0, win_h - 1);
+            // Default: 2nd visible row (skip hairline). Optional extra inset for
+            // allowed plugin windows (0 = sample OS title bar like other apps).
+            let chrome_skip = if is_ambient_allowed_hwnd(target) {
+                ambient_allow_top_inset()
+            } else {
+                0
+            };
+            let y0 = (top_inset + 1 + chrome_skip).clamp(0, win_h - 1);
 
             let dpi_scale = {
                 let dpi = GetDpiForWindow(me);
@@ -1117,7 +1205,12 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{get_mode, is_settling, poll_changed, sample, set_mode};
+pub use win::{
+    get_mode, is_settling, poll_changed, sample, set_ambient_sample_target, set_mode,
+};
+
+#[cfg(not(windows))]
+pub fn set_ambient_sample_target(_hwnd: Option<isize>, _top_inset_px: i32) {}
 
 #[cfg(not(windows))]
 pub fn sample(_self_hwnd: Option<isize>) -> AmbientStrip {

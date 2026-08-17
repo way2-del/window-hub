@@ -64,7 +64,17 @@ description: >-
 | 列表行内边距 | ≈ 9–10px |
 | 表单控件圆角 | 6–8px |
 
-窗口尺寸默认 Host **320×480**（`PLUGIN_POPUP_W/H`）；插件可用 `settings.popupWidth` / `popupHeight` 或 `hub.popup.open({ width, height })` 自定义（clamp 见 host-api）。内容按窗宽布局，勿假定固定像素。
+窗口尺寸默认 Host **320×480**（`PLUGIN_POPUP_W/H`）；插件可用 `settings.popupWidth` / `popupHeight` 或 `hub.popup.open({ width, height })` 自定义（clamp：宽 **280–2400**、高 **320–1600**）。内容按窗宽布局，勿假定固定像素。
+
+大画布类插件可额外使用：
+
+| API | 说明 |
+|-----|------|
+| `hub.popup.open({ nativeFrame, resizable, windowedFullscreen })` | `nativeFrame: true` → 系统标题栏（同设置窗）；最大化用系统按钮或 `windowedFullscreen` |
+| `hub.popup.setWindowedFullscreen(bool)` | 原生窗 maximize；无边框则铺满工作区 |
+| `hub.popup.resize({ width, height })` | 调整已开弹窗 |
+
+官方示例：`docs/plugins/examples/excalidraw/`（始终 `nativeFrame: true`）。
 
 ## 自检
 

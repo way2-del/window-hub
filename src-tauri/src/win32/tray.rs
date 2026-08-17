@@ -72,6 +72,8 @@ pub struct TrayPrefs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayClick {
     Left,
+    /// Second click of a user double-click — sends WM_LBUTTONDBLCLK (apps that ignore single click).
+    LeftDouble,
     Right,
 }
 
@@ -79,6 +81,7 @@ impl TrayClick {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "right" | "context" | "contextmenu" => Self::Right,
+            "left-double" | "leftdouble" | "double" | "dblclick" | "dbl" => Self::LeftDouble,
             _ => Self::Left,
         }
     }
@@ -2045,7 +2048,7 @@ mod win {
         cursor: (i32, i32),
     ) -> Result<(), String> {
         use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-        use windows::Win32::UI::WindowsAndMessaging::SendNotifyMessageW;
+        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
         // NOTIFYICON_VERSION_4+: wParam = cursor, lParam = MAKEWPARAM(msg, uid)
         // older: wParam = uid, lParam = MAKEWPARAM(msg, 0)
@@ -2062,11 +2065,20 @@ mod win {
             )
         };
 
+        // PostMessage matches AHK / explorer-style tray synthesis better than SendNotify.
         unsafe {
-            SendNotifyMessageW(HWND(hwnd as *mut _), callback, wparam, lparam)
+            PostMessageW(HWND(hwnd as *mut _), callback, wparam, lparam)
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    /// Double-click apps often register VERSION_4 while our cache still has 0 (or vice versa).
+    fn notify_icon_dblclk(hwnd: isize, callback: u32, uid: u32, version: u32, cursor: (i32, i32)) {
+        use windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDBLCLK;
+        let _ = notify_icon_at(hwnd, callback, uid, version, WM_LBUTTONDBLCLK, cursor);
+        let alt = if version > 3 { 0 } else { 4 };
+        let _ = notify_icon_at(hwnd, callback, uid, alt, WM_LBUTTONDBLCLK, cursor);
     }
 
     pub fn invoke_icon_by_id(
@@ -2220,7 +2232,7 @@ mod win {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
             AllowSetForegroundWindow, GetWindowThreadProcessId, IsWindow, WM_CONTEXTMENU,
-            WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER,
+            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER,
         };
         const NIN_SELECT: u32 = WM_USER + 0;
 
@@ -2237,7 +2249,13 @@ mod win {
             }
         }
 
-        crate::win32::topmost::yield_for(1_800);
+        // Right-click menus need topmost yield; left/dblclk must fire immediately or
+        // a user double-click is already over before messages are posted.
+        if matches!(click, TrayClick::Right) {
+            crate::win32::topmost::yield_for(1_800);
+        } else {
+            crate::win32::topmost::yield_for(40);
+        }
 
         let click_pt = cursor_pos();
         let adapt_menu = matches!(click, TrayClick::Right);
@@ -2282,35 +2300,55 @@ mod win {
             version
         };
 
-        let messages: &[u32] = match click {
-            TrayClick::Left => &[WM_LBUTTONDOWN, WM_LBUTTONUP],
-            TrayClick::Right => &[WM_RBUTTONDOWN, WM_RBUTTONUP],
-        };
-
-        for &msg in messages {
-            notify_icon_at(
-                hwnd,
-                callback_msg,
-                uid,
-                pack_ver,
-                msg,
-                (msg_x, msg_y),
-            )?;
-        }
-
-        let extra = match click {
-            TrayClick::Left => NIN_SELECT,
-            TrayClick::Right => WM_CONTEXTMENU,
-        };
-        if pack_ver >= 3 || (adapt_menu && tencent) {
-            notify_icon_at(
-                hwnd,
-                callback_msg,
-                uid,
-                pack_ver.max(4),
-                extra,
-                (msg_x, msg_y),
-            )?;
+        match click {
+            // AHK-style: double-click is ONLY WM_LBUTTONDBLCLK (both pack styles).
+            TrayClick::LeftDouble => {
+                notify_icon_dblclk(hwnd, callback_msg, uid, pack_ver, (msg_x, msg_y));
+            }
+            TrayClick::Left => {
+                for &msg in &[WM_LBUTTONDOWN, WM_LBUTTONUP] {
+                    notify_icon_at(
+                        hwnd,
+                        callback_msg,
+                        uid,
+                        pack_ver,
+                        msg,
+                        (msg_x, msg_y),
+                    )?;
+                }
+                if pack_ver >= 3 || tencent {
+                    notify_icon_at(
+                        hwnd,
+                        callback_msg,
+                        uid,
+                        pack_ver.max(4),
+                        NIN_SELECT,
+                        (msg_x, msg_y),
+                    )?;
+                }
+            }
+            TrayClick::Right => {
+                for &msg in &[WM_RBUTTONDOWN, WM_RBUTTONUP] {
+                    notify_icon_at(
+                        hwnd,
+                        callback_msg,
+                        uid,
+                        pack_ver,
+                        msg,
+                        (msg_x, msg_y),
+                    )?;
+                }
+                if pack_ver >= 3 || tencent {
+                    notify_icon_at(
+                        hwnd,
+                        callback_msg,
+                        uid,
+                        pack_ver.max(4),
+                        WM_CONTEXTMENU,
+                        (msg_x, msg_y),
+                    )?;
+                }
+            }
         }
 
         if adapt_menu {
@@ -2344,7 +2382,6 @@ mod win {
             });
         }
 
-        let _ = WM_LBUTTONDBLCLK;
         Ok(())
     }
 

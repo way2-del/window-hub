@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -23,11 +23,16 @@ import type { PluginCapability, PluginSettingField } from "./plugins/types";
 import { subscribeSystemDark, syncGlassCss } from "./glassPrefs";
 import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginsMarketPanel from "./PluginsMarketPanel";
+import ShortcutsScopeSettings from "./components/ShortcutsScopeSettings";
+import {
+  parseScopes,
+  type ShortcutsPluginScope,
+} from "./shortcutsPrefs";
 import PrefSelect from "./components/PrefSelect";
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
-type NavId = "general" | "theme" | "dock" | "tray" | "plugins" | "developer";
+type NavId = "general" | "theme" | "dock" | "shortcuts" | "tray" | "plugins" | "developer";
 
 type DockDisplayMode =
   | "default"
@@ -354,6 +359,18 @@ const NAV: { id: NavId; label: string; tint: string; icon: ReactNode }[] = [
     ),
   },
   {
+    id: "shortcuts",
+    label: "快捷区",
+    tint: "#ffd60a",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="5" width="18" height="4" rx="1" />
+        <path d="M6 7h.01M10 7h2M15 7h3" />
+        <path d="M4 12h16M4 17h10" />
+      </svg>
+    ),
+  },
+  {
     id: "tray",
     label: "托盘",
     tint: "#30d158",
@@ -455,6 +472,11 @@ export default function SettingsApp() {
   /** scenario pluginId → whether openTrayKey is bound (plugin settings). */
   const [scenarioOpenBound, setScenarioOpenBound] = useState<Record<string, boolean>>({});
   const [shortcutsExclusiveId, setShortcutsExclusiveId] = useState<string>("");
+  const [shortcutsExclusiveOpen, setShortcutsExclusiveOpen] = useState(false);
+  const shortcutsExclusiveRef = useRef<HTMLDivElement | null>(null);
+  const [shortcutsScopes, setShortcutsScopes] = useState<
+    Record<string, ShortcutsPluginScope>
+  >({});
   const [installed, setInstalled] = useState<InstalledPluginDto[]>([]);
   const [pluginMsg, setPluginMsg] = useState("");
   const [pluginBusy, setPluginBusy] = useState(false);
@@ -565,23 +587,89 @@ export default function SettingsApp() {
           (p.manifest?.slots?.shortcuts != null ||
             (p.capabilities ?? []).includes("shortcuts")),
       )
-      .map((p) => ({
-        id: p.id,
-        name: p.manifest?.slots?.shortcuts?.label ?? p.name,
-      }));
+      .map((p) => {
+        const manage = p.manifest?.slots?.shortcuts?.manage ?? "none";
+        const barWorker =
+          manage !== "custom" &&
+          manage !== "settings" &&
+          Boolean(
+            p.manifest?.slots?.["island.bar"] &&
+              p.manifest?.entry?.shortcuts &&
+              (p.capabilities ?? []).includes("island.bar"),
+          );
+        return {
+          id: p.id,
+          name: p.manifest?.slots?.shortcuts?.label ?? p.name,
+          barWorker,
+        };
+      });
   }, [installed]);
 
-  const persistShortcutsExclusive = async (pluginId: string) => {
-    setShortcutsExclusiveId(pluginId);
+  const persistShortcutsPrefs = async (patch: {
+    exclusivePluginId?: string | null;
+    scopes?: Record<string, ShortcutsPluginScope>;
+  }) => {
+    if (patch.exclusivePluginId !== undefined) {
+      setShortcutsExclusiveId(patch.exclusivePluginId ?? "");
+    }
+    if (patch.scopes) setShortcutsScopes(patch.scopes);
     try {
-      const next = await invoke<{ exclusivePluginId?: string | null }>("set_shortcuts_prefs", {
-        prefs: { exclusivePluginId: pluginId || null },
+      const next = await invoke<{
+        exclusivePluginId?: string | null;
+        scopes?: Record<string, ShortcutsPluginScope> | null;
+      }>("set_shortcuts_prefs", {
+        prefs: {
+          exclusivePluginId:
+            patch.exclusivePluginId !== undefined
+              ? patch.exclusivePluginId || null
+              : shortcutsExclusiveId || null,
+          ...(patch.scopes ? { scopes: patch.scopes } : {}),
+        },
       });
       setShortcutsExclusiveId(next.exclusivePluginId ?? "");
+      if (next.scopes != null) {
+        setShortcutsScopes(parseScopes(next.scopes));
+      } else if (patch.scopes) {
+        setShortcutsScopes(patch.scopes);
+      }
     } catch (err) {
       console.error(err);
     }
   };
+
+  const persistShortcutsExclusive = async (pluginId: string) => {
+    setShortcutsExclusiveOpen(false);
+    await persistShortcutsPrefs({ exclusivePluginId: pluginId || null });
+  };
+
+  useEffect(() => {
+    if (!shortcutsExclusiveOpen) return;
+    const onPointer = (ev: MouseEvent) => {
+      if (
+        shortcutsExclusiveRef.current &&
+        !shortcutsExclusiveRef.current.contains(ev.target as Node)
+      ) {
+        setShortcutsExclusiveOpen(false);
+      }
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setShortcutsExclusiveOpen(false);
+    };
+    window.addEventListener("mousedown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [shortcutsExclusiveOpen]);
+
+  const shortcutsExclusiveLabel = useMemo(() => {
+    if (!shortcutsExclusiveId) return "全部插件";
+    return (
+      shortcutsPluginOptions.find((p) => p.id === shortcutsExclusiveId)?.name ??
+      shortcutsExclusiveId
+    );
+  }, [shortcutsExclusiveId, shortcutsPluginOptions]);
 
   const persistDockPrefs = async (patch: Partial<DockPrefs>) => {
     const next: DockPrefs = normalizeDockPrefs({ ...dockPrefs, ...patch, ...DOCK_FIXED });
@@ -713,8 +801,12 @@ export default function SettingsApp() {
         /* noop */
       }
       try {
-        const sp = await invoke<{ exclusivePluginId?: string | null }>("get_shortcuts_prefs");
+        const sp = await invoke<{
+          exclusivePluginId?: string | null;
+          scopes?: Record<string, ShortcutsPluginScope> | null;
+        }>("get_shortcuts_prefs");
         setShortcutsExclusiveId(sp.exclusivePluginId ?? "");
+        setShortcutsScopes(parseScopes(sp.scopes));
       } catch {
         /* noop */
       }
@@ -744,8 +836,14 @@ export default function SettingsApp() {
       setMenuHeights(ev.payload.menu_heights ?? {});
       setFlashNotify(ev.payload.flash_notify ?? {});
     }).then((fn) => unsubs.push(fn));
-    void listen<{ exclusivePluginId?: string | null }>("shortcuts-prefs", (ev) => {
+    void listen<{
+      exclusivePluginId?: string | null;
+      scopes?: Record<string, ShortcutsPluginScope> | null;
+    }>("shortcuts-prefs", (ev) => {
       setShortcutsExclusiveId(ev.payload?.exclusivePluginId ?? "");
+      if (ev.payload?.scopes !== undefined) {
+        setShortcutsScopes(parseScopes(ev.payload.scopes));
+      }
     }).then((fn) => unsubs.push(fn));
 
     void bootstrapPlugins().then((list) => {
@@ -1202,30 +1300,6 @@ export default function SettingsApp() {
                 {generalMsg ? <p className="card-desc">{generalMsg}</p> : null}
               </section>
               <section className="settings-card">
-                <h2>快捷区</h2>
-                <p className="card-desc">
-                  状态菜单左侧快捷区可显示多个插件入口，也可独占给某一个插件（例如窗口组固定项占满整条）。
-                </p>
-                <label className="pref-row">
-                  <span className="pref-row-text">
-                    <span className="pref-row-label">快捷区占用</span>
-                    <span className="pref-row-desc">选「全部插件」或指定一个 shortcuts 插件</span>
-                  </span>
-                  <select
-                    className="pref-select"
-                    value={shortcutsExclusiveId}
-                    onChange={(e) => void persistShortcutsExclusive(e.target.value)}
-                  >
-                    <option value="">全部插件</option>
-                    {shortcutsPluginOptions.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </section>
-              <section className="settings-card">
                 <h2>下拉内容</h2>
                 <p className="card-desc">
                   选择点击或下拉展开灵动岛时默认显示的内容。列表来自已启用且声明 island.panel、未设
@@ -1401,6 +1475,142 @@ export default function SettingsApp() {
                 <p className="swatch-meta">
                   rgb({ambient.r}, {ambient.g}, {ambient.b})
                 </p>
+              </section>
+            </>
+          )}
+
+          {nav === "shortcuts" && (
+            <>
+              <section className="settings-card">
+                <h2>显示范围</h2>
+                <p className="card-desc">
+                  状态菜单左侧快捷区可并排多个插件，也可独占给某一个（例如窗口组占满整条）。下方可为每个插件指定适用的前台程序。
+                </p>
+                <div className="pref-row-text" style={{ marginBottom: 8 }}>
+                  <span className="pref-row-label">快捷区占用</span>
+                  <span className="pref-row-desc">选「全部插件」或指定一个 shortcuts 插件</span>
+                </div>
+                <div
+                  className={`scenario-tray-picker scenario-tray-picker-text${
+                    shortcutsExclusiveOpen ? " is-open" : ""
+                  }`}
+                  ref={shortcutsExclusiveRef}
+                >
+                  <button
+                    type="button"
+                    className="scenario-tray-picker-trigger"
+                    aria-haspopup="listbox"
+                    aria-expanded={shortcutsExclusiveOpen}
+                    onClick={() => setShortcutsExclusiveOpen((v) => !v)}
+                  >
+                    <span className="scenario-tray-picker-icon scenario-tray-picker-fallback">
+                      {shortcutsExclusiveId ? "插" : "—"}
+                    </span>
+                    <span className="scenario-tray-picker-label">
+                      {shortcutsExclusiveLabel}
+                    </span>
+                    <span className="scenario-tray-picker-chevron" aria-hidden>
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path
+                          d="M4 6l4 4 4-4"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </span>
+                  </button>
+                  {shortcutsExclusiveOpen ? (
+                    <div
+                      className="scenario-tray-picker-menu"
+                      role="listbox"
+                      aria-label="快捷区占用"
+                    >
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={!shortcutsExclusiveId}
+                        className={`scenario-tray-picker-option${
+                          !shortcutsExclusiveId ? " is-selected" : ""
+                        }`}
+                        onClick={() => void persistShortcutsExclusive("")}
+                      >
+                        <span className="scenario-tray-picker-icon scenario-tray-picker-fallback">
+                          —
+                        </span>
+                        <span className="scenario-tray-picker-label">
+                          <span className="scenario-gate-win-title">全部插件</span>
+                          <span className="scenario-gate-win-exe">
+                            并排显示所有已启用的快捷区插件
+                          </span>
+                        </span>
+                        <span
+                          className={`scenario-presence-check${!shortcutsExclusiveId ? " is-on" : ""}`}
+                          aria-hidden
+                        >
+                          {!shortcutsExclusiveId ? "✓" : ""}
+                        </span>
+                      </button>
+                      {shortcutsPluginOptions.map((p) => {
+                        const on = shortcutsExclusiveId === p.id;
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            role="option"
+                            aria-selected={on}
+                            className={`scenario-tray-picker-option${on ? " is-selected" : ""}`}
+                            onClick={() => void persistShortcutsExclusive(p.id)}
+                          >
+                            <span className="scenario-tray-picker-icon scenario-tray-picker-fallback">
+                              插
+                            </span>
+                            <span className="scenario-tray-picker-label">
+                              <span className="scenario-gate-win-title">{p.name}</span>
+                              <span className="scenario-gate-win-exe">
+                                {p.barWorker
+                                  ? "岛栏 worker · 独占时仍会挂载"
+                                  : p.id}
+                              </span>
+                            </span>
+                            <span
+                              className={`scenario-presence-check${on ? " is-on" : ""}`}
+                              aria-hidden
+                            >
+                              {on ? "✓" : ""}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+              <section className="settings-card">
+                <h2>按程序显示</h2>
+                <p className="card-desc">
+                  为每个快捷区插件选择「全部程序」或仅在指定程序位于前台时显示。未启用任何 shortcuts
+                  插件时此处为空。
+                </p>
+                {shortcutsPluginOptions.length === 0 ? (
+                  <p className="card-desc">暂无已启用的快捷区插件，请先在插件市场启用。</p>
+                ) : (
+                  <div className="shortcuts-scope-list">
+                    {shortcutsPluginOptions.map((p) => (
+                      <ShortcutsScopeSettings
+                        key={p.id}
+                        pluginId={p.id}
+                        pluginLabel={p.name}
+                        barWorker={p.barWorker}
+                        scopes={shortcutsScopes}
+                        onScopesChange={(scopes) =>
+                          persistShortcutsPrefs({ scopes })
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
               </section>
             </>
           )}

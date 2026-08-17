@@ -1,0 +1,55 @@
+html,
+body {
+  margin: 0;
+  height: var(--wh-bar-h, 28px);
+  overflow: hidden;
+  background: transparent;
+  color: var(--chrome-left-fg, #f4f4f5);
+  font: 600 12px/1 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.ex-bar {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  height: var(--wh-bar-h, 28px);
+  padding: 0 2px;
+}
+
+.ex-chip {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: calc(var(--wh-bar-h, 28px) - 4px);
+  max-height: var(--wh-bar-h, 28px);
+  padding: 0 10px 0 8px;
+  margin: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ex-chip:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.ex-chip:active {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.ex-chip svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: block;
+}
+
+.ex-chip span {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}

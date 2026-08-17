@@ -55,9 +55,10 @@ description: >-
 | 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/`（shortcuts `manage=none`） |
 | 岛栏歌词自适应宽 + 迷你播放器 | **正在播放** | `docs/plugins/examples/now-playing/`（`island.scenario` + `adaptiveWidth`；健康 claim） |
 | 快捷区成语 chip + 历史弹窗 + 带调拼音 | **成语** | `docs/plugins/examples/idiom/`（`manage=custom`；`pinyin-pro.min.js`） |
+| 快捷区白板 + 窗口化全屏 | **Excalidraw** | `docs/plugins/examples/excalidraw/`（CDN 加载；`setWindowedFullscreen`） |
 | 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
-打包资源镜像：`src-tauri/resources/plugins/{window-groups|app-library|transfer-station|weather|mirror|idiom|now-playing}/`（与 docs 示例保持同步）。
+打包资源镜像：`src-tauri/resources/plugins/{window-groups|app-library|transfer-station|weather|mirror|idiom|now-playing|excalidraw}/`（与 docs 示例保持同步）。
 
 ### 1. 建目录与 `plugin.json`
 

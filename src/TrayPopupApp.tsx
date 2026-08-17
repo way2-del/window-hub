@@ -11,6 +11,7 @@ import {
 } from "./components/TrayCluster";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
 import { slideRevealPopup } from "./popupFit";
+import { armTrayLeftClick, fireTrayLeftDouble, invokeTrayRightClick } from "./trayInvoke";
 
 const POPUP_W = 280;
 
@@ -29,16 +30,15 @@ function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
   return <span className="tray-glyph tray-glyph-fallback">{letter}</span>;
 }
 
-async function clickTray(icon: TrayIconInfo, action: "left" | "right") {
+async function clickTray(icon: TrayIconInfo, action: "left" | "right" | "left-double") {
   try {
-    await invoke("invoke_tray_icon", {
-      id: icon.id,
-      hwnd: icon.hwnd,
-      callbackMsg: icon.callback_msg,
-      uid: icon.uid,
-      version: icon.version ?? 0,
-      action,
-    });
+    if (action === "right") {
+      await invokeTrayRightClick(icon);
+    } else if (action === "left-double") {
+      fireTrayLeftDouble(icon);
+    } else {
+      armTrayLeftClick(icon);
+    }
   } catch (e) {
     console.error(e);
   }
@@ -260,6 +260,10 @@ export default function TrayPopupApp() {
                     className={`tray-drop-item${icon.flashing ? " is-flashing" : ""}`}
                     title={trayLabel(icon)}
                     onClick={() => void clickTray(icon, "left")}
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      void clickTray(icon, "left-double");
+                    }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
@@ -284,6 +288,10 @@ export default function TrayPopupApp() {
                     className={`tray-drop-item${icon.flashing ? " is-flashing" : ""}`}
                     title={trayLabel(icon)}
                     onClick={() => void clickTray(icon, "left")}
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      void clickTray(icon, "left-double");
+                    }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();

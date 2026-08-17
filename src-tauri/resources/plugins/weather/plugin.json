@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.weather",
   "name": "天气",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "official": true,
   "logo": "icon.svg",
   "description": "岛栏常驻天气摘要；下拉查看详细天气。开发者 ID / KEY 在本插件设置中配置。",
@@ -22,7 +22,7 @@
       "order": 20
     },
     "island.panel": {
-      "defaultSize": { "w": 380, "h": 220 },
+      "defaultSize": { "w": 380, "h": 248 },
       "excludeFromPullContent": false
     }
   },

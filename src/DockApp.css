@@ -286,20 +286,22 @@ body.is-dock #root {
   opacity: 0.45;
 }
 
-/* While tracking the pointer, snap slot widths every frame — 160ms width
-   tween was why fan felt sticky / not following after drop. */
-.dock-shell.is-fan-live .dock-item,
-.dock-shell.is-fan-live .dock-hit,
-.dock-shell.is-fan-collapsing .dock-item,
-.dock-shell.is-fan-collapsing .dock-hit {
+/* While tracking the pointer, snap slot widths every frame — width tween here
+   made fan feel sticky / lag the cursor. */
+.dock-shell.is-fan-live:not(.is-fan-collapsing) .dock-item,
+.dock-shell.is-fan-live:not(.is-fan-collapsing) .dock-hit {
   transition: opacity 120ms ease;
 }
 
-/* Tile size must snap with the fan — a leftover width/height tween here is what
-   left icons stuck magnified after fast leave / AutoHide (window hid mid-tween). */
-.dock-shell.is-fan-live .dock-icon-tile,
-.dock-shell.is-fan-collapsing .dock-icon-tile {
+.dock-shell.is-fan-live:not(.is-fan-collapsing) .dock-icon-tile {
   transition: none;
+}
+
+/* Leave shrink is JS-driven (collapseT) — do not CSS-tween width (fights rAF). */
+.dock-shell.is-fan-collapsing .dock-item,
+.dock-shell.is-fan-collapsing .dock-hit,
+.dock-shell.is-fan-collapsing .dock-icon-tile {
+  transition: opacity 120ms ease;
 }
 
 /* Icon tile grows in layout px (bottom-aligned into headroom). */

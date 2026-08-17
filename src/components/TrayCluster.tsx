@@ -8,6 +8,7 @@ import {
   pickDropTarget,
   sameOrder,
 } from "../chromeReorder";
+import { invokeTrayRightClick, armTrayLeftClick, fireTrayLeftDouble } from "../trayInvoke";
 
 export type TrayIconInfo = {
   id: string;
@@ -232,16 +233,15 @@ function sanitizeLangAbbr(raw: string | undefined | null): string {
   return s;
 }
 
-async function clickTray(icon: TrayIconInfo, action: "left" | "right") {
+async function clickTray(icon: TrayIconInfo, action: "left" | "right" | "left-double") {
   try {
-    await invoke("invoke_tray_icon", {
-      id: icon.id,
-      hwnd: icon.hwnd,
-      callbackMsg: icon.callback_msg,
-      uid: icon.uid,
-      version: icon.version ?? 0,
-      action,
-    });
+    if (action === "right") {
+      await invokeTrayRightClick(icon);
+    } else if (action === "left-double") {
+      fireTrayLeftDouble(icon);
+    } else {
+      armTrayLeftClick(icon);
+    }
   } catch (e) {
     console.error(e);
   }
@@ -714,6 +714,12 @@ export default function TrayCluster({
                 }
                 void hideChromeHoverTip();
                 void clickTray(icon, "left");
+              }}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                if (suppressClickRef.current || ctrlHeld || dragKey) return;
+                void hideChromeHoverTip();
+                void clickTray(icon, "left-double");
               }}
               onContextMenu={(e) => {
                 e.preventDefault();

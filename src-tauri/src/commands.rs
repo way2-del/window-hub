@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
+    State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 use tauri::window::Color;
@@ -562,15 +563,103 @@ pub fn is_status_menu_popup_open(app: AppHandle) -> bool {
 const PLUGIN_POPUP_W: f64 = 320.0;
 const PLUGIN_POPUP_H: f64 = 480.0;
 const PLUGIN_POPUP_W_MIN: f64 = 280.0;
-const PLUGIN_POPUP_W_MAX: f64 = 720.0;
+/// Large canvas plugins (e.g. Excalidraw) need room beyond the old 720 cap.
+const PLUGIN_POPUP_W_MAX: f64 = 2400.0;
 const PLUGIN_POPUP_H_MIN: f64 = 320.0;
-const PLUGIN_POPUP_H_MAX: f64 = 900.0;
+const PLUGIN_POPUP_H_MAX: f64 = 1600.0;
 
 fn clamp_popup_size(w: f64, h: f64) -> (f64, f64) {
     (
         w.clamp(PLUGIN_POPUP_W_MIN, PLUGIN_POPUP_W_MAX),
         h.clamp(PLUGIN_POPUP_H_MIN, PLUGIN_POPUP_H_MAX),
     )
+}
+
+/// Last normal (non–windowed-fullscreen) popup geometry for restore.
+static PLUGIN_POPUP_RESTORE: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
+
+/// Fit plugin popup to the monitor work area (taskbar-safe = 窗口化全屏, not exclusive).
+#[cfg(windows)]
+fn apply_plugin_popup_work_area(win: &WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let hwnd = win
+        .hwnd()
+        .map_err(|e| format!("plugin popup hwnd: {e}"))?;
+    unsafe {
+        let mon = MonitorFromWindow(HWND(hwnd.0 as *mut _), MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut info).as_bool() {
+            return Err("GetMonitorInfoW failed".into());
+        }
+        let r = info.rcWork;
+        let w = (r.right - r.left).max(320);
+        let h = (r.bottom - r.top).max(240);
+        win.set_position(PhysicalPosition::new(r.left, r.top))
+            .map_err(|e| e.to_string())?;
+        win.set_size(PhysicalSize::new(w as u32, h as u32))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_plugin_popup_work_area(win: &WebviewWindow) -> Result<(), String> {
+    let mon = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .ok_or_else(|| "no monitor".to_string())?;
+    let scale = mon.scale_factor();
+    let size = mon.size();
+    let pos = mon.position();
+    let w = ((size.width as f64) / scale).round().max(320.0);
+    let h = ((size.height as f64) / scale).round().max(240.0);
+    let x = (pos.x as f64) / scale;
+    let y = (pos.y as f64) / scale;
+    win.set_position(LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    win.set_size(LogicalSize::new(w, h))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn remember_plugin_popup_geometry(win: &WebviewWindow) {
+    let Ok(size) = win.inner_size() else {
+        return;
+    };
+    let Ok(pos) = win.outer_position() else {
+        return;
+    };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let w = size.width as f64 / scale;
+    let h = size.height as f64 / scale;
+    let x = pos.x as f64 / scale;
+    let y = pos.y as f64 / scale;
+    if let Ok(mut g) = PLUGIN_POPUP_RESTORE.lock() {
+        *g = Some((x, y, w, h));
+    }
+}
+
+fn restore_plugin_popup_geometry(win: &WebviewWindow, plugin_id: &str) {
+    let saved = PLUGIN_POPUP_RESTORE
+        .lock()
+        .ok()
+        .and_then(|g| *g);
+    if let Some((x, y, w, h)) = saved {
+        let (cw, ch) = clamp_popup_size(w, h);
+        let _ = win.set_size(LogicalSize::new(cw, ch));
+        let _ = win.set_position(LogicalPosition::new(x, y));
+        return;
+    }
+    let (cw, ch) = resolve_plugin_popup_size(plugin_id, None, None);
+    let _ = win.set_size(LogicalSize::new(cw, ch));
 }
 
 fn number_from_settings(v: &serde_json::Value, key: &str) -> Option<f64> {
@@ -680,6 +769,28 @@ fn plugin_popup_path(
     Ok(popup)
 }
 
+const PLUGIN_POPUP_LABEL: &str = "plugin-popup";
+/// Decorated OS window (settings-like Mica caption). Separate label so material
+/// routing never depends on `is_decorated()` / URL parsing quirks.
+const PLUGIN_WINDOW_LABEL: &str = "plugin-window";
+
+fn close_plugin_surfaces(app: &AppHandle) {
+    for label in [PLUGIN_POPUP_LABEL, PLUGIN_WINDOW_LABEL] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.hide();
+            let _ = w.close();
+        }
+    }
+    #[cfg(windows)]
+    crate::win32::ambient::set_ambient_sample_target(None, 0);
+    let _ = app.emit("plugin-popup-closed", ());
+}
+
+fn plugin_surface_window(app: &AppHandle) -> Option<WebviewWindow> {
+    app.get_webview_window(PLUGIN_WINDOW_LABEL)
+        .or_else(|| app.get_webview_window(PLUGIN_POPUP_LABEL))
+}
+
 /// 通用插件弹窗：宿主 App 壳（有 Tauri IPC）+ 注入 window.hub，再由前端加载插件静态资源。
 #[tauri::command]
 pub async fn open_plugin_popup(
@@ -691,8 +802,12 @@ pub async fn open_plugin_popup(
     prefer_group_id: Option<String>,
     width: Option<f64>,
     height: Option<f64>,
+    windowed_fullscreen: Option<bool>,
+    resizable: Option<bool>,
+    // Like settings: OS title bar / min / max / close → label `plugin-window`.
+    native_frame: Option<bool>,
 ) -> Result<(), String> {
-    close_sibling_popups(&app, "plugin-popup");
+    close_sibling_popups(&app, PLUGIN_POPUP_LABEL);
 
     let record = crate::plugin_install::find_installed_plugin(&plugin_id)
         .ok_or_else(|| "plugin not installed".to_string())?;
@@ -701,35 +816,82 @@ pub async fn open_plugin_popup(
     }
     crate::plugin_hub::assert_capability(&plugin_id, "popup")?;
 
+    let want_native = native_frame.unwrap_or(false);
+    let want_fs = windowed_fullscreen.unwrap_or(false);
+    let want_resize = resizable.unwrap_or(want_fs || want_native);
     let (popup_w, popup_h) = resolve_plugin_popup_size(&plugin_id, width, height);
 
-    // Ensure popup entry exists (and asset scope for any future direct loads)
     let popup = plugin_popup_path(&record)?;
     let parent = popup
         .parent()
         .ok_or_else(|| "plugin popup has no parent directory".to_string())?;
     let _ = app.asset_protocol_scope().allow_directory(parent, true);
 
-    // Idempotent: same plugin popup already visible → do not recreate (avoids hover/slide spam).
-    if let Some(existing) = app.get_webview_window("plugin-popup") {
-        let already =
-            existing.is_visible().unwrap_or(false) && popup_plugin_id_of(&existing) == Some(plugin_id.clone());
+    let title = record
+        .manifest
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("插件")
+        .to_string();
+
+    let target_label = if want_native {
+        PLUGIN_WINDOW_LABEL
+    } else {
+        PLUGIN_POPUP_LABEL
+    };
+
+    // Idempotent: same surface + same plugin already visible.
+    if let Some(existing) = app.get_webview_window(target_label) {
+        let already = existing.is_visible().unwrap_or(false)
+            && popup_plugin_id_of(&existing) == Some(plugin_id.clone());
         if already {
             if let Some(gid) = prefer_group_id.as_ref().filter(|s| !s.is_empty()) {
                 let _ = app.emit("plugin-popup-prefer-group", gid);
             }
-            let _ = existing.set_size(LogicalSize::new(popup_w, popup_h));
-            let _ = existing.set_position(LogicalPosition::new(x, y));
+            let _ = existing.set_resizable(want_resize);
+            if want_native {
+                let _ = existing.set_always_on_top(false);
+                let _ = existing.set_skip_taskbar(false);
+                if want_fs {
+                    let _ = existing.maximize();
+                }
+                reassert_saved_material(&existing, &state);
+                schedule_plugin_window_mica_refresh(&app);
+                #[cfg(windows)]
+                if let Ok(hwnd) = existing.hwnd() {
+                    // Sample OS title bar (same as Chrome/VS Code), not canvas.
+                    crate::win32::ambient::set_ambient_sample_target(
+                        Some(hwnd.0 as isize),
+                        0,
+                    );
+                }
+            } else if want_fs {
+                remember_plugin_popup_geometry(&existing);
+                apply_plugin_popup_work_area(&existing)?;
+                let _ = existing.set_always_on_top(false);
+                let _ = existing.set_skip_taskbar(false);
+            } else {
+                let _ = existing.set_size(LogicalSize::new(popup_w, popup_h));
+                let _ = existing.set_position(LogicalPosition::new(x, y));
+                let _ = existing.set_always_on_top(true);
+                let _ = existing.set_skip_taskbar(true);
+            }
+            let _ = existing.unminimize();
             let _ = existing.set_focus();
             let _ = app.emit("plugin-popup-opened", &plugin_id);
             return Ok(());
         }
-        let _ = existing.close();
-        let _ = app.emit("plugin-popup-closed", ());
-        std::thread::sleep(std::time::Duration::from_millis(40));
     }
 
-    let mut url_s = format!("index.html?window=plugin-popup&plugin={plugin_id}");
+    // Switching popup ↔ window (or different plugin): tear down both surfaces.
+    close_plugin_surfaces(&app);
+    std::thread::sleep(std::time::Duration::from_millis(48));
+
+    let mut url_s = if want_native {
+        format!("index.html?window=plugin-window&plugin={plugin_id}")
+    } else {
+        format!("index.html?window=plugin-popup&plugin={plugin_id}")
+    };
     if let Some(gid) = prefer_group_id.as_ref().filter(|s| !s.is_empty()) {
         url_s.push_str("&preferGroup=");
         url_s.push_str(&urlencoding_minimal(gid));
@@ -737,55 +899,224 @@ pub async fn open_plugin_popup(
     let url = WebviewUrl::App(url_s.into());
     let init = hub_init_script(&plugin_id);
 
-    let win = WebviewWindowBuilder::new(&app, "plugin-popup", url)
-        .title(
-            record
-                .manifest
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("插件"),
-        )
-        .inner_size(popup_w, popup_h)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .closable(true)
-        .decorations(false)
-        .transparent(true)
-        .background_color(Color(0, 0, 0, 0))
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focused(true)
-        .visible(false)
-        .initialization_script(init)
-        .build()
-        .map_err(|e| format!("open plugin popup failed: {e}"))?;
+    let win = if want_native {
+        // Same builder + material path as settings (OS caption + system Mica 吸色).
+        WebviewWindowBuilder::new(&app, PLUGIN_WINDOW_LABEL, url)
+            .title(&title)
+            .inner_size(popup_w.max(640.0), popup_h.max(420.0))
+            .min_inner_size(640.0, 420.0)
+            .resizable(true)
+            .maximizable(true)
+            .minimizable(true)
+            .closable(true)
+            .decorations(true)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .center()
+            .focused(true)
+            .visible(false)
+            .initialization_script(init)
+            .build()
+            .map_err(|e| format!("open plugin window failed: {e}"))?
+    } else {
+        WebviewWindowBuilder::new(&app, PLUGIN_POPUP_LABEL, url)
+            .title(&title)
+            .inner_size(popup_w, popup_h)
+            .resizable(want_resize)
+            .maximizable(false)
+            .minimizable(false)
+            .closable(true)
+            .decorations(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
+            .always_on_top(!want_fs)
+            .skip_taskbar(!want_fs)
+            .focused(true)
+            .visible(false)
+            .initialization_script(init)
+            .build()
+            .map_err(|e| format!("open plugin popup failed: {e}"))?
+    };
 
-    let _ = win.set_position(LogicalPosition::new(x, y));
+    if want_native {
+        if want_fs {
+            let _ = win.maximize();
+        }
+    } else if want_fs {
+        remember_plugin_popup_geometry(&win);
+        apply_plugin_popup_work_area(&win)?;
+    } else {
+        let _ = win.set_position(LogicalPosition::new(x, y));
+    }
     apply_saved_material(&win, &state);
-    if let Ok(hwnd) = win.hwnd() {
-        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    if !want_native {
+        if let Ok(hwnd) = win.hwnd() {
+            crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+        }
     }
     let _ = win.show();
     let _ = win.set_focus();
+    if want_native {
+        reassert_saved_material(&win, &state);
+        schedule_plugin_window_mica_refresh(&app);
+        // Allow island ambient to sample this HWND when maximized (same-process
+        // windows are otherwise excluded). Skip ~36px Host chrome → canvas.
+        #[cfg(windows)]
+        if let Ok(hwnd) = win.hwnd() {
+            // Sample OS title bar (窗体顶栏), not canvas below caption.
+            crate::win32::ambient::set_ambient_sample_target(Some(hwnd.0 as isize), 0);
+            // Kick ambient watcher so island picks up canvas colors immediately.
+            if let Some(main) = app.get_webview_window("main") {
+                if let Ok(mh) = main.hwnd() {
+                    let strip = crate::win32::ambient::sample(Some(mh.0 as isize));
+                    let _ = app.emit("ambient-color", &strip);
+                }
+            }
+            // WebView2 may reparent shortly after show — re-bind root HWND.
+            let app_amb = app.clone();
+            std::thread::spawn(move || {
+                for ms in [120_u64, 320, 700] {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    let Some(w) = app_amb.get_webview_window(PLUGIN_WINDOW_LABEL) else {
+                        return;
+                    };
+                    let Ok(hwnd) = w.hwnd() else {
+                        continue;
+                    };
+                    crate::win32::ambient::set_ambient_sample_target(Some(hwnd.0 as isize), 0);
+                    if let Some(main) = app_amb.get_webview_window("main") {
+                        if let Ok(mh) = main.hwnd() {
+                            let strip = crate::win32::ambient::sample(Some(mh.0 as isize));
+                            let _ = app_amb.emit("ambient-color", &strip);
+                        }
+                    }
+                }
+            });
+        }
+    } else {
+        #[cfg(windows)]
+        crate::win32::ambient::set_ambient_sample_target(None, 0);
+    }
     let _ = app.emit("plugin-popup-opened", &plugin_id);
+    Ok(())
+}
+
+/// Detach frameless popup → native OS window without racing the closing webview's IPC reply.
+/// Returns Ok immediately so the popup can finish the invoke; recreate runs on a short delay.
+#[tauri::command]
+pub async fn schedule_plugin_popup_as_window(
+    app: AppHandle,
+    plugin_id: String,
+    width: Option<f64>,
+    height: Option<f64>,
+    windowed_fullscreen: Option<bool>,
+) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "popup")?;
+    let app2 = app.clone();
+    let plugin_id2 = plugin_id;
+    tauri::async_runtime::spawn(async move {
+        // Deliver invoke result to the still-alive popup first.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let state = app2.state::<MaterialState>();
+        let _ = open_plugin_popup(
+            app2.clone(),
+            state,
+            plugin_id2,
+            0.0,
+            0.0,
+            None,
+            width,
+            height,
+            windowed_fullscreen,
+            Some(true),
+            Some(true),
+        )
+        .await;
+    });
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_plugin_popup(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("plugin-popup") {
-        w.close().map_err(|e| e.to_string())?;
-    }
-    let _ = app.emit("plugin-popup-closed", ());
+    close_plugin_surfaces(&app);
     Ok(())
 }
 
 #[tauri::command]
 pub fn is_plugin_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("plugin-popup")
+    plugin_surface_window(&app)
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false)
+}
+
+/// Resize the open plugin popup (clamped). Used by canvas plugins.
+#[tauri::command]
+pub async fn resize_plugin_popup(
+    app: AppHandle,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let win = plugin_surface_window(&app)
+        .ok_or_else(|| "plugin popup not open".to_string())?;
+    let (w, h) = clamp_popup_size(width, height);
+    win.set_size(LogicalSize::new(w, h))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Toggle 窗口化全屏：原生窗体用 maximize；无边框弹窗则铺满工作区。
+#[tauri::command]
+pub async fn set_plugin_popup_windowed_fullscreen(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let win = plugin_surface_window(&app)
+        .ok_or_else(|| "plugin popup not open".to_string())?;
+    let plugin_id = popup_plugin_id_of(&win).unwrap_or_default();
+    let native = win.label() == PLUGIN_WINDOW_LABEL
+        || crate::win32::blur_glass::is_native_frame_plugin_popup(&win);
+
+    if native {
+        if enabled {
+            let _ = win.maximize();
+        } else {
+            let _ = win.unmaximize();
+        }
+        // Maximize repaints caption — keep settings-frame Mica.
+        reassert_saved_material(&win, &state);
+        if win.label() == PLUGIN_WINDOW_LABEL {
+            schedule_plugin_window_mica_refresh(&app);
+            #[cfg(windows)]
+            if let Ok(hwnd) = win.hwnd() {
+                crate::win32::ambient::set_ambient_sample_target(Some(hwnd.0 as isize), 0);
+                if let Some(main) = app.get_webview_window("main") {
+                    if let Ok(mh) = main.hwnd() {
+                        let strip = crate::win32::ambient::sample(Some(mh.0 as isize));
+                        let _ = app.emit("ambient-color", &strip);
+                    }
+                }
+            }
+        }
+    } else if enabled {
+        remember_plugin_popup_geometry(&win);
+        apply_plugin_popup_work_area(&win)?;
+        let _ = win.set_resizable(true);
+        let _ = win.set_always_on_top(false);
+        let _ = win.set_skip_taskbar(false);
+    } else {
+        restore_plugin_popup_geometry(&win, &plugin_id);
+        let _ = win.set_always_on_top(true);
+        let _ = win.set_skip_taskbar(true);
+    }
+    let _ = win.set_focus();
+    let _ = app.emit(
+        "plugin-popup-windowed-fullscreen",
+        serde_json::json!({ "enabled": enabled }),
+    );
+    Ok(())
 }
 
 fn load_material_prefs() -> crate::win32::material::MaterialPrefs {
@@ -837,6 +1168,35 @@ pub fn reassert_saved_material_pub(window: &tauri::WebviewWindow, state: &Materi
     reassert_saved_material(window, state);
 }
 
+/// Full DWM apply (not soft) — used after maximize when caption attrs are reset.
+pub fn force_apply_saved_material_pub(window: &tauri::WebviewWindow, state: &MaterialState) {
+    let prefs = read_material_prefs(state);
+    let _ = crate::win32::material::apply_prefs(window, &prefs);
+}
+
+/// Debounced multi-pass refresh for `plugin-window` after maximize/restore.
+pub fn schedule_plugin_window_mica_refresh(app: &AppHandle) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    let gen = GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        for ms in [40_u64, 120, 280, 520] {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            if GEN.load(Ordering::Relaxed) != gen {
+                return;
+            }
+            let Some(w) = app.get_webview_window("plugin-window") else {
+                return;
+            };
+            let Some(state) = app.try_state::<MaterialState>() else {
+                return;
+            };
+            force_apply_saved_material_pub(&w, &*state);
+        }
+    });
+}
+
 /// Re-apply materials to every open popup after prefs change.
 fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::MaterialPrefs) {
     for label in [
@@ -844,6 +1204,7 @@ fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::M
         "dock-icon-editor",
         "tray-popup",
         "plugin-popup",
+        "plugin-window",
         "status-menu-popup",
         "input-lang-popup",
         "wifi-popup",
@@ -1251,10 +1612,32 @@ pub struct ChromeHoverTipPayload {
     /// Dock item id — click preview launches/focuses like clicking the icon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
+    /// Dock / app icon (PNG base64, no data: prefix) — title row leading glyph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_png_base64: Option<String>,
 }
 
 const CHROME_HOVER_TIP_W: f64 = 160.0;
 const CHROME_HOVER_TIP_H: f64 = 48.0;
+
+fn chrome_hover_tip_same(a: &ChromeHoverTipPayload, b: &ChromeHoverTipPayload) -> bool {
+    if a.lines != b.lines {
+        return false;
+    }
+    if a.image_jpeg_base64 != b.image_jpeg_base64 {
+        return false;
+    }
+    if a.icon_png_base64 != b.icon_png_base64 {
+        return false;
+    }
+    if a.hwnd != b.hwnd || a.item_id != b.item_id {
+        return false;
+    }
+    if a.placement != b.placement {
+        return false;
+    }
+    (a.x - b.x).abs() < 0.75 && (a.y - b.y).abs() < 0.75
+}
 
 /// Windows that may own chrome tips — cursor must stay over one of these or tip auto-hides.
 const CHROME_TIP_HOST_LABELS: &[&str] = &[
@@ -1344,8 +1727,18 @@ fn spawn_chrome_tip_leave_watch(app: AppHandle, seq: u64) {
                 continue;
             }
             misses = misses.saturating_add(1);
-            // Two samples (~200ms) outside Host → dismiss (covers fast flick to desktop).
-            if misses >= 2 {
+            // Interactive preview: allow crossing the Dock→tip gap without a false dismiss.
+            let interactive = CHROME_HOVER_TIP
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .map(|p| {
+                    p.image_jpeg_base64.as_ref().is_some_and(|s| !s.is_empty())
+                        && p.hwnd.map(|h| h != 0).unwrap_or(false)
+                })
+                .unwrap_or(false);
+            let need = if interactive { 5 } else { 2 }; // ~500ms vs ~200ms
+            if misses >= need {
                 if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != seq {
                     return;
                 }
@@ -1375,6 +1768,7 @@ pub async fn show_chrome_hover_tip(
     image_jpeg_base64: Option<String>,
     hwnd: Option<i64>,
     item_id: Option<String>,
+    icon_png_base64: Option<String>,
     #[allow(unused_variables)] epoch: Option<u64>,
 ) -> Result<(), String> {
     let lines: Vec<String> = lines
@@ -1390,14 +1784,14 @@ pub async fn show_chrome_hover_tip(
         return close_chrome_hover_tip(app, None).await;
     }
 
-    // Claim a generation for this show; close/newer show will bump past it.
-    let seq = CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-
     let placement = placement
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| s == "above" || s == "below");
     let interactive = image.is_some() && hwnd.map(|h| h != 0).unwrap_or(false);
     let item_id = item_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let icon = icon_png_base64
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let payload = ChromeHoverTipPayload {
@@ -1407,14 +1801,36 @@ pub async fn show_chrome_hover_tip(
         placement,
         image_jpeg_base64: image,
         hwnd: if interactive { hwnd } else { None },
-        item_id: if interactive { item_id } else { None },
+        // Keep item id for title-first progressive tips (click before thumb arrives).
+        item_id,
+        icon_png_base64: icon,
     };
+
+    // Skip identical re-show (same content + ~same anchor) — prevents tip/preview flicker.
+    // Still re-assert cursor hit-testing so an interactive tip never stays click-through.
+    if app.get_webview_window("chrome-hover-tip").is_some() {
+        if let Ok(g) = CHROME_HOVER_TIP.lock() {
+            if let Some(prev) = g.as_ref() {
+                if chrome_hover_tip_same(prev, &payload) {
+                    if interactive || payload.item_id.is_some() {
+                        set_dock_preview_tip_keep(&app, true);
+                    }
+                    if let Some(w) = app.get_webview_window("chrome-hover-tip") {
+                        let _ = w.set_ignore_cursor_events(!interactive);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Claim a generation for this show; close/newer show will bump past it.
+    let seq = CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
         *g = Some(payload.clone());
     }
-    // Hold AutoHide for interactive previews. Only arm here — never clear on a
-    // non-interactive refresh (progressive title-first tip must not drop keep).
-    if interactive {
+    // Hold AutoHide for interactive previews / dock preview sessions (title-first included).
+    if interactive || payload.item_id.is_some() {
         set_dock_preview_tip_keep(&app, true);
     }
 
@@ -2633,6 +3049,20 @@ pub fn hub_media_send_key(plugin_id: String, action: String) -> Result<(), Strin
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ShortcutsPluginScopeDto {
+    /// `all` | `apps` — default all when missing.
+    #[serde(default = "default_shortcuts_scope_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub window_keys: Vec<String>,
+}
+
+fn default_shortcuts_scope_mode() -> String {
+    "all".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShortcutsPrefsDto {
     /// When set, shortcuts bar only shows this plugin entry + its pins.
     #[serde(default)]
@@ -2640,6 +3070,10 @@ pub struct ShortcutsPrefsDto {
     /// User order of shortcuts plugin ids (Ctrl+drag). `None` = leave unchanged on patch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_order: Option<Vec<String>>,
+    /// Per-plugin visibility: all programs vs selected window keys.
+    /// `None` on patch = leave unchanged; `Some({})` clears custom scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<std::collections::HashMap<String, ShortcutsPluginScopeDto>>,
 }
 
 impl Default for ShortcutsPrefsDto {
@@ -2647,6 +3081,7 @@ impl Default for ShortcutsPrefsDto {
         Self {
             exclusive_plugin_id: None,
             plugin_order: None,
+            scopes: None,
         }
     }
 }
@@ -2672,6 +3107,40 @@ fn normalize_shortcuts_prefs(mut p: ShortcutsPrefsDto) -> ShortcutsPrefsDto {
         }
         *order = out;
     }
+    if let Some(scopes) = p.scopes.as_mut() {
+        let mut cleaned = std::collections::HashMap::new();
+        for (pid, scope) in scopes.drain() {
+            let id = pid.trim().to_string();
+            if id.is_empty() {
+                continue;
+            }
+            let mode = if scope.mode.trim().eq_ignore_ascii_case("apps") {
+                "apps"
+            } else {
+                "all"
+            };
+            let mut seen = std::collections::HashSet::new();
+            let mut keys = Vec::new();
+            for k in scope.window_keys {
+                let t = k.trim().to_string();
+                if t.is_empty() || !seen.insert(t.clone()) {
+                    continue;
+                }
+                keys.push(t);
+            }
+            if mode == "all" && keys.is_empty() {
+                continue;
+            }
+            cleaned.insert(
+                id,
+                ShortcutsPluginScopeDto {
+                    mode: mode.into(),
+                    window_keys: keys,
+                },
+            );
+        }
+        *scopes = cleaned;
+    }
     p
 }
 
@@ -2695,6 +3164,9 @@ pub fn set_shortcuts_prefs(
     next.exclusive_plugin_id = patch.exclusive_plugin_id;
     if let Some(order) = patch.plugin_order {
         next.plugin_order = Some(order);
+    }
+    if let Some(scopes) = patch.scopes {
+        next.scopes = Some(scopes);
     }
     let val = serde_json::to_value(&next).map_err(|e| e.to_string())?;
     crate::db::with_conn(|c| crate::db::shortcuts_set(c, &val))?;

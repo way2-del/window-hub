@@ -32,6 +32,11 @@ import ShortcutsPluginStrip, {
   type ShortcutsHoverTip,
 } from "./ShortcutsPluginStrip";
 import { WH_SHORTCUTS_EVT } from "../plugins/shortcutsHubBridge";
+import {
+  parseScopes,
+  shortcutsScopeVisible,
+  type ShortcutsPluginScope,
+} from "../shortcutsPrefs";
 import "./ShortcutsHost.css";
 
 const POPUP_GAP = 8;
@@ -147,6 +152,11 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   const [, setRegistryVersion] = useState(0);
   const [exclusivePluginId, setExclusivePluginId] = useState<string | null>(null);
   const [pluginOrder, setPluginOrder] = useState<string[]>([]);
+  const [scopes, setScopes] = useState<Record<string, ShortcutsPluginScope>>({});
+  const [fgExe, setFgExe] = useState<{
+    exe?: string | null;
+    exe_name?: string | null;
+  } | null>(null);
   const [ctrlHeld, setCtrlHeld] = useState(false);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropHint, setDropHint] = useState<{ toId: string; place: "before" | "after" } | null>(
@@ -189,7 +199,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
 
   useLayoutEffect(() => {
     recomputeBounds();
-  }, [recomputeBounds, exclusivePluginId, popupOpen, stripWidths]);
+  }, [recomputeBounds, exclusivePluginId, popupOpen, stripWidths, scopes, fgExe]);
 
   useEffect(() => {
     const onResize = () => recomputeBounds();
@@ -209,13 +219,18 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    type Prefs = { exclusivePluginId?: string | null; pluginOrder?: string[] | null };
+    type Prefs = {
+      exclusivePluginId?: string | null;
+      pluginOrder?: string[] | null;
+      scopes?: Record<string, ShortcutsPluginScope> | null;
+    };
     void (async () => {
       try {
         const prefs = await invoke<Prefs>("get_shortcuts_prefs");
         if (!cancelled) {
           setExclusivePluginId(prefs.exclusivePluginId ?? null);
           setPluginOrder(Array.isArray(prefs.pluginOrder) ? prefs.pluginOrder : []);
+          setScopes(parseScopes(prefs.scopes));
         }
       } catch {
         /* noop */
@@ -227,6 +242,9 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       setExclusivePluginId(ev.payload?.exclusivePluginId ?? null);
       if (Array.isArray(ev.payload?.pluginOrder)) {
         setPluginOrder(ev.payload.pluginOrder);
+      }
+      if (ev.payload?.scopes !== undefined) {
+        setScopes(parseScopes(ev.payload.scopes));
       }
     }).then((fn) => {
       if (cancelled) fn();
@@ -316,16 +334,25 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
         const fg = await invoke<{
           isSelf?: boolean;
           windowId?: string | null;
+          exeName?: string | null;
+          exe_name?: string | null;
         }>("get_foreground_app");
         if (cancelled) return;
         if (fg.isSelf) return;
         const wid = fg.windowId ?? null;
+        const exeName = fg.exeName ?? fg.exe_name ?? null;
+        setFgExe((prev) => {
+          const next = { exe_name: exeName };
+          if (prev?.exe_name === next.exe_name) return prev;
+          return next;
+        });
         if (wid === lastWid) return;
         lastWid = wid;
         broadcast({
           channel: WH_SHORTCUTS_EVT,
           type: "foreground-changed",
           windowId: wid,
+          exeName,
         });
       } catch {
         /* noop */
@@ -567,13 +594,18 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
 
   const pluginsAll = pluginRegistry.listShortcuts();
   // 独占某插件时仍挂载「岛栏 worker」：声明 island.bar + entry.shortcuts 的隐形条（如天气）
-  const plugins = exclusivePluginId
+  const pluginsExclusive = exclusivePluginId
     ? pluginsAll.filter((p) => {
         if (p.pluginId === exclusivePluginId) return true;
         const m = pluginRegistry.get(p.pluginId)?.manifest;
         return Boolean(m?.slots?.["island.bar"] && m.entry?.shortcuts);
       })
     : pluginsAll;
+
+  const plugins = pluginsExclusive.filter((p) => {
+    if (isIslandBarWorker(p)) return true;
+    return shortcutsScopeVisible(scopes, p.pluginId, fgExe);
+  });
 
   const pluginsSorted = sortByOrderKey(plugins, pluginOrder, (p) => p.pluginId);
 

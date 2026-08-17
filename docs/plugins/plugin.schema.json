@@ -352,6 +352,10 @@
         "step": {
           "type": "number"
         },
+        "unit": {
+          "type": "string",
+          "description": "Display unit for ranged number fields (e.g. px, ms). Host defaults: *Width/*Height → px, else ms."
+        },
         "maxLength": {
           "type": "integer",
           "minimum": 1,

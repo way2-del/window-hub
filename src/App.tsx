@@ -1740,6 +1740,11 @@ function App() {
     };
   }, [ambient.r, ambient.g, ambient.b, ambient.png_base64, ambient.width]);
 
+  // After chrome CSS vars commit — shortcuts iframes mirror --chrome-left-* by hand.
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("wh-chrome-tokens"));
+  }, [chromeLeft.fg, chromeLeft.shadow, chromeRight.fg, chromeCenter.fg]);
+
   /** 当前会话 / 投放 / 情景插件：同步面板壳尺寸 */
   const sizePluginId =
     parsePluginPanelId(

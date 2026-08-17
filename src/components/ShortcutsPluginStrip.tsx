@@ -179,6 +179,68 @@ export default function ShortcutsPluginStrip({
     };
   }, [pluginId, srcdoc]);
 
+  /**
+   * Host chrome (--chrome-left-fg) updates with ambient, but iframe copies are
+   * one-shot unless we re-push. Status bar CSS vars update live; strips used to
+   * stay stale until a click remasured — sync on shell chrome + ambient.
+   */
+  useEffect(() => {
+    if (!srcdoc) return;
+    let cancelled = false;
+    let raf = 0;
+    const timers: number[] = [];
+
+    const pushChrome = () => {
+      if (cancelled) return;
+      measureAndReport();
+    };
+
+    const schedule = (extraMs: number[] = [0, 48, 120]) => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        pushChrome();
+        for (const ms of extraMs) {
+          timers.push(window.setTimeout(pushChrome, ms));
+        }
+      });
+    };
+
+    const shell =
+      (document.querySelector(".shell[data-chrome-left]") as HTMLElement | null) ||
+      (wrapRef.current?.closest(".shell") as HTMLElement | null);
+
+    let shellMo: MutationObserver | null = null;
+    if (shell && typeof MutationObserver !== "undefined") {
+      shellMo = new MutationObserver(() => schedule([0, 32]));
+      shellMo.observe(shell, {
+        attributes: true,
+        attributeFilter: ["style", "data-chrome-left", "data-chrome-right"],
+      });
+    }
+
+    let unAmbient: (() => void) | undefined;
+    void (async () => {
+      try {
+        unAmbient = await listen("ambient-color", () => schedule([0, 48, 140]));
+      } catch {
+        /* noop */
+      }
+    })();
+
+    const onChromeTokens = () => schedule([0, 16]);
+    window.addEventListener("wh-chrome-tokens", onChromeTokens);
+
+    schedule([0, 80]);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      for (const id of timers) window.clearTimeout(id);
+      shellMo?.disconnect();
+      unAmbient?.();
+      window.removeEventListener("wh-chrome-tokens", onChromeTokens);
+    };
+  }, [pluginId, srcdoc]);
+
   useEffect(() => {
     const onMessage = (ev: MessageEvent) => {
       const d = ev.data as {
@@ -262,6 +324,10 @@ export default function ShortcutsPluginStrip({
               typeof d.args?.height === "number" && Number.isFinite(d.args.height)
                 ? d.args.height
                 : null;
+            const windowedFullscreen = d.args?.windowedFullscreen === true;
+            const nativeFrame = d.args?.nativeFrame === true;
+            const resizable =
+              d.args?.resizable === true || windowedFullscreen || nativeFrame;
             const open = await invoke<boolean>("is_plugin_popup_open").catch(() => false);
             const { x, y } = await popupAnchorFromEl(wrapRef.current);
             await invoke("open_plugin_popup", {
@@ -271,6 +337,9 @@ export default function ShortcutsPluginStrip({
               preferGroupId,
               width,
               height,
+              windowedFullscreen,
+              resizable,
+              nativeFrame,
             });
             // If already open, Rust emits prefer-group; still call open for idempotent path.
             void open;

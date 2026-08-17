@@ -17,6 +17,7 @@ const IDIOM_EXAMPLE_ID: &str = "com.window-hub.idiom";
 const NOW_PLAYING_EXAMPLE_ID: &str = "com.window-hub.now-playing";
 const FILE_SEARCH_EXAMPLE_ID: &str = "com.window-hub.file-search";
 const SYSMON_EXAMPLE_ID: &str = "com.window-hub.sysmon";
+const EXCALIDRAW_EXAMPLE_ID: &str = "com.window-hub.excalidraw";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,10 +191,12 @@ pub(crate) fn find_installed_plugin(id: &str) -> Option<InstalledPluginRecord> {
 }
 
 fn close_plugin_popup(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("plugin-popup") {
-        let _ = win.close();
-        let _ = app.emit("plugin-popup-closed", ());
+    for label in ["plugin-popup", "plugin-window"] {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.close();
+        }
     }
+    let _ = app.emit("plugin-popup-closed", ());
 }
 
 pub fn list_installed_plugins_sync() -> Vec<InstalledPluginRecord> {
@@ -513,6 +516,8 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("file-search")
     } else if id == "sysmon" || id == SYSMON_EXAMPLE_ID {
         Ok("sysmon")
+    } else if id == "excalidraw" || id == EXCALIDRAW_EXAMPLE_ID {
+        Ok("excalidraw")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

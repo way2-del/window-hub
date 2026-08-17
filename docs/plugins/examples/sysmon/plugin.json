@@ -26,7 +26,9 @@
       "label": "弹窗宽度",
       "default": 360,
       "min": 300,
-      "max": 520
+      "max": 520,
+      "step": 10,
+      "unit": "px"
     },
     {
       "key": "popupHeight",
@@ -34,7 +36,9 @@
       "label": "弹窗高度",
       "default": 440,
       "min": 360,
-      "max": 720
+      "max": 720,
+      "step": 10,
+      "unit": "px"
     }
   ],
   "capabilities": ["shortcuts", "storage", "popup", "system.monitor"]

@@ -173,7 +173,12 @@ fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
                 std::mem::size_of::<u32>() as u32,
             );
         }
-        let corner = DWMWCP_ROUND;
+        // Maximized + ROUND often forces an opaque black caption; match Win11 apps.
+        let corner = if windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool() {
+            DWMWCP_DONOTROUND
+        } else {
+            DWMWCP_ROUND
+        };
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -186,6 +191,30 @@ fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
             DWMWA_BORDER_COLOR,
             &border as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+/// Caption color for framed Mica windows — always `COLOR_NONE` so SYSTEMBACKDROP
+/// owns the title strip. (Solid wallpaper tints look “吸错色”; plugin-window uses
+/// a frameless Host chrome so mica shows in the client caption row.)
+fn framed_caption_color(_hwnd: HWND, _is_dark: bool) -> u32 {
+    DWMWA_COLOR_NONE
+}
+
+fn dwm_frame_changed(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND::default(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
     }
 }
@@ -225,6 +254,39 @@ fn apply_swca_acrylic(hwnd: HWND, dark: Option<bool>) -> Result<(), String> {
     Ok(())
 }
 
+/// Kept for reference; `plugin-window` now uses settings-frame Mica like settings.
+#[allow(dead_code)]
+pub fn apply_plugin_window_glass(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    let hwnd = hwnd_of(window)?;
+    prepare_hwnd_for_system_backdrop(hwnd);
+    clear_webview_fill(window);
+    disable_system_backdrop(hwnd);
+    let tint = if dark == Some(false) {
+        pack_gradient(248, 248, 250, 72)
+    } else {
+        // Keep alpha low — wallpaper must remain visible in the chrome strip.
+        pack_gradient(32, 34, 38, 58)
+    };
+    if !set_window_composition_attribute(
+        hwnd,
+        ACCENT_ENABLE_ACRYLICBLURBEHIND,
+        ACCENT_FLAGS_BLUR_FULL,
+        tint,
+    ) {
+        if !set_window_composition_attribute(
+            hwnd,
+            ACCENT_ENABLE_BLURBEHIND,
+            ACCENT_FLAGS_BLUR_FULL,
+            tint,
+        ) {
+            return Err("apply plugin-window glass failed".into());
+        }
+    }
+    apply_mica_chrome(hwnd, dark);
+    clear_webview_fill(window);
+    Ok(())
+}
+
 /// Frosted system backdrop — Acrylic blurs desktop more like Start/flyouts;
 /// Mica alone often reads as a flat slab under WebView2.
 pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
@@ -240,11 +302,36 @@ pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(
     Ok(())
 }
 
-/// Settings window (decorated): true system Mica so **title bar + left nav** share
+/// Native OS plugin window: dedicated label `plugin-window`, or legacy
+/// `plugin-popup` with `nativeFrame=1` / decorated frame.
+pub fn is_native_frame_plugin_popup(window: &WebviewWindow) -> bool {
+    match window.label() {
+        "plugin-window" => true,
+        "plugin-popup" => {
+            if window
+                .url()
+                .ok()
+                .map(|u| {
+                    let s = u.as_str();
+                    s.contains("nativeFrame=1") || s.contains("nativeFrame%3D1")
+                })
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            window.is_decorated().unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Settings window (decorated): true system Mica so **title bar + client** share
 /// the same theme backdrop. Right pane stays solid via CSS (`--glass-main-bg`).
 ///
-/// Popups keep SWCA acrylic (`apply_system_mica`); only the framed settings window
-/// uses `DWMSBT_MAINWINDOW` + caption color none.
+/// Frameless popups keep SWCA acrylic (`apply_system_mica`). Decorated frames
+/// (`settings` / `dock-icon-editor` / `plugin-window`) use
+/// `DWMSBT_MAINWINDOW` + caption `COLOR_NONE` (windowed) or wallpaper-tinted
+/// caption when maximized (Win11 drops live Mica on zoomed frames).
 pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
     let hwnd = hwnd_of(window)?;
     let is_dark = dark.unwrap_or(true);
@@ -264,8 +351,8 @@ pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> 
     set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
 
     unsafe {
-        // Let caption use the same system backdrop as the client (Win11 Settings-like).
-        let caption = DWMWA_COLOR_NONE;
+        // Windowed: COLOR_NONE → live Mica caption. Maximized: wallpaper-tinted solid.
+        let caption = framed_caption_color(hwnd, is_dark);
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_CAPTION_COLOR,
@@ -293,6 +380,7 @@ pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> 
         );
     }
 
+    dwm_frame_changed(hwnd);
     clear_webview_fill(window);
     Ok(())
 }
@@ -304,7 +392,7 @@ pub fn reassert_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) 
     apply_mica_chrome(hwnd, Some(is_dark));
     set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
     unsafe {
-        let caption = DWMWA_COLOR_NONE;
+        let caption = framed_caption_color(hwnd, is_dark);
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_CAPTION_COLOR,
@@ -323,6 +411,7 @@ pub fn reassert_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) 
             std::mem::size_of::<u32>() as u32,
         );
     }
+    dwm_frame_changed(hwnd);
     clear_webview_fill(window);
     Ok(())
 }
@@ -915,9 +1004,15 @@ pub fn apply_effect(
         "dock" => return apply_dock_icons_layer(window, dark),
         // Glass strip: acrylic without rounded DWM chrome/shadow.
         "dock-glass" => return apply_dock_glass_layer(window, dark),
-        // Decorated settings: system Mica on title bar + left nav (theme-aligned).
-        "settings" | "dock-icon-editor" => {
+        // Decorated settings / icon editor / plugin OS window: Mica on caption.
+        "settings" | "dock-icon-editor" | "plugin-window" => {
             if matches!(kind, WindowMaterial::MicaAlt) {
+                return apply_settings_frame_mica(window, dark);
+            }
+        }
+        "plugin-popup" => {
+            // Legacy nativeFrame on same label only (decorated OS caption).
+            if matches!(kind, WindowMaterial::MicaAlt) && is_native_frame_plugin_popup(window) {
                 return apply_settings_frame_mica(window, dark);
             }
         }

@@ -60,6 +60,8 @@ export type PluginSettingField = {
   min?: number;
   max?: number;
   step?: number;
+  /** Display unit for ranged number fields (e.g. px, ms). */
+  unit?: string;
   maxLength?: number;
   /** Host custom UI (e.g. tray picker); skip generic PluginSettingsForm row. */
   uiHidden?: boolean;

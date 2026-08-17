@@ -1,4 +1,4 @@
-﻿mod commands;
+mod commands;
 mod companion_scripts;
 mod db;
 mod dock;
@@ -285,6 +285,7 @@ pub fn run() {
             spawn_wifi_watcher(app.handle().clone());
             crate::companion_scripts::start_hub_associated_launchers();
             crate::dock::bootstrap_dock(app.handle());
+            crate::dock::spawn_dock_preview_refresher(app.handle().clone());
             #[cfg(windows)]
             crate::win32::island_search_hotkey::spawn_island_search_hotkey(app.handle().clone());
 
@@ -300,6 +301,12 @@ pub fn run() {
                             pin_top_bar(&w);
                         }
                     }
+                    // Maximize / restore resets caption — debounce full Mica re-apply.
+                    if window.label() == "plugin-window" {
+                        crate::commands::schedule_plugin_window_mica_refresh(
+                            window.app_handle(),
+                        );
+                    }
                 }
                 tauri::WindowEvent::Focused(focused) => {
                     // Dock: re-strip native caption residue on activate (Win11 paints
@@ -313,6 +320,11 @@ pub fn run() {
                                 hwnd.0 as isize,
                             );
                         }
+                    }
+                    if *focused && window.label() == "plugin-window" {
+                        crate::commands::schedule_plugin_window_mica_refresh(
+                            window.app_handle(),
+                        );
                     }
                     // 托盘 / 插件 / 状态菜单弹窗失焦即关（WebView 侧 focus 事件不总是可靠）
                     if (window.label() == "tray-popup"
@@ -362,7 +374,11 @@ pub fn run() {
                     if window.label() == "tray-popup" {
                         let _ = window.app_handle().emit("tray-popup-closed", ());
                     }
-                    if window.label() == "plugin-popup" {
+                    if window.label() == "plugin-popup" || window.label() == "plugin-window" {
+                        #[cfg(windows)]
+                        if window.label() == "plugin-window" {
+                            crate::win32::ambient::set_ambient_sample_target(None, 0);
+                        }
                         let _ = window.app_handle().emit("plugin-popup-closed", ());
                     }
                     if window.label() == "status-menu-popup" {
@@ -417,8 +433,11 @@ pub fn run() {
             commands::close_status_menu_popup,
             commands::is_status_menu_popup_open,
             commands::open_plugin_popup,
+            commands::schedule_plugin_popup_as_window,
             commands::close_plugin_popup,
             commands::is_plugin_popup_open,
+            commands::resize_plugin_popup,
+            commands::set_plugin_popup_windowed_fullscreen,
             plugin_hub::hub_windows_list,
             plugin_hub::hub_windows_get,
             plugin_hub::hub_windows_focus,

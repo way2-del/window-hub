@@ -68,7 +68,7 @@ function resolveWindowKind(): WindowKind {
     if (label === "dock-icon-editor") return "dock-icon-editor";
     if (label === "dock-glass") return "dock-glass";
     if (label === "dock") return "dock";
-    if (label === "plugin-popup") return "plugin-popup";
+    if (label === "plugin-popup" || label === "plugin-window") return "plugin-popup";
     if (label === "wifi-auth-popup") return "wifi-auth";
     if (label === "wifi-popup") return "wifi";
     if (label === "chrome-hover-tip") return "chrome-tip";
@@ -83,7 +83,7 @@ function resolveWindowKind(): WindowKind {
   if (q === "dock-icon-editor") return "dock-icon-editor";
   if (q === "dock-glass") return "dock-glass";
   if (q === "dock") return "dock";
-  if (q === "plugin-popup") return "plugin-popup";
+  if (q === "plugin-popup" || q === "plugin-window") return "plugin-popup";
   if (q === "wifi-auth") return "wifi-auth";
   if (q === "wifi") return "wifi";
   if (q === "chrome-tip") return "chrome-tip";

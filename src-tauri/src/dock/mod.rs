@@ -2810,7 +2810,7 @@ pub struct DockWindowPreviewDto {
     pub height: u32,
     pub title: String,
     pub hwnd: isize,
-    /// True when live capture failed (e.g. minimized) and a previous frame was reused.
+    /// Always true for the hover path — frames come from the background refresher.
     #[serde(default)]
     pub from_cache: bool,
 }
@@ -2822,15 +2822,43 @@ struct DockPreviewCacheEntry {
     height: u32,
     title: String,
     hwnd: isize,
+    captured_at_ms: u64,
 }
 
 static DOCK_PREVIEW_CACHE: std::sync::OnceLock<
     parking_lot::Mutex<std::collections::HashMap<String, DockPreviewCacheEntry>>,
 > = std::sync::OnceLock::new();
 
+static DOCK_PREVIEW_PRIORITY: std::sync::OnceLock<parking_lot::Mutex<std::collections::VecDeque<String>>> =
+    std::sync::OnceLock::new();
+
+static DOCK_PREVIEW_REFRESHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// ~2× the 280 CSS tip width so 125–200% DPI stays sharp.
+/* Capture budget: height-first for unified dock tip (~160px CSS @2x). */
+const DOCK_PREVIEW_MAX_W: u32 = 720;
+const DOCK_PREVIEW_MAX_H: u32 = 320;
+/// Skip re-capture if the cached frame is newer than this (ms), unless prioritized.
+const DOCK_PREVIEW_FRESH_MS: u64 = 4_000;
+/// Pause between captures so PrintWindow does not hog the UI thread.
+const DOCK_PREVIEW_CAPTURE_GAP_MS: u64 = 280;
+/// Idle sleep when preview is off / dock disabled.
+const DOCK_PREVIEW_IDLE_MS: u64 = 1_200;
+
 fn dock_preview_cache() -> &'static parking_lot::Mutex<std::collections::HashMap<String, DockPreviewCacheEntry>>
 {
     DOCK_PREVIEW_CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn dock_preview_priority() -> &'static parking_lot::Mutex<std::collections::VecDeque<String>> {
+    DOCK_PREVIEW_PRIORITY.get_or_init(|| parking_lot::Mutex::new(std::collections::VecDeque::new()))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn cache_dock_preview(item_id: &str, entry: DockPreviewCacheEntry) {
@@ -2858,58 +2886,204 @@ fn cached_dock_preview(item_id: &str) -> Option<DockWindowPreviewDto> {
     })
 }
 
-/// Capture a live thumbnail for the window matching a Dock item (if running).
-/// Minimized windows reuse the last good preview when a live grab is impossible.
-#[tauri::command]
-pub fn dock_capture_window_preview(item_id: String) -> Result<Option<DockWindowPreviewDto>, String> {
-    let prefs = load_dock_prefs();
-    let items = dock_merge_running(&prefs, false);
-    let Some(item) = items.into_iter().find(|i| i.id == item_id) else {
-        return Ok(None);
-    };
+fn request_preview_priority(item_id: &str) {
+    let id = item_id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut q = dock_preview_priority().lock();
+    q.retain(|x| x != id);
+    q.push_front(id.to_string());
+    while q.len() > 24 {
+        q.pop_back();
+    }
+}
+
+fn pop_preview_priority() -> Option<String> {
+    dock_preview_priority().lock().pop_front()
+}
+
+fn prune_dock_preview_cache(keep: &std::collections::HashSet<String>) {
+    let mut g = dock_preview_cache().lock();
+    g.retain(|k, _| keep.contains(k));
+}
+
+/// Capture one dock item into cache. Skips minimized windows (never restore).
+#[cfg(windows)]
+fn refresh_dock_preview_item(item: &DockItem) -> Option<DockWindowPreviewDto> {
+    use base64::Engine;
+    use crate::win32::capture::capture_window_owned_thumb_jpeg;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+
     if item.kind != "app" {
-        return Ok(None);
+        return None;
     }
     let wins = crate::win32::enum_windows::list_windows(None);
-    let Some(w) = launch::best_matching_window(&item, &wins) else {
-        return Ok(cached_dock_preview(&item_id));
+    let w = launch::best_matching_window(item, &wins)?;
+    // Background refresh must not touch minimized apps (restore/minimize flicker).
+    if unsafe { IsIconic(HWND(w.hwnd as *mut _)).as_bool() } {
+        return None;
+    }
+    let frame = capture_window_owned_thumb_jpeg(w.hwnd, DOCK_PREVIEW_MAX_W, DOCK_PREVIEW_MAX_H).ok()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.jpeg);
+    let dto = DockWindowPreviewDto {
+        jpeg_base64: b64.clone(),
+        width: frame.width,
+        height: frame.height,
+        title: w.title.clone(),
+        hwnd: w.hwnd,
+        from_cache: true,
     };
+    cache_dock_preview(
+        &item.id,
+        DockPreviewCacheEntry {
+            jpeg_base64: b64,
+            width: frame.width,
+            height: frame.height,
+            title: w.title.clone(),
+            hwnd: w.hwnd,
+            captured_at_ms: now_ms(),
+        },
+    );
+    Some(dto)
+}
 
-    #[cfg(windows)]
-    {
-        use base64::Engine;
-        use crate::win32::capture::capture_window_owned_thumb_jpeg;
-        match capture_window_owned_thumb_jpeg(w.hwnd, 240, 144) {
-            Ok(frame) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.jpeg);
-                let dto = DockWindowPreviewDto {
-                    jpeg_base64: b64.clone(),
-                    width: frame.width,
-                    height: frame.height,
-                    title: w.title.clone(),
-                    hwnd: w.hwnd,
-                    from_cache: false,
+#[cfg(not(windows))]
+fn refresh_dock_preview_item(_item: &DockItem) -> Option<DockWindowPreviewDto> {
+    None
+}
+
+fn preview_item_is_fresh(item_id: &str) -> bool {
+    let g = dock_preview_cache().lock();
+    match g.get(item_id) {
+        Some(e) => now_ms().saturating_sub(e.captured_at_ms) < DOCK_PREVIEW_FRESH_MS,
+        None => false,
+    }
+}
+
+fn running_preview_targets(prefs: &DockPrefs) -> Vec<DockItem> {
+    let items = dock_merge_running(prefs, false);
+    let wins = crate::windows_service::cached_windows();
+    items
+        .into_iter()
+        .filter(|it| it.kind == "app" && item_is_running(it, &wins))
+        .collect()
+}
+
+/// Background thumbnails for Dock hover — never capture on the hover invoke path.
+pub fn spawn_dock_preview_refresher(app: AppHandle) {
+    if DOCK_PREVIEW_REFRESHER.set(()).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("dock-preview".into())
+        .spawn(move || {
+            let mut rr: usize = 0;
+            let mut fresh_skips: usize = 0;
+            loop {
+                let prefs = load_dock_prefs();
+                if !prefs.enabled || !prefs.hover_window_preview {
+                    fresh_skips = 0;
+                    std::thread::sleep(std::time::Duration::from_millis(DOCK_PREVIEW_IDLE_MS));
+                    continue;
+                }
+
+                let targets = running_preview_targets(&prefs);
+                let keep: std::collections::HashSet<String> =
+                    targets.iter().map(|t| t.id.clone()).collect();
+                prune_dock_preview_cache(&keep);
+
+                if targets.is_empty() {
+                    fresh_skips = 0;
+                    std::thread::sleep(std::time::Duration::from_millis(DOCK_PREVIEW_IDLE_MS));
+                    continue;
+                }
+
+                // Hovered icons jump the queue so cold cache fills quickly.
+                let priority_id = pop_preview_priority();
+                let (next, prioritized) = if let Some(id) = priority_id.as_ref() {
+                    if let Some(item) = targets.iter().find(|t| t.id == *id).cloned() {
+                        (Some(item), true)
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (None, false)
                 };
-                cache_dock_preview(
-                    &item_id,
-                    DockPreviewCacheEntry {
-                        jpeg_base64: b64,
-                        width: frame.width,
-                        height: frame.height,
-                        title: w.title.clone(),
-                        hwnd: w.hwnd,
-                    },
-                );
-                Ok(Some(dto))
+                let next = next.or_else(|| {
+                    let n = targets.len();
+                    if n == 0 {
+                        return None;
+                    }
+                    let idx = rr % n;
+                    rr = rr.wrapping_add(1);
+                    Some(targets[idx].clone())
+                });
+
+                let Some(item) = next else {
+                    std::thread::sleep(std::time::Duration::from_millis(DOCK_PREVIEW_IDLE_MS));
+                    continue;
+                };
+
+                // Round-robin only warms empty cache. Continuous re-capture of every
+                // running app was flashing minimized windows / poisoning ambient chrome.
+                // Hover (priority) is what refreshes a live frame.
+                if !prioritized {
+                    let has_cache = dock_preview_cache().lock().contains_key(&item.id);
+                    if has_cache {
+                        fresh_skips = fresh_skips.saturating_add(1);
+                        if fresh_skips >= targets.len() {
+                            fresh_skips = 0;
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                        } else {
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                        }
+                        continue;
+                    }
+                }
+                if !prioritized && preview_item_is_fresh(&item.id) {
+                    fresh_skips = fresh_skips.saturating_add(1);
+                    if fresh_skips >= targets.len() {
+                        fresh_skips = 0;
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(40));
+                    }
+                    continue;
+                }
+                fresh_skips = 0;
+
+                if let Some(dto) = refresh_dock_preview_item(&item) {
+                    let _ = app.emit(
+                        "dock-preview-ready",
+                        serde_json::json!({
+                            "itemId": item.id,
+                            "jpegBase64": dto.jpeg_base64,
+                            "width": dto.width,
+                            "height": dto.height,
+                            "title": dto.title,
+                            "hwnd": dto.hwnd,
+                        }),
+                    );
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(DOCK_PREVIEW_CAPTURE_GAP_MS));
             }
-            Err(_) => Ok(cached_dock_preview(&item_id)),
-        }
+        })
+        .ok();
+}
+
+/// Return a cached window thumbnail. Never blocks on capture — background refresher
+/// keeps the cache warm; hover only prioritizes the next grab.
+#[tauri::command]
+pub fn dock_capture_window_preview(item_id: String) -> Result<Option<DockWindowPreviewDto>, String> {
+    let id = item_id.trim().to_string();
+    if id.is_empty() {
+        return Ok(None);
     }
-    #[cfg(not(windows))]
-    {
-        let _ = w;
-        Ok(cached_dock_preview(&item_id))
-    }
+    request_preview_priority(&id);
+    Ok(cached_dock_preview(&id))
 }
 
 /// How many top-level windows match this dock item (for context menu).

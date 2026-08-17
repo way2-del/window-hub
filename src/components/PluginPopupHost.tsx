@@ -43,7 +43,16 @@ declare global {
         open: (path: string) => Promise<unknown>;
         reveal: (path: string) => Promise<unknown>;
       };
-      popup: { close: () => Promise<unknown> };
+      popup: {
+        close: () => Promise<unknown>;
+        resize?: (opts?: { width?: number; height?: number }) => Promise<unknown>;
+        setWindowedFullscreen?: (enabled: boolean) => Promise<unknown>;
+        openAsWindow?: (opts?: {
+          width?: number;
+          height?: number;
+          windowedFullscreen?: boolean;
+        }) => Promise<unknown>;
+      };
       applyEffect: (material?: string) => Promise<unknown>;
     };
   }
@@ -58,7 +67,38 @@ function resolvePluginId(): string {
 }
 
 function ensureHub(pluginId: string) {
-  if (window.hub?.pluginId === pluginId) return;
+  const patchPopup = (hub: NonNullable<Window["hub"]>) => {
+    const popup = hub.popup ?? { close: () => invoke("close_plugin_popup") };
+    hub.popup = {
+      close: popup.close ?? (() => invoke("close_plugin_popup")),
+      resize:
+        popup.resize ??
+        ((opts?: { width?: number; height?: number }) =>
+          invoke("resize_plugin_popup", {
+            width: opts?.width ?? 320,
+            height: opts?.height ?? 480,
+          })),
+      setWindowedFullscreen:
+        popup.setWindowedFullscreen ??
+        ((enabled: boolean) =>
+          invoke("set_plugin_popup_windowed_fullscreen", { enabled: !!enabled })),
+      openAsWindow:
+        popup.openAsWindow ??
+        ((opts?: { width?: number; height?: number; windowedFullscreen?: boolean }) =>
+          invoke("schedule_plugin_popup_as_window", {
+            pluginId,
+            width: opts?.width ?? 1120,
+            height: opts?.height ?? 720,
+            windowedFullscreen: !!opts?.windowedFullscreen,
+          })),
+    };
+  };
+
+  // Rust initialization_script already installs hub — still patch popup APIs.
+  if (window.hub?.pluginId === pluginId) {
+    patchPopup(window.hub);
+    return;
+  }
   window.__WH_PLUGIN_ID__ = pluginId;
 
   const withPlugin = (args?: Record<string, unknown>) => ({
@@ -153,6 +193,24 @@ function ensureHub(pluginId: string) {
     },
     popup: {
       close: () => invoke("close_plugin_popup"),
+      resize: (opts?: { width?: number; height?: number }) =>
+        invoke("resize_plugin_popup", {
+          width: opts?.width ?? 320,
+          height: opts?.height ?? 480,
+        }),
+      setWindowedFullscreen: (enabled: boolean) =>
+        invoke("set_plugin_popup_windowed_fullscreen", { enabled: !!enabled }),
+      openAsWindow: (opts?: {
+        width?: number;
+        height?: number;
+        windowedFullscreen?: boolean;
+      }) =>
+        invoke("schedule_plugin_popup_as_window", {
+          pluginId,
+          width: opts?.width ?? 1120,
+          height: opts?.height ?? 720,
+          windowedFullscreen: !!opts?.windowedFullscreen,
+        }),
     },
     applyEffect: (material?: string) =>
       material
@@ -165,6 +223,7 @@ type Boot = { css: string; js: string; pinyin?: string };
 
 /**
  * Host shell: Tauri IPC + inject plugin CSS/JS from disk (independent package).
+ * Native `plugin-window` uses OS caption + settings-frame Mica (same as settings).
  */
 export default function PluginPopupHost() {
   const pluginId = resolvePluginId();
@@ -183,7 +242,7 @@ export default function PluginPopupHost() {
         const prefs = await invoke<GlassPrefs>("get_material_prefs");
         await syncGlassCss({ ...prefs, kind: normalizeGlassKind(prefs.kind) });
       } catch {
-        await syncGlassCss({ kind: "mica-alt", dark: true });
+        await syncGlassCss({ kind: "mica-alt", dark: null });
       }
       await invoke("apply_window_effect", {}).catch(() => undefined);
     })();

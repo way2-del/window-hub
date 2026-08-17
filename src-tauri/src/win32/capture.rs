@@ -253,10 +253,13 @@ unsafe fn capture_printwindow_bgra(
     };
 
     // Full content first (GPU / Chromium); client-only as second attempt.
+    // Never return an unfiltered PrintWindow buffer — flat white looks "successful".
     try_flags(PW_RENDERFULLCONTENT)
         .filter(|b| bgra_looks_usable(b))
-        .or_else(|| try_flags(PW_CLIENTONLY | PW_RENDERFULLCONTENT).filter(|b| bgra_looks_usable(b)))
-        .or_else(|| try_flags(PW_RENDERFULLCONTENT))
+        .or_else(|| {
+            try_flags(PW_CLIENTONLY | PW_RENDERFULLCONTENT).filter(|b| bgra_looks_usable(b))
+        })
+        .or_else(|| try_flags(0).filter(|b| bgra_looks_usable(b)))
 }
 
 #[cfg(windows)]
@@ -326,11 +329,22 @@ fn encode_jpeg_bgra_thumb(
     }
     let img: ImageBuffer<Rgb<u8>, _> =
         ImageBuffer::from_raw(cw, ch, rgb).ok_or("ImageBuffer failed")?;
-    let thumb = imageops::thumbnail(&img, max_w.max(1), max_h.max(1));
+    let max_w = max_w.max(1);
+    let max_h = max_h.max(1);
+    let scale = (max_w as f64 / cw as f64)
+        .min(max_h as f64 / ch as f64)
+        .min(1.0);
+    let tw = ((cw as f64) * scale).round().max(1.0) as u32;
+    let th = ((ch as f64) * scale).round().max(1.0) as u32;
+    // Lanczos stays sharper than `thumbnail` (triangle) when downscaling large windows.
+    let thumb = if tw == cw && th == ch {
+        img
+    } else {
+        imageops::resize(&img, tw, th, imageops::FilterType::Lanczos3)
+    };
     let (tw, th) = (thumb.width(), thumb.height());
     let mut cursor = Cursor::new(Vec::new());
-    // Lower quality = smaller / faster encode for hover tips.
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 72);
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 88);
     enc.encode(thumb.as_raw(), tw, th, image::ExtendedColorType::Rgb8)
         .map_err(|e| format!("JPEG encode: {e}"))?;
     Ok(CapturedFrame {
@@ -479,8 +493,10 @@ pub fn capture_window_owned_jpeg(hwnd_raw: isize) -> Result<CapturedFrame, Strin
 }
 
 /// Dock / owned preview: prefer PrintWindow (works for many GPU apps), reject black frames.
-/// Minimized windows: try PrintWindow with normal size; if that fails, briefly
-/// restore without activating, capture, then minimize again.
+///
+/// **Never** soft-restores minimized windows — a background refresher doing
+/// ShowWindow(SW_SHOWNOACTIVATE)↔minimize flashes apps (e.g. Cursor) onto the
+/// desktop and poisons ambient chrome sampling.
 #[cfg(windows)]
 pub fn capture_window_owned_thumb_jpeg(
     hwnd_raw: isize,
@@ -489,8 +505,7 @@ pub fn capture_window_owned_thumb_jpeg(
 ) -> Result<CapturedFrame, String> {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowPlacement, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, ShowWindow,
-        WINDOWPLACEMENT, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+        GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
     };
 
     let hwnd = HWND(hwnd_raw as *mut _);
@@ -499,22 +514,17 @@ pub fn capture_window_owned_thumb_jpeg(
             return Err("Invalid window".into());
         }
 
-        let iconic = IsIconic(hwnd).as_bool();
-        if !iconic && !IsWindowVisible(hwnd).as_bool() {
+        if IsIconic(hwnd).as_bool() {
+            return Err("window minimized".into());
+        }
+        if !IsWindowVisible(hwnd).as_bool() {
             return Err("window not visible".into());
         }
 
-        let (full_w, full_h) = if iconic {
-            let mut place = WINDOWPLACEMENT::default();
-            place.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-            GetWindowPlacement(hwnd, &mut place).map_err(|e| format!("GetWindowPlacement: {e}"))?;
-            let r = place.rcNormalPosition;
-            ((r.right - r.left).max(1), (r.bottom - r.top).max(1))
-        } else {
-            let mut rect = RECT::default();
-            GetWindowRect(hwnd, &mut rect).map_err(|e| format!("GetWindowRect: {e}"))?;
-            ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1))
-        };
+        let mut rect = RECT::default();
+        GetWindowRect(hwnd, &mut rect).map_err(|e| format!("GetWindowRect: {e}"))?;
+        let full_w = (rect.right - rect.left).max(1);
+        let full_h = (rect.bottom - rect.top).max(1);
         if full_w > 8192 || full_h > 8192 {
             return Err("window size out of range".into());
         }
@@ -547,24 +557,20 @@ pub fn capture_window_owned_thumb_jpeg(
             None
         };
 
+        // First attempt, then one short retry — DWM/GPU apps often need a composed frame.
         if let Some(frame) = try_capture(hwnd, full_w, full_h) {
             return Ok(frame);
         }
-
-        // Minimized: PrintWindow often fails while iconic — soft-restore without
-        // stealing focus, capture, then put it back on the taskbar.
-        if iconic {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            // Re-read live size after restore (dpi / snap may differ from placement).
-            let mut rect = RECT::default();
-            let (rw, rh) = if GetWindowRect(hwnd, &mut rect).is_ok() {
-                ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1))
-            } else {
-                (full_w, full_h)
-            };
-            let frame = try_capture(hwnd, rw, rh);
-            let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
-            if let Some(frame) = frame {
+        std::thread::sleep(std::time::Duration::from_millis(28));
+        if let Some(frame) = try_capture(hwnd, full_w, full_h) {
+            return Ok(frame);
+        }
+        // On-screen blit last: PrintWindow/WindowDC often blank on Chromium/GPU,
+        // but the visible pixels are already composed.
+        if let Some(buf) =
+            capture_screen_bgra(rect.left, rect.top, full_w, full_h).filter(|b| bgra_looks_usable(b))
+        {
+            if let Ok(frame) = encode_jpeg_bgra_thumb(&buf, full_w, full_h, max_w, max_h) {
                 return Ok(frame);
             }
         }
