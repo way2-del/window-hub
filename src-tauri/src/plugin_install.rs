@@ -126,10 +126,15 @@ fn validate_manifest(v: &Value) -> Result<(String, String, String, Vec<String>),
     Ok((id, name, version, capabilities))
 }
 
+fn strip_utf8_bom(s: &str) -> &str {
+    s.strip_prefix('\u{feff}').unwrap_or(s)
+}
+
 fn read_manifest_file(dir: &Path) -> Result<Value, String> {
     let path = dir.join("plugin.json");
     let text = fs::read_to_string(&path).map_err(|e| format!("read plugin.json: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("parse plugin.json: {e}"))
+    serde_json::from_str(strip_utf8_bom(text.trim_start()))
+        .map_err(|e| format!("parse plugin.json: {e}"))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {

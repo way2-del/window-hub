@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   color-scheme: dark;
   --glass-panel-bg: rgba(28, 28, 30, 0.48);
   --glass-main-bg: #1c1c1e;
@@ -722,6 +722,12 @@ html[data-theme="light"] .scenario-gate-settings {
 .scenario-tray-picker-text.scenario-tray-picker-inline {
   width: min(200px, 100%);
   max-width: 200px;
+}
+
+/* Dock display modes have longer labels than autostart options. */
+.scenario-tray-picker-text.dock-display-mode-picker {
+  width: min(220px, 100%);
+  max-width: 220px;
 }
 
 html[data-theme="light"] .scenario-presence-badge {

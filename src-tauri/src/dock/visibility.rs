@@ -5,6 +5,9 @@
 //! 2. Shown  → pointer inside the **exact dock window rect** (or dock HWND) keeps it
 //! 3. Outside that area for `hide_linger_ms` → hide
 //!
+//! AutoHide additionally stays visible on the desktop / when nothing covers the
+//! dock bar (same clear-area idea as SmartHide), and `tick` honors that via `want`.
+//!
 //! Geometry always uses the dock window’s monitor (not the cursor’s) so a stacked
 //! upper display’s bottom edge (often y=0) cannot drive primary-dock reveal/hide.
 //! Animation is never cancelled mid-slide (`busy`).
@@ -303,11 +306,10 @@ impl DockVisibility {
             );
 
             if uses_linger {
-                let want_eff = match g.mode {
-                    DockDisplayMode::AutoHide => near,
-                    DockDisplayMode::SmartHide => want || near,
-                    _ => want,
-                };
+                // AutoHide/SmartHide: policy `want` (desktop / clear / edge) plus
+                // pointer hysteresis. AutoHide previously used `near` only, which
+                // ignored on-desktop and made that preference a no-op.
+                let want_eff = want || near;
 
                 if busy {
                     // In-flight slide — do not change desired / leave.
@@ -315,13 +317,10 @@ impl DockVisibility {
                     g.hide_deadline = None;
                     g.desired = true;
                 } else if want_eff {
-                    // Once a leave timer is armed, require a stronger "near"
-                    // (~200ms) before cancelling — prevents edge flicker resets.
-                    if g.hide_deadline.is_some() {
-                        if g.near_streak >= 4 {
-                            g.hide_deadline = None;
-                        }
-                    } else {
+                    // Policy `want` (desktop / clear) cancels leave immediately.
+                    // Pointer-only keep still needs a stronger near streak so
+                    // edge flicker does not reset the linger timer.
+                    if want || g.hide_deadline.is_none() || g.near_streak >= 4 {
                         g.hide_deadline = None;
                     }
                     g.desired = true;
@@ -468,7 +467,18 @@ impl DockVisibility {
             DockDisplayMode::Layered | DockDisplayMode::Always => (true, "always".into()),
             DockDisplayMode::AlwaysFullscreen => (true, "alwaysFullscreen".into()),
             DockDisplayMode::AutoHide => {
-                if near {
+                // Desktop (or nothing covering the dock) → stay shown.
+                // Otherwise edge reveal only. `want_eff` in tick must honor this.
+                if on_desktop || !overlapped {
+                    (
+                        true,
+                        if on_desktop {
+                            "autoHideDesktop".into()
+                        } else {
+                            "autoHideClear".into()
+                        },
+                    )
+                } else if near {
                     (true, "edge".into())
                 } else {
                     (false, "leave".into())
@@ -857,17 +867,28 @@ fn dock_root_screen_rect(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
 #[cfg(windows)]
 fn is_desktop_foreground() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindowTextW,
+        GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowTextW, GA_ROOT,
     };
     unsafe {
-        let fg = GetForegroundWindow();
-        if fg.0.is_null() {
+        let raw = GetForegroundWindow();
+        if raw.0.is_null() {
             return true;
         }
+        let fg = {
+            let root = GetAncestor(raw, GA_ROOT);
+            if root.0.is_null() {
+                raw
+            } else {
+                root
+            }
+        };
         let mut cls = [0u16; 64];
         let n = GetClassNameW(fg, &mut cls);
         let class = String::from_utf16_lossy(&cls[..n as usize]);
-        if class == "Progman" || class == "WorkerW" {
+        if matches!(
+            class.as_str(),
+            "Progman" | "WorkerW" | "SHELLDLL_DefView"
+        ) {
             return true;
         }
         let mut title = [0u16; 64];

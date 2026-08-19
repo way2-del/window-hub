@@ -106,7 +106,7 @@ const AUTOSTART_OPTIONS: { id: AutostartBackend; label: string; desc: string }[]
 const DOCK_MODES: { id: DockDisplayMode; label: string; desc: string }[] = [
   { id: "default", label: "默认显示模式", desc: "常驻贴底；全屏游戏时隐藏" },
   { id: "layered", label: "叠层显示模式", desc: "常驻并保持置顶" },
-  { id: "autoHide", label: "自动隐藏模式", desc: "鼠标贴屏幕最底边时显示" },
+  { id: "autoHide", label: "自动隐藏模式", desc: "桌面或底部无窗口遮挡时常显；有窗口盖住时贴底边唤出，移开后隐藏" },
   { id: "smartHide", label: "智能隐藏模式", desc: "窗口与 Dock 重叠时隐藏" },
   { id: "always", label: "始终显示模式", desc: "始终显示，并预留底部工作区（最大化窗口不会盖住 Dock）" },
   { id: "hotkey", label: "热键显示模式", desc: "Ctrl+Alt+D 切换显隐" },
@@ -1677,26 +1677,25 @@ export default function SettingsApp() {
                     <span className="pref-switch-knob" />
                   </button>
                 </label>
-                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                <div className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
                   <span className="pref-row-text">
                     <span className="pref-row-label">显示模式</span>
                     <span className="pref-row-desc">对齐 MyDockFinder 的八种底栏策略</span>
                   </span>
-                  <select
-                    className="pref-select"
-                    value={dockPrefs.displayMode}
+                  <PrefSelect
+                    ariaLabel="显示模式"
+                    className="dock-display-mode-picker"
                     disabled={!dockPrefs.enabled || dockBusy}
-                    onChange={(e) =>
-                      void persistDockPrefs({ displayMode: e.target.value as DockDisplayMode })
+                    value={dockPrefs.displayMode}
+                    options={DOCK_MODES.map((m) => ({
+                      value: m.id,
+                      label: m.label,
+                    }))}
+                    onChange={(next) =>
+                      void persistDockPrefs({ displayMode: next as DockDisplayMode })
                     }
-                  >
-                    {DOCK_MODES.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                  />
+                </div>
                 <p className="card-desc" style={{ marginTop: 4 }}>
                   {DOCK_MODES.find((m) => m.id === dockPrefs.displayMode)?.desc ?? ""}
                   {dockPrefs.displayMode === "hotkey" ? `（${dockPrefs.hotkey || "Ctrl+Alt+D"}）` : ""}

@@ -1,4 +1,19 @@
 fn main() {
+    // Ensure frontend embed invalidates when Vite output changes.
+    // Without this, release-fast incremental builds can keep a stale/empty
+    // asset map → runtime "asset not found: index.html".
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let dist_index = manifest_dir.join("../dist/index.html");
+    let dist_dir = manifest_dir.join("../dist");
+    println!("cargo:rerun-if-changed={}", dist_index.display());
+    println!("cargo:rerun-if-changed={}", dist_dir.join("assets").display());
+    if !dist_index.is_file() {
+        println!(
+            "cargo:warning=frontend missing at {} — run `npm run build` before tauri build",
+            dist_index.display()
+        );
+    }
+
     #[cfg(windows)]
     build_trayhook();
     #[cfg(windows)]

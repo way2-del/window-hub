@@ -2348,6 +2348,67 @@ function App() {
     void setBarHeight(islandH);
   }, [notifyStacked]);
 
+  // 叠层胶囊：主窗仍是全屏宽，左右透明条带必须 OS 级穿透。
+  // CSS pointer-events 不够时，按光标是否落在可点区域切换 ignoreCursorEvents。
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const passThrough =
+      notifyStacked && !expanded && !pulling && reveal <= 0.12;
+    if (!passThrough) {
+      void win.setIgnoreCursorEvents(false).catch(() => undefined);
+      return;
+    }
+
+    let cancelled = false;
+    let lastIgnore: boolean | null = null;
+    const pad = 2;
+
+    const hit = (r: DOMRect | undefined, x: number, y: number) => {
+      if (!r || r.width < 1 || r.height < 1) return false;
+      return (
+        x >= r.left - pad &&
+        x <= r.right + pad &&
+        y >= r.top - pad &&
+        y <= r.bottom + pad
+      );
+    };
+
+    const sync = async () => {
+      if (cancelled) return;
+      try {
+        const pos = await invoke<[number, number] | null>("main_cursor_client_pos");
+        if (!pos || cancelled) return;
+        const [x, y] = pos;
+        const over =
+          hit(notifyRef.current?.getBoundingClientRect(), x, y) ||
+          hit(islandRef.current?.getBoundingClientRect(), x, y) ||
+          hit(settingsAnchorRef.current?.getBoundingClientRect(), x, y) ||
+          hit(
+            document.querySelector(".shortcuts-host:not(.is-empty)")?.getBoundingClientRect(),
+            x,
+            y,
+          ) ||
+          hit(document.querySelector(".tray-cluster")?.getBoundingClientRect(), x, y);
+        const ignore = !over;
+        if (lastIgnore === ignore) return;
+        lastIgnore = ignore;
+        await win.setIgnoreCursorEvents(ignore);
+      } catch {
+        /* noop */
+      }
+    };
+
+    const id = window.setInterval(() => {
+      void sync();
+    }, 32);
+    void sync();
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      void win.setIgnoreCursorEvents(false).catch(() => undefined);
+    };
+  }, [notifyStacked, expanded, pulling, reveal]);
+
   // 岛栏折叠宽自适应：slots.island.bar.adaptiveWidth（如正在播放长歌词）
   useLayoutEffect(() => {
     if (

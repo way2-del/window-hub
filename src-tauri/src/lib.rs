@@ -421,6 +421,7 @@ pub fn run() {
             commands::forward_pointer,
             commands::forward_key,
             commands::self_hwnd,
+            commands::main_cursor_client_pos,
             commands::dock_set_visual_height,
             commands::float_overlay,
             commands::settle_overlay,

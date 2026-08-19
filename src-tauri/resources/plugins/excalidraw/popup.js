@@ -251,7 +251,7 @@
     frame.src = "https://excalidraw.com";
     frame.allow = "clipboard-read; clipboard-write";
     frame.style.cssText =
-      "width:100%;height:100%;border:0;display:block;background:#121212;";
+      "width:100%;height:100%;border:0;display:block;background:transparent;";
     canvas.appendChild(frame);
     setStatus("在线模式");
   }

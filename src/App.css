@@ -37,6 +37,8 @@ body,
 body.is-island,
 body.is-island #root {
   background: transparent !important;
+  /* Full-window shell: empty pixels must not own hits; children opt in. */
+  pointer-events: none;
 }
 
 body.is-settings,
@@ -106,6 +108,8 @@ button {
 }
 
 .shell > * {
+  /* Default: children receive hits. Passthrough shells (e.g. .island-notify-stack)
+     must set pointer-events: none !important to pierce this. */
   pointer-events: auto;
 }
 
@@ -654,7 +658,9 @@ button {
   animation: notify-drop-in 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* 冲突叠层：主岛下方独立胶囊（搜索 / 情景临时 / 下拉展开） */
+/* 冲突叠层：主岛下方独立胶囊（搜索 / 情景临时 / 下拉展开）
+   必须穿透左右空白：.shell > * 的 pointer-events:auto 不能盖住本层。 */
+.shell > .island-notify-stack,
 .island-notify-stack {
   position: absolute;
   left: 50%;
@@ -662,17 +668,20 @@ button {
   z-index: 6;
   display: flex;
   justify-content: center;
+  align-items: stretch;
   width: max-content;
   max-width: var(--notify-stack-max-w, 420px);
-  min-width: 148px;
+  min-width: 0;
   height: 28px;
-  pointer-events: none;
+  pointer-events: none !important;
 }
 
 .bar-notify.is-stacked {
   position: relative;
   inset: auto;
-  width: 100%;
+  /* Shrink-wrap to content — never stretch to island/window width. */
+  width: max-content;
+  max-width: 100%;
   height: 100%;
   padding: 0 12px;
   border-radius: 999px;

@@ -1,8 +1,8 @@
-﻿{
+{
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.excalidraw",
   "name": "Excalidraw",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "official": true,
   "logo": "icon.svg",
   "description": "快捷区先开较大弹窗，可向右拖拽加宽并记住大小；右下角图标窗口化，超过最大宽度自动全屏独立窗口。画布自动保存。首次需联网。",

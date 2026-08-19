@@ -13,18 +13,31 @@ if (Test-Path (Join-Path $lldBin "rust-lld.exe")) {
 }
 
 Write-Host "=== Stopping running Window Hub (if any) ==="
+$remaining = @()
 Get-Process -Name "window-hub" -ErrorAction SilentlyContinue | ForEach-Object {
   try {
     Stop-Process -Id $_.Id -Force -ErrorAction Stop
+    Write-Host "Stopped PID $($_.Id)"
   } catch {
     Write-Host "Could not stop PID $($_.Id): Access denied (may be service/elevated)."
-    Write-Host "End it in Task Manager, or re-run this script as Administrator."
+    $remaining += $_.Id
   }
 }
 Start-Sleep -Seconds 1
+$still = @(Get-Process -Name "window-hub" -ErrorAction SilentlyContinue)
+if ($still.Count -gt 0 -or $remaining.Count -gt 0) {
+  Write-Host ""
+  Write-Host "ERROR: window-hub.exe is still running. End it in Task Manager (or run this script as Administrator), then retry."
+  Write-Host "Otherwise the linker cannot replace the binary and you may launch a stale build (asset not found: index.html)."
+  exit 1
+}
 
 Write-Host "=== Window Hub: release-fast (no bundle, rust-lld) ==="
 Write-Host "Note: first build of a profile recompiles everything; later edits mainly re-link."
+# Touch frontend entry so tauri-build re-embeds dist into the binary.
+if (Test-Path "dist\index.html") {
+  (Get-Item "dist\index.html").LastWriteTime = Get-Date
+}
 npm run tauri:build:fast
 if ($LASTEXITCODE -ne 0) {
   Write-Host ""

@@ -1666,6 +1666,20 @@ fn chrome_tip_cursor_pos() -> Option<(i32, i32)> {
     None
 }
 
+/// Cursor position in the `main` webview's CSS client space (logical px).
+/// Used so stacked island notify can click-through beside the capsule.
+#[tauri::command]
+pub fn main_cursor_client_pos(app: AppHandle) -> Option<(f64, f64)> {
+    let (cx, cy) = chrome_tip_cursor_pos()?;
+    let win = app.get_webview_window("main")?;
+    let pos = win.outer_position().ok()?;
+    let scale = win.scale_factor().ok()?.max(0.1);
+    Some((
+        (cx as f64 - pos.x as f64) / scale,
+        (cy as f64 - pos.y as f64) / scale,
+    ))
+}
+
 fn chrome_tip_cursor_over_host(app: &AppHandle) -> bool {
     let Some((cx, cy)) = chrome_tip_cursor_pos() else {
         // Unknown cursor — keep tip (avoid flicker on transient API failure).

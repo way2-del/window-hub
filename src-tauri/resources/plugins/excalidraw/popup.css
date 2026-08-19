@@ -1,4 +1,5 @@
-/* Excalidraw — popup shell + native window shell */
+/* Excalidraw — popup shell + native window shell.
+   Outer shell must stay transparent / glass so Host Mica shows through. */
 
 #app.wg-shell.ex-popup,
 #app.wg-shell.ex-native {
@@ -10,17 +11,19 @@
   flex-direction: column;
   gap: 0;
   overflow: hidden;
-  background: #121212;
-  color: #f4f4f5;
+  /* Never opaque fill — Host applies Mica + --glass-panel-bg. */
+  background: transparent;
+  color: var(--glass-fg, #f4f4f5);
   font: 500 12px/1.3 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color-scheme: dark;
   position: relative;
 }
 
-/* Popup: keep content off the Mica edge a bit */
+/* Popup: keep content off the Mica edge (skill tokens). */
 #app.wg-shell.ex-popup {
-  padding: 10px 12px 12px 10px;
-  gap: 10px;
+  padding: var(--wh-popup-pad-top, 12px) var(--wh-popup-pad-x, 12px)
+    var(--wh-popup-pad-bottom, 14px);
+  gap: var(--wh-popup-gap, 10px);
 }
 
 /* Right-edge drag to widen popup */
@@ -60,13 +63,15 @@
   flex: 1;
   min-height: 0;
   position: relative;
-  background: #121212;
+  background: transparent;
   border-radius: 12px;
   overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 #app.wg-shell.ex-native .ex-canvas {
   border-radius: 0;
+  box-shadow: none;
 }
 
 .ex-canvas > div,
@@ -81,7 +86,7 @@
   height: 100%;
   border: 0;
   display: block;
-  background: #121212;
+  background: transparent;
 }
 
 .ex-dock {
@@ -192,6 +197,8 @@
   text-align: center;
   color: rgba(250, 250, 250, 0.7);
   font-size: 13px;
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.35));
+  border-radius: inherit;
 }
 
 .ex-error {
