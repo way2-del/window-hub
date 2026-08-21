@@ -2,10 +2,10 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.file-search",
   "name": "文件搜索",
-  "version": "1.5.3",
+  "version": "1.5.5",
   "official": true,
   "logo": "icon.svg",
-  "description": "情景临时：Alt+空格搜索。空态为可自定义卡片组网格（分类/拖拽/改大小）；有关键字则类型过滤 + Everything 结果。需本机已运行 Everything。",
+  "description": "情景临时：全局热键搜索（默认同系统岛栏搜索）。空态为可自定义卡片组网格；有关键字则 Everything 结果。需本机已运行 Everything。",
   "entry": {
     "panel": "panel.html"
   },
@@ -22,6 +22,26 @@
       "excludeFromPullContent": true
     }
   },
+  "settings": [
+    {
+      "key": "openSearch",
+      "type": "hotkey",
+      "label": "打开搜索",
+      "description": "与系统「打开岛栏搜索」同步，可在设置 → 快捷键中统一修改",
+      "default": "Alt+Space",
+      "action": "island.search.toggle",
+      "maxLength": 64
+    },
+    {
+      "key": "openFavorites",
+      "type": "hotkey",
+      "label": "打开常用卡片组",
+      "description": "展开搜索面板并进入「常用」分类；留空禁用",
+      "default": "Alt+Space+Space",
+      "action": "fileSearch.openFavorites",
+      "maxLength": 64
+    }
+  ],
   "capabilities": [
     "storage",
     "island.panel",

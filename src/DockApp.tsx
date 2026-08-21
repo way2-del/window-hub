@@ -28,6 +28,7 @@ import {
   dockIconTipPointerProps,
   installChromeHoverTipGlobalDismiss,
   isInteractiveChromeHoverTipLive,
+  clearDockPreviewSoftCache,
 } from "./chromeHoverTip";
 import { DockStartIcon, DockTrashIcon, DOCK_START_BG, DOCK_TRASH_BG, DOCK_AUTO_PLATE_BG } from "./dockIcons";
 import { useDockIconPlate } from "./dockIconPlate";
@@ -63,6 +64,7 @@ type DockPrefs = {
   hiddenItemIds?: string[];
   hoverWindowPreview?: boolean;
   hoverPreviewDelayMs?: number;
+  hoverPreviewHeightPx?: number;
 };
 
 type HubWindow = {
@@ -1088,6 +1090,16 @@ export default function DockApp() {
       // Reorder persist emits stripped pins (no icons) — applying that prefs
       // blob mid-fan hitchs the bar. Ignore until quiet persist finishes.
       if (dndActiveRef.current || persistQuietRef.current) return;
+      const prevH = prefsRef.current?.hoverPreviewHeightPx;
+      const nextH = e.payload?.hoverPreviewHeightPx;
+      if (
+        typeof nextH === "number" &&
+        Number.isFinite(nextH) &&
+        prevH != null &&
+        nextH !== prevH
+      ) {
+        clearDockPreviewSoftCache();
+      }
       setPrefs(e.payload);
       void refreshDisplay();
     }).then((u) => unsubs.push(u));
@@ -1851,10 +1863,11 @@ export default function DockApp() {
                           {...(draggingId
                             ? {}
                             : dockIconTipPointerProps(label, {
-                                gap: 8,
+                                gap: 2,
                                 windowPreviewItemId:
                                   prefs?.hoverWindowPreview && running ? item.id : null,
                                 settleMs: prefs?.hoverPreviewDelayMs,
+                                previewHeightPx: prefs?.hoverPreviewHeightPx,
                                 iconPngBase64: item.iconPng || null,
                               }))}
                           style={

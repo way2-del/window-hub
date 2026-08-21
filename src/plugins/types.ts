@@ -43,7 +43,8 @@ export type PluginSettingType =
   | "number"
   | "select"
   | "radio"
-  | "multiSelect";
+  | "multiSelect"
+  | "hotkey";
 
 export type PluginSettingOption = {
   value: string | number | boolean;
@@ -55,6 +56,8 @@ export type PluginSettingField = {
   type: PluginSettingType;
   label: string;
   description?: string;
+  /** Host `hotkey-action` id when type is hotkey (default: key). */
+  action?: string;
   default?: unknown;
   options?: PluginSettingOption[];
   min?: number;

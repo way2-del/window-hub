@@ -46,8 +46,16 @@ Rust 单例轮询（默认 250ms），事件 `hub-windows-changed`。多插件 `
 
 ## `hub.settings.*`
 
-`plugin.json` → `settings[]`；类型 `boolean` / `string` / `number` / `select` / `radio` / `multiSelect`。  
-示例：中转站 `panelWidth` / `panelHeight`。Host 面板尺寸：settings → `defaultSize` → 380×220。
+`plugin.json` → `settings[]`；类型 `boolean` / `string` / `number` / `select` / `radio` / `multiSelect` / **`hotkey`**。  
+示例：中转站 `panelWidth` / `panelHeight`；文件搜索 `openSearch` / `openFavorites`（`type: "hotkey"`）。  
+Host 面板尺寸：settings → `defaultSize` → 380×220。
+
+### 全局热键（`type: "hotkey"`）
+
+- 存规范化 chord（`Ctrl+Alt+D`）；空字符串禁用。
+- 可选 `action`：命中后 Host emit `hotkey-action` `{ pluginId, action, chord }`（缺省用 settings `key`）。
+- `action: "island.search.toggle"`：与系统「打开岛栏搜索」别名，不重复 `RegisterHotKey`。
+- 统一页：设置 → **快捷键**（系统 / 插件）；冲突时拒绝保存。
 
 ## `hub.staging.*`
 

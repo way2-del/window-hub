@@ -24,15 +24,20 @@ import { subscribeSystemDark, syncGlassCss } from "./glassPrefs";
 import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginsMarketPanel from "./PluginsMarketPanel";
 import ShortcutsScopeSettings from "./components/ShortcutsScopeSettings";
+import HotkeysSettingsPanel from "./components/HotkeysSettingsPanel";
 import {
   parseScopes,
   type ShortcutsPluginScope,
 } from "./shortcutsPrefs";
 import PrefSelect from "./components/PrefSelect";
+import {
+  subscribeSettingsToast,
+  type SettingsToastPayload,
+} from "./components/settingsToastBus";
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
-type NavId = "general" | "theme" | "dock" | "shortcuts" | "tray" | "plugins" | "developer";
+type NavId = "general" | "theme" | "dock" | "shortcuts" | "hotkeys" | "tray" | "plugins" | "developer";
 
 type DockDisplayMode =
   | "default"
@@ -78,6 +83,8 @@ type DockPrefs = {
   hoverWindowPreview: boolean;
   /** Delay before showing hover preview (ms). */
   hoverPreviewDelayMs: number;
+  /** Thumbnail height in CSS px (default 160). */
+  hoverPreviewHeightPx: number;
 };
 
 type AutostartBackend = "service" | "task" | "none";
@@ -140,6 +147,13 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
     hoverPreviewDelayMs: Math.min(
       2000,
       Math.max(0, Number.isFinite(Number(dp?.hoverPreviewDelayMs)) ? Number(dp?.hoverPreviewDelayMs) : 120),
+    ),
+    hoverPreviewHeightPx: Math.min(
+      320,
+      Math.max(
+        96,
+        Number.isFinite(Number(dp?.hoverPreviewHeightPx)) ? Number(dp?.hoverPreviewHeightPx) : 160,
+      ),
     ),
   };
 }
@@ -371,6 +385,17 @@ const NAV: { id: NavId; label: string; tint: string; icon: ReactNode }[] = [
     ),
   },
   {
+    id: "hotkeys",
+    label: "快捷键",
+    tint: "#ff9f0a",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="2" y="6" width="20" height="12" rx="2" />
+        <path d="M6 10h.01M10 10h4M16 10h2M8 14h8" />
+      </svg>
+    ),
+  },
+  {
     id: "tray",
     label: "托盘",
     tint: "#30d158",
@@ -445,6 +470,9 @@ export default function SettingsApp() {
   const [trayDetailKey, setTrayDetailKey] = useState<string | null>(null);
   const [menuHeightDraft, setMenuHeightDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const [settingsToast, setSettingsToast] = useState<SettingsToastPayload | null>(
+    null,
+  );
   const [dockPrefs, setDockPrefs] = useState<DockPrefs>(() => normalizeDockPrefs(null));
   const [dockMsg, setDockMsg] = useState("");
   const [dockBusy, setDockBusy] = useState(false);
@@ -508,6 +536,8 @@ export default function SettingsApp() {
     return () => un?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- seed nav once from init focus
   }, []);
+
+  useEffect(() => subscribeSettingsToast(setSettingsToast), []);
 
   const pullOptions = useMemo(() => {
     const panels = listPanelProviders(pluginRegistry.listPanelManifests());
@@ -1479,6 +1509,8 @@ export default function SettingsApp() {
             </>
           )}
 
+          {nav === "hotkeys" && <HotkeysSettingsPanel />}
+
           {nav === "shortcuts" && (
             <>
               <section className="settings-card">
@@ -1790,7 +1822,7 @@ export default function SettingsApp() {
                   <span className="pref-row-text">
                     <span className="pref-row-label">悬停窗口预览</span>
                     <span className="pref-row-desc">
-                      鼠标放在正在运行的应用图标上时，显示该窗口实时缩略图
+                      鼠标放在正在运行的应用图标上时，显示窗口实时缩略图；同一应用多开时并排显示
                     </span>
                   </span>
                   <button
@@ -1836,6 +1868,47 @@ export default function SettingsApp() {
                     }}
                     style={{ width: 88, textAlign: "right" }}
                   />
+                </label>
+                <label
+                  className={`pref-row${dockPrefs.enabled && dockPrefs.hoverWindowPreview ? "" : " is-disabled"}`}
+                >
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">预览高度</span>
+                    <span className="pref-row-desc">
+                      缩略图高度（像素，默认 160；多开窗口并排显示）
+                    </span>
+                  </span>
+                  <span className="dock-mag-controls">
+                    <input
+                      type="range"
+                      min={96}
+                      max={320}
+                      step={8}
+                      value={dockPrefs.hoverPreviewHeightPx}
+                      disabled={!dockPrefs.enabled || !dockPrefs.hoverWindowPreview || dockBusy}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (!Number.isFinite(n)) return;
+                        setDockPrefs((p) => ({ ...p, hoverPreviewHeightPx: n }));
+                      }}
+                      onPointerUp={(e) => {
+                        const n = Math.min(
+                          320,
+                          Math.max(96, Number((e.target as HTMLInputElement).value) || 160),
+                        );
+                        void persistDockPrefs({ hoverPreviewHeightPx: n });
+                      }}
+                      onKeyUp={(e) => {
+                        const n = Math.min(
+                          320,
+                          Math.max(96, Number((e.target as HTMLInputElement).value) || 160),
+                        );
+                        void persistDockPrefs({ hoverPreviewHeightPx: n });
+                      }}
+                      style={{ width: 120 }}
+                    />
+                    <span className="dock-mag-value">{dockPrefs.hoverPreviewHeightPx}px</span>
+                  </span>
                 </label>
               </section>
               <section className="settings-card">
@@ -2146,6 +2219,20 @@ export default function SettingsApp() {
 
           {nav === "developer" && <SqliteDevPanel />}
         </div>
+
+        {settingsToast ? (
+          <div key={settingsToast.id} className="settings-toast" role="alert">
+            <span className="settings-toast-text">{settingsToast.text}</span>
+            <button
+              type="button"
+              className="settings-toast-dismiss"
+              aria-label="关闭"
+              onClick={() => setSettingsToast(null)}
+            >
+              ✕
+            </button>
+          </div>
+        ) : null}
       </main>
 
       {installPending ? (

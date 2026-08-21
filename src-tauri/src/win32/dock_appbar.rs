@@ -11,6 +11,8 @@ mod win {
     use std::thread;
     use std::time::Duration;
 
+    use crate::win32::work_area;
+
     use windows::core::w;
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
@@ -19,7 +21,7 @@ mod win {
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::Shell::{
         SHAppBarMessage, ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
-        ABM_WINDOWPOSCHANGED, ABN_POSCHANGED, APPBARDATA,
+        ABN_POSCHANGED, APPBARDATA,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, LoadCursorW, MoveWindow,
@@ -45,6 +47,8 @@ mod win {
 
     static TX: Mutex<Option<Sender<Cmd>>> = Mutex::new(None);
     static REGISTERED: AtomicBool = AtomicBool::new(false);
+    /// Last *intended* strip — see top `appbar.rs` (avoid SETPOS↔ABN loops).
+    static LAST_DESIRED: Mutex<Option<RECT>> = Mutex::new(None);
     static LAST_RC: Mutex<Option<RECT>> = Mutex::new(None);
     static STRIP_PX: AtomicI32 = AtomicI32::new(0);
 
@@ -100,6 +104,9 @@ mod win {
     ) -> LRESULT {
         if msg == APPBAR_CALLBACK {
             if lparam.0 as u32 == ABN_POSCHANGED {
+                if work_area::work_area_quiet() {
+                    return LRESULT(0);
+                }
                 let _ = apply_pos(hwnd, None, false);
             }
             return LRESULT(0);
@@ -143,20 +150,24 @@ mod win {
 
     fn apply_pos(host: HWND, anchor: Option<HWND>, force: bool) -> bool {
         let probe = anchor.unwrap_or(host);
-        let Some(mut rc) = desired_strip(probe) else {
+        let Some(desired) = desired_strip(probe) else {
             return false;
         };
 
         if !force {
-            if let Ok(guard) = LAST_RC.lock() {
+            if work_area::work_area_quiet() {
+                return true;
+            }
+            if let Ok(guard) = LAST_DESIRED.lock() {
                 if let Some(prev) = *guard {
-                    if rect_eq(&prev, &rc) {
+                    if rect_eq(&prev, &desired) {
                         return true;
                     }
                 }
             }
         }
 
+        let mut rc = desired;
         let mut data = abd_for(host, rc);
         unsafe {
             SHAppBarMessage(ABM_QUERYPOS, &mut data);
@@ -176,10 +187,12 @@ mod win {
                 (rc.bottom - rc.top).max(1),
                 false,
             );
-            let mut changed = abd_for(host, rc);
-            SHAppBarMessage(ABM_WINDOWPOSCHANGED, &mut changed);
+            // Skip ABM_WINDOWPOSCHANGED — re-broadcasts ABN and fights the top AppBar.
         }
 
+        if let Ok(mut guard) = LAST_DESIRED.lock() {
+            *guard = Some(desired);
+        }
         if let Ok(mut guard) = LAST_RC.lock() {
             *guard = Some(rc);
         }
@@ -244,6 +257,9 @@ mod win {
             let _ = DestroyWindow(host);
         }
         if let Ok(mut guard) = LAST_RC.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = LAST_DESIRED.lock() {
             *guard = None;
         }
     }

@@ -327,10 +327,17 @@ fn validate_setting_value(field: &Value, value: &Value) -> Result<(), String> {
                 return Err(format!("settings.{key} must be boolean"));
             }
         }
-        "string" => {
+        "string" | "hotkey" => {
             let s = value
                 .as_str()
                 .ok_or_else(|| format!("settings.{key} must be string"))?;
+            if ty == "hotkey" {
+                #[cfg(windows)]
+                {
+                    let _ = crate::win32::hotkey_registry::normalize_chord(s)
+                        .map_err(|e| format!("settings.{key}: {e}"))?;
+                }
+            }
             if let Some(max) = field.get("maxLength").and_then(|m| m.as_u64()) {
                 if s.len() as u64 > max {
                     return Err(format!("settings.{key} exceeds maxLength"));
@@ -528,6 +535,15 @@ pub fn hub_settings_set(
         "plugin-settings-changed",
         serde_json::json!({ "pluginId": plugin_id, "settings": all }),
     );
+    // Hotkey fields may change global RegisterHotKey set.
+    #[cfg(windows)]
+    {
+        let is_hotkey = field.get("type").and_then(|t| t.as_str()) == Some("hotkey");
+        if is_hotkey {
+            crate::win32::hotkey_registry::reload(&app);
+            let _ = app.emit("hotkeys-changed", true);
+        }
+    }
     Ok(all)
 }
 

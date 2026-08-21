@@ -648,7 +648,10 @@ pub fn relaunch_now(_as_admin: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn relaunch_app(app: AppHandle, as_admin: bool) -> Result<(), String> {
     #[cfg(windows)]
-    crate::win32::autostart_svc::clear_user_quit();
+    {
+        crate::win32::autostart_svc::note_expect_relaunch();
+        crate::win32::autostart_svc::clear_user_quit();
+    }
     relaunch_now(as_admin)?;
     app.exit(0);
     Ok(())

@@ -325,7 +325,8 @@
             "number",
             "select",
             "radio",
-            "multiSelect"
+            "multiSelect",
+            "hotkey"
           ]
         },
         "label": {
@@ -334,6 +335,11 @@
         },
         "description": {
           "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Host hotkey-action id when type is hotkey (default: settings key). Use island.search.toggle to alias the system island-search chord."
         },
         "default": {},
         "options": {

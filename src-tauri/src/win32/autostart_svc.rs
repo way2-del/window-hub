@@ -36,7 +36,7 @@ pub const SERVICE_NAME: &str = "WindowHubAutoStart";
 pub const SERVICE_DISPLAY: &str = "Window Hub Auto Start";
 /// Manual-reset Global event: set by GUI “退出”, cleared on service start / GUI start / restart.
 /// Keeps the SCM worker from treating intentional quit as a crash to relaunch.
-pub const USER_QUIT_EVENT: &str = "Global\\com.xushi.window-hub.user-quit";
+pub const USER_QUIT_EVENT: &str = "Global\\com.xushi.window-hub.user-quit.v2";
 const LAUNCH_RETRY_SECS: u64 = 3;
 /// After CreateProcessAsUser, wait this long before treating the GUI as "up".
 const LAUNCH_VERIFY_SECS: u64 = 2;
@@ -45,6 +45,8 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static STATUS_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 /// Service holds this so the named event survives across GUI process lifetimes.
 static QUIT_EVENT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+/// GUI is handing off to a new process (`restart` / `relaunch`) — do not set quit on Exit.
+static EXPECT_RELAUNCH: AtomicBool = AtomicBool::new(false);
 
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -102,24 +104,76 @@ fn quit_event_handle() -> Option<HANDLE> {
     }
 }
 
+/// SDDL: Authenticated Users can signal / wait / reset the Global event.
+/// Without this, Session-0 (SYSTEM) creates the event and the interactive GUI
+/// gets ACCESS_DENIED on SetEvent — service then treats every quit as a crash.
+fn quit_event_security_attributes() -> Option<(
+    windows::Win32::Security::SECURITY_ATTRIBUTES,
+    windows::Win32::Security::PSECURITY_DESCRIPTOR,
+)> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+    // GA = generic all for Authenticated Users (AU).
+    let sddl = wide("D:(A;;GA;;;AU)");
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut sd,
+            None,
+        )
+    };
+    if ok.is_err() || sd.is_invalid() {
+        return None;
+    }
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0,
+        bInheritHandle: false.into(),
+    };
+    Some((sa, sd))
+}
+
+fn create_quit_event_shared(initial_signaled: bool) -> Result<HANDLE, windows::core::Error> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::System::Threading::CreateEventW;
+
+    let name = wide(USER_QUIT_EVENT);
+    if let Some((sa, sd)) = quit_event_security_attributes() {
+        let result = unsafe {
+            CreateEventW(
+                Some(&sa),
+                true,
+                initial_signaled,
+                PCWSTR(name.as_ptr()),
+            )
+        };
+        unsafe {
+            let _ = LocalFree(HLOCAL(sd.0 as _));
+        }
+        return result;
+    }
+    unsafe { CreateEventW(None, true, initial_signaled, PCWSTR(name.as_ptr())) }
+}
+
 /// Create (or open) the Global quit event and keep a handle in `QUIT_EVENT`.
 fn ensure_quit_event_held() -> Option<HANDLE> {
-    use windows::Win32::System::Threading::CreateEventW;
     if let Some(h) = quit_event_handle() {
         return Some(h);
     }
-    let name = wide(USER_QUIT_EVENT);
-    unsafe {
-        // Manual-reset, initially nonsignaled.
-        match CreateEventW(None, true, false, PCWSTR(name.as_ptr())) {
-            Ok(h) => {
-                QUIT_EVENT.store(h.0 as isize, Ordering::SeqCst);
-                Some(h)
-            }
-            Err(e) => {
-                svc_log(&format!("CreateEvent user-quit: {e}"));
-                None
-            }
+    match create_quit_event_shared(false) {
+        Ok(h) => {
+            QUIT_EVENT.store(h.0 as isize, Ordering::SeqCst);
+            Some(h)
+        }
+        Err(e) => {
+            svc_log(&format!("CreateEvent user-quit: {e}"));
+            None
         }
     }
 }
@@ -135,39 +189,56 @@ fn user_quit_signaled() -> bool {
 
 /// GUI “退出 window-hub”: tell the autostart service not to relaunch this session.
 pub fn signal_user_quit() {
-    use windows::Win32::System::Threading::{
-        CreateEventW, OpenEventW, SetEvent, EVENT_MODIFY_STATE,
-    };
+    use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
     let name = wide(USER_QUIT_EVENT);
     unsafe {
-        let handle = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())).or_else(|_| {
-            // No service holding the event yet — create, signal, then drop.
-            CreateEventW(None, true, false, PCWSTR(name.as_ptr()))
-        });
-        if let Ok(h) = handle {
-            let _ = SetEvent(h);
-            // Do not CloseHandle if we own the service-held static.
-            if QUIT_EVENT.load(Ordering::SeqCst) == 0 {
-                let _ = CloseHandle(h);
+        let handle = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr()))
+            .or_else(|_| create_quit_event_shared(false));
+        match handle {
+            Ok(h) => {
+                if SetEvent(h).is_err() {
+                    eprintln!("[autostart] SetEvent user-quit failed");
+                }
+                if QUIT_EVENT.load(Ordering::SeqCst) == 0 {
+                    let _ = CloseHandle(h);
+                }
+            }
+            Err(e) => {
+                eprintln!("[autostart] Open/Create user-quit event failed: {e}");
             }
         }
     }
 }
 
+/// Call from Tauri `RunEvent::Exit` so any quit path (not only `exit_app`) suppresses relaunch.
+pub fn signal_user_quit_unless_relaunching() {
+    if EXPECT_RELAUNCH.load(Ordering::SeqCst) {
+        return;
+    }
+    signal_user_quit();
+}
+
+/// Next process exit is a handoff (`restart_app` / `relaunch_app`) — allow service recovery.
+pub fn note_expect_relaunch() {
+    EXPECT_RELAUNCH.store(true, Ordering::SeqCst);
+}
+
 /// Allow autostart relaunch again (GUI start, restart, or fresh service boot).
 pub fn clear_user_quit() {
-    use windows::Win32::System::Threading::{
-        CreateEventW, OpenEventW, ResetEvent, EVENT_MODIFY_STATE,
-    };
+    use windows::Win32::System::Threading::{OpenEventW, ResetEvent, EVENT_MODIFY_STATE};
     let name = wide(USER_QUIT_EVENT);
     unsafe {
-        let handle = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())).or_else(|_| {
-            CreateEventW(None, true, false, PCWSTR(name.as_ptr()))
-        });
-        if let Ok(h) = handle {
-            let _ = ResetEvent(h);
-            if QUIT_EVENT.load(Ordering::SeqCst) == 0 {
-                let _ = CloseHandle(h);
+        let handle = OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr()))
+            .or_else(|_| create_quit_event_shared(false));
+        match handle {
+            Ok(h) => {
+                let _ = ResetEvent(h);
+                if QUIT_EVENT.load(Ordering::SeqCst) == 0 {
+                    let _ = CloseHandle(h);
+                }
+            }
+            Err(e) => {
+                eprintln!("[autostart] clear user-quit failed: {e}");
             }
         }
     }

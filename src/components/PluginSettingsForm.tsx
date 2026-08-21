@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { PluginSettingField } from "../plugins/types";
 import { OPEN_TRAY_SETTING_KEY } from "../scenarioGates";
+import HotkeyRecorder from "./HotkeyRecorder";
 import OpenTraySetting from "./OpenTraySetting";
 import PluginOffsetNumberField from "./PluginOffsetNumberField";
 import PrefSelect from "./PrefSelect";
@@ -223,6 +224,46 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
                 onChange={(e) => void setField(field.key, Number(e.target.value))}
               />
             </label>
+          );
+        }
+        if (field.type === "hotkey") {
+          const chord = typeof value === "string" ? value : String(value ?? "");
+          const aliasesSearch = field.action === "island.search.toggle";
+          const bindingId = aliasesSearch
+            ? "system.islandSearch"
+            : `plugin.${pluginId}:${field.key}`;
+          return (
+            <div key={field.key} className="pref-row">
+              <span className="pref-row-text">
+                <span className="pref-row-label">{field.label}</span>
+                <span className="pref-row-desc">
+                  {aliasesSearch
+                    ? "与系统「打开岛栏搜索」同步"
+                    : desc || field.action || field.key}
+                </span>
+              </span>
+              <HotkeyRecorder
+                bindingId={bindingId}
+                value={chord}
+                disabled={busy}
+                onError={setError}
+                onCommit={async (c) => {
+                  if (aliasesSearch) {
+                    await invoke("set_hotkey_binding", {
+                      id: "system.islandSearch",
+                      chord: c,
+                    });
+                    const all = await invoke<Record<string, unknown>>(
+                      "hub_settings_get_all",
+                      { pluginId },
+                    );
+                    setValues(all ?? {});
+                    return;
+                  }
+                  await setField(field.key, c);
+                }}
+              />
+            </div>
           );
         }
         // string

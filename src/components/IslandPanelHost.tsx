@@ -18,7 +18,7 @@ type Props = {
   active: boolean;
   onPanelClose?: () => void;
   /** Alt+Space 岛栏回车：把 query 转发给当前面板 iframe */
-  searchSubmit?: { nonce: number; query: string } | null;
+  searchSubmit?: { nonce: number; query: string; action?: string } | null;
 };
 
 type PendingPanelScripts = {
@@ -368,7 +368,7 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
       {
         channel: "island-search-fwd",
         pluginId,
-        action: "submit",
+        action: searchSubmit.action || "submit",
         query: searchSubmit.query ?? "",
         nonce: searchSubmit.nonce,
       },

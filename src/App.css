@@ -2190,7 +2190,7 @@ html[data-theme="light"] .global-dialog-btn {
   border-color: rgba(0, 0, 0, 0.12);
 }
 
-/* Host chrome hover tip — same glass wash + DWM mica as plugin-popup / .wg-shell */
+/* Host chrome hover tip — same glass wash + DWM mica as .status-menu-shell */
 html:has(body.is-chrome-hover-tip),
 body.is-chrome-hover-tip,
 body.is-chrome-hover-tip #root {
@@ -2199,7 +2199,7 @@ body.is-chrome-hover-tip #root {
   margin: 0 !important;
   padding: 0 !important;
   overflow: hidden !important;
-  /* HWND gets system mica; CSS wash matches .plugin-popup-frame / .wg-shell */
+  /* HWND gets system mica; root wash is on .chrome-hover-tip-root only */
   background: transparent !important;
   color: var(--glass-fg, #f4f4f5);
   pointer-events: none;
@@ -2213,11 +2213,20 @@ body.is-chrome-hover-tip #root {
   margin: 0;
   padding: 0;
   pointer-events: none;
-  /* Same wash as island top-bar tip / status menu — no caret */
-  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+  /* Mirror .status-menu-shell: 10px + DWM ROUND, Host SWCA blur (no backdrop-filter). */
+  --cht-radius: 10px;
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.72));
   color: var(--glass-fg, #f4f4f5);
-  border-radius: 0;
+  border: none;
+  border-radius: var(--cht-radius);
+  overflow: hidden;
   position: relative;
+}
+
+/* Hide until HWND is sized/placed at the final anchor — no stub→slide flash. */
+.chrome-hover-tip-root.is-pending {
+  opacity: 0 !important;
+  visibility: hidden;
 }
 
 .chrome-hover-tip-box {
@@ -2226,9 +2235,10 @@ body.is-chrome-hover-tip #root {
   height: 100%;
   max-width: none;
   margin: 0;
-  padding: 8px 11px;
+  /* Symmetric pad — uneven 8/11 made text tips look off-center. */
+  padding: 8px;
   border: none;
-  border-radius: 0;
+  border-radius: inherit;
   background: transparent;
   color: var(--glass-fg, #f4f4f5);
   box-shadow: none;
@@ -2268,9 +2278,36 @@ body.is-chrome-hover-tip #root {
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
-  /* Preview drives tip width (true window aspect); title stretches to match. */
+  /* Preview drives tip width; never stretch to a wrong HWND. */
   width: max-content;
+  height: auto;
   max-width: none;
+  box-sizing: border-box;
+}
+
+.chrome-hover-tip-previews {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.chrome-hover-tip-preview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  /* Width locked to thumb in JS — title ellipsizes, never widens the shell. */
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  position: relative;
+  cursor: pointer;
 }
 
 .chrome-hover-tip-title-row {
@@ -2278,12 +2315,17 @@ body.is-chrome-hover-tip #root {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 280px;
-  padding: 0 2px;
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  box-sizing: border-box;
+  /* Reserve space so title doesn't jump when close fades in; close is absolute. */
+  padding-right: 22px;
 }
 
+.chrome-hover-tip-preview-card .chrome-hover-tip-title-row,
 .chrome-hover-tip-root.has-preview .chrome-hover-tip-title-row {
-  max-width: none;
+  max-width: 100%;
   width: 100%;
 }
 
@@ -2307,7 +2349,11 @@ body.is-chrome-hover-tip #root {
 }
 
 .chrome-hover-tip-close {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  flex: none;
   width: 22px;
   height: 22px;
   margin: 0;
@@ -2337,25 +2383,25 @@ body.is-chrome-hover-tip #root {
 }
 
 .chrome-hover-tip-preview-wrap {
-  /* Unified height; width set in JS = height × JPEG aspect (full window, no crop). */
-  --dock-preview-h: 160px;
+  /* Inline width/height from JS (aspect × preview height). */
   position: relative;
-  height: var(--dock-preview-h);
   width: max-content;
-  margin: 0 auto;
+  height: auto;
+  margin: 0;
   border-radius: 6px;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.22);
   flex: 0 0 auto;
+  align-self: stretch;
 }
 
 .chrome-hover-tip-preview {
   display: block;
-  height: var(--dock-preview-h);
   width: auto;
+  height: auto;
   border-radius: 6px;
-  /* Exact pixel box matches aspect — show entire capture, never crop/stretch. */
-  object-fit: fill;
+  /* Box is sized to aspect — fill without distorting if inline size races. */
+  object-fit: contain;
   /* Prefer crisp downscale from HiDPI capture; avoid browser soft upscale look. */
   image-rendering: -webkit-optimize-contrast;
   background: transparent;

@@ -5,6 +5,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export type ChromeHoverTipPlacement = "above" | "below";
 
+export type ChromeHoverTipPreview = {
+  jpegBase64: string;
+  title: string;
+  hwnd: number;
+};
+
 export type ChromeHoverTipShowOpts = {
   /** Prefer multi-line tip. */
   lines?: string[];
@@ -16,6 +22,10 @@ export type ChromeHoverTipShowOpts = {
   iconPngBase64?: string;
   /** Target HWND for interactive preview close button. */
   hwnd?: number | null;
+  /** Multi-instance window thumbnails (side-by-side). */
+  previews?: ChromeHoverTipPreview[];
+  /** Thumbnail CSS height from Dock prefs (default 160). */
+  previewHeightPx?: number;
   /** Dock item id — click preview launches/focuses like the icon. */
   itemId?: string | null;
   /** Viewport coords inside the calling window (logical CSS px). */
@@ -86,11 +96,16 @@ function tipPaintSig(
   icon: string | undefined,
   opts: ChromeHoverTipShowOpts,
 ): string {
+  const previewsSig = (opts.previews || [])
+    .map((p) => `${p.hwnd}:${blobFp(p.jpegBase64)}:${(p.title || "").slice(0, 24)}`)
+    .join(";");
   return [
     lines.join("\n"),
     blobFp(image),
     blobFp(icon),
+    previewsSig,
     opts.hwnd != null && Number.isFinite(opts.hwnd) ? Math.trunc(opts.hwnd) : "",
+    typeof opts.previewHeightPx === "number" ? Math.round(opts.previewHeightPx) : "",
     (opts.itemId || "").trim(),
     opts.placement === "above" ? "above" : "below",
     Math.round(opts.x),
@@ -208,9 +223,23 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
         if (!pending) return;
 
         const paintLines = normalizeLines(pending);
-        const paintImage = (pending.imageJpegBase64 || "").trim() || undefined;
+        const paintPreviews = (pending.previews || [])
+          .map((p) => ({
+            jpegBase64: (p.jpegBase64 || "").trim(),
+            title: String(p.title || "").trim(),
+            hwnd:
+              typeof p.hwnd === "number" && Number.isFinite(p.hwnd) && p.hwnd !== 0
+                ? Math.trunc(p.hwnd)
+                : 0,
+          }))
+          .filter((p) => p.jpegBase64 && p.hwnd)
+          .slice(0, 8);
+        const paintImage =
+          paintPreviews[0]?.jpegBase64 ||
+          (pending.imageJpegBase64 || "").trim() ||
+          undefined;
         const paintIcon = (pending.iconPngBase64 || "").trim() || undefined;
-        if (!paintLines.length && !paintImage) {
+        if (!paintLines.length && !paintImage && !paintPreviews.length) {
           await hideChromeHoverTip();
           return;
         }
@@ -220,6 +249,7 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
           pending.placement === "above" ? "above" : "below";
         const sig = tipPaintSig(paintLines, paintImage, paintIcon, {
           ...pending,
+          previews: paintPreviews,
           gap,
           placement,
         });
@@ -228,10 +258,11 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
         }
 
         const wantInteractive = Boolean(
-          paintImage &&
-            pending.hwnd != null &&
-            Number.isFinite(pending.hwnd) &&
-            pending.hwnd !== 0,
+          paintPreviews.length > 0 ||
+            (paintImage &&
+              pending.hwnd != null &&
+              Number.isFinite(pending.hwnd) &&
+              pending.hwnd !== 0),
         );
 
         try {
@@ -251,11 +282,24 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
             placement,
             imageJpegBase64: paintImage ?? null,
             hwnd:
-              pending.hwnd != null && Number.isFinite(pending.hwnd)
+              paintPreviews[0]?.hwnd ??
+              (pending.hwnd != null && Number.isFinite(pending.hwnd)
                 ? Math.trunc(pending.hwnd)
-                : null,
+                : null),
             itemId: (pending.itemId || "").trim() || null,
             iconPngBase64: paintIcon ?? null,
+            previews: paintPreviews.length
+              ? paintPreviews.map((p) => ({
+                  jpegBase64: p.jpegBase64,
+                  title: p.title,
+                  hwnd: p.hwnd,
+                }))
+              : null,
+            previewHeightPx:
+              typeof pending.previewHeightPx === "number" &&
+              Number.isFinite(pending.previewHeightPx)
+                ? Math.min(320, Math.max(96, Math.round(pending.previewHeightPx)))
+                : null,
           });
           if (!tipWanted || epoch !== tipToken) {
             if (!tipWanted) {
@@ -281,10 +325,11 @@ export async function showChromeHoverTip(opts: ChromeHoverTipShowOpts): Promise<
       if (showCoalesceOpts && tipWanted && epoch === tipToken) {
         const pending = showCoalesceOpts;
         const flushInteractive = Boolean(
-          (pending.imageJpegBase64 || "").trim() &&
-            pending.hwnd != null &&
-            Number.isFinite(pending.hwnd) &&
-            pending.hwnd !== 0,
+          (pending.previews && pending.previews.length > 0) ||
+            ((pending.imageJpegBase64 || "").trim() &&
+              pending.hwnd != null &&
+              Number.isFinite(pending.hwnd) &&
+              pending.hwnd !== 0),
         );
         clearShowDebounceTimerOnly();
         if (flushInteractive) {
@@ -361,10 +406,15 @@ const DOCK_TIP_HIDE_GRACE_MS = 120;
 /** Soft FE mirror of backend cache — hover paints instantly; refresher updates. */
 const DOCK_PREVIEW_CACHE_TTL_MS = 30_000;
 
-type DockPreviewCacheEntry = {
+type DockPreviewWindow = {
   jpegBase64: string;
   title: string;
-  hwnd?: number;
+  hwnd: number;
+};
+
+type DockPreviewCacheEntry = {
+  windows: DockPreviewWindow[];
+  previewHeightPx: number;
   at: number;
 };
 
@@ -381,6 +431,7 @@ let dockPreviewActiveId: string | null = null;
 let dockPreviewActiveText = "";
 let dockPreviewActiveIcon: string | undefined;
 let dockPreviewActiveGap = 8;
+let dockPreviewActiveHeight = 160;
 let dockPreviewReadyListening = false;
 /** Last jpeg fp applied to the open preview tip — skip identical background frames. */
 let dockPreviewShownJpegFp = "";
@@ -406,6 +457,26 @@ function measureDockHit(el: HTMLElement): DOMRect | null {
   return r;
 }
 
+/**
+ * Tip sits just above the live `.dock-hit` (already grows with magnification).
+ * Do not reserve the full HWND headroom — that left a large empty gap above the icon.
+ * Fan-arm race is handled by the short re-anchor after settle.
+ */
+function measureDockTipAnchor(el: HTMLElement): { x: number; y: number } | null {
+  const r = measureDockHit(el);
+  if (!r) return null;
+  return {
+    x: r.left + r.width / 2,
+    y: r.top,
+  };
+}
+
+function windowsFp(windows: DockPreviewWindow[]): string {
+  return windows
+    .map((w) => `${w.hwnd}:${blobFp(w.jpegBase64)}:${(w.title || "").slice(0, 24)}`)
+    .join(";");
+}
+
 function readPreviewCache(itemId: string): DockPreviewCacheEntry | null {
   const hit = dockPreviewCache.get(itemId);
   if (!hit) return null;
@@ -418,15 +489,113 @@ function readPreviewCache(itemId: string): DockPreviewCacheEntry | null {
 
 function writePreviewCache(
   itemId: string,
-  jpegBase64: string,
-  title: string,
-  hwnd?: number,
+  windows: DockPreviewWindow[],
+  previewHeightPx: number,
 ) {
+  if (!windows.length) return;
   dockPreviewCache.set(itemId, {
-    jpegBase64,
-    title,
-    hwnd,
+    windows,
+    previewHeightPx,
     at: performance.now(),
+  });
+}
+
+/** Drop FE soft cache (e.g. preview height changed) so width remeasures from fresh frames. */
+export function clearDockPreviewSoftCache() {
+  dockPreviewCache.clear();
+  dockPreviewShownJpegFp = "";
+}
+
+function normalizeCaptureWindows(
+  raw:
+    | {
+        windows?: Array<{
+          jpegBase64?: string;
+          title?: string;
+          hwnd?: number;
+        }>;
+        jpegBase64?: string;
+        title?: string;
+        hwnd?: number;
+        previewHeightPx?: number;
+      }
+    | null
+    | undefined,
+  fallbackTitle: string,
+): { windows: DockPreviewWindow[]; previewHeightPx: number } | null {
+  if (!raw) return null;
+  const height =
+    typeof raw.previewHeightPx === "number" && Number.isFinite(raw.previewHeightPx)
+      ? Math.min(320, Math.max(96, Math.round(raw.previewHeightPx)))
+      : dockPreviewActiveHeight;
+  let windows: DockPreviewWindow[] = [];
+  if (Array.isArray(raw.windows) && raw.windows.length) {
+    const parsed: DockPreviewWindow[] = [];
+    for (const w of raw.windows) {
+      const jpegBase64 = (w.jpegBase64 || "").trim();
+      const hwnd =
+        typeof w.hwnd === "number" && Number.isFinite(w.hwnd) && w.hwnd !== 0
+          ? Math.trunc(w.hwnd)
+          : 0;
+      if (!jpegBase64 || !hwnd) continue;
+      parsed.push({
+        jpegBase64,
+        title: (w.title || "").trim() || fallbackTitle,
+        hwnd,
+      });
+      if (parsed.length >= 8) break;
+    }
+    windows = parsed;
+  } else {
+    const jpeg = (raw.jpegBase64 || "").trim();
+    const hwnd =
+      typeof raw.hwnd === "number" && Number.isFinite(raw.hwnd) && raw.hwnd !== 0
+        ? Math.trunc(raw.hwnd)
+        : 0;
+    if (jpeg && hwnd) {
+      windows = [
+        {
+          jpegBase64: jpeg,
+          title: (raw.title || "").trim() || fallbackTitle,
+          hwnd,
+        },
+      ];
+    }
+  }
+  if (!windows.length) return null;
+  return { windows, previewHeightPx: height };
+}
+
+function paintDockPreviewTip(
+  el: HTMLElement,
+  text: string,
+  gap: number,
+  icon: string | undefined,
+  previewId: string,
+  windows: DockPreviewWindow[],
+  previewHeightPx: number,
+  immediate: boolean,
+) {
+  const anchor = measureDockTipAnchor(el);
+  if (!anchor) return;
+  const first = windows[0];
+  void showChromeHoverTip({
+    text: first?.title || text,
+    imageJpegBase64: first?.jpegBase64,
+    iconPngBase64: icon,
+    hwnd: first?.hwnd,
+    itemId: previewId,
+    previews: windows.map((w) => ({
+      jpegBase64: w.jpegBase64,
+      title: w.title || text,
+      hwnd: w.hwnd,
+    })),
+    previewHeightPx,
+    x: anchor.x,
+    y: anchor.y,
+    placement: "above",
+    gap,
+    immediate,
   });
 }
 
@@ -438,36 +607,33 @@ function ensureDockPreviewReadyListener() {
     jpegBase64?: string;
     title?: string;
     hwnd?: number;
+    previewHeightPx?: number;
+    windows?: Array<{
+      jpegBase64?: string;
+      title?: string;
+      hwnd?: number;
+    }>;
   }>("dock-preview-ready", (ev) => {
     const itemId = (ev.payload?.itemId || "").trim();
-    const jpeg = (ev.payload?.jpegBase64 || "").trim();
-    if (!itemId || !jpeg) return;
-    const title = (ev.payload?.title || "").trim();
-    const hwnd =
-      typeof ev.payload?.hwnd === "number" && Number.isFinite(ev.payload.hwnd)
-        ? ev.payload.hwnd
-        : undefined;
-    writePreviewCache(itemId, jpeg, title || itemId, hwnd);
+    if (!itemId) return;
+    const normalized = normalizeCaptureWindows(ev.payload, itemId);
+    if (!normalized) return;
+    writePreviewCache(itemId, normalized.windows, normalized.previewHeightPx);
     if (dockPreviewActiveId !== itemId || !dockTipVisibleFor) return;
-    const fp = blobFp(jpeg);
+    const fp = windowsFp(normalized.windows);
     if (fp === dockPreviewShownJpegFp) return;
     dockPreviewShownJpegFp = fp;
-    const el = dockTipVisibleFor;
-    const r = measureDockHit(el);
-    if (!r) return;
-    // Debounced update path (immediate + already painted → TIP_UPDATE_DEBOUNCE_MS).
-    void showChromeHoverTip({
-      text: title || dockPreviewActiveText,
-      imageJpegBase64: jpeg,
-      iconPngBase64: dockPreviewActiveIcon,
-      hwnd,
+    dockPreviewActiveHeight = normalized.previewHeightPx;
+    paintDockPreviewTip(
+      dockTipVisibleFor,
+      dockPreviewActiveText,
+      dockPreviewActiveGap,
+      dockPreviewActiveIcon,
       itemId,
-      x: r.left + r.width / 2,
-      y: r.top,
-      placement: "above",
-      gap: dockPreviewActiveGap,
-      immediate: true,
-    });
+      normalized.windows,
+      normalized.previewHeightPx,
+      true,
+    );
   });
 }
 
@@ -487,14 +653,18 @@ function showDockTipForEl(
   gap: number,
   windowPreviewItemId?: string | null,
   iconPngBase64?: string | null,
+  previewHeightPx?: number | null,
 ) {
-  const r = measureDockHit(el);
-  if (!r) return;
+  const anchor = measureDockTipAnchor(el);
+  if (!anchor) return;
   dockTipVisibleFor = el;
-  const x = r.left + r.width / 2;
-  const y = r.top;
+  const { x, y } = anchor;
   const previewId = (windowPreviewItemId || "").trim();
   const icon = (iconPngBase64 || "").trim() || undefined;
+  const height =
+    typeof previewHeightPx === "number" && Number.isFinite(previewHeightPx)
+      ? Math.min(320, Math.max(96, Math.round(previewHeightPx)))
+      : 160;
 
   if (!previewId) {
     dockPreviewActiveId = null;
@@ -507,6 +677,22 @@ function showDockTipForEl(
       gap,
       immediate: true,
     });
+    // Fan may arm after settle — re-anchor once without content flash if Y drops.
+    window.setTimeout(() => {
+      if (dockTipVisibleFor !== el) return;
+      const a2 = measureDockTipAnchor(el);
+      if (!a2) return;
+      if (Math.abs(a2.y - y) < 1 && Math.abs(a2.x - x) < 1) return;
+      void showChromeHoverTip({
+        text,
+        iconPngBase64: icon,
+        x: a2.x,
+        y: a2.y,
+        placement: "above",
+        gap,
+        immediate: true,
+      });
+    }, 160);
     return;
   }
 
@@ -519,29 +705,30 @@ function showDockTipForEl(
   dockPreviewActiveText = text;
   dockPreviewActiveIcon = icon;
   dockPreviewActiveGap = gap;
+  dockPreviewActiveHeight = height;
   dockPreviewShownJpegFp = "";
 
   const soft = readPreviewCache(previewId);
-  if (soft) {
-    dockPreviewShownJpegFp = blobFp(soft.jpegBase64);
-    void showChromeHoverTip({
-      text: soft.title || text,
-      imageJpegBase64: soft.jpegBase64,
-      iconPngBase64: icon,
-      hwnd: soft.hwnd,
-      itemId: previewId,
-      x,
-      y,
-      placement: "above",
+  if (soft?.windows.length) {
+    dockPreviewShownJpegFp = windowsFp(soft.windows);
+    // Always use current prefs height — stale soft.previewHeightPx squeezed width after resize.
+    paintDockPreviewTip(
+      el,
+      text,
       gap,
-      immediate: true,
-    });
+      icon,
+      previewId,
+      soft.windows,
+      height,
+      true,
+    );
   } else {
     // Title + icon immediately; thumbnail arrives via cache / dock-preview-ready.
     void showChromeHoverTip({
       text,
       iconPngBase64: icon,
       itemId: previewId,
+      previewHeightPx: height,
       x,
       y,
       placement: "above",
@@ -550,38 +737,71 @@ function showDockTipForEl(
     });
   }
 
-  // Cache-only backend read (prioritizes background refresh) — never waits on capture.
-  void (async () => {
-    try {
-      const prev = await invoke<{
-        jpegBase64?: string;
-        title?: string;
-        hwnd?: number;
-      } | null>("dock_capture_window_preview", { itemId: previewId });
-      if (gen !== dockPreviewGen || dockTipVisibleFor !== el) return;
-      const jpeg = (prev?.jpegBase64 || "").trim();
-      if (!jpeg) return;
-      const title = (prev?.title || "").trim() || text;
-      const hwnd =
-        typeof prev?.hwnd === "number" && Number.isFinite(prev.hwnd) ? prev.hwnd : undefined;
-      writePreviewCache(previewId, jpeg, title, hwnd);
-      const fp = blobFp(jpeg);
-      if (fp === dockPreviewShownJpegFp) return;
-      dockPreviewShownJpegFp = fp;
-      const r2 = measureDockHit(el);
-      if (!r2 || dockTipVisibleFor !== el) return;
+  // After fan arms / chrome widens, nudge tip above peaking icon (same payload).
+  window.setTimeout(() => {
+    if (dockTipVisibleFor !== el || gen !== dockPreviewGen) return;
+    const a2 = measureDockTipAnchor(el);
+    if (!a2) return;
+    if (Math.abs(a2.y - y) < 1 && Math.abs(a2.x - x) < 1) return;
+    const soft2 = readPreviewCache(previewId);
+    if (soft2?.windows.length) {
+      paintDockPreviewTip(
+        el,
+        text,
+        gap,
+        icon,
+        previewId,
+        soft2.windows,
+        height,
+        true,
+      );
+    } else {
       void showChromeHoverTip({
-        text: title,
-        imageJpegBase64: jpeg,
+        text,
         iconPngBase64: icon,
-        hwnd,
         itemId: previewId,
-        x: r2.left + r2.width / 2,
-        y: r2.top,
+        previewHeightPx: height,
+        x: a2.x,
+        y: a2.y,
         placement: "above",
         gap,
         immediate: true,
       });
+    }
+  }, 160);
+
+  // Cache-only backend read (prioritizes background refresh) — never waits on capture.
+  void (async () => {
+    try {
+      const prev = await invoke<{
+        windows?: Array<{
+          jpegBase64?: string;
+          title?: string;
+          hwnd?: number;
+        }>;
+        jpegBase64?: string;
+        title?: string;
+        hwnd?: number;
+        previewHeightPx?: number;
+      } | null>("dock_capture_window_preview", { itemId: previewId });
+      if (gen !== dockPreviewGen || dockTipVisibleFor !== el) return;
+      const normalized = normalizeCaptureWindows(prev, text);
+      if (!normalized) return;
+      writePreviewCache(previewId, normalized.windows, normalized.previewHeightPx);
+      const fp = windowsFp(normalized.windows);
+      if (fp === dockPreviewShownJpegFp) return;
+      dockPreviewShownJpegFp = fp;
+      if (dockTipVisibleFor !== el) return;
+      paintDockPreviewTip(
+        el,
+        text,
+        gap,
+        icon,
+        previewId,
+        normalized.windows,
+        normalized.previewHeightPx,
+        true,
+      );
     } catch {
       /* keep text / soft tip */
     }
@@ -595,6 +815,7 @@ function scheduleDockTipShow(
   windowPreviewItemId?: string | null,
   settleMs?: number,
   iconPngBase64?: string | null,
+  previewHeightPx?: number | null,
 ) {
   clearDockTipHideTimer();
   clearDockTipShowTimer();
@@ -625,7 +846,7 @@ function scheduleDockTipShow(
   dockTipShowTimer = setTimeout(() => {
     dockTipShowTimer = null;
     if (dockTipEl !== el) return;
-    showDockTipForEl(el, text, gap, windowPreviewItemId, iconPngBase64);
+    showDockTipForEl(el, text, gap, windowPreviewItemId, iconPngBase64, previewHeightPx);
   }, delay);
 }
 
@@ -667,6 +888,8 @@ export function dockIconTipPointerProps(
     settleMs?: number;
     /** Dock tile icon (PNG base64) for preview title row. */
     iconPngBase64?: string | null;
+    /** Thumbnail height in CSS px (Dock prefs). */
+    previewHeightPx?: number | null;
   },
 ): {
   onPointerEnter?: (e: ReactPointerEvent<HTMLElement>) => void;
@@ -674,10 +897,11 @@ export function dockIconTipPointerProps(
 } {
   const tip = (text ?? "").trim();
   if (!tip) return {};
-  const gap = typeof opts?.gap === "number" ? opts.gap : 8;
+  const gap = typeof opts?.gap === "number" ? opts.gap : 2;
   const windowPreviewItemId = opts?.windowPreviewItemId ?? null;
   const settleMs = opts?.settleMs;
   const iconPngBase64 = opts?.iconPngBase64 ?? null;
+  const previewHeightPx = opts?.previewHeightPx ?? null;
   return {
     onPointerEnter: (e) => {
       scheduleDockTipShow(
@@ -687,6 +911,7 @@ export function dockIconTipPointerProps(
         windowPreviewItemId,
         settleMs,
         iconPngBase64,
+        previewHeightPx,
       );
     },
     onPointerLeave: (e) => {

@@ -1289,8 +1289,33 @@ function bind() {
 
 function onHostSearch(ev) {
   const d = ev?.detail;
-  if (!d || d.action !== "submit") return;
+  if (!d) return;
+  if (d.action === "openFavorites") {
+    void openFavoritesHome();
+    return;
+  }
+  if (d.action !== "submit") return;
   void runSearch(d.query || "");
+}
+
+/** Host hotkey: expand to card-group home on the 「常用」 folder. */
+async function openFavoritesHome() {
+  const fav =
+    state.store.folders.find((f) => f.name === "常用") ||
+    state.store.folders[0] ||
+    null;
+  if (fav) state.activeFolderId = fav.id;
+  state.query = "";
+  state.view = "home";
+  state.results = [];
+  state.total = 0;
+  state.error = null;
+  state.loading = false;
+  state.typeFilterId = "all";
+  state.editing = false;
+  state.form = null;
+  state.hitMenuIndex = null;
+  render();
 }
 
 async function boot() {

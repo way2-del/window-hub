@@ -1,4 +1,5 @@
 # Fast local release: no installer bundle, release-fast profile, then launch.
+# For a distributable setup.exe use:  .\build-installer.ps1
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
