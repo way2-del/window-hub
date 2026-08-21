@@ -329,12 +329,21 @@ fn install_from_dir(app: &AppHandle, src: &Path, is_dev: bool) -> Result<Install
         None
     };
 
+    let prev_enabled = {
+        let reg = load_registry();
+        reg.plugins
+            .iter()
+            .find(|p| p.id == install_id)
+            .map(|p| p.enabled)
+    };
+
     let record = InstalledPluginRecord {
         id: install_id,
         name,
         version,
         path: dest.to_string_lossy().to_string(),
-        enabled: true,
+        // Preserve user toggle across resync / upgrade (never force-enable).
+        enabled: prev_enabled.unwrap_or(true),
         is_dev,
         dev_source,
         capabilities,
@@ -468,6 +477,8 @@ pub fn set_plugin_enabled(
     }
     let _ = app.emit("shortcuts-pins-changed", pins.all_flat());
     emit_plugins(&app, &reg);
+    #[cfg(windows)]
+    crate::win32::hotkey_registry::reload(&app);
     Ok(())
 }
 

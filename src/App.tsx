@@ -645,12 +645,16 @@ function App() {
   const [searchSubmit, setSearchSubmit] = useState<{
     nonce: number;
     query: string;
+    action?: string;
   } | null>(null);
   const searchModeRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   /** collapse 时保留搜索态（Alt+空格从展开切回「仅搜索栏」） */
   const retainSearchModeRef = useRef(false);
   const toggleIslandSearchHotkeyRef = useRef<(() => void | Promise<void>) | null>(
+    null,
+  );
+  const openFavoritesHotkeyRef = useRef<(() => void | Promise<void>) | null>(
     null,
   );
   /** Esc 退出过渡：先播动画再卸 DOM */
@@ -1693,6 +1697,7 @@ function App() {
 
     void (async () => {
       try {
+        // Prefer event stream; invoke is non-blocking (no foreign BitBlt).
         const first = await invoke<Ambient>("sample_ambient_color");
         if (!cancelled) setAmbient(first);
       } catch {
@@ -2095,9 +2100,24 @@ function App() {
     }).then((fn) => {
       unlistenSession = fn;
     });
-    void listen("island-search-hotkey", () => {
-      console.info("[island-search] hotkey");
-      void toggleIslandSearchHotkeyRef.current?.();
+    void listen<{
+      action?: string;
+      pluginId?: string | null;
+      id?: string;
+    }>("hotkey-action", (ev) => {
+      const action = ev.payload?.action ?? "";
+      console.info("[hotkey-action]", action, ev.payload?.id);
+      if (action === "island.search.toggle") {
+        void toggleIslandSearchHotkeyRef.current?.();
+        return;
+      }
+      if (
+        action === "fileSearch.openFavorites" ||
+        (ev.payload?.pluginId === "com.window-hub.file-search" &&
+          action === "openFavorites")
+      ) {
+        void openFavoritesHotkeyRef.current?.();
+      }
     }).then((fn) => {
       unlistenSearchHotkey = fn;
     });
@@ -2727,6 +2747,27 @@ function App() {
   }
   toggleIslandSearchHotkeyRef.current = () => {
     void toggleIslandSearchMode();
+  };
+
+  async function openFileSearchFavorites() {
+    const FALLBACK = "com.window-hub.file-search";
+    const pluginId = resolveIslandSearchPluginId() ?? FALLBACK;
+    bumpIslandActivity();
+    await enterIslandSearchMode();
+    armPluginSession(pluginId);
+    const fire = () =>
+      setSearchSubmit({
+        nonce: Date.now(),
+        query: "",
+        action: "openFavorites",
+      });
+    if (!expandedRef.current) {
+      await expand({ force: true });
+    }
+    fire();
+  }
+  openFavoritesHotkeyRef.current = () => {
+    void openFileSearchFavorites();
   };
 
   function submitIslandSearch() {

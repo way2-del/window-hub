@@ -262,6 +262,53 @@ unsafe fn capture_printwindow_bgra(
         .or_else(|| try_flags(0).filter(|b| bgra_looks_usable(b)))
 }
 
+/// PrintWindow can block forever on a hung target. Run it off-thread with a short
+/// timeout so Dock/ECS/ambient never freeze Window Hub's IPC (UI "未响应").
+#[cfg(windows)]
+fn capture_printwindow_bgra_timed(
+    hwnd: windows::Win32::Foundation::HWND,
+    w: i32,
+    h: i32,
+) -> Option<Vec<u8>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use windows::Win32::Foundation::HWND;
+
+    static PW_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+    const PW_MAX: usize = 2;
+    const PW_TIMEOUT_MS: u64 = 180;
+
+    let raw = hwnd.0 as isize;
+    if crate::win32::hang::is_hung_hwnd(raw) {
+        return None;
+    }
+    if PW_INFLIGHT.load(Ordering::SeqCst) >= PW_MAX {
+        return None;
+    }
+    PW_INFLIGHT.fetch_add(1, Ordering::SeqCst);
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("pw-cap".into())
+        .spawn(move || {
+            let result = unsafe { capture_printwindow_bgra(HWND(raw as *mut _), w, h) };
+            let _ = tx.send(result);
+            PW_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+        })
+        .is_ok();
+    if !spawned {
+        PW_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+        return None;
+    }
+    match rx.recv_timeout(Duration::from_millis(PW_TIMEOUT_MS)) {
+        Ok(v) => v,
+        Err(_) => {
+            // Worker still blocked on PrintWindow — slot stays until it returns.
+            None
+        }
+    }
+}
+
 #[cfg(windows)]
 fn encode_jpeg_bgra(bgra: &[u8], full_w: i32, full_h: i32, roi: Roi) -> Result<CapturedFrame, String> {
     use image::{ImageBuffer, ImageFormat, Rgb};
@@ -417,11 +464,11 @@ pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, S
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
         ReleaseDC, SelectObject, SRCCOPY,
     };
-    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
     use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect, IsWindow};
 
-    const PW_CLIENTONLY: u32 = 0x1;
-    const PW_RENDERFULLCONTENT: u32 = 0x2;
+    if crate::win32::hang::is_hung_hwnd(hwnd_raw) {
+        return Err("window hung".into());
+    }
 
     let hwnd = HWND(hwnd_raw as *mut _);
     unsafe {
@@ -442,13 +489,14 @@ pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, S
                 bgra = capture_windowdc_bgra(hwnd, full_w, full_h).filter(|b| !bgra_is_blank(b));
             }
             if bgra.is_none() {
-                bgra = capture_printwindow_bgra(hwnd, full_w, full_h).filter(|b| !bgra_is_blank(b));
+                bgra =
+                    capture_printwindow_bgra_timed(hwnd, full_w, full_h).filter(|b| !bgra_is_blank(b));
             }
             let bgra = bgra.ok_or_else(|| "window capture blank".to_string())?;
             return encode_jpeg_bgra(&bgra, full_w, full_h, Roi::default());
         }
 
-        // ROI path (ECS): client-area PrintWindow / BitBlt, coords relative to client.
+        // ROI path (ECS): prefer BitBlt; timed PrintWindow only as fallback.
         let mut rect = RECT::default();
         GetClientRect(hwnd, &mut rect).map_err(|e| format!("GetClientRect: {e}"))?;
         let full_w = (rect.right - rect.left).max(1);
@@ -470,16 +518,21 @@ pub fn capture_window_jpeg(hwnd_raw: isize, roi: Roi) -> Result<CapturedFrame, S
             return Err("CreateCompatibleBitmap failed".into());
         }
         let old = SelectObject(hdc_mem, hbmp);
-        let flags = PRINT_WINDOW_FLAGS(PW_CLIENTONLY | PW_RENDERFULLCONTENT);
-        let printed = PrintWindow(hwnd, hdc_mem, flags).as_bool();
-        if !printed {
-            let _ = BitBlt(hdc_mem, 0, 0, full_w, full_h, hdc_win, 0, 0, SRCCOPY);
-        }
-        let bgra = dibits_bgra(hdc_mem, hbmp, full_w, full_h);
+        let blitted = BitBlt(hdc_mem, 0, 0, full_w, full_h, hdc_win, 0, 0, SRCCOPY).is_ok();
+        let mut bgra = if blitted {
+            dibits_bgra(hdc_mem, hbmp, full_w, full_h).filter(|b| !bgra_is_blank(b))
+        } else {
+            None
+        };
         let _ = SelectObject(hdc_mem, old);
         let _ = DeleteObject(hbmp);
         let _ = DeleteDC(hdc_mem);
         ReleaseDC(hwnd, hdc_win);
+
+        if bgra.is_none() {
+            // Timed PW — never block ECS thread forever on hung/GPU targets.
+            bgra = capture_printwindow_bgra_timed(hwnd, full_w, full_h).filter(|b| !bgra_is_blank(b));
+        }
         let bgra = bgra.ok_or_else(|| "GetDIBits failed".to_string())?;
         encode_jpeg_bgra(&bgra, full_w, full_h, roi)
     }
@@ -507,6 +560,10 @@ pub fn capture_window_owned_thumb_jpeg(
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
     };
+
+    if crate::win32::hang::is_hung_hwnd(hwnd_raw) {
+        return Err("window hung".into());
+    }
 
     let hwnd = HWND(hwnd_raw as *mut _);
     unsafe {
@@ -539,20 +596,21 @@ pub fn capture_window_owned_thumb_jpeg(
             let dst_w = ((full_w as f64) * scale).round().max(1.0) as i32;
             let dst_h = ((full_h as f64) * scale).round().max(1.0) as i32;
 
-            if let Some(buf) =
-                capture_printwindow_bgra(hwnd, full_w, full_h).filter(|b| bgra_looks_usable(b))
+            // WindowDC / stretch first — PrintWindow last with timeout (hang-safe).
+            if let Some(buf) = capture_windowdc_thumb_bgra(hwnd, full_w, full_h, dst_w, dst_h)
+                .filter(|b| bgra_looks_usable(b))
             {
-                return encode_jpeg_bgra_thumb(&buf, full_w, full_h, max_w, max_h).ok();
+                return encode_jpeg_bgra_thumb(&buf, dst_w, dst_h, max_w, max_h).ok();
             }
             if let Some(buf) =
                 capture_windowdc_bgra(hwnd, full_w, full_h).filter(|b| bgra_looks_usable(b))
             {
                 return encode_jpeg_bgra_thumb(&buf, full_w, full_h, max_w, max_h).ok();
             }
-            if let Some(buf) = capture_windowdc_thumb_bgra(hwnd, full_w, full_h, dst_w, dst_h)
-                .filter(|b| bgra_looks_usable(b))
+            if let Some(buf) =
+                capture_printwindow_bgra_timed(hwnd, full_w, full_h).filter(|b| bgra_looks_usable(b))
             {
-                return encode_jpeg_bgra_thumb(&buf, dst_w, dst_h, max_w, max_h).ok();
+                return encode_jpeg_bgra_thumb(&buf, full_w, full_h, max_w, max_h).ok();
             }
             None
         };

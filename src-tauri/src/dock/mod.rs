@@ -127,6 +127,9 @@ pub struct DockPrefs {
     /// Delay before showing hover preview (ms). Default 120.
     #[serde(default = "default_hover_preview_delay_ms")]
     pub hover_preview_delay_ms: u32,
+    /// Thumbnail height in logical CSS px (default 160). Width follows window aspect.
+    #[serde(default = "default_hover_preview_height_px")]
+    pub hover_preview_height_px: u32,
 }
 
 fn default_hotkey() -> String {
@@ -148,6 +151,26 @@ fn default_hide_linger_ms() -> u32 {
 fn default_hover_preview_delay_ms() -> u32 {
     120
 }
+
+fn default_hover_preview_height_px() -> u32 {
+    160
+}
+
+fn clamp_hover_preview_height_px(v: u32) -> u32 {
+    v.clamp(96, 320)
+}
+
+/// Capture pixel budget from CSS tip height (~2× for HiDPI sharpness).
+fn preview_capture_budget(height_css: u32) -> (u32, u32) {
+    let h = clamp_hover_preview_height_px(height_css)
+        .saturating_mul(2)
+        .clamp(192, 640);
+    let w = ((h as f64) * 2.25).round() as u32;
+    (w.max(240), h)
+}
+
+/// Cap side-by-side thumbnails so the tip HWND stays manageable.
+const DOCK_PREVIEW_MAX_WINDOWS: usize = 8;
 
 fn default_magnification() -> f64 {
     1.6 // == DOCK_MAG_SCALE (const defined below with geometry)
@@ -238,6 +261,7 @@ impl Default for DockPrefs {
             hidden_item_ids: Vec::new(),
             hover_window_preview: false,
             hover_preview_delay_ms: default_hover_preview_delay_ms(),
+            hover_preview_height_px: default_hover_preview_height_px(),
         }
     }
 }
@@ -262,6 +286,8 @@ impl DockPrefs {
         self.bottom_offset_px = self.bottom_offset_px.min(400);
         self.hide_linger_ms = self.hide_linger_ms.clamp(200, 10_000);
         self.hover_preview_delay_ms = self.hover_preview_delay_ms.min(2_000);
+        self.hover_preview_height_px =
+            clamp_hover_preview_height_px(self.hover_preview_height_px);
         self.magnification = clamp_magnification(self.magnification);
         self.corner_radius_px = self.corner_radius_px.min(30);
         for it in &mut self.items {
@@ -729,6 +755,10 @@ pub(crate) fn mode_reserves_bottom_work_area(mode: DockDisplayMode) -> bool {
 pub(crate) fn sync_dock_bottom_appbar(app: &AppHandle, prefs: &DockPrefs, shown: bool) {
     #[cfg(windows)]
     {
+        // 全屏只藏 UI：底边占位必须保持。
+        if crate::win32::work_area::island_hidden_for_fullscreen() {
+            return;
+        }
         let want = prefs.enabled
             && mode_reserves_bottom_work_area(prefs.mode())
             && match prefs.mode() {
@@ -737,15 +767,20 @@ pub(crate) fn sync_dock_bottom_appbar(app: &AppHandle, prefs: &DockPrefs, shown:
                 _ => true,
             };
         let was = crate::win32::dock_appbar::is_registered();
+        let quiet = crate::win32::work_area::work_area_quiet();
         if want {
             if let Some(w) = app.get_webview_window("dock") {
                 if let Ok(h) = w.hwnd() {
                     let raw = h.0 as isize;
                     if was {
+                        // Quiet: skip redundant SETPOS (ABN / place spam).
+                        if quiet {
+                            return;
+                        }
                         crate::win32::dock_appbar::sync(raw);
                     } else {
+                        // First claim always allowed — quiet only kills feedback loops.
                         crate::win32::dock_appbar::register(raw);
-                        // Work-area claim can reset framed Mica to light — reassert once.
                         reassert_settings_material(app);
                     }
                     return;
@@ -753,6 +788,9 @@ pub(crate) fn sync_dock_bottom_appbar(app: &AppHandle, prefs: &DockPrefs, shown:
             }
         }
         if was {
+            if quiet {
+                return;
+            }
             crate::win32::dock_appbar::suspend();
             reassert_settings_material(app);
         }
@@ -2254,6 +2292,7 @@ pub async fn set_dock_prefs(
     if next.enabled {
         next.hide_system_taskbar = true;
     }
+    let prev_height = load_dock_prefs().hover_preview_height_px;
     // Drop stale hide ids after pin list edits / imports.
     next.hidden_item_ids
         .retain(|id| next.items.iter().any(|it| it.id == *id));
@@ -2261,6 +2300,9 @@ pub async fn set_dock_prefs(
     icon::ensure_prefs_icons_cached(&mut next);
     next = with_icons(next);
     save_dock_prefs(&next)?;
+    if next.hover_preview_height_px != prev_height {
+        dock_preview_cache().lock().clear();
+    }
     invalidate_dock_layout_cache();
     vis.apply_prefs(&next);
     let _ = app.emit("dock-prefs", &next);
@@ -2815,14 +2857,26 @@ pub struct DockWindowPreviewDto {
     pub from_cache: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockWindowPreviewsDto {
+    pub windows: Vec<DockWindowPreviewDto>,
+    pub preview_height_px: u32,
+}
+
 #[derive(Clone)]
-struct DockPreviewCacheEntry {
+struct DockPreviewFrame {
     jpeg_base64: String,
     width: u32,
     height: u32,
     title: String,
     hwnd: isize,
     captured_at_ms: u64,
+}
+
+#[derive(Clone)]
+struct DockPreviewCacheEntry {
+    frames: Vec<DockPreviewFrame>,
 }
 
 static DOCK_PREVIEW_CACHE: std::sync::OnceLock<
@@ -2834,10 +2888,6 @@ static DOCK_PREVIEW_PRIORITY: std::sync::OnceLock<parking_lot::Mutex<std::collec
 
 static DOCK_PREVIEW_REFRESHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
-/// ~2× the 280 CSS tip width so 125–200% DPI stays sharp.
-/* Capture budget: height-first for unified dock tip (~160px CSS @2x). */
-const DOCK_PREVIEW_MAX_W: u32 = 720;
-const DOCK_PREVIEW_MAX_H: u32 = 320;
 /// Skip re-capture if the cached frame is newer than this (ms), unless prioritized.
 const DOCK_PREVIEW_FRESH_MS: u64 = 4_000;
 /// Pause between captures so PrintWindow does not hog the UI thread.
@@ -2874,15 +2924,26 @@ fn cache_dock_preview(item_id: &str, entry: DockPreviewCacheEntry) {
     }
 }
 
-fn cached_dock_preview(item_id: &str) -> Option<DockWindowPreviewDto> {
+fn cached_dock_preview(item_id: &str, preview_height_px: u32) -> Option<DockWindowPreviewsDto> {
     let g = dock_preview_cache().lock();
-    g.get(item_id).map(|e| DockWindowPreviewDto {
-        jpeg_base64: e.jpeg_base64.clone(),
-        width: e.width,
-        height: e.height,
-        title: e.title.clone(),
-        hwnd: e.hwnd,
-        from_cache: true,
+    let entry = g.get(item_id)?;
+    if entry.frames.is_empty() {
+        return None;
+    }
+    Some(DockWindowPreviewsDto {
+        windows: entry
+            .frames
+            .iter()
+            .map(|e| DockWindowPreviewDto {
+                jpeg_base64: e.jpeg_base64.clone(),
+                width: e.width,
+                height: e.height,
+                title: e.title.clone(),
+                hwnd: e.hwnd,
+                from_cache: true,
+            })
+            .collect(),
+        preview_height_px,
     })
 }
 
@@ -2908,9 +2969,9 @@ fn prune_dock_preview_cache(keep: &std::collections::HashSet<String>) {
     g.retain(|k, _| keep.contains(k));
 }
 
-/// Capture one dock item into cache. Skips minimized windows (never restore).
+/// Capture all matching top-level windows for one dock item.
 #[cfg(windows)]
-fn refresh_dock_preview_item(item: &DockItem) -> Option<DockWindowPreviewDto> {
+fn refresh_dock_preview_item(item: &DockItem) -> Option<DockWindowPreviewsDto> {
     use base64::Engine;
     use crate::win32::capture::capture_window_owned_thumb_jpeg;
     use windows::Win32::Foundation::HWND;
@@ -2919,44 +2980,92 @@ fn refresh_dock_preview_item(item: &DockItem) -> Option<DockWindowPreviewDto> {
     if item.kind != "app" {
         return None;
     }
+    let height_css = clamp_hover_preview_height_px(load_dock_prefs().hover_preview_height_px);
+    let (max_w, max_h) = preview_capture_budget(height_css);
     let wins = crate::win32::enum_windows::list_windows(None);
-    let w = launch::best_matching_window(item, &wins)?;
-    // Background refresh must not touch minimized apps (restore/minimize flicker).
-    if unsafe { IsIconic(HWND(w.hwnd as *mut _)).as_bool() } {
+    let ranked = launch::matching_windows_ranked(item, &wins);
+    if ranked.is_empty() {
         return None;
     }
-    let frame = capture_window_owned_thumb_jpeg(w.hwnd, DOCK_PREVIEW_MAX_W, DOCK_PREVIEW_MAX_H).ok()?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.jpeg);
-    let dto = DockWindowPreviewDto {
-        jpeg_base64: b64.clone(),
-        width: frame.width,
-        height: frame.height,
-        title: w.title.clone(),
-        hwnd: w.hwnd,
-        from_cache: true,
+
+    let prev_by_hwnd: std::collections::HashMap<isize, DockPreviewFrame> = {
+        let g = dock_preview_cache().lock();
+        g.get(&item.id)
+            .map(|e| {
+                e.frames
+                    .iter()
+                    .map(|f| (f.hwnd, f.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    cache_dock_preview(
-        &item.id,
-        DockPreviewCacheEntry {
+
+    let mut frames: Vec<DockPreviewFrame> = Vec::new();
+    for w in ranked.into_iter().take(DOCK_PREVIEW_MAX_WINDOWS) {
+        let iconic = unsafe { IsIconic(HWND(w.hwnd as *mut _)).as_bool() };
+        if iconic {
+            // Keep last frame for minimized windows; skip cold capture (restore flicker).
+            if let Some(prev) = prev_by_hwnd.get(&w.hwnd) {
+                let mut kept = prev.clone();
+                if !w.title.trim().is_empty() {
+                    kept.title = w.title.clone();
+                }
+                frames.push(kept);
+            }
+            continue;
+        }
+        let Ok(frame) = capture_window_owned_thumb_jpeg(w.hwnd, max_w, max_h) else {
+            if let Some(prev) = prev_by_hwnd.get(&w.hwnd) {
+                frames.push(prev.clone());
+            }
+            continue;
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&frame.jpeg);
+        frames.push(DockPreviewFrame {
             jpeg_base64: b64,
             width: frame.width,
             height: frame.height,
             title: w.title.clone(),
             hwnd: w.hwnd,
             captured_at_ms: now_ms(),
+        });
+    }
+
+    if frames.is_empty() {
+        return None;
+    }
+
+    let dto = DockWindowPreviewsDto {
+        windows: frames
+            .iter()
+            .map(|e| DockWindowPreviewDto {
+                jpeg_base64: e.jpeg_base64.clone(),
+                width: e.width,
+                height: e.height,
+                title: e.title.clone(),
+                hwnd: e.hwnd,
+                from_cache: true,
+            })
+            .collect(),
+        preview_height_px: height_css,
+    };
+    cache_dock_preview(
+        &item.id,
+        DockPreviewCacheEntry {
+            frames,
         },
     );
     Some(dto)
 }
 
 #[cfg(not(windows))]
-fn refresh_dock_preview_item(_item: &DockItem) -> Option<DockWindowPreviewDto> {
+fn refresh_dock_preview_item(_item: &DockItem) -> Option<DockWindowPreviewsDto> {
     None
 }
 
 fn preview_item_is_fresh(item_id: &str) -> bool {
     let g = dock_preview_cache().lock();
-    match g.get(item_id) {
+    match g.get(item_id).and_then(|e| e.frames.first()) {
         Some(e) => now_ms().saturating_sub(e.captured_at_ms) < DOCK_PREVIEW_FRESH_MS,
         None => false,
     }
@@ -2979,12 +3088,12 @@ pub fn spawn_dock_preview_refresher(app: AppHandle) {
     std::thread::Builder::new()
         .name("dock-preview".into())
         .spawn(move || {
+            // Cold start: AppBar + ambient settle first — PrintWindow storms cause 未响应.
+            std::thread::sleep(std::time::Duration::from_secs(6));
             let mut rr: usize = 0;
-            let mut fresh_skips: usize = 0;
             loop {
                 let prefs = load_dock_prefs();
                 if !prefs.enabled || !prefs.hover_window_preview {
-                    fresh_skips = 0;
                     std::thread::sleep(std::time::Duration::from_millis(DOCK_PREVIEW_IDLE_MS));
                     continue;
                 }
@@ -2995,7 +3104,6 @@ pub fn spawn_dock_preview_refresher(app: AppHandle) {
                 prune_dock_preview_cache(&keep);
 
                 if targets.is_empty() {
-                    fresh_skips = 0;
                     std::thread::sleep(std::time::Duration::from_millis(DOCK_PREVIEW_IDLE_MS));
                     continue;
                 }
@@ -3026,44 +3134,41 @@ pub fn spawn_dock_preview_refresher(app: AppHandle) {
                     continue;
                 };
 
-                // Round-robin only warms empty cache. Continuous re-capture of every
-                // running app was flashing minimized windows / poisoning ambient chrome.
-                // Hover (priority) is what refreshes a live frame.
+                // Round-robin warm disabled — continuous PrintWindow freezes Hub on
+                // Alt-Tab / click. Capture only when hover prioritizes an icon.
                 if !prioritized {
-                    let has_cache = dock_preview_cache().lock().contains_key(&item.id);
-                    if has_cache {
-                        fresh_skips = fresh_skips.saturating_add(1);
-                        if fresh_skips >= targets.len() {
-                            fresh_skips = 0;
-                            std::thread::sleep(std::time::Duration::from_millis(800));
-                        } else {
-                            std::thread::sleep(std::time::Duration::from_millis(40));
-                        }
-                        continue;
-                    }
-                }
-                if !prioritized && preview_item_is_fresh(&item.id) {
-                    fresh_skips = fresh_skips.saturating_add(1);
-                    if fresh_skips >= targets.len() {
-                        fresh_skips = 0;
-                        std::thread::sleep(std::time::Duration::from_millis(400));
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(40));
-                    }
+                    let _ = rr;
+                    std::thread::sleep(std::time::Duration::from_millis(DOCK_PREVIEW_IDLE_MS));
                     continue;
                 }
-                fresh_skips = 0;
 
                 if let Some(dto) = refresh_dock_preview_item(&item) {
+                    let windows: Vec<serde_json::Value> = dto
+                        .windows
+                        .iter()
+                        .map(|w| {
+                            serde_json::json!({
+                                "jpegBase64": w.jpeg_base64,
+                                "width": w.width,
+                                "height": w.height,
+                                "title": w.title,
+                                "hwnd": w.hwnd,
+                            })
+                        })
+                        .collect();
+                    let first = dto.windows.first();
                     let _ = app.emit(
                         "dock-preview-ready",
                         serde_json::json!({
                             "itemId": item.id,
-                            "jpegBase64": dto.jpeg_base64,
-                            "width": dto.width,
-                            "height": dto.height,
-                            "title": dto.title,
-                            "hwnd": dto.hwnd,
+                            "previewHeightPx": dto.preview_height_px,
+                            "windows": windows,
+                            // Compat: first frame at top level for older listeners.
+                            "jpegBase64": first.map(|w| w.jpeg_base64.clone()).unwrap_or_default(),
+                            "width": first.map(|w| w.width).unwrap_or(0),
+                            "height": first.map(|w| w.height).unwrap_or(0),
+                            "title": first.map(|w| w.title.clone()).unwrap_or_default(),
+                            "hwnd": first.map(|w| w.hwnd).unwrap_or(0),
                         }),
                     );
                 }
@@ -3074,16 +3179,19 @@ pub fn spawn_dock_preview_refresher(app: AppHandle) {
         .ok();
 }
 
-/// Return a cached window thumbnail. Never blocks on capture — background refresher
+/// Return cached window thumbnails. Never blocks on capture — background refresher
 /// keeps the cache warm; hover only prioritizes the next grab.
 #[tauri::command]
-pub fn dock_capture_window_preview(item_id: String) -> Result<Option<DockWindowPreviewDto>, String> {
+pub fn dock_capture_window_preview(
+    item_id: String,
+) -> Result<Option<DockWindowPreviewsDto>, String> {
     let id = item_id.trim().to_string();
     if id.is_empty() {
         return Ok(None);
     }
     request_preview_priority(&id);
-    Ok(cached_dock_preview(&id))
+    let height = clamp_hover_preview_height_px(load_dock_prefs().hover_preview_height_px);
+    Ok(cached_dock_preview(&id, height))
 }
 
 /// How many top-level windows match this dock item (for context menu).
@@ -3360,13 +3468,13 @@ pub fn bootstrap_dock(app: &AppHandle) {
             eprintln!("[dock] bootstrap failed: {e}");
             return;
         }
+        // Taskbar already hidden in spawn_watchdog (before top AppBar). Idempotent.
         apply_taskbar_for_dock(true);
         // One delayed material/place pass — do not loop (races auto-hide animation).
         let app3 = app2.clone();
         let prefs3 = prefs2.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(400));
-            apply_taskbar_for_dock(true);
             if let Some(vis) = app3.try_state::<Arc<DockVisibility>>() {
                 if vis.is_busy() {
                     return;

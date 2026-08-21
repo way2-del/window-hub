@@ -188,33 +188,58 @@ pub fn dock_set_visual_height(_window: WebviewWindow, _height: i32) -> Result<()
 }
 
 /// 岛展开 / 拉高：面板伸进工作区，保持 TOPMOST。
+///
+/// **Must stay Win32-only / async** — sync `window.show()` / `set_always_on_top`
+/// from an IPC handler deadlocks WebView2 on Windows (click → 未响应).
 #[tauri::command]
-pub fn float_overlay(window: WebviewWindow) -> Result<(), String> {
-    let _ = window.set_skip_taskbar(true);
+pub async fn float_overlay(window: WebviewWindow) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let raw = hwnd.0 as isize;
     crate::win32::switcher::exclude_from_switcher(raw);
     crate::win32::topmost::set_main_hwnd(raw);
     crate::win32::topmost::set_overlay_raised(true);
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_always_on_top(true);
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IsIconic, ShowWindow, SW_RESTORE, SW_SHOWNOACTIVATE,
+        };
+        let h = HWND(raw as *mut _);
+        unsafe {
+            if IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_RESTORE);
+            }
+            let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+        }
+        crate::win32::topmost::force_topmost(raw);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window.set_skip_taskbar(true);
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+    }
     Ok(())
 }
 
 /// 岛收回折叠条：仍保持 TOPMOST（防壁纸软件 / 显示桌面埋掉顶栏）。
 #[tauri::command]
-pub fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
-    let _ = window.set_skip_taskbar(true);
+pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let raw = hwnd.0 as isize;
     crate::win32::switcher::exclude_from_switcher(raw);
     crate::win32::topmost::set_main_hwnd(raw);
     crate::win32::topmost::set_overlay_raised(false);
     let _ = crate::win32::topmost::ensure_main_visible();
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_always_on_top(true);
+    crate::win32::topmost::reassert_main_zorder();
+    #[cfg(not(windows))]
+    {
+        let _ = window.set_skip_taskbar(true);
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+    }
     Ok(())
 }
 
@@ -1265,6 +1290,11 @@ pub fn apply_window_effect(
     state: State<'_, MaterialState>,
     material: Option<String>,
 ) -> Result<String, String> {
+    // Tip HWND: never run the normal path's side effects mid-show; commit owns geometry.
+    if window.label() == "chrome-hover-tip" {
+        apply_chrome_hover_tip_material(&window, &state);
+        return Ok(read_material_prefs(&state).kind.as_str().to_string());
+    }
     let base = read_material_prefs(&state);
     let prefs = if let Some(m) = material {
         let mut p = base;
@@ -1315,10 +1345,12 @@ fn main_hwnd(app: &AppHandle) -> Option<isize> {
         .map(|h| h.0 as isize)
 }
 
-/// 采样当前窗口顶边整条色带（左右可变色）。
+/// Fast path for UI: never block on a live BitBlt of a foreign HWND.
+/// Prefer locked/last strip; otherwise wallpaper / fallback.
 #[tauri::command]
 pub fn sample_ambient_color(app: AppHandle) -> crate::win32::ambient::AmbientStrip {
-    crate::win32::ambient::sample(main_hwnd(&app))
+    let hwnd = main_hwnd(&app);
+    crate::win32::ambient::sample_nonblocking(hwnd)
 }
 
 #[tauri::command]
@@ -1592,6 +1624,17 @@ static CHROME_HOVER_TIP: Mutex<Option<ChromeHoverTipPayload>> = Mutex::new(None)
 /// Do NOT trust per-webview JS counters — main/dock/tray each have their own tipEpoch and
 /// desync permanently rejects shows (tip works once, then never again).
 static CHROME_HOVER_TIP_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Last committed tip window box (logical): left, top, width, height — for position-only nudges.
+static CHROME_HOVER_TIP_BOX: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
+
+/// Chrome hover tip payload (status-bar tip must be a separate window — main is ~28px tall).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChromeHoverTipPreview {
+    pub jpeg_base64: String,
+    pub title: String,
+    pub hwnd: i64,
+}
 
 /// Chrome hover tip payload (status-bar tip must be a separate window — main is ~28px tall).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1604,6 +1647,7 @@ pub struct ChromeHoverTipPayload {
     #[serde(default)]
     pub placement: Option<String>,
     /// Optional live window thumbnail (JPEG base64, no data: prefix).
+    /// Prefer `previews` when multiple windows; kept as first-frame compat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_jpeg_base64: Option<String>,
     /// When set with a preview image, tip is interactive (close button).
@@ -1615,12 +1659,113 @@ pub struct ChromeHoverTipPayload {
     /// Dock / app icon (PNG base64, no data: prefix) — title row leading glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_png_base64: Option<String>,
+    /// Multi-instance window thumbnails (side-by-side). Empty/omitted = single `imageJpegBase64`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previews: Vec<ChromeHoverTipPreview>,
+    /// Thumbnail CSS height (logical px). Default 160 when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_height_px: Option<u32>,
+    /// Backend generation — FE must pass this to `commit_chrome_hover_tip`.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
-const CHROME_HOVER_TIP_W: f64 = 160.0;
-const CHROME_HOVER_TIP_H: f64 = 48.0;
+/// Park the tip HWND off-screen while measuring so DWM never paints a stub frame.
+const CHROME_HOVER_TIP_PARK_X: f64 = -32000.0;
+const CHROME_HOVER_TIP_PARK_Y: f64 = -32000.0;
+const CHROME_HOVER_TIP_MEASURE_W: f64 = 720.0;
+const CHROME_HOVER_TIP_MEASURE_H: f64 = 420.0;
+
+#[cfg(windows)]
+fn chrome_hover_tip_hwnd(win: &WebviewWindow) -> Option<windows::Win32::Foundation::HWND> {
+    let hwnd_raw = win.hwnd().ok()?;
+    Some(windows::Win32::Foundation::HWND(hwnd_raw.0 as *mut _))
+}
+
+/// Kill Win11 show/move/resize animations on the tip HWND (they read as a drag).
+/// Does NOT touch corner preference — that is owned by `apply_chrome_hover_tip_chrome`.
+fn disable_chrome_hover_tip_transitions(win: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::BOOL;
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+        const DWMWA_TRANSITIONS_FORCEDISABLED: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(3);
+        let Some(hwnd) = chrome_hover_tip_hwnd(win) else {
+            return;
+        };
+        let disable = BOOL(1);
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &disable as *const _ as *const _,
+                std::mem::size_of::<BOOL>() as u32,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = win;
+    }
+}
+
+/// Frameless popup chrome — identical path to `status-menu-popup`
+/// (`strip_frameless_popup_titlebar` → `apply_mica_chrome` with DWM `ROUND`).
+/// Do not force `ROUNDSMALL`: it clips less than CSS 10px and leaves a light HWND fringe.
+fn apply_chrome_hover_tip_chrome(win: &WebviewWindow, dark: Option<bool>) {
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        use windows::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+        };
+        let Some(hwnd) = chrome_hover_tip_hwnd(win) else {
+            return;
+        };
+        crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
+        unsafe {
+            if let Some(d) = dark {
+                let v: u32 = u32::from(d);
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &v as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dark;
+    }
+    let _ = win.set_shadow(false);
+}
+
+fn park_chrome_hover_tip(win: &WebviewWindow) {
+    if let Ok(mut g) = CHROME_HOVER_TIP_BOX.lock() {
+        *g = None;
+    }
+    // Off-screen measure box — never use Tauri set_size (async → races with show).
+    set_chrome_hover_tip_rect(
+        win,
+        CHROME_HOVER_TIP_PARK_X,
+        CHROME_HOVER_TIP_PARK_Y,
+        CHROME_HOVER_TIP_MEASURE_W,
+        CHROME_HOVER_TIP_MEASURE_H,
+        false,
+        true,
+    );
+}
 
 fn chrome_hover_tip_same(a: &ChromeHoverTipPayload, b: &ChromeHoverTipPayload) -> bool {
+    chrome_hover_tip_same_content(a, b)
+        && (a.x - b.x).abs() < 0.75
+        && (a.y - b.y).abs() < 0.75
+}
+
+/// Same tip body (ignore anchor) — used to slide without park/remeasure flash.
+fn chrome_hover_tip_same_content(a: &ChromeHoverTipPayload, b: &ChromeHoverTipPayload) -> bool {
     if a.lines != b.lines {
         return false;
     }
@@ -1633,10 +1778,127 @@ fn chrome_hover_tip_same(a: &ChromeHoverTipPayload, b: &ChromeHoverTipPayload) -
     if a.hwnd != b.hwnd || a.item_id != b.item_id {
         return false;
     }
-    if a.placement != b.placement {
+    if a.preview_height_px != b.preview_height_px {
         return false;
     }
-    (a.x - b.x).abs() < 0.75 && (a.y - b.y).abs() < 0.75
+    if a.previews.len() != b.previews.len() {
+        return false;
+    }
+    for (pa, pb) in a.previews.iter().zip(b.previews.iter()) {
+        if pa.jpeg_base64 != pb.jpeg_base64 || pa.title != pb.title || pa.hwnd != pb.hwnd {
+            return false;
+        }
+    }
+    a.placement == b.placement
+}
+
+fn chrome_hover_tip_window_origin(payload: &ChromeHoverTipPayload, w: f64, h: f64) -> (f64, f64) {
+    let left = (payload.x - w * 0.5).max(4.0);
+    let above = payload
+        .placement
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case("above"));
+    let top = if above {
+        (payload.y - h).max(0.0)
+    } else {
+        payload.y.max(0.0)
+    };
+    (left, top)
+}
+
+/// Low-level tip HWND box. Never call Tauri `set_size`/`set_position` here —
+/// those are async and resize *after* ShowWindow (reads as bottom-right drag).
+fn set_chrome_hover_tip_rect(
+    win: &WebviewWindow,
+    left: f64,
+    top: f64,
+    w: f64,
+    h: f64,
+    show: bool,
+    resize: bool,
+) {
+    disable_chrome_hover_tip_transitions(win);
+    let scale = win.scale_factor().unwrap_or(1.0).max(0.1);
+    let px = (left * scale).round() as i32;
+    let py = (top * scale).round() as i32;
+    let pw = (w.max(1.0) * scale).round().max(1.0) as i32;
+    let ph = (h.max(1.0) * scale).round().max(1.0) as i32;
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, ShowWindow, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOSIZE,
+            SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
+        };
+        let Some(hwnd) = chrome_hover_tip_hwnd(win) else {
+            return;
+        };
+        // Never SWP_SHOWWINDOW / SWP_FRAMECHANGED with a size change — that is the
+        // DWM "drag from bottom-right" paint. Size while hidden; ShowWindow alone.
+        let mut flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
+        if !resize {
+            flags |= SWP_NOSIZE;
+        }
+        if !show {
+            flags |= SWP_HIDEWINDOW;
+        }
+        unsafe {
+            if resize {
+                let _ = SetWindowPos(hwnd, None, px, py, pw, ph, flags);
+            } else {
+                let _ = SetWindowPos(hwnd, None, px, py, 0, 0, flags | SWP_NOSIZE);
+            }
+            if show {
+                let _ = ShowWindow(hwnd, SW_SHOWNA);
+            } else {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if resize {
+            let _ = win.set_size(LogicalSize::new(w.max(1.0), h.max(1.0)));
+        }
+        let _ = win.set_position(LogicalPosition::new(left, top));
+        if show {
+            let _ = win.show();
+        } else {
+            let _ = win.hide();
+        }
+        let _ = (px, py, pw, ph);
+    }
+}
+
+/// Final box while HIDDEN (Tauri + Win32 agree on size), then ShowWindow only.
+///
+/// Skipping Tauri `set_size` left Wry's cached size at the measure box (720×420);
+/// ShowWindow then restored that — tip looked like a huge empty mica slab.
+fn reveal_chrome_hover_tip(win: &WebviewWindow, left: f64, top: f64, w: f64, h: f64) {
+    let w = w.max(1.0);
+    let h = h.max(1.0);
+    disable_chrome_hover_tip_transitions(win);
+    // 1) Hide + size/position while invisible. Prefer Tauri first so WebView2
+    //    client size matches; then re-assert with SetWindowPos (no SHOW flag).
+    let _ = win.hide();
+    let _ = win.set_size(LogicalSize::new(w, h));
+    let _ = win.set_position(LogicalPosition::new(left, top));
+    set_chrome_hover_tip_rect(win, left, top, w, h, false, true);
+    // 2) Show only — never resize in the same call as becoming visible.
+    set_chrome_hover_tip_rect(win, left, top, w, h, true, false);
+}
+
+fn move_chrome_hover_tip_hwnd(win: &WebviewWindow, left: f64, top: f64, w: f64, h: f64, show: bool) {
+    // Visible nudge: move only (no resize).
+    set_chrome_hover_tip_rect(win, left, top, w, h, show, false);
+}
+
+/// Tip material: sync once, never deferred (deferred SetWindowPos races with show).
+fn apply_chrome_hover_tip_material(win: &WebviewWindow, state: &MaterialState) {
+    disable_chrome_hover_tip_transitions(win);
+    let prefs = read_material_prefs(state);
+    let dark = crate::win32::material::resolve_dark(prefs.dark);
+    let _ = crate::win32::material::apply_prefs(win, &prefs);
+    apply_chrome_hover_tip_chrome(win, Some(dark));
 }
 
 /// Windows that may own chrome tips — cursor must stay over one of these or tip auto-hides.
@@ -1719,9 +1981,12 @@ fn hide_chrome_hover_tip_sync(app: &AppHandle) {
     if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
         *g = None;
     }
+    if let Ok(mut g) = CHROME_HOVER_TIP_BOX.lock() {
+        *g = None;
+    }
     set_dock_preview_tip_keep(app, false);
     if let Some(w) = app.get_webview_window("chrome-hover-tip") {
-        let _ = w.hide();
+        park_chrome_hover_tip(&w);
     }
     let _ = app.emit("chrome-hover-tip-hide", ());
 }
@@ -1747,8 +2012,9 @@ fn spawn_chrome_tip_leave_watch(app: AppHandle, seq: u64) {
                 .ok()
                 .and_then(|g| g.clone())
                 .map(|p| {
-                    p.image_jpeg_base64.as_ref().is_some_and(|s| !s.is_empty())
-                        && p.hwnd.map(|h| h != 0).unwrap_or(false)
+                    !p.previews.is_empty()
+                        || (p.image_jpeg_base64.as_ref().is_some_and(|s| !s.is_empty())
+                            && p.hwnd.map(|h| h != 0).unwrap_or(false))
                 })
                 .unwrap_or(false);
             let need = if interactive { 5 } else { 2 }; // ~500ms vs ~200ms
@@ -1783,6 +2049,8 @@ pub async fn show_chrome_hover_tip(
     hwnd: Option<i64>,
     item_id: Option<String>,
     icon_png_base64: Option<String>,
+    previews: Option<Vec<ChromeHoverTipPreview>>,
+    preview_height_px: Option<u32>,
     #[allow(unused_variables)] epoch: Option<u64>,
 ) -> Result<(), String> {
     let lines: Vec<String> = lines
@@ -1791,55 +2059,122 @@ pub async fn show_chrome_hover_tip(
         .filter(|s| !s.is_empty())
         .take(8)
         .collect();
+    let mut previews: Vec<ChromeHoverTipPreview> = previews
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| {
+            let jpeg = p.jpeg_base64.trim().to_string();
+            if jpeg.is_empty() || p.hwnd == 0 {
+                return None;
+            }
+            Some(ChromeHoverTipPreview {
+                jpeg_base64: jpeg,
+                title: p.title.trim().to_string(),
+                hwnd: p.hwnd,
+            })
+        })
+        .take(8)
+        .collect();
     let image = image_jpeg_base64
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    if lines.is_empty() && image.is_none() {
+    // Promote legacy single image into previews when needed.
+    if previews.is_empty() {
+        if let (Some(jpeg), Some(h)) = (image.clone(), hwnd.filter(|h| *h != 0)) {
+            previews.push(ChromeHoverTipPreview {
+                jpeg_base64: jpeg,
+                title: lines.first().cloned().unwrap_or_default(),
+                hwnd: h,
+            });
+        }
+    }
+    let image = previews
+        .first()
+        .map(|p| p.jpeg_base64.clone())
+        .or(image);
+    if lines.is_empty() && image.is_none() && previews.is_empty() {
         return close_chrome_hover_tip(app, None).await;
     }
 
     let placement = placement
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| s == "above" || s == "below");
-    let interactive = image.is_some() && hwnd.map(|h| h != 0).unwrap_or(false);
+    let primary_hwnd = previews.first().map(|p| p.hwnd).or(hwnd.filter(|h| *h != 0));
+    let interactive = image.is_some() && primary_hwnd.map(|h| h != 0).unwrap_or(false);
     let item_id = item_id
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let icon = icon_png_base64
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let payload = ChromeHoverTipPayload {
+    let preview_height_px = preview_height_px
+        .map(|h| h.clamp(96, 320))
+        .filter(|&h| h > 0);
+    let mut payload = ChromeHoverTipPayload {
         lines,
         x,
         y,
         placement,
         image_jpeg_base64: image,
-        hwnd: if interactive { hwnd } else { None },
+        hwnd: if interactive { primary_hwnd } else { None },
         // Keep item id for title-first progressive tips (click before thumb arrives).
         item_id,
         icon_png_base64: icon,
+        previews,
+        preview_height_px,
+        epoch: 0,
     };
 
     // Skip identical re-show (same content + ~same anchor) — prevents tip/preview flicker.
     // Still re-assert cursor hit-testing so an interactive tip never stays click-through.
-    if app.get_webview_window("chrome-hover-tip").is_some() {
-        if let Ok(g) = CHROME_HOVER_TIP.lock() {
-            if let Some(prev) = g.as_ref() {
-                if chrome_hover_tip_same(prev, &payload) {
-                    if interactive || payload.item_id.is_some() {
-                        set_dock_preview_tip_keep(&app, true);
+    // Same body, new anchor (fan arm / chrome widen): slide HWND only — no park flash.
+    if let Some(existing) = app.get_webview_window("chrome-hover-tip") {
+        let prev = CHROME_HOVER_TIP.lock().ok().and_then(|g| g.clone());
+        if let Some(prev) = prev {
+            if chrome_hover_tip_same(&prev, &payload) {
+                if interactive || payload.item_id.is_some() {
+                    set_dock_preview_tip_keep(&app, true);
+                }
+                let _ = existing.set_ignore_cursor_events(!interactive);
+                return Ok(());
+            }
+            if chrome_hover_tip_same_content(&prev, &payload) {
+                let box_wh = CHROME_HOVER_TIP_BOX.lock().ok().and_then(|b| *b);
+                if let Some((_, _, bw, bh)) = box_wh {
+                    let visible = existing.is_visible().unwrap_or(false);
+                    if visible {
+                        if interactive || payload.item_id.is_some() {
+                            set_dock_preview_tip_keep(&app, true);
+                        }
+                        let (left, top) = chrome_hover_tip_window_origin(&payload, bw, bh);
+                        move_chrome_hover_tip_hwnd(&existing, left, top, bw, bh, true);
+                        if let Ok(mut box_g) = CHROME_HOVER_TIP_BOX.lock() {
+                            *box_g = Some((left, top, bw, bh));
+                        }
+                        if let Ok(mut tip_g) = CHROME_HOVER_TIP.lock() {
+                            let mut next = payload.clone();
+                            next.epoch = tip_g.as_ref().map(|p| p.epoch).unwrap_or(0);
+                            *tip_g = Some(next);
+                        }
+                        let _ = existing.set_ignore_cursor_events(!interactive);
+                        return Ok(());
                     }
-                    if let Some(w) = app.get_webview_window("chrome-hover-tip") {
-                        let _ = w.set_ignore_cursor_events(!interactive);
-                    }
-                    return Ok(());
                 }
             }
         }
     }
 
+    // Hide + park BEFORE emit so React never paints a new layout on a visible HWND.
+    if let Some(existing) = app.get_webview_window("chrome-hover-tip") {
+        park_chrome_hover_tip(&existing);
+        apply_chrome_hover_tip_material(&existing, &state);
+        let _ = existing.set_always_on_top(true);
+        let _ = existing.set_ignore_cursor_events(!interactive);
+    }
+
     // Claim a generation for this show; close/newer show will bump past it.
     let seq = CHROME_HOVER_TIP_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    payload.epoch = seq;
     if let Ok(mut g) = CHROME_HOVER_TIP.lock() {
         *g = Some(payload.clone());
     }
@@ -1851,19 +2186,8 @@ pub async fn show_chrome_hover_tip(
     let still_current =
         || CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) == seq;
 
-    if let Some(existing) = app.get_webview_window("chrome-hover-tip") {
+    if app.get_webview_window("chrome-hover-tip").is_some() {
         if !still_current() {
-            return Ok(());
-        }
-        apply_saved_material(&existing, &state);
-        let _ = existing.set_size(LogicalSize::new(CHROME_HOVER_TIP_W, CHROME_HOVER_TIP_H));
-        let _ = existing.set_position(LogicalPosition::new(x, y));
-        let _ = existing.set_always_on_top(true);
-        let _ = existing.unminimize();
-        let _ = existing.show();
-        let _ = existing.set_ignore_cursor_events(!interactive);
-        if !still_current() {
-            let _ = existing.hide();
             return Ok(());
         }
         let _ = app.emit("chrome-hover-tip-show", &payload);
@@ -1881,13 +2205,15 @@ pub async fn show_chrome_hover_tip(
         WebviewUrl::App("index.html?window=chrome-tip".into()),
     )
     .title("提示")
-    .inner_size(CHROME_HOVER_TIP_W, CHROME_HOVER_TIP_H)
+    .inner_size(CHROME_HOVER_TIP_MEASURE_W, CHROME_HOVER_TIP_MEASURE_H)
+    .position(CHROME_HOVER_TIP_PARK_X, CHROME_HOVER_TIP_PARK_Y)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
     .closable(false)
     .decorations(false)
     .transparent(true)
+    .shadow(false)
     .background_color(Color(0, 0, 0, 0))
     .always_on_top(true)
     .skip_taskbar(true)
@@ -1902,38 +2228,73 @@ pub async fn show_chrome_hover_tip(
         return Ok(());
     }
 
-    let _ = win.set_position(LogicalPosition::new(x, y));
+    park_chrome_hover_tip(&win);
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
-    apply_saved_material(&win, &state);
+    let _ = win.set_shadow(false);
+    apply_chrome_hover_tip_material(&win, &state);
     let _ = win.set_ignore_cursor_events(!interactive);
     let _ = win.set_always_on_top(true);
-    let _ = win.show();
-    apply_saved_material(&win, &state);
     if !still_current() {
-        let _ = win.hide();
+        park_chrome_hover_tip(&win);
         return Ok(());
     }
     let _ = app.emit("chrome-hover-tip-show", &payload);
-    let app2 = app.clone();
-    let payload2 = payload.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != seq {
-            return;
-        }
-        if CHROME_HOVER_TIP
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .is_none()
-        {
-            return;
-        }
-        let _ = app2.emit("chrome-hover-tip-show", &payload2);
-    });
     spawn_chrome_tip_leave_watch(app.clone(), seq);
+    Ok(())
+}
+
+/// Apply measured geometry then show once. No-op if a newer show/hide superseded `epoch`.
+///
+/// Uses one `SetWindowPos` for size+origin while hidden — separate Tauri
+/// `set_size` / `set_position` lets DWM paint a wide stub then slide (reads as
+/// drag-from-the-right).
+#[tauri::command]
+pub async fn commit_chrome_hover_tip(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    epoch: u64,
+) -> Result<(), String> {
+    if epoch == 0
+        || CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch
+    {
+        return Ok(());
+    }
+    let Some(win) = app.get_webview_window("chrome-hover-tip") else {
+        return Ok(());
+    };
+    let w = width.max(1.0).min(2400.0);
+    let h = height.max(1.0).min(560.0);
+    let left = x.max(0.0);
+    let top = y.max(0.0);
+    let interactive = CHROME_HOVER_TIP
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .map(|p| {
+            !p.previews.is_empty()
+                || (p.image_jpeg_base64.as_ref().is_some_and(|s| !s.is_empty())
+                    && p.hwnd.map(|h| h != 0).unwrap_or(false))
+        })
+        .unwrap_or(false);
+    let _ = win.set_ignore_cursor_events(!interactive);
+    let _ = win.set_always_on_top(true);
+    // Material while hidden, then one hidden SetWindowPos(final) + ShowWindow.
+    // Never Tauri set_size / deferred material — those resize after show (= 右下拖拽).
+    apply_chrome_hover_tip_material(&win, &state);
+    reveal_chrome_hover_tip(&win, left, top, w, h);
+    if CHROME_HOVER_TIP_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+        park_chrome_hover_tip(&win);
+        return Ok(());
+    }
+    if let Ok(mut g) = CHROME_HOVER_TIP_BOX.lock() {
+        *g = Some((left, top, w, h));
+    }
     Ok(())
 }
 
@@ -2318,7 +2679,10 @@ pub fn show_desktop() -> Result<(), String> {
 pub fn restart_app(app: AppHandle) -> Result<(), String> {
     // Allow SCM autostart to treat this as a normal handoff, not a user quit.
     #[cfg(windows)]
-    crate::win32::autostart_svc::clear_user_quit();
+    {
+        crate::win32::autostart_svc::note_expect_relaunch();
+        crate::win32::autostart_svc::clear_user_quit();
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
     if let Ok(cwd) = std::env::current_dir() {
@@ -2335,6 +2699,37 @@ pub fn exit_app(app: AppHandle) {
     #[cfg(windows)]
     crate::win32::autostart_svc::signal_user_quit();
     app.exit(0);
+}
+
+#[tauri::command]
+pub fn list_hotkey_bindings() -> Result<Vec<crate::win32::hotkey_registry::HotkeyBindingDto>, String> {
+    crate::win32::hotkey_registry::list_bindings()
+}
+
+#[tauri::command]
+pub fn set_hotkey_binding(
+    app: AppHandle,
+    id: String,
+    chord: String,
+) -> Result<Vec<crate::win32::hotkey_registry::HotkeyBindingDto>, String> {
+    crate::win32::hotkey_registry::set_binding(&app, &id, &chord)
+}
+
+#[tauri::command]
+pub fn validate_hotkey_chord(id: String, chord: String) -> Result<String, String> {
+    crate::win32::hotkey_registry::validate_chord_available(&id, &chord)
+}
+
+#[tauri::command]
+pub fn suspend_hotkeys_for_recording() {
+    #[cfg(windows)]
+    crate::win32::hotkey_registry::suspend_for_recording();
+}
+
+#[tauri::command]
+pub fn resume_hotkeys_after_recording() {
+    #[cfg(windows)]
+    crate::win32::hotkey_registry::resume_after_recording();
 }
 
 // ── Staging (CapGate only; scoped by pluginId) ─────────────────────

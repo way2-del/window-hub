@@ -646,23 +646,54 @@ mod win {
     }
 
     /// Query 中/英 via the window's default IME hwnd (works cross-process for many IMEs).
-    /// Does not Activate ITfThreadMgr — safe for the IME's Shift hotkey.
+    /// Uses SendMessageTimeout + hung check — never block forever on a frozen app.
     fn query_ime_zh_via_ime_wnd(hwnd: HWND) -> Option<(bool /*open*/, bool /*native*/)> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_NORMAL,
+        };
         unsafe {
             if hwnd.is_invalid() {
+                return None;
+            }
+            if crate::win32::hang::is_hung_hwnd(hwnd.0 as isize) {
                 return None;
             }
             let ime = ImmGetDefaultIMEWnd(hwnd);
             if ime.is_invalid() || ime.0.is_null() {
                 return None;
             }
-            let open = SendMessageW(ime, WM_IME_CONTROL, WPARAM(IMC_GETOPENSTATUS), LPARAM(0)).0
-                != 0;
-            let conv =
-                SendMessageW(ime, WM_IME_CONTROL, WPARAM(IMC_GETCONVERSIONMODE), LPARAM(0)).0
-                    as u32;
+            if crate::win32::hang::is_hung_hwnd(ime.0 as isize) {
+                return None;
+            }
+            let mut open_raw = 0usize;
+            let sent_open = SendMessageTimeoutW(
+                ime,
+                WM_IME_CONTROL,
+                WPARAM(IMC_GETOPENSTATUS),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_NORMAL,
+                50,
+                Some(&mut open_raw),
+            );
+            if sent_open.0 == 0 {
+                return None;
+            }
+            let mut conv_raw = 0usize;
+            let sent_conv = SendMessageTimeoutW(
+                ime,
+                WM_IME_CONTROL,
+                WPARAM(IMC_GETCONVERSIONMODE),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_NORMAL,
+                50,
+                Some(&mut conv_raw),
+            );
+            if sent_conv.0 == 0 {
+                return None;
+            }
+            let open = open_raw != 0;
+            let conv = conv_raw as u32;
             let native = conv & IME_CMODE_NATIVE != 0;
-            // Some IMEs leave conversion at 0; then open-status alone is the 中/英 bit.
             let zh = if conv != 0 { open && native } else { open };
             Some((open, zh))
         }
@@ -765,10 +796,9 @@ mod win {
     }
 
     /// Resolve 中/英 for a Chinese language profile (read-only, no TSF ThreadMgr).
+    /// Poll path: never AttachThreadInput (can join a hung UI queue).
     fn resolve_zh_en_abbr(hwnd: HWND) -> (String, bool) {
-        if let Some((open, is_zh)) = query_ime_zh_via_ime_wnd(hwnd)
-            .or_else(|| query_ime_zh_via_imm_attach(hwnd))
-        {
+        if let Some((open, is_zh)) = query_ime_zh_via_ime_wnd(hwnd) {
             if is_zh {
                 return ("中".into(), true);
             }
@@ -1142,6 +1172,16 @@ mod win {
     }
 
     pub fn get() -> InputLangState {
+        // Prefer watcher cache — never SendMessage a hung FG from a Tauri invoke.
+        let last = LAST.lock().clone();
+        if last.lang_id != 0
+            && !last.lang_abbr.is_empty()
+            && last.lang_abbr != "0000"
+            && !(last.lang_abbr.len() == 4
+                && last.lang_abbr.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return last;
+        }
         let cur = snapshot();
         if cur.lang_id != 0 && cur.lang_abbr != "0000" {
             *LAST.lock() = cur.clone();
@@ -1491,7 +1531,7 @@ mod win {
                             emit(cur);
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    std::thread::sleep(std::time::Duration::from_millis(400));
                 }
             })
             .expect("spawn input-lang");

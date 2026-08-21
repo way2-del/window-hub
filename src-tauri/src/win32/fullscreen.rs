@@ -8,7 +8,7 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowLongW,
-        GetWindowRect, IsIconic, IsWindow, IsWindowVisible, IsZoomed, GA_ROOT, GWL_EXSTYLE,
+        GetWindowRect, IsIconic, IsWindow, IsWindowVisible, GA_ROOT, GWL_EXSTYLE,
         GWL_STYLE, WS_CAPTION, WS_EX_TOOLWINDOW,
     };
 
@@ -61,12 +61,31 @@ mod win {
 
     /// True fullscreen ≈ covers the physical monitor (`rcMonitor`), not just work area.
     /// Maximized apps usually stop at the taskbar (`rcWork`) and should NOT hide the island.
-    fn covers_physical_monitor(hwnd: HWND) -> bool {
+    fn covers_rect(hwnd: HWND, target: RECT) -> bool {
         unsafe {
             let mut wr = RECT::default();
             if GetWindowRect(hwnd, &mut wr).is_err() {
                 return false;
             }
+            let tw = (target.right - target.left).max(1);
+            let th = (target.bottom - target.top).max(1);
+            let ww = (wr.right - wr.left).max(0);
+            let wh = (wr.bottom - wr.top).max(0);
+
+            // Near full coverage (95% — some borderless games leave a thin inset).
+            if ww * 100 < tw * 95 || wh * 100 < th * 95 {
+                return false;
+            }
+            // Anchored to target origin (allow a few px for exclusive-mode quirks).
+            if (wr.left - target.left).abs() > 8 || (wr.top - target.top).abs() > 8 {
+                return false;
+            }
+            true
+        }
+    }
+
+    fn covers_physical_monitor(hwnd: HWND) -> bool {
+        unsafe {
             let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             let mut info = MONITORINFO {
                 cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -75,37 +94,28 @@ mod win {
             if !GetMonitorInfoW(mon, &mut info).as_bool() {
                 return false;
             }
-            let m = info.rcMonitor;
-            let mw = (m.right - m.left).max(1);
-            let mh = (m.bottom - m.top).max(1);
-            let ww = (wr.right - wr.left).max(0);
-            let wh = (wr.bottom - wr.top).max(0);
-
-            // Near full coverage of the physical display.
-            if ww * 100 < mw * 97 || wh * 100 < mh * 97 {
-                return false;
-            }
-            // Anchored to monitor origin (allow a few px for exclusive-mode quirks).
-            if (wr.left - m.left).abs() > 4 || (wr.top - m.top).abs() > 4 {
-                return false;
-            }
-            true
+            covers_rect(hwnd, info.rcMonitor)
         }
     }
 
-    /// Game-like fullscreen: fills the physical monitor, and is not a normal maximized app.
+    /// Game-like fullscreen: fills the **physical** monitor (`rcMonitor`).
+    ///
+    /// Maximized apps (WPS / browsers / IDEs — often borderless custom chrome) stop at
+    /// `rcWork` under our top AppBar and must NOT hide the island/dock.
+    /// Exclusive games often also set `WS_MAXIMIZE` / `IsZoomed` while covering
+    /// `rcMonitor` without a caption — those still count as game FS.
     fn is_game_fullscreen(hwnd: HWND) -> bool {
-        if !covers_physical_monitor(hwnd) {
-            return false;
-        }
         unsafe {
-            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-            let has_caption = style & WS_CAPTION.0 != 0;
-            // Maximized titled windows (browser/IDE) must keep the island — even if the
-            // taskbar is auto-hidden and the rect reaches rcMonitor.
-            if IsZoomed(hwnd).as_bool() && has_caption {
+            if !covers_physical_monitor(hwnd) {
                 return false;
             }
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let has_caption = style & WS_CAPTION.0 != 0;
+            // Titled maximize that reaches rcMonitor (auto-hidden taskbar) — keep chrome.
+            if has_caption {
+                return false;
+            }
+            // Borderless covering the physical monitor = exclusive / game FS.
             true
         }
     }

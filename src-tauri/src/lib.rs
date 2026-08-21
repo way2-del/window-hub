@@ -13,15 +13,15 @@ mod sysmon;
 mod win32;
 mod windows_service;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
+use tauri::{Emitter, Manager};
 
 use crate::commands::initial_material_state;
 use crate::ecs::{spawn_ecs_thread, EcsHandle};
 use crate::plugin_hub::ShortcutsPinStore;
 use crate::win32::appbar;
+use crate::win32::work_area;
 use crate::windows_service::WindowsService;
 
 /// Windows Service entry for `--autostart-svc` (no Tauri UI).
@@ -49,60 +49,109 @@ pub fn ensure_single_instance() {
 }
 
 /// 因全屏游戏隐藏顶栏时为 true；watchdog 期间勿重挂 AppBar / 几何。
-static HIDDEN_FOR_FULLSCREEN: AtomicBool = AtomicBool::new(false);
+fn island_hidden_for_fullscreen() -> bool {
+    work_area::island_hidden_for_fullscreen()
+}
 
 fn hwnd_of(window: &tauri::WebviewWindow) -> Option<isize> {
     window.hwnd().ok().map(|h| h.0 as isize)
 }
 
-/// 顶栏贴齐当前显示器顶部，并强制铺满整屏宽度（左右留给系统材质）。
-fn pin_top_bar(window: &tauri::WebviewWindow) {
-    let Ok(Some(monitor)) = window.current_monitor() else {
-        return;
+/// Pin island HWND to monitor top / full width — pure Win32 (safe from any thread).
+/// Never call `WebviewWindow::set_size` / `set_position` from background or sync IPC.
+#[cfg(windows)]
+fn pin_top_bar_hwnd(hwnd_raw: isize) {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
-    let Ok(size) = window.outer_size() else {
-        return;
-    };
-    let Ok(pos) = window.outer_position() else {
-        return;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
     };
 
-    let screen = monitor.size();
-    let origin = monitor.position();
-    let x = origin.x;
-    let y = origin.y;
-
-    if size.width != screen.width {
-        let _ = window.set_size(PhysicalSize::new(screen.width, size.height));
-    }
-    if pos.x != x || pos.y != y {
-        let _ = window.set_position(PhysicalPosition::new(x, y));
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut info).as_bool() {
+            return;
+        }
+        let mut wr = RECT::default();
+        if GetWindowRect(hwnd, &mut wr).is_err() {
+            return;
+        }
+        let h = (wr.bottom - wr.top).max(1);
+        let mon = info.rcMonitor;
+        let w = (mon.right - mon.left).max(1);
+        if wr.left == mon.left && wr.top == mon.top && (wr.right - wr.left) == w {
+            return;
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            mon.left,
+            mon.top,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 
+#[cfg(not(windows))]
+fn pin_top_bar_hwnd(_hwnd_raw: isize) {}
+
+fn pin_top_bar(window: &tauri::WebviewWindow) {
+    if let Some(hwnd) = hwnd_of(window) {
+        pin_top_bar_hwnd(hwnd);
+    }
+}
+
+/// Reassert island visibility / Z-order with Win32 only.
+/// Calling `window.show()` / `set_always_on_top` from a worker or sync command
+/// deadlocks WebView2 on Windows (click → 未响应).
 fn reassert_window(window: &tauri::WebviewWindow) {
-    if HIDDEN_FOR_FULLSCREEN.load(Ordering::SeqCst) {
+    if island_hidden_for_fullscreen() {
         return;
     }
-    if let Some(hwnd) = hwnd_of(window) {
-        // 持续排除 Alt+Tab / Win+Tab，防止样式被重置后又出现在窗口切换里
-        crate::win32::switcher::exclude_from_switcher(hwnd);
-        crate::win32::topmost::set_main_hwnd(hwnd);
-    }
-    // 三指下滑「显示桌面」会最小化岛窗 —— 非全屏隐藏时立刻拉回
+    let Some(hwnd) = hwnd_of(window) else {
+        return;
+    };
+    crate::win32::switcher::exclude_from_switcher(hwnd);
+    crate::win32::topmost::set_main_hwnd(hwnd);
     let _ = crate::win32::topmost::ensure_main_visible();
-    let _ = window.unminimize();
-    let _ = window.show();
-    // 桌面态始终 TOPMOST，避免壁纸软件 / Show Desktop 把顶栏埋掉
     crate::win32::topmost::reassert_main_zorder();
-    let _ = window.set_always_on_top(true);
-    pin_top_bar(window);
+    pin_top_bar_hwnd(hwnd);
+}
+
+#[cfg(windows)]
+fn show_hwnd(hwnd_raw: isize, show: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        let _ = ShowWindow(hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
 }
 
 fn spawn_watchdog(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(500));
+        // Let the main HWND exist, then claim strips once under quiet.
+        std::thread::sleep(Duration::from_millis(200));
         if let Some(window) = app.get_webview_window("main") {
+            // Dock on: hide taskbar *before* top AppBar so shell only settles once
+            // toward the final (top+bottom reserved) work area, not expand-then-shrink.
+            #[cfg(windows)]
+            {
+                let prefs = crate::dock::load_dock_prefs();
+                if prefs.enabled && crate::dock::mode_reserves_bottom_work_area(prefs.mode()) {
+                    let _ = crate::commands::set_system_taskbar_visible(false);
+                    std::thread::sleep(Duration::from_millis(60));
+                }
+            }
             if let Some(hwnd) = hwnd_of(&window) {
                 appbar::register(hwnd);
             }
@@ -113,9 +162,9 @@ fn spawn_watchdog(app: tauri::AppHandle) {
 
         let mut ticks: u32 = 0;
         loop {
-            // 比 2s 更密：显示桌面后尽快把岛拉回
-            std::thread::sleep(Duration::from_millis(500));
-            if HIDDEN_FOR_FULLSCREEN.load(Ordering::SeqCst) {
+            // Sparse reassert — every 500ms set_always_on_top fights Alt-Tab / clicks.
+            std::thread::sleep(Duration::from_millis(2000));
+            if island_hidden_for_fullscreen() {
                 continue;
             }
             let Some(window) = app.get_webview_window("main") else {
@@ -123,7 +172,7 @@ fn spawn_watchdog(app: tauri::AppHandle) {
             };
             reassert_window(&window);
             ticks = ticks.wrapping_add(1);
-            if ticks % 10 == 0 {
+            if ticks % 5 == 0 && !work_area::work_area_quiet() {
                 if let Some(hwnd) = hwnd_of(&window) {
                     appbar::sync(hwnd);
                 }
@@ -132,11 +181,19 @@ fn spawn_watchdog(app: tauri::AppHandle) {
     });
 }
 
-/// 前台为独占/无边框全屏（游戏）时隐藏岛并释放工作区；退出全屏后再显示。
+/// 前台为独占/无边框全屏（游戏）时只藏岛/设置窗 UI；**不** ABM_REMOVE / 重挂 AppBar。
+///
+/// 顶栏 + Dock 各一次 SETPOS 会让最大化窗 resize 两次；quiet 只能砍掉 ABN 互踢，
+/// 无法把两次合成一次。全屏期间保持工作区不变 → 退出时 0 次 work-area 抖动，判定一次成功。
 fn spawn_fullscreen_watcher(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(800));
         let mut hidden = false;
+        let mut hide_streak = 0u32;
+        let mut show_streak = 0u32;
+        let mut restore_grace_until: Option<Instant> = None;
+        // 工作区不再随全屏抖动，2×350ms 即可；grace 防短闪误藏。
+        const NEED: u32 = 2;
 
         loop {
             std::thread::sleep(Duration::from_millis(350));
@@ -144,54 +201,93 @@ fn spawn_fullscreen_watcher(app: tauri::AppHandle) {
                 break;
             };
             let self_hwnd = hwnd_of(&window);
-            let should_hide = crate::win32::fullscreen::should_hide_strip(self_hwnd);
+            let mut should_hide = crate::win32::fullscreen::should_hide_strip(self_hwnd);
 
-            if should_hide && !hidden {
-                HIDDEN_FOR_FULLSCREEN.store(true, Ordering::SeqCst);
-                appbar::suspend();
-                let _ = window.hide();
-                // 设置窗若开着一并藏起，避免盖在游戏上
+            if restore_grace_until
+                .map(|until| Instant::now() < until)
+                .unwrap_or(false)
+            {
+                should_hide = false;
+                hide_streak = 0;
+            } else {
+                restore_grace_until = None;
+            }
+
+            if should_hide {
+                show_streak = 0;
+                hide_streak = hide_streak.saturating_add(1);
+            } else {
+                hide_streak = 0;
+                show_streak = show_streak.saturating_add(1);
+            }
+
+            if should_hide && hide_streak >= NEED && !hidden {
+                // Freeze dock AppBar sync so Default 模式藏条时不会 ABM_REMOVE 底边。
+                work_area::set_island_hidden_for_fullscreen(true);
+                if let Some(hwnd) = hwnd_of(&window) {
+                    #[cfg(windows)]
+                    show_hwnd(hwnd, false);
+                    #[cfg(not(windows))]
+                    {
+                        let _ = window.hide();
+                    }
+                }
                 if let Some(settings) = app.get_webview_window("settings") {
-                    let _ = settings.hide();
+                    if let Some(hwnd) = hwnd_of(&settings) {
+                        #[cfg(windows)]
+                        show_hwnd(hwnd, false);
+                        #[cfg(not(windows))]
+                        {
+                            let _ = settings.hide();
+                        }
+                    }
                 }
                 hidden = true;
-            } else if !should_hide && hidden {
-                let _ = window.show();
-                if let Some(hwnd) = self_hwnd {
-                    appbar::register(hwnd);
+            } else if !should_hide && show_streak >= NEED && hidden {
+                if let Some(hwnd) = hwnd_of(&window) {
+                    #[cfg(windows)]
+                    show_hwnd(hwnd, true);
+                    #[cfg(not(windows))]
+                    {
+                        let _ = window.show();
+                    }
                 }
-                HIDDEN_FOR_FULLSCREEN.store(false, Ordering::SeqCst);
+                work_area::set_island_hidden_for_fullscreen(false);
                 reassert_window(&window);
+                restore_grace_until = Some(Instant::now() + Duration::from_secs(2));
                 hidden = false;
             }
         }
     });
 }
 
-/// 最大化窗口顶 1–2px 取色；切窗后采 ~3s 再锁定，锁定后只侦测窗口切换。
+/// 最大化窗口顶取色；切窗后动态采 ~0.9s 再锁定。启动稍晚，避免 AppBar 未就绪时自吸发黑。
 fn spawn_ambient_watcher(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(700));
+        // Wait for AppBar work-area + first paint (cold start / post-build is slower).
+        std::thread::sleep(Duration::from_millis(1400));
         let mut cleared = false;
 
-        // 启动时采一次
         if let Some(window) = app.get_webview_window("main") {
             let _ = crate::win32::material::clear(&window);
             cleared = true;
+            // Seed from cache/wallpaper first, then one live poll.
+            let seed = crate::win32::ambient::sample_nonblocking(hwnd_of(&window));
+            let _ = app.emit("ambient-color", seed);
             if let Some(strip) = crate::win32::ambient::poll_changed(hwnd_of(&window)) {
                 let _ = app.emit("ambient-color", strip);
             } else {
+                // Force a live sample once so the bar is never stuck on seed gray.
                 let strip = crate::win32::ambient::sample(hwnd_of(&window));
                 let _ = app.emit("ambient-color", strip);
             }
         }
 
         loop {
-            // 稳定期密采；锁定后只低频侦测「当前最大化窗口是否切换」
             let ms = if crate::win32::ambient::is_settling() {
-                180
+                450
             } else {
-                700
+                1200
             };
             std::thread::sleep(Duration::from_millis(ms));
             let Some(window) = app.get_webview_window("main") else {
@@ -262,11 +358,12 @@ pub fn run() {
             pins.load_all_from_db();
             app.manage(pins);
             let _ = crate::plugin_install::list_installed_plugins_sync();
-            crate::plugin_install::ensure_official_plugins(app.handle());
-            // Directory-imported (__dev) plugins are copies — refresh from source on launch.
-            crate::plugin_install::resync_dev_plugins(app.handle());
             crate::win32::ambient::set_mode(commands::load_ambient_mode());
             crate::win32::tray::set_prefs(commands::load_tray_prefs());
+
+            // Startup: kill AppBar ABN thrash while top + taskbar + dock bottom settle.
+            // Maximized windows otherwise resize many times on first launch.
+            work_area::mark_work_area_quiet(5_000);
 
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(hwnd) = hwnd_of(&window) {
@@ -277,6 +374,15 @@ pub fn run() {
                 let _ = crate::win32::material::clear(&window);
             }
 
+            // Plugin ensure/resync can copy many files — never block setup / UI thread.
+            {
+                let app_plugins = app.handle().clone();
+                std::thread::spawn(move || {
+                    crate::plugin_install::ensure_official_plugins(&app_plugins);
+                    crate::plugin_install::resync_dev_plugins(&app_plugins);
+                });
+            }
+
             spawn_watchdog(app.handle().clone());
             spawn_ambient_watcher(app.handle().clone());
             spawn_fullscreen_watcher(app.handle().clone());
@@ -284,10 +390,17 @@ pub fn run() {
             spawn_input_lang_watcher(app.handle().clone());
             spawn_wifi_watcher(app.handle().clone());
             crate::companion_scripts::start_hub_associated_launchers();
-            crate::dock::bootstrap_dock(app.handle());
+            // After watchdog: taskbar hide + top AppBar, then dock bottom claim.
+            {
+                let app_dock = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(450));
+                    crate::dock::bootstrap_dock(&app_dock);
+                });
+            }
             crate::dock::spawn_dock_preview_refresher(app.handle().clone());
             #[cfg(windows)]
-            crate::win32::island_search_hotkey::spawn_island_search_hotkey(app.handle().clone());
+            crate::win32::hotkey_registry::spawn(app.handle().clone());
 
             Ok(())
         })
@@ -295,7 +408,7 @@ pub fn run() {
             match event {
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                     if window.label() == "main"
-                        && !HIDDEN_FOR_FULLSCREEN.load(Ordering::SeqCst)
+                        && !island_hidden_for_fullscreen()
                     {
                         if let Some(w) = window.app_handle().get_webview_window("main") {
                             pin_top_bar(&w);
@@ -336,8 +449,31 @@ pub fn run() {
                     {
                         let label = window.label().to_string();
                         let app = window.app_handle().clone();
+                        let popup_hwnd = window.hwnd().ok().map(|h| h.0 as isize);
                         std::thread::spawn(move || {
                             std::thread::sleep(Duration::from_millis(60));
+                            #[cfg(windows)]
+                            {
+                                use windows::Win32::Foundation::HWND;
+                                use windows::Win32::UI::WindowsAndMessaging::{
+                                    GetForegroundWindow, PostMessageW, WM_CLOSE,
+                                };
+                                if let Some(raw) = popup_hwnd {
+                                    unsafe {
+                                        let fg = GetForegroundWindow();
+                                        if fg.0 as isize == raw {
+                                            return;
+                                        }
+                                        let _ = PostMessageW(
+                                            HWND(raw as *mut _),
+                                            WM_CLOSE,
+                                            windows::Win32::Foundation::WPARAM(0),
+                                            windows::Win32::Foundation::LPARAM(0),
+                                        );
+                                    }
+                                }
+                            }
+                            #[cfg(not(windows))]
                             if let Some(w) = app.get_webview_window(&label) {
                                 if w.is_focused().unwrap_or(false) {
                                     return;
@@ -497,6 +633,7 @@ pub fn run() {
             commands::open_keyboard_settings,
             commands::open_input_lang_popup,
             commands::show_chrome_hover_tip,
+            commands::commit_chrome_hover_tip,
             commands::close_chrome_hover_tip,
             commands::get_chrome_hover_tip,
             commands::close_input_lang_popup,
@@ -565,6 +702,11 @@ pub fn run() {
             commands::show_desktop,
             commands::restart_app,
             commands::exit_app,
+            commands::list_hotkey_bindings,
+            commands::set_hotkey_binding,
+            commands::validate_hotkey_chord,
+            commands::suspend_hotkeys_for_recording,
+            commands::resume_hotkeys_after_recording,
             win32::app_launch::get_general_prefs,
             win32::app_launch::set_general_prefs,
             win32::app_launch::relaunch_app,
@@ -594,6 +736,13 @@ pub fn run() {
             plugin_install::preview_plugin_from_path,
             plugin_install::preview_example_plugin,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Window Hub");
+        .build(tauri::generate_context!())
+        .expect("error while building Window Hub")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Any GUI teardown (菜单退出 / 进程结束) — tell SCM not to treat as crash.
+                #[cfg(windows)]
+                crate::win32::autostart_svc::signal_user_quit_unless_relaunching();
+            }
+        });
 }

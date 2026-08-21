@@ -92,6 +92,14 @@ pub fn dock_set(conn: &Connection, value: &Value) -> Result<(), String> {
     singleton_set_json(conn, "prefs_dock", value)
 }
 
+pub fn hotkeys_get(conn: &Connection) -> Result<Option<Value>, String> {
+    singleton_get_json(conn, "prefs_hotkeys")
+}
+
+pub fn hotkeys_set(conn: &Connection, value: &Value) -> Result<(), String> {
+    singleton_set_json(conn, "prefs_hotkeys", value)
+}
+
 pub fn general_get(conn: &Connection) -> Result<Option<Value>, String> {
     singleton_get_json(conn, "prefs_general")
 }
@@ -318,6 +326,11 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS prefs_dock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prefs_hotkeys (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL

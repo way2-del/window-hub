@@ -145,6 +145,12 @@ impl DockVisibility {
         }
     }
 
+    /// Global hotkey path (from `hotkey_registry`).
+    pub fn apply_hotkey_toggle(self: &Arc<Self>, app: &AppHandle) {
+        self.toggle_hotkey();
+        self.tick(app);
+    }
+
     /// Kept for IPC compatibility — AutoHide ignores this (native geometry only).
     pub fn set_mouse_near_bottom(&self, _near: bool) {}
 
@@ -187,12 +193,7 @@ impl DockVisibility {
                 std::thread::sleep(Duration::from_millis(POLL_MS));
             }
         });
-        #[cfg(windows)]
-        {
-            let this2 = Arc::clone(self);
-            let app2 = app.clone();
-            std::thread::spawn(move || hotkey_loop(this2, app2));
-        }
+        // Global Dock hotkey: `hotkey_registry` system.dockToggle.
     }
 
     pub fn stop(&self) {
@@ -306,13 +307,24 @@ impl DockVisibility {
             );
 
             if uses_linger {
+                // Exclusive FS: never keep dock via bottom-edge `near` (games cursors sit there).
+                let fullscreen_hide = reason == "fullscreen";
                 // AutoHide/SmartHide: policy `want` (desktop / clear / edge) plus
                 // pointer hysteresis. AutoHide previously used `near` only, which
                 // ignored on-desktop and made that preference a no-op.
-                let want_eff = want || near;
+                let want_eff = if fullscreen_hide {
+                    false
+                } else {
+                    want || near
+                };
 
                 if busy {
                     // In-flight slide — do not change desired / leave.
+                } else if fullscreen_hide {
+                    // Drop immediately — skip settle / linger while a game owns the display.
+                    g.hide_deadline = None;
+                    g.desired = false;
+                    g.shown_at = None;
                 } else if shown && settling {
                     g.hide_deadline = None;
                     g.desired = true;
@@ -449,21 +461,33 @@ impl DockVisibility {
         let force = g.force_show;
         drop(g);
 
-        let fullscreen = crate::win32::fullscreen::should_hide_strip(
-            app.get_webview_window("main")
-                .and_then(|w| w.hwnd().ok().map(|h| h.0 as isize)),
+        // Prefer dock HWND for monitor match — island may sit on another display.
+        let self_hwnd = app
+            .get_webview_window("dock")
+            .and_then(|w| w.hwnd().ok().map(|h| h.0 as isize))
+            .or_else(|| {
+                app.get_webview_window("main")
+                    .and_then(|w| w.hwnd().ok().map(|h| h.0 as isize))
+            });
+        let fullscreen = crate::win32::fullscreen::should_hide_strip(self_hwnd);
+        // Always* modes intentionally stay up over games.
+        let fs_hides = matches!(
+            mode,
+            DockDisplayMode::Default
+                | DockDisplayMode::AutoHide
+                | DockDisplayMode::SmartHide
+                | DockDisplayMode::Desktop
+                | DockDisplayMode::Hotkey
         );
+        if fullscreen && fs_hides {
+            return (false, "fullscreen".into());
+        }
+
         let on_desktop = is_desktop_foreground();
         let overlapped = is_dock_overlapped(app);
 
         match mode {
-            DockDisplayMode::Default => {
-                if fullscreen {
-                    (false, "fullscreen".into())
-                } else {
-                    (true, "default".into())
-                }
-            }
+            DockDisplayMode::Default => (true, "default".into()),
             DockDisplayMode::Layered | DockDisplayMode::Always => (true, "always".into()),
             DockDisplayMode::AlwaysFullscreen => (true, "alwaysFullscreen".into()),
             DockDisplayMode::AutoHide => {
@@ -980,37 +1004,5 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
     {
         let _ = app;
         false
-    }
-}
-
-#[cfg(windows)]
-fn hotkey_loop(vis: Arc<DockVisibility>, app: AppHandle) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_HOTKEY,
-    };
-
-    const HOTKEY_ID: i32 = 0xD0C1;
-    unsafe {
-        let mods = HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0);
-        if RegisterHotKey(None, HOTKEY_ID, mods, 0x44).is_err() {
-            eprintln!("[dock] RegisterHotKey Ctrl+Alt+D failed");
-            return;
-        }
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if !vis.running.load(Ordering::SeqCst) {
-                break;
-            }
-            if msg.message == WM_HOTKEY && msg.wParam.0 == HOTKEY_ID as usize {
-                vis.toggle_hotkey();
-                vis.tick(&app);
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        let _ = UnregisterHotKey(None, HOTKEY_ID);
     }
 }

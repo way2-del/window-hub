@@ -1,9 +1,11 @@
 //! Ambient strip color.
 //! - Maximized / fullscreen window:
-//!   - **edge**: full-width horizontal PNG strip from visible top 1–2 px
-//!   - **center**: solid color from window mid band
+//!   - **edge**: GetWindowDC at junction (+1px), then screen BitBlt if DC empty —
+//!     screen path skipped while Win11 Snap Layouts is visible.
+//!   - **center**: solid color from that same junction band
 //! - Windowed → desktop wallpaper (edge may use wallpaper top-row strip).
-//! - After a target switch: sample ~3s then lock until next switch.
+//! - After a target switch: live-sample ~5s then lock until next switch.
+//! - Never PrintWindow on the hot path (full-frame PW can hang the process).
 
 use serde::{Deserialize, Serialize};
 
@@ -113,18 +115,19 @@ mod win {
         DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
     };
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
-        GetMonitorInfoW, GetSysColor, GetWindowDC, MonitorFromWindow, ReleaseDC, SelectObject,
-        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_DESKTOP, DIB_RGB_COLORS, HDC, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST, SRCCOPY,
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, GetMonitorInfoW, GetSysColor, GetWindowDC, MonitorFromWindow, ReleaseDC,
+        SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        COLOR_DESKTOP, DIB_RGB_COLORS, HDC, HALFTONE, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        SRCCOPY,
     };
     use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowLongW,
         GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
-        SystemParametersInfoW, GA_ROOT, GWL_EXSTYLE, SPI_GETDESKWALLPAPER,
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WS_EX_TOOLWINDOW,
+        SystemParametersInfoW, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, SPI_GETDESKWALLPAPER,
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WS_CAPTION, WS_EX_TOOLWINDOW,
     };
 
     const PW_RENDERFULLCONTENT: u32 = 0x2;
@@ -132,10 +135,15 @@ mod win {
     const MODE_EDGE: u8 = 0;
     const MODE_CENTER: u8 = 1;
 
-    /// How long to keep sampling after a window/desktop target switch.
-    const SETTLE_MS: u64 = 3000;
+    /// How long to keep live-sampling after a window/desktop target switch.
+    /// Short settle + timed blit — avoid multi-second BitBlt storms (DWM freeze).
+    const SETTLE_MS: u64 = 900;
     /// Top rows to average from the target window (window-local Y).
     const TOP_ROWS: i32 = 2;
+    /// Hard cap on window-DC / screen ribbon width.
+    const MAX_RIBBON_W: i32 = 960;
+    /// Abort GDI sample if it does not finish (hung HWND / DWM stall).
+    const CAPTURE_TIMEOUT_MS: u64 = 80;
 
     /// Last live sample — used when focus is on the island (no external target).
     static LAST_STRIP: Mutex<Option<AmbientStrip>> = Mutex::new(None);
@@ -193,17 +201,6 @@ mod win {
         hwnd.map(|h| h.0 as isize).unwrap_or(0)
     }
 
-    fn avg_changed(prev: Option<(u8, u8, u8)>, r: u8, g: u8, b: u8) -> bool {
-        match prev {
-            None => true,
-            Some((pr, pg, pb)) => {
-                (pr as i16 - r as i16).abs() > 2
-                    || (pg as i16 - g as i16).abs() > 2
-                    || (pb as i16 - b as i16).abs() > 2
-            }
-        }
-    }
-
     fn class_name(hwnd: HWND) -> String {
         let mut buf = [0u16; 256];
         let n = unsafe { GetClassNameW(hwnd, &mut buf) };
@@ -225,10 +222,6 @@ mod win {
     /// `plugin-window` must be a valid 吸色 target like Chrome/VS Code.
     static AMBIENT_ALLOW_HWND: std::sync::atomic::AtomicIsize =
         std::sync::atomic::AtomicIsize::new(0);
-    /// Extra top inset (physical px) when sampling an allowed plugin window.
-    /// `0` = sample the OS title bar (same as Chrome/VS Code).
-    static AMBIENT_ALLOW_TOP_INSET: std::sync::atomic::AtomicI32 =
-        std::sync::atomic::AtomicI32::new(0);
 
     /// Always store / compare **root** HWND (Tauri `.hwnd()` may be a child).
     fn root_hwnd_isize(hwnd_raw: isize) -> isize {
@@ -247,11 +240,11 @@ mod win {
     }
 
     /// Register / clear an in-process window as an ambient sample target.
-    pub fn set_ambient_sample_target(hwnd: Option<isize>, top_inset_px: i32) {
+    /// `top_inset_px` is ignored — all windows use the same top-chrome sample Y.
+    pub fn set_ambient_sample_target(hwnd: Option<isize>, _top_inset_px: i32) {
         use std::sync::atomic::Ordering;
         let root = hwnd.map(root_hwnd_isize).filter(|&h| h != 0);
         AMBIENT_ALLOW_HWND.store(root.unwrap_or(0), Ordering::SeqCst);
-        AMBIENT_ALLOW_TOP_INSET.store(top_inset_px.max(0), Ordering::SeqCst);
         // Force settle restart so island leaves a wallpaper lock for this HWND.
         if let Ok(mut gate) = GATE.lock() {
             gate.target_key = isize::MIN;
@@ -270,11 +263,6 @@ mod win {
         }
         let raw = hwnd.0 as isize;
         raw == allow || root_hwnd_isize(raw) == allow
-    }
-
-    fn ambient_allow_top_inset() -> i32 {
-        use std::sync::atomic::Ordering;
-        AMBIENT_ALLOW_TOP_INSET.load(Ordering::SeqCst).max(0)
     }
 
     fn is_cloaked(hwnd: HWND) -> bool {
@@ -309,18 +297,204 @@ mod win {
         }
     }
 
+    /// Top of the shell work area (= bottom of island AppBar). Maximized windows
+    /// meet the status bar on this screen row.
+    fn work_area_top(hint: HWND) -> i32 {
+        unsafe {
+            let mon = MonitorFromWindow(hint, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(mon, &mut info).as_bool() {
+                return info.rcWork.top;
+            }
+        }
+        crate::win32::appbar::strip_height_px().max(1)
+    }
+
+    /// AppBar must have reserved the top strip — otherwise screen Y is wrong and
+    /// we BitBlt our own (often black/transparent) island → black bar + thrash.
+    fn junction_screen_y(island: HWND) -> Option<i32> {
+        let strip = crate::win32::appbar::strip_height_px();
+        if strip <= 0 {
+            return None;
+        }
+        let meet = work_area_top(island);
+        if meet + 2 < strip {
+            return None;
+        }
+        Some(meet + 1)
+    }
+
+    fn row_avg_luma(bgra: &[u8]) -> u32 {
+        let mut sum = 0u64;
+        let mut n = 0u64;
+        for c in bgra.chunks_exact(4) {
+            // rough luma
+            sum += (u64::from(c[2]) * 3 + u64::from(c[1]) * 6 + u64::from(c[0])) / 10;
+            n += 1;
+        }
+        if n == 0 {
+            0
+        } else {
+            (sum / n) as u32
+        }
+    }
+
+    /// BitBlt/StretchBlt from the desktop DC.
+    /// Always covers the full source width, scaled into ≤ MAX_RIBBON_W columns
+    /// (left-only crop made icons dominate the ambient strip).
+    unsafe fn blit_screen_rows(x: i32, y: i32, src_w: i32, h: i32) -> Option<Vec<u8>> {
+        if src_w < 1 || h < 1 {
+            return None;
+        }
+        let src_w = src_w.max(1);
+        let dst_w = src_w.min(MAX_RIBBON_W).max(1);
+        let hdc_screen = GetDC(None);
+        if hdc_screen.is_invalid() {
+            return None;
+        }
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        if hdc_mem.is_invalid() {
+            ReleaseDC(None, hdc_screen);
+            return None;
+        }
+        let hbmp = CreateCompatibleBitmap(hdc_screen, dst_w, h);
+        if hbmp.is_invalid() {
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(None, hdc_screen);
+            return None;
+        }
+        let old = SelectObject(hdc_mem, hbmp);
+        let ok = if dst_w == src_w {
+            BitBlt(hdc_mem, 0, 0, dst_w, h, hdc_screen, x, y, SRCCOPY).is_ok()
+        } else {
+            let _ = SetStretchBltMode(hdc_mem, HALFTONE);
+            StretchBlt(
+                hdc_mem,
+                0,
+                0,
+                dst_w,
+                h,
+                hdc_screen,
+                x,
+                y,
+                src_w,
+                h,
+                SRCCOPY,
+            )
+            .as_bool()
+        };
+        let bgra = if ok {
+            dibits_bgra(hdc_mem, hbmp, dst_w, h)
+        } else {
+            None
+        };
+        let _ = SelectObject(hdc_mem, old);
+        let _ = DeleteObject(hbmp);
+        let _ = DeleteDC(hdc_mem);
+        ReleaseDC(None, hdc_screen);
+        bgra
+    }
+
+    fn blit_screen_rows_timed(x: i32, y: i32, src_w: i32, h: i32) -> Option<Vec<u8>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+        if INFLIGHT.load(Ordering::SeqCst) >= 1 {
+            return None;
+        }
+        INFLIGHT.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("amb-scr".into())
+            .spawn(move || {
+                let result = unsafe { blit_screen_rows(x, y, src_w, h) };
+                let _ = tx.send(result);
+                INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+            })
+            .is_ok();
+        if !spawned {
+            INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        match rx.recv_timeout(Duration::from_millis(CAPTURE_TIMEOUT_MS)) {
+            Ok(v) => v,
+            Err(_) => None,
+        }
+    }
+
+    /// Optional screen sample at work-area top + 1px.
+    /// Skip when Snap Layouts is up (would paint the strip dark).
+    unsafe fn capture_junction_row(
+        island: HWND,
+        target_wr: RECT,
+        left_inset: i32,
+        vis_w: i32,
+    ) -> Option<Vec<u8>> {
+        if snap_overlay_visible() {
+            return None;
+        }
+        let screen_y = junction_screen_y(island)?;
+        let x0 = (target_wr.left + left_inset).max(target_wr.left);
+        let src_w = vis_w.min(target_wr.right - x0).max(1);
+        let dst_w = src_w.min(MAX_RIBBON_W).max(1);
+        let bgra = blit_screen_rows_timed(x0, screen_y, src_w, TOP_ROWS)?;
+        let avg = average_bgra_rows(&bgra, dst_w, TOP_ROWS);
+        if is_all_zero(&avg) || row_avg_luma(&avg) < 8 {
+            return None;
+        }
+        Some(avg)
+    }
+
+    fn is_snap_class_name(c: &str) -> bool {
+        matches!(
+            c,
+            "XamlExplorerHostIslandWindow" | "SnapAssistFlyout"
+        ) || {
+            let cl = c.to_ascii_lowercase();
+            cl.contains("snapassist") || cl.contains("snap_assist") || cl.contains("snaplayout")
+        }
+    }
+
+    /// Win11 Snap Layouts / drag-to-top flyout currently on screen.
+    fn snap_overlay_visible() -> bool {
+        struct Ctx {
+            found: bool,
+        }
+        let ctx = Box::new(Ctx { found: false });
+        let ptr = Box::into_raw(ctx);
+        unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let ctx = &mut *(lparam.0 as *mut Ctx);
+            if ctx.found {
+                return BOOL(0);
+            }
+            if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                return BOOL(1);
+            }
+            if is_snap_class_name(&class_name(hwnd)) {
+                ctx.found = true;
+                return BOOL(0);
+            }
+            BOOL(1)
+        }
+        unsafe {
+            let _ = EnumWindows(Some(cb), LPARAM(ptr as isize));
+            let ctx = Box::from_raw(ptr);
+            ctx.found
+        }
+    }
+
     fn is_excluded(hwnd: HWND, self_hwnd: Option<isize>) -> bool {
         if hwnd.0.is_null() {
             return true;
         }
         if let Some(me) = self_hwnd {
             let mine = HWND(me as *mut _);
-            // Island itself must never be the sample target.
             if hwnd.0 as isize == me {
                 return true;
             }
-            // Same process: skip Host chrome (settings/tray/dock/…), but allow
-            // registered plugin OS windows so maximized Excalidraw 吸色 works.
             if same_process(hwnd, mine) && !is_ambient_allowed_hwnd(hwnd) {
                 return true;
             }
@@ -330,21 +504,23 @@ mod win {
                 || !IsWindowVisible(hwnd).as_bool()
                 || IsIconic(hwnd).as_bool()
                 || is_cloaked(hwnd)
+                || crate::win32::hang::is_hung_hwnd(hwnd.0 as isize)
             {
                 return true;
             }
         }
-        matches!(
-            class_name(hwnd).as_str(),
-            "WindowHubAppBarHost"
-            | "WindowHubDockAppBarHost"
-                | "Shell_TrayWnd"
-                | "Shell_SecondaryTrayWnd"
-                | "Progman"
-                | "WorkerW"
-                | "ForegroundStaging"
-                | "Windows.UI.Core.CoreWindow"
-        )
+        is_snap_class_name(&class_name(hwnd))
+            || matches!(
+                class_name(hwnd).as_str(),
+                "WindowHubAppBarHost"
+                    | "WindowHubDockAppBarHost"
+                    | "Shell_TrayWnd"
+                    | "Shell_SecondaryTrayWnd"
+                    | "Progman"
+                    | "WorkerW"
+                    | "ForegroundStaging"
+                    | "Windows.UI.Core.CoreWindow"
+            )
     }
 
     fn root_of(hwnd: HWND) -> HWND {
@@ -380,8 +556,6 @@ mod win {
     }
 
     /// True fullscreen ≈ fills the physical monitor (`rcMonitor`).
-    /// Maximized apps that only fill the work area return false.
-    #[allow(dead_code)]
     fn covers_physical_monitor(hwnd: HWND) -> bool {
         unsafe {
             let mut wr = RECT::default();
@@ -411,25 +585,78 @@ mod win {
         }
     }
 
+    /// Fills the shell work area tightly (borderless maximize under AppBars).
+    fn covers_work_area_tight(hwnd: HWND) -> bool {
+        unsafe {
+            let mut wr = RECT::default();
+            if GetWindowRect(hwnd, &mut wr).is_err() {
+                return false;
+            }
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(mon, &mut info).as_bool() {
+                return false;
+            }
+            let w = info.rcWork;
+            let aw = (w.right - w.left).max(1) as i64;
+            let ah = (w.bottom - w.top).max(1) as i64;
+            let ww = (wr.right - wr.left).max(0) as i64;
+            let wh = (wr.bottom - wr.top).max(0) as i64;
+            if ww * 100 < aw * 97 || wh * 100 < ah * 97 {
+                return false;
+            }
+            if (wr.left - w.left).abs() > 6 || (wr.top - w.top).abs() > 6 {
+                return false;
+            }
+            true
+        }
+    }
+
+    /// Stable maximize / exclusive fullscreen suitable for ambient sampling.
+    /// Excludes Win11 "drag to top" snap preview (large but not IsZoomed).
+    fn is_true_maximized_for_ambient(hwnd: HWND) -> bool {
+        unsafe {
+            if IsZoomed(hwnd).as_bool() {
+                return true;
+            }
+            // Borderless F11 / game-style: no caption, fills monitor or work area.
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let has_caption = style & WS_CAPTION.0 != 0;
+            if has_caption {
+                // Caption windows must be IsZoomed — snap-drag looks maximized but isn't.
+                return false;
+            }
+            covers_physical_monitor(hwnd) || covers_work_area_tight(hwnd)
+        }
+    }
+
+    #[allow(dead_code)]
     fn is_fullscreen_or_maximized(hwnd: HWND) -> bool {
         unsafe { IsZoomed(hwnd).as_bool() || covers_monitor(hwnd) }
     }
 
-    /// Topmost maximized/fullscreen (EnumWindows = z-order top → bottom).
+    /// Topmost true maximized/fullscreen (EnumWindows = z-order top → bottom).
+    /// Skips snap-drag previews so we sample the maximized window underneath.
     fn topmost_fullscreen(self_hwnd: Option<isize>) -> Option<HWND> {
         struct Ctx {
             self_hwnd: Option<isize>,
-            found: Option<HWND>,
+            /// Prefer IsZoomed; keep first borderless fill as fallback.
+            zoomed: Option<HWND>,
+            borderless: Option<HWND>,
         }
         let ctx = Box::new(Ctx {
             self_hwnd,
-            found: None,
+            zoomed: None,
+            borderless: None,
         });
         let ptr = Box::into_raw(ctx);
 
         unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
             let ctx = &mut *(lparam.0 as *mut Ctx);
-            if ctx.found.is_some() {
+            if ctx.zoomed.is_some() {
                 return BOOL(0);
             }
             if is_excluded(hwnd, ctx.self_hwnd) {
@@ -443,9 +670,15 @@ mod win {
             if is_excluded(root, ctx.self_hwnd) {
                 return BOOL(1);
             }
-            if is_fullscreen_or_maximized(root) {
-                ctx.found = Some(root);
+            if !is_true_maximized_for_ambient(root) {
+                return BOOL(1);
+            }
+            if IsZoomed(root).as_bool() {
+                ctx.zoomed = Some(root);
                 return BOOL(0);
+            }
+            if ctx.borderless.is_none() {
+                ctx.borderless = Some(root);
             }
             BOOL(1)
         }
@@ -453,15 +686,17 @@ mod win {
         unsafe {
             let _ = EnumWindows(Some(cb), LPARAM(ptr as isize));
             let ctx = Box::from_raw(ptr);
-            ctx.found
+            ctx.zoomed.or(ctx.borderless)
         }
     }
 
-    /// Only maximized / fullscreen windows. Windowed apps → wallpaper instead.
+    /// Ambient only tracks true maximize / fullscreen.
+    /// Drag-to-top / Snap Layouts → ignore FG, use maximized window below.
     fn pick_target(self_hwnd: Option<isize>) -> Option<HWND> {
         unsafe {
             let fg = root_of(GetForegroundWindow());
-            if !is_excluded(fg, self_hwnd) && is_fullscreen_or_maximized(fg) {
+            // Snap UI as foreground, or caption window that isn't IsZoomed (drag preview).
+            if !is_excluded(fg, self_hwnd) && is_true_maximized_for_ambient(fg) {
                 return Some(fg);
             }
         }
@@ -694,8 +929,8 @@ mod win {
         })
     }
 
-    /// After target switch: sample until settled (~3s) then lock.
-    /// Returns `Some` when the UI should update; `None` when locked & unchanged.
+    /// After target switch: live-sample for SETTLE_MS (always emit strip), then
+    /// lock the last frame. Locked: return `None` until the next window switch.
     pub fn poll_changed(self_hwnd: Option<isize>) -> Option<AmbientStrip> {
         let target = pick_target(self_hwnd);
         let key = target_key(target);
@@ -708,16 +943,11 @@ mod win {
                 gate.locked = None;
                 gate.last_avg = None;
                 SETTLING.store(true, Ordering::SeqCst);
-            } else if let Some(locked) = gate.locked.clone() {
+            } else if gate.locked.is_some() {
                 SETTLING.store(false, Ordering::SeqCst);
                 // Locked: no recapture until next switch.
-                let _ = locked;
                 return None;
             } else {
-                let started = gate.settle_started.get_or_insert_with(Instant::now);
-                if started.elapsed() >= Duration::from_millis(SETTLE_MS) {
-                    // About to take one last sample below, then lock.
-                }
                 SETTLING.store(true, Ordering::SeqCst);
             }
         }
@@ -737,22 +967,18 @@ mod win {
             return Some(strip);
         }
 
-        let should_emit = avg_changed(gate.last_avg, strip.r, strip.g, strip.b);
         gate.last_avg = Some((strip.r, strip.g, strip.b));
-
         let started = gate.settle_started.get_or_insert_with(Instant::now);
         if started.elapsed() >= Duration::from_millis(SETTLE_MS) {
+            // Freeze last live frame — one final emit, then quiet.
             gate.locked = Some(strip.clone());
             SETTLING.store(false, Ordering::SeqCst);
-        } else {
-            SETTLING.store(true, Ordering::SeqCst);
+            return Some(strip);
         }
 
-        if should_emit || gate.locked.is_some() {
-            Some(strip)
-        } else {
-            None
-        }
+        SETTLING.store(true, Ordering::SeqCst);
+        // Settling: always push so the 色带 stays continuously dynamic.
+        Some(strip)
     }
 
     /// Average RGB of the desktop wallpaper top strip (never samples a window HWND).
@@ -776,6 +1002,7 @@ mod win {
     }
 
     /// Always sample live (settings / first paint). Also seeds the settle gate.
+    /// When already locked on the same target, return the frozen strip (no flicker).
     pub fn sample(self_hwnd: Option<isize>) -> AmbientStrip {
         let target = pick_target(self_hwnd);
         let key = target_key(target);
@@ -784,8 +1011,12 @@ mod win {
                 gate.target_key = key;
                 gate.settle_started = Some(Instant::now());
                 gate.locked = None;
+                gate.last_avg = None;
+            } else if let Some(locked) = gate.locked.clone() {
+                SETTLING.store(false, Ordering::SeqCst);
+                return locked;
             }
-            SETTLING.store(gate.locked.is_none(), Ordering::SeqCst);
+            SETTLING.store(true, Ordering::SeqCst);
         }
 
         if let Some(t) = target {
@@ -806,6 +1037,25 @@ mod win {
             return strip;
         }
         last_strip().unwrap_or_else(AmbientStrip::fallback)
+    }
+
+    /// For UI invoke: never BitBlt a foreign HWND on the IPC thread.
+    /// Watcher thread owns live capture via `poll_changed` / `sample`.
+    pub fn sample_nonblocking(self_hwnd: Option<isize>) -> AmbientStrip {
+        let target = pick_target(self_hwnd);
+        let key = target_key(target);
+        if let Ok(gate) = GATE.lock() {
+            if gate.target_key == key {
+                if let Some(locked) = gate.locked.clone() {
+                    return locked;
+                }
+            }
+        }
+        if let Some(strip) = last_strip() {
+            return strip;
+        }
+        // Wallpaper decode is local disk — safe; skip window BitBlt.
+        sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback)
     }
 
     fn encode_rgb_row(rgb: &[u8], width: u32) -> String {
@@ -857,8 +1107,9 @@ mod win {
         }
     }
 
-    /// Window-local top 1–2 **visible** px (skip invisible DWM borders).
-    /// Prefer GetWindowDC BitBlt; PrintWindow fallback only if the blit is empty.
+    /// Window-local top 1–2 px. GetWindowDC only — no PrintWindow (PW of a
+    /// maximized frame on the ambient hot path can freeze the process).
+    /// Skip hung targets: BitBlt from their window DC can also stall.
     unsafe fn capture_top_pixel_row(
         target: HWND,
         win_w: i32,
@@ -867,24 +1118,25 @@ mod win {
         ribbon_w: i32,
         y0: i32,
     ) -> Option<Vec<u8>> {
+        if crate::win32::hang::is_hung_hwnd(target.0 as isize) {
+            return None;
+        }
         if win_w < 2 || win_h < 2 || ribbon_w < 1 {
             return None;
         }
         let x0 = x0.clamp(0, win_w - 1);
-        let ribbon_w = ribbon_w.min(win_w - x0).max(1);
+        let src_w = ribbon_w.min(win_w - x0).max(1);
+        let dst_w = src_w.min(MAX_RIBBON_W).max(1);
         let y0 = y0.clamp(0, win_h - 1);
         let rows = TOP_ROWS.min(win_h - y0).max(1);
 
-        if let Some(bgra) = blit_window_rows(target, x0, y0, ribbon_w, rows) {
-            let avg = average_bgra_rows(&bgra, ribbon_w, rows);
-            // Only treat *failed* empty blits as miss — dark title bars are valid.
-            if !is_all_zero(&avg) {
-                return Some(avg);
-            }
+        let bgra = blit_window_rows_timed(target, x0, y0, src_w, rows, dst_w)?;
+        let avg = average_bgra_rows(&bgra, dst_w, rows);
+        if is_all_zero(&avg) {
+            None
+        } else {
+            Some(avg)
         }
-        printwindow_top_rows(target, win_w, win_h, x0, ribbon_w, y0, rows)
-            .map(|bgra| average_bgra_rows(&bgra, ribbon_w, rows))
-            .filter(|b| !is_all_zero(b))
     }
 
     /// Average `rows` of BGRA into a single row (per-column).
@@ -917,12 +1169,14 @@ mod win {
         out
     }
 
+    /// Stretch full `src_w` into `dst_w` columns so the ribbon spans the whole chrome.
     unsafe fn blit_window_rows(
         target: HWND,
         x0: i32,
         y0: i32,
-        ribbon_w: i32,
+        src_w: i32,
         rows: i32,
+        dst_w: i32,
     ) -> Option<Vec<u8>> {
         let hdc_win = GetWindowDC(target);
         if hdc_win.is_invalid() {
@@ -933,16 +1187,34 @@ mod win {
             ReleaseDC(target, hdc_win);
             return None;
         }
-        let hbmp = CreateCompatibleBitmap(hdc_win, ribbon_w, rows);
+        let hbmp = CreateCompatibleBitmap(hdc_win, dst_w, rows);
         if hbmp.is_invalid() {
             let _ = DeleteDC(hdc_mem);
             ReleaseDC(target, hdc_win);
             return None;
         }
         let old = SelectObject(hdc_mem, hbmp);
-        let ok = BitBlt(hdc_mem, 0, 0, ribbon_w, rows, hdc_win, x0, y0, SRCCOPY).is_ok();
+        let ok = if dst_w == src_w {
+            BitBlt(hdc_mem, 0, 0, dst_w, rows, hdc_win, x0, y0, SRCCOPY).is_ok()
+        } else {
+            let _ = SetStretchBltMode(hdc_mem, HALFTONE);
+            StretchBlt(
+                hdc_mem,
+                0,
+                0,
+                dst_w,
+                rows,
+                hdc_win,
+                x0,
+                y0,
+                src_w,
+                rows,
+                SRCCOPY,
+            )
+            .as_bool()
+        };
         let bgra = if ok {
-            dibits_bgra(hdc_mem, hbmp, ribbon_w, rows)
+            dibits_bgra(hdc_mem, hbmp, dst_w, rows)
         } else {
             None
         };
@@ -953,7 +1225,51 @@ mod win {
         bgra
     }
 
+    /// Run window-DC capture off-thread with a hard timeout so a hung target
+    /// cannot freeze ambient (and stall DWM / IPC).
+    fn blit_window_rows_timed(
+        target: HWND,
+        x0: i32,
+        y0: i32,
+        src_w: i32,
+        rows: i32,
+        dst_w: i32,
+    ) -> Option<Vec<u8>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+        if crate::win32::hang::is_hung_hwnd(target.0 as isize) {
+            return None;
+        }
+        if INFLIGHT.load(Ordering::SeqCst) >= 1 {
+            return None;
+        }
+        INFLIGHT.fetch_add(1, Ordering::SeqCst);
+        let raw = target.0 as isize;
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("amb-blit".into())
+            .spawn(move || {
+                let result = unsafe {
+                    blit_window_rows(HWND(raw as *mut _), x0, y0, src_w, rows, dst_w)
+                };
+                let _ = tx.send(result);
+                INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+            })
+            .is_ok();
+        if !spawned {
+            INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        match rx.recv_timeout(Duration::from_millis(CAPTURE_TIMEOUT_MS)) {
+            Ok(v) => v,
+            Err(_) => None,
+        }
+    }
+
     /// PrintWindow full window; read `rows` starting at window-local `y0`.
+    /// Kept for diagnostics — not used on the ambient hot path (can hang).
+    #[allow(dead_code)]
     unsafe fn printwindow_top_rows(
         target: HWND,
         win_w: i32,
@@ -1028,9 +1344,7 @@ mod win {
         bgra.chunks_exact(4).all(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
     }
 
-    /// Sample visible top 1–2 px of the target HWND.
-    /// - Edge: full-bar horizontal RGB strip (mapped 1:1, UI stretches 100%)
-    /// - Center: solid mid-band color
+    /// Sample visible top chrome where the window meets the status bar.
     fn capture_edge_ribbon(self_hwnd: Option<isize>, target: Option<HWND>) -> Option<AmbientStrip> {
         unsafe {
             let target = target?;
@@ -1049,15 +1363,6 @@ mod win {
             let right_limit = (frame.right - wr.left).clamp(left_inset + 1, win_w);
             let vis_w = (right_limit - left_inset).max(1);
 
-            // Default: 2nd visible row (skip hairline). Optional extra inset for
-            // allowed plugin windows (0 = sample OS title bar like other apps).
-            let chrome_skip = if is_ambient_allowed_hwnd(target) {
-                ambient_allow_top_inset()
-            } else {
-                0
-            };
-            let y0 = (top_inset + 1 + chrome_skip).clamp(0, win_h - 1);
-
             let dpi_scale = {
                 let dpi = GetDpiForWindow(me);
                 if dpi == 0 {
@@ -1070,13 +1375,34 @@ mod win {
             let bar_logical = ((bar_phys as f64) / dpi_scale).round() as i32;
             let mode = get_mode();
 
-            // Capture entire visible top ribbon once (window-local).
-            let bgra = capture_top_pixel_row(target, win_w, win_h, left_inset, vis_w, y0)?;
+            let meet = work_area_top(me);
+            let y_meet = (meet + 1 - wr.top).clamp(0, win_h - 1);
+            let y_inset = (top_inset + 1).clamp(0, win_h - 1);
+
+            let mut bgra: Option<Vec<u8>> = None;
+            // At most two Y tries — multi-Y × full-width BitBlt stalls DWM on Alt-Tab.
+            for y in [y_meet, y_inset] {
+                if let Some(row) =
+                    capture_top_pixel_row(target, win_w, win_h, left_inset, vis_w, y)
+                {
+                    if !is_all_zero(&row) {
+                        bgra = Some(row);
+                        break;
+                    }
+                }
+            }
+            // Timed screen fallback for DWM/GPU chrome (window DC often blank).
+            if bgra.is_none() {
+                bgra = capture_junction_row(me, wr, left_inset, vis_w);
+            }
+            let bgra = bgra?;
+            let captured_w = ((bgra.len() / 4) as i32).max(1);
 
             if mode == SampleMode::Center {
-                let pad = ((vis_w as f64) * 0.35).round() as i32;
-                let cx0 = pad.clamp(0, vis_w / 3);
-                let cx1 = (vis_w - pad).max(cx0 + 1);
+                // Sample is already full-width compressed into `captured_w`.
+                let pad = ((captured_w as f64) * 0.35).round() as i32;
+                let cx0 = pad.clamp(0, captured_w / 3);
+                let cx1 = (captured_w - pad).max(cx0 + 1);
                 let mut mid = Vec::with_capacity(((cx1 - cx0) as usize) * 4);
                 for x in cx0..cx1 {
                     let i = (x as usize) * 4;
@@ -1098,15 +1424,21 @@ mod win {
                 });
             }
 
-            // Edge: remap each bar column → window-local X (clamp to visible chrome).
-            let out_w = bar_logical.clamp(64, 1920) as u32;
+            // Edge: bar column → proportional X in full-width stretched sample.
+            let out_w = bar_logical.clamp(64, 1280) as u32;
             let mut rgb = vec![0u8; (out_w as usize) * 3];
             for ox in 0..out_w {
                 let t = (ox as f64 + 0.5) / out_w as f64;
                 let screen_x = mine.left as f64 + t * bar_phys as f64;
                 let wx = (screen_x - wr.left as f64).round() as i32;
-                let wx = wx.clamp(left_inset, right_limit - 1);
-                let src = ((wx - left_inset) as usize) * 4;
+                let local = (wx - left_inset).clamp(0, vis_w - 1);
+                let src_x = if vis_w > 1 {
+                    ((local as i64 * (captured_w as i64 - 1)) / (vis_w as i64 - 1).max(1)) as i32
+                } else {
+                    0
+                }
+                .clamp(0, captured_w - 1);
+                let src = (src_x as usize) * 4;
                 let dst = (ox as usize) * 3;
                 if src + 2 < bgra.len() {
                     rgb[dst] = bgra[src + 2];
@@ -1114,7 +1446,6 @@ mod win {
                     rgb[dst + 2] = bgra[src];
                 }
             }
-            blur_rgb_row_3(&mut rgb);
 
             let (avg_r, avg_g, avg_b) = {
                 let mut sr = 0u64;
@@ -1143,6 +1474,7 @@ mod win {
         }
     }
 
+    #[allow(dead_code)]
     fn blur_rgb_row_3(rgb: &mut [u8]) {
         let n = rgb.len() / 3;
         if n < 3 {
@@ -1206,7 +1538,8 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    get_mode, is_settling, poll_changed, sample, set_ambient_sample_target, set_mode,
+    get_mode, is_settling, poll_changed, sample, sample_nonblocking, set_ambient_sample_target,
+    set_mode,
 };
 
 #[cfg(not(windows))]
@@ -1214,6 +1547,11 @@ pub fn set_ambient_sample_target(_hwnd: Option<isize>, _top_inset_px: i32) {}
 
 #[cfg(not(windows))]
 pub fn sample(_self_hwnd: Option<isize>) -> AmbientStrip {
+    AmbientStrip::fallback()
+}
+
+#[cfg(not(windows))]
+pub fn sample_nonblocking(_self_hwnd: Option<isize>) -> AmbientStrip {
     AmbientStrip::fallback()
 }
 

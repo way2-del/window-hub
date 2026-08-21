@@ -12,9 +12,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use host::{
-    ambient_get, ambient_set, dock_get, dock_set, general_get, general_set, island_get, island_set,
-    launchers_list, launchers_replace_all, material_get, material_set, meta_get, meta_set,
-    shortcuts_get, shortcuts_set, tray_get, tray_set, IslandPrefsRow, LauncherRow,
+    ambient_get, ambient_set, dock_get, dock_set, general_get, general_set, hotkeys_get, hotkeys_set,
+    island_get, island_set, launchers_list, launchers_replace_all, material_get, material_set,
+    meta_get, meta_set, shortcuts_get, shortcuts_set, tray_get, tray_set, IslandPrefsRow,
+    LauncherRow,
 };
 pub use migrate::migrate_legacy_files;
 
@@ -204,6 +205,11 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS prefs_general (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prefs_hotkeys (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL
