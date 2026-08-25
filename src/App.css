@@ -137,12 +137,118 @@ button {
   height: var(--island-bar-h);
   z-index: 0;
   pointer-events: none !important;
+  border-radius: 0;
   background-color: rgb(var(--ambient-r, 32), var(--ambient-g, 32), var(--ambient-b, 34));
   /* 色带横向连续，避免放大插值断层 */
   image-rendering: auto;
   background-clip: border-box;
   transition: none;
 }
+
+/* 吸色后叠主题色洗（Win32 模糊在下层 island-bar-glass；勿再 backdrop-filter 叠糊） */
+.ambient-glass {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--island-bar-h);
+  z-index: 1;
+  pointer-events: none !important;
+  border-radius: 0;
+  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+}
+
+/* 桌面：不吸色，仅透出 Win32 模糊材质 */
+.bar-glass {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--island-bar-h);
+  z-index: 0;
+  pointer-events: none !important;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* 桌面 Win32 顶栏整条同材质 — 左右 chrome 跟岛心一致（勿分段壁纸反色） */
+.shell.is-desktop-glass .tray-rail,
+.shell.is-desktop-glass .shortcuts-host,
+.shell.is-desktop-glass .shortcuts-collapsed,
+.shell.is-desktop-glass .status-menu-trigger,
+.shell.is-desktop-glass .settings-btn,
+.shell.is-desktop-glass .settings-label,
+.shell.has-bar-glass:not(.has-ambient) .tray-rail,
+.shell.has-bar-glass:not(.has-ambient) .shortcuts-host,
+.shell.has-bar-glass:not(.has-ambient) .shortcuts-collapsed,
+.shell.has-bar-glass:not(.has-ambient) .status-menu-trigger,
+.shell.has-bar-glass:not(.has-ambient) .settings-btn,
+.shell.has-bar-glass:not(.has-ambient) .settings-label {
+  color: var(--chrome-center-fg, rgba(255, 255, 255, 0.94));
+  text-shadow: var(--chrome-center-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
+  transition: none;
+}
+
+.shell.is-desktop-glass .tray-glyph,
+.shell.has-bar-glass:not(.has-ambient) .tray-glyph {
+  filter: var(--chrome-center-glyph-shadow, drop-shadow(0 1px 1px rgba(0, 0, 0, 0.28)));
+}
+
+/* 顶栏 Win32 材质在 sibling island-bar-glass；左右 chrome 走材质，岛保持黑胶囊独立。
+   勿再把折叠岛 fill-opacity 清零 — 否则与左右融成一条，常驻黑字叠黑壳无法区分。 */
+.shell.has-bar-glass:not(.is-expanded) .island-beam {
+  /* 保留岛底圆角，与左右直角顶栏分段 */
+  border-radius: 0 0 var(--island-r-bot, 14px) var(--island-r-bot, 14px) !important;
+}
+
+/* 非沉浸：岛内常驻固定浅色（黑胶囊上可读）；沉浸才跟 --chrome-center-fg */
+.island-root:not(.is-immersed) .bar-weather,
+.island-root:not(.is-immersed) .bar-staging,
+.island-root:not(.is-immersed) .bar-staging-text {
+  color: rgba(255, 255, 255, 0.96);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.island-root:not(.is-immersed) .bar-condition,
+.island-root:not(.is-immersed) .bar-meta {
+  color: rgba(255, 255, 255, 0.82);
+  opacity: 1;
+}
+
+/* 搜索岛：黑胶囊 + 固定浅色字（勿跟桌面 chrome 反成黑字） */
+.island-root.is-searching .island-path {
+  fill-opacity: 1;
+}
+
+.island-root.is-searching .island-corner-patch,
+.island-root.is-searching .island-top-cap {
+  opacity: 1;
+}
+
+.island-root.is-searching .bar-search,
+.island-root.is-searching .bar-search-input,
+.island-root.is-searching .bar-search-btn {
+  color: rgba(255, 255, 255, 0.94);
+  text-shadow: none;
+}
+
+.island-root.is-searching .bar-search-icon {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.island-root.is-searching .bar-search-input::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.island-root.is-searching .bar-search-input {
+  caret-color: #fff;
+}
+
+.island-root.is-searching .bar-search-btn:hover {
+  color: #fff;
+}
+
+/* 仅吸色条：左右跟环境色；岛为独立黑胶囊，常驻浅色（见上方 :not(.is-immersed)） */
 
 .settings-anchor {
   position: absolute;
@@ -302,7 +408,8 @@ button {
 }
 
 .island-root.is-drop-target .island-top-cap,
-.island-root.is-notifying.is-immersed .island-top-cap {
+.island-root.is-notifying.is-immersed .island-top-cap,
+.island-root.is-searching .island-top-cap {
   opacity: 1;
 }
 
@@ -348,7 +455,8 @@ button {
 }
 
 .island-root.is-drop-target .island-corner-patch-fill,
-.island-root.is-notifying.is-immersed .island-corner-patch-fill {
+.island-root.is-notifying.is-immersed .island-corner-patch-fill,
+.island-root.is-searching .island-corner-patch-fill {
   fill-opacity: 1;
 }
 
@@ -401,9 +509,10 @@ button {
   fill-opacity: 0;
 }
 
-/* 拖放高亮 / 通知横幅：保持不透明壳（中转站不阻断沉浸） */
+/* 拖放高亮 / 通知横幅 / 搜索岛：保持不透明壳（中转站不阻断沉浸） */
 .island-root.is-drop-target .island-path,
-.island-root.is-notifying.is-immersed .island-path {
+.island-root.is-notifying.is-immersed .island-path,
+.island-root.is-searching .island-path {
   fill-opacity: 1;
 }
 
@@ -622,19 +731,19 @@ button {
   pointer-events: none;
 }
 
-/* 沉浸态下搜索栏仍跟 chrome 反色 */
-.island-root.is-immersed .bar-search,
-.island-root.is-immersed .bar-search-input,
-.island-root.is-immersed .bar-search-btn {
+/* 沉浸态下搜索栏仍跟 chrome 反色；搜索岛开着时锁浅色字（黑胶囊） */
+.island-root.is-immersed:not(.is-searching) .bar-search,
+.island-root.is-immersed:not(.is-searching) .bar-search-input,
+.island-root.is-immersed:not(.is-searching) .bar-search-btn {
   color: var(--chrome-center-fg, #fff);
 }
-.island-root.is-immersed .bar-search-icon {
+.island-root.is-immersed:not(.is-searching) .bar-search-icon {
   color: color-mix(in srgb, var(--chrome-center-fg, #fff) 72%, transparent);
 }
-.island-root.is-immersed .bar-search-input::placeholder {
+.island-root.is-immersed:not(.is-searching) .bar-search-input::placeholder {
   color: color-mix(in srgb, var(--chrome-center-fg, #fff) 45%, transparent);
 }
-.island-root.is-immersed .bar-search-input {
+.island-root.is-immersed:not(.is-searching) .bar-search-input {
   caret-color: var(--chrome-center-fg, #fff);
 }
 

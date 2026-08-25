@@ -1,4 +1,5 @@
 import type { PluginManifest } from "./types";
+import { isPluginSurfaceEnabled } from "./surfacePrefs";
 
 export type PanelProvider = {
   id: string;
@@ -26,7 +27,8 @@ export function listPanelProviders(
         m.slots?.["island.panel"] &&
         !m.slots["island.panel"]?.excludeFromPullContent &&
         !m.slots?.["island.scenario"] &&
-        (m.entry?.panel || m.entry?.development?.panel),
+        (m.entry?.panel || m.entry?.development?.panel) &&
+        isPluginSurfaceEnabled(m.id, "island.panel", m),
     )
     .map((m) => ({
       id: `plugin:${m.id}`,

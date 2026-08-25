@@ -11,7 +11,11 @@ pub mod dock_appbar;
 #[cfg(windows)]
 pub mod blur_glass;
 #[cfg(windows)]
+pub mod bar_comp;
+#[cfg(windows)]
 pub mod dock_comp;
+#[cfg(windows)]
+pub mod island_bar_glass;
 pub mod capture;
 pub mod enum_windows;
 pub mod fullscreen;
@@ -34,6 +38,8 @@ pub mod tray_registry;
 pub mod tray_uia;
 pub mod input_lang;
 pub mod wifi;
+#[cfg(windows)]
+pub mod webview_camera;
 #[cfg(windows)]
 pub mod hotkey_registry;
 #[cfg(not(windows))]

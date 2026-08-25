@@ -8,7 +8,10 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use windows::core::PCWSTR;
@@ -55,6 +58,9 @@ type FnGetMajorVersion = unsafe extern "system" fn() -> u32;
 type FnGetMinorVersion = unsafe extern "system" fn() -> u32;
 type FnGetRevision = unsafe extern "system" fn() -> u32;
 type FnReset = unsafe extern "system" fn();
+
+/// Hard cap so a stuck Everything IPC cannot freeze Hub / leave the panel on 搜索中 forever.
+const QUERY_TIMEOUT_MS: u64 = 4_000;
 
 struct EverythingApi {
     _module: HMODULE,
@@ -198,6 +204,13 @@ fn api_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// True while a QueryW (or status probe) owns the SDK. Survives timed-out callers
+/// until the worker finishes — prevents overlapping Reset/Query corruption.
+fn sdk_busy() -> &'static AtomicBool {
+    static BUSY: OnceLock<AtomicBool> = OnceLock::new();
+    BUSY.get_or_init(|| AtomicBool::new(false))
+}
+
 fn map_error(code: u32) -> String {
     match code {
         EVERYTHING_OK => "Everything: unknown error".into(),
@@ -285,13 +298,30 @@ pub fn status() -> EverythingStatus {
             };
         }
     };
-    let _guard = api_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // Never block UI/status on a hung QueryW — try_lock only.
+    let Ok(_guard) = api_lock().try_lock() else {
+        return EverythingStatus {
+            available: true,
+            running: true,
+            db_loaded: false,
+            version: None,
+            error: Some("Everything 搜索进行中…".into()),
+        };
+    };
+    if sdk_busy().load(Ordering::SeqCst) {
+        return EverythingStatus {
+            available: true,
+            running: true,
+            db_loaded: false,
+            version: None,
+            error: Some("Everything 搜索进行中…".into()),
+        };
+    }
     unsafe {
         let major = (api.get_major_version)();
         let minor = (api.get_minor_version)();
         let rev = (api.get_revision)();
         let err = (api.get_last_error)();
-        // Probe IPC with empty query max=0 — IsDBLoaded is enough when client up.
         let db = (api.is_db_loaded)() != 0;
         let running = db || err != EVERYTHING_ERROR_IPC;
         EverythingStatus {
@@ -308,32 +338,13 @@ pub fn status() -> EverythingStatus {
     }
 }
 
-pub fn search(query: &str, opts: Option<EverythingSearchOpts>) -> Result<EverythingSearchResult, String> {
-    let api = load_api()?;
-    let opts = opts.unwrap_or(EverythingSearchOpts {
-        max: None,
-        offset: None,
-        match_case: None,
-        match_whole_word: None,
-        match_path: None,
-        regex: None,
-        path_prefix: None,
-    });
-    let max = opts.max.unwrap_or(50).clamp(1, 200);
-    let offset = opts.offset.unwrap_or(0);
-
-    let mut q = query.trim().to_string();
-    if let Some(prefix) = opts.path_prefix.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
-    {
-        // Everything syntax: path:"C:\foo" term
-        let normalized = prefix.replace('/', "\\");
-        if q.is_empty() {
-            q = format!("path:\"{normalized}\"");
-        } else {
-            q = format!("path:\"{normalized}\" {q}");
-        }
-    }
-
+fn search_locked(
+    api: &EverythingApi,
+    q: String,
+    opts: &EverythingSearchOpts,
+    max: u32,
+    offset: u32,
+) -> Result<EverythingSearchResult, String> {
     let _guard = api_lock().lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         (api.reset)();
@@ -390,6 +401,86 @@ pub fn search(query: &str, opts: Option<EverythingSearchOpts>) -> Result<Everyth
             total,
             results,
         })
+    }
+}
+
+pub fn search(query: &str, opts: Option<EverythingSearchOpts>) -> Result<EverythingSearchResult, String> {
+    let api = load_api()?;
+    let opts = opts.unwrap_or(EverythingSearchOpts {
+        max: None,
+        offset: None,
+        match_case: None,
+        match_whole_word: None,
+        match_path: None,
+        regex: None,
+        path_prefix: None,
+    });
+    let max = opts.max.unwrap_or(50).clamp(1, 200);
+    let offset = opts.offset.unwrap_or(0);
+
+    let mut q = query.trim().to_string();
+    if let Some(prefix) = opts.path_prefix.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
+    {
+        let normalized = prefix.replace('/', "\\");
+        if q.is_empty() {
+            q = format!("path:\"{normalized}\"");
+        } else {
+            q = format!("path:\"{normalized}\" {q}");
+        }
+    }
+
+    if sdk_busy().swap(true, Ordering::SeqCst) {
+        return Err("Everything 正忙（上次搜索可能未结束），请稍后再试".into());
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let q_worker = q.clone();
+    let opts_worker = EverythingSearchOpts {
+        max: Some(max),
+        offset: Some(offset),
+        match_case: opts.match_case,
+        match_whole_word: opts.match_whole_word,
+        match_path: opts.match_path,
+        regex: opts.regex,
+        path_prefix: None, // already folded into `q`
+    };
+    let spawned = std::thread::Builder::new()
+        .name("everything-q".into())
+        .spawn(move || {
+            // SAFETY: EverythingApi is process-static; only one worker runs at a time (sdk_busy).
+            let result = search_locked(api, q_worker, &opts_worker, max, offset);
+            let _ = tx.send(result);
+            sdk_busy().store(false, Ordering::SeqCst);
+        })
+        .is_ok();
+    if !spawned {
+        sdk_busy().store(false, Ordering::SeqCst);
+        return Err("无法启动 Everything 搜索线程".into());
+    }
+
+    match rx.recv_timeout(Duration::from_millis(QUERY_TIMEOUT_MS)) {
+        Ok(r) => r,
+        Err(_) => {
+            // Worker may still be inside QueryW — leave sdk_busy true until it returns.
+            Err("Everything 搜索超时（客户端无响应）。请确认 Everything 已运行，或重启后再试".into())
+        }
+    }
+}
+
+/// Best-effort: clear SDK request state when a plugin with Everything is disabled.
+/// No-op if a query is in flight (avoid Reset during QueryW).
+pub fn reset_if_idle() {
+    if sdk_busy().load(Ordering::SeqCst) {
+        return;
+    }
+    let Ok(api) = load_api() else {
+        return;
+    };
+    let Ok(_guard) = api_lock().try_lock() else {
+        return;
+    };
+    unsafe {
+        (api.reset)();
     }
 }
 

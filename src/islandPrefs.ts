@@ -11,6 +11,10 @@ export type IslandPrefs = {
   autoImmerse: boolean;
   /** 无操作多久后沉浸（秒） */
   immerseIdleSec: number;
+  /** 顶栏主题模糊材质（有窗口先吸色再叠模糊；桌面仅模糊） */
+  barGlass: boolean;
+  /** 忽略吸色的程序（windowKey：`exe:` / `proc:`，与快捷区 scope 相同） */
+  ignoreAmbientApps: string[];
   /** 下拉岛默认展示内容 */
   pullContent: PullContent;
   /**
@@ -63,6 +67,8 @@ export const STAGING_PANEL_H = STAGING_PANEL_H_DEFAULT;
 const DEFAULTS: IslandPrefs = {
   autoImmerse: true,
   immerseIdleSec: 8,
+  barGlass: true,
+  ignoreAmbientApps: [],
   /** Weather is a plugin; migrate legacy "weather"|"mirror" in parsePullContent */
   pullContent: "plugin:com.window-hub.weather",
   barResident: "com.window-hub.weather",
@@ -79,6 +85,11 @@ const MSG_SEC_MAX = 30;
 
 let cache: IslandPrefs = { ...DEFAULTS, scenarioGates: {} };
 let hydrated = false;
+
+function parseIgnoreAmbientApps(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.map((x) => String(x || "").trim()).filter(Boolean))];
+}
 
 function clampIdle(sec: number) {
   if (!Number.isFinite(sec)) return DEFAULTS.immerseIdleSec;
@@ -144,6 +155,8 @@ function readLegacyLocalStorage(): IslandPrefs | null {
     return {
       autoImmerse: autoRaw == null ? DEFAULTS.autoImmerse : autoRaw === "1" || autoRaw === "true",
       immerseIdleSec: idleRaw == null ? DEFAULTS.immerseIdleSec : clampIdle(Number(idleRaw)),
+      barGlass: DEFAULTS.barGlass,
+      ignoreAmbientApps: DEFAULTS.ignoreAmbientApps,
       pullContent: parsePullContent(pullRaw),
       barResident: DEFAULTS.barResident,
       msgNotify: msgRaw == null ? DEFAULTS.msgNotify : msgRaw === "1" || msgRaw === "true",
@@ -169,6 +182,11 @@ function mergePrefs(prev: IslandPrefs, partial: Partial<IslandPrefs>): IslandPre
     autoImmerse: partial.autoImmerse ?? prev.autoImmerse,
     immerseIdleSec:
       partial.immerseIdleSec != null ? clampIdle(partial.immerseIdleSec) : prev.immerseIdleSec,
+    barGlass: partial.barGlass ?? prev.barGlass,
+    ignoreAmbientApps:
+      partial.ignoreAmbientApps != null
+        ? parseIgnoreAmbientApps(partial.ignoreAmbientApps)
+        : prev.ignoreAmbientApps,
     pullContent:
       partial.pullContent != null ? parsePullContent(partial.pullContent) : prev.pullContent,
     barResident:
@@ -216,11 +234,22 @@ export async function setIslandPrefs(partial: Partial<IslandPrefs>): Promise<Isl
   const next = mergePrefs(cache, partial);
   try {
     cache = mergePrefs(DEFAULTS, await invoke<IslandPrefs>("set_island_prefs", { prefs: next }));
-  } catch {
-    cache = next;
+  } catch (e) {
+    console.error("[islandPrefs] set_island_prefs failed", e);
+    throw e;
   }
   window.dispatchEvent(new Event("wh-island-prefs"));
   return cache;
+}
+
+/** 主岛展开前从 DB 拉最新偏好（设置窗改下拉内容后防跨窗缓存不同步） */
+export async function refreshIslandPrefsFromDb(): Promise<IslandPrefs> {
+  try {
+    const raw = await invoke<IslandPrefs>("get_island_prefs");
+    return applyIslandPrefsSnapshot(raw);
+  } catch {
+    return getIslandPrefs();
+  }
 }
 
 /** Apply prefs from Tauri event payload (cross-window). */

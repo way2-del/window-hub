@@ -65,3 +65,38 @@ body {
   opacity: 0.75;
   word-break: break-word;
 }
+
+.mirror-hint {
+  max-width: 280px;
+  margin-top: 2px;
+}
+
+.mirror-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.mirror-btn {
+  appearance: none;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0a0a0a;
+  background: #f4f4f5;
+  cursor: pointer;
+}
+
+.mirror-btn:hover {
+  filter: brightness(1.06);
+}
+
+.mirror-btn.is-ghost {
+  color: #f4f4f5;
+  background: rgba(255, 255, 255, 0.12);
+}

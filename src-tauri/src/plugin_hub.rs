@@ -654,6 +654,58 @@ pub fn hub_plugin_asset_path(plugin_id: String, relative_path: String) -> Result
 
 const EVERYTHING_CAP: &str = "everything.search";
 const SYSMON_CAP: &str = "system.monitor";
+const CAMERA_CAP: &str = "media.camera";
+
+/// Install WebView2 camera PermissionRequested auto-allow — only when a
+/// `media.camera` plugin panel is actually opened (not at Hub cold start).
+#[tauri::command]
+pub fn hub_camera_prepare(app: AppHandle, plugin_id: String) -> Result<(), String> {
+    assert_capability(&plugin_id, CAMERA_CAP)?;
+    #[cfg(windows)]
+    {
+        let win = crate::win32::webview_camera::main_webview(&app)?;
+        crate::win32::webview_camera::install_camera_auto_allow(&win)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, plugin_id);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn hub_camera_reset_permission(
+    app: AppHandle,
+    plugin_id: String,
+) -> Result<(), String> {
+    assert_capability(&plugin_id, CAMERA_CAP)?;
+    #[cfg(windows)]
+    {
+        let win = crate::win32::webview_camera::main_webview(&app)?;
+        // Ensure PermissionRequested handler exists before forcing ALLOW.
+        let _ = crate::win32::webview_camera::install_camera_auto_allow(&win);
+        crate::win32::webview_camera::allow_camera_permission(&win)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, plugin_id);
+        Err("camera permission reset is Windows-only".into())
+    }
+}
+
+#[tauri::command]
+pub fn hub_camera_open_privacy_settings(plugin_id: String) -> Result<(), String> {
+    assert_capability(&plugin_id, CAMERA_CAP)?;
+    #[cfg(windows)]
+    {
+        crate::win32::webview_camera::open_windows_camera_privacy()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = plugin_id;
+        Err("camera privacy settings is Windows-only".into())
+    }
+}
 
 #[tauri::command]
 pub fn hub_everything_status(plugin_id: String) -> Result<Value, String> {
@@ -675,7 +727,7 @@ pub fn hub_everything_status(plugin_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn hub_everything_search(
+pub async fn hub_everything_search(
     plugin_id: String,
     query: String,
     opts: Option<Value>,
@@ -687,7 +739,12 @@ pub fn hub_everything_search(
             None | Some(Value::Null) => None,
             Some(v) => Some(serde_json::from_value(v).map_err(|e| e.to_string())?),
         };
-        let result = crate::everything::search(&query, parsed)?;
+        // Off the IPC hot path: QueryW can block for seconds.
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            crate::everything::search(&query, parsed)
+        })
+        .await
+        .map_err(|e| format!("Everything 任务失败: {e}"))??;
         Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
     }
     #[cfg(not(windows))]
@@ -868,6 +925,11 @@ pub fn hub_init_script(plugin_id: &str) -> String {
     media: {{
       sendKey: (action) =>
         invoke("hub_media_send_key", withPlugin({{ action: action }})),
+      prepareCamera: () => invoke("hub_camera_prepare", withPlugin()),
+      resetCameraPermission: () =>
+        invoke("hub_camera_reset_permission", withPlugin()),
+      openCameraPrivacySettings: () =>
+        invoke("hub_camera_open_privacy_settings", withPlugin()),
     }},
     everything: {{
       status: () => invoke("hub_everything_status", withPlugin()),

@@ -271,6 +271,51 @@ pub fn close_window(_hwnd: isize) -> Result<(), String> {
     Err("close_window is only available on Windows".into())
 }
 
+/// Stable window bind key: `exe:C:\\path\\app.exe` or `proc:appname` (matches Host FE).
+#[cfg(windows)]
+pub fn window_key_for_pid(pid: u32) -> Option<String> {
+    let (exe, name) = process_exe(pid);
+    if let Some(path) = exe {
+        let norm = path.replace('/', "\\").to_lowercase();
+        if !norm.is_empty() {
+            return Some(format!("exe:{norm}"));
+        }
+    }
+    if let Some(name) = name {
+        let stem = name
+            .trim()
+            .trim_end_matches(".exe")
+            .trim_end_matches(".EXE")
+            .to_lowercase();
+        if !stem.is_empty() {
+            return Some(format!("proc:{stem}"));
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+pub fn window_key_for_hwnd(hwnd: isize) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        window_key_for_pid(pid)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn window_key_for_pid(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn window_key_for_hwnd(_hwnd: isize) -> Option<String> {
+    None
+}
+
 /// Parse `hwnd:123` or raw numeric string into hwnd.
 pub fn parse_window_id(id: &str) -> Result<isize, String> {
     let raw = id.strip_prefix("hwnd:").unwrap_or(id);

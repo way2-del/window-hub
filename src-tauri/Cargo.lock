@@ -5864,9 +5864,11 @@ dependencies = [
  "tauri",
  "tauri-build",
  "ureq",
+ "webview2-com",
  "window-vibrancy",
  "windows 0.58.0",
  "windows-core 0.58.0",
+ "windows-core 0.61.2",
  "winreg 0.52.0",
  "zip",
 ]

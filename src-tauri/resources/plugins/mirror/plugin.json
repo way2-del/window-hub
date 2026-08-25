@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.mirror",
   "name": "镜子",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "official": true,
   "logo": "icon.svg",
   "description": "灵动岛下拉摄像头预览（仅面板）。",
@@ -16,5 +16,5 @@
     }
   },
   "settings": [],
-  "capabilities": ["island.panel"]
+  "capabilities": ["island.panel", "media.camera"]
 }

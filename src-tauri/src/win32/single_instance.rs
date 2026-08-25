@@ -75,12 +75,9 @@ pub fn any_gui_instance_running() -> bool {
 /// Call once from the GUI entry (`main` without `--autostart-svc`).
 /// If another UI instance exists: show a dialog and exit the process.
 pub fn ensure_single_instance_or_exit() {
-    // Mutex only — never treat the Session-0 service exe as a second GUI.
     if !try_acquire_instance_mutex() {
         show_already_running_dialog();
         std::process::exit(0);
     }
-    // Manual launch after “退出” should clear the suppress so a later crash can
-    // still be recovered by the autostart service (quit stays until then / reboot).
     crate::win32::autostart_svc::clear_user_quit();
 }

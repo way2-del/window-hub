@@ -46,11 +46,14 @@ description: >-
 
 ## chrome 反色
 
-| 状态 | `data-chrome` | 栏文字 |
-|------|---------------|--------|
-| 非沉浸 | `dark` | 白字 |
-| 沉浸 | `chromeCenter.scheme` | `--chrome-center-fg` |
-| 仅拖放命中 | 可强制 `dark` | 白字 |
+| 状态 | `data-chrome` | 栏文字 | 岛壳 |
+|------|---------------|--------|------|
+| 非沉浸 | `dark` | **固定白字**（黑胶囊可读） | 黑胶囊不透明 |
+| 沉浸 | `chromeCenter.scheme` | `--chrome-center-fg` | `fill-opacity: 0` |
+| 仅拖放命中 | 可强制 `dark` | 白字 | 不透明壳 |
+
+**岛与左右分段：** 左侧快捷区 / 右侧托盘走顶栏材质或吸色条；中间岛保持独立黑胶囊。  
+**禁止**在 `has-bar-glass` / `has-ambient` 下把折叠岛 `fill-opacity` 清零或把非沉浸常驻字色绑到 `--chrome-center-fg`（浅色壁纸会出黑字叠黑壳）。
 
 中转站摘要（`.bar-staging`）在 `.is-immersed` 下须与 `.bar-weather` 一样跟 chrome，**禁止** `!important` 锁死白字 + 黑壳不透底。
 
@@ -75,7 +78,8 @@ description: >-
 ## 检查清单
 
 - [ ] 自动沉浸勾选：闲置后含中转站摘要的岛也能透底，字色跟 chrome
-- [ ] 自动沉浸未勾选：永不沉浸
+- [ ] 自动沉浸未勾选：永不沉浸；岛保持黑胶囊 + 白字，与左右快捷区/托盘分段
+- [ ] 非沉浸时 `data-chrome` 恒为 `dark`（勿因 `barGlass` 绑 chromeCenter）
 - [ ] 无 `staging.total` 永久阻断
 - [ ] 文件条目不复制本体；按钮为「复制路径」
 - [ ] 改沉浸逻辑时同步本 skill

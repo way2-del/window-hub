@@ -253,8 +253,13 @@ pub async fn open_settings_window(
     app: AppHandle,
     state: State<'_, MaterialState>,
     plugin_id: Option<String>,
+    focus_nav: Option<String>,
 ) -> Result<(), String> {
     let focus = plugin_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let nav = focus_nav
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
@@ -268,6 +273,9 @@ pub async fn open_settings_window(
         if let Some(pid) = focus {
             let _ = app.emit("settings-focus-plugin", pid);
         }
+        if let Some(n) = nav {
+            let _ = app.emit("settings-focus-nav", n);
+        }
         return Ok(());
     }
 
@@ -280,11 +288,21 @@ pub async fn open_settings_window(
             )
         })
         .unwrap_or_default();
+    let nav_js = nav
+        .as_ref()
+        .map(|n| {
+            format!(
+                "window.__WH_SETTINGS_FOCUS_NAV__ = {};",
+                serde_json::to_string(n).unwrap_or_else(|_| "null".into())
+            )
+        })
+        .unwrap_or_default();
 
     let init = format!(
         r#"
       window.__WH_IS_SETTINGS__ = true;
       {focus_js}
+      {nav_js}
       document.addEventListener('keydown', function (e) {{
         if (e.key === 'Escape') {{
           try {{ window.__TAURI__.core.invoke('close_settings_window'); }} catch (_) {{}}
@@ -338,38 +356,25 @@ const TRAY_POPUP_W: f64 = 280.0;
 /// Placeholder only — frontend measures + slide-reveals while still hidden.
 const TRAY_POPUP_H: f64 = 320.0;
 
-/// 独立窄高托盘弹窗：与设置/插件共用材质配置。
-/// Kept invisible until the webview fits content — same path as status menu.
-#[tauri::command]
-pub async fn open_tray_popup(
-    app: AppHandle,
-    state: State<'_, MaterialState>,
-    x: f64,
-    y: f64,
-) -> Result<(), String> {
-    close_sibling_popups(&app, "tray-popup");
+const TRAY_POPUP_INIT: &str = r#"
+  window.__WH_IS_TRAY_POPUP__ = true;
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      try { window.__TAURI__.core.invoke('close_tray_popup'); } catch (_) {}
+    }
+  });
+"#;
 
+fn ensure_tray_popup_window(
+    app: &AppHandle,
+    state: &MaterialState,
+) -> Result<WebviewWindow, String> {
     if let Some(existing) = app.get_webview_window("tray-popup") {
-        apply_saved_material(&existing, &state);
-        let _ = existing.hide();
-        let _ = existing.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
-        let _ = existing.set_position(LogicalPosition::new(x, y));
-        let _ = existing.unminimize();
-        let _ = app.emit("tray-popup-opened", ());
-        return Ok(());
+        return Ok(existing);
     }
 
-    let init = r#"
-      window.__WH_IS_TRAY_POPUP__ = true;
-      document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-          try { window.__TAURI__.core.invoke('close_tray_popup'); } catch (_) {}
-        }
-      });
-    "#;
-
     let win = WebviewWindowBuilder::new(
-        &app,
+        app,
         "tray-popup",
         WebviewUrl::App("index.html?window=tray".into()),
     )
@@ -386,15 +391,51 @@ pub async fn open_tray_popup(
     .skip_taskbar(true)
     .focused(false)
     .visible(false)
-    .initialization_script(init)
+    .initialization_script(TRAY_POPUP_INIT)
     .build()
     .map_err(|e| format!("open tray popup failed: {e}"))?;
 
-    let _ = win.set_position(LogicalPosition::new(x, y));
-    apply_saved_material(&win, &state);
+    apply_saved_material(&win, state);
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
+    Ok(win)
+}
+
+/// Optional: create hidden tray-popup after READY (not on boot critical path).
+#[allow(dead_code)]
+pub fn prewarm_tray_popup(app: &AppHandle) {
+    if app.get_webview_window("tray-popup").is_some() {
+        eprintln!("[boot] tray-popup: already exists");
+        return;
+    }
+    let Some(state) = app.try_state::<MaterialState>() else {
+        eprintln!("[boot] tray-popup: SKIP (MaterialState missing)");
+        return;
+    };
+    match ensure_tray_popup_window(app, &*state) {
+        Ok(_) => eprintln!("[boot] tray-popup: prewarmed"),
+        Err(e) => eprintln!("[boot] tray-popup: prewarm failed: {e}"),
+    }
+}
+
+/// 独立窄高托盘弹窗：与设置/插件共用材质配置。
+/// Kept invisible until the webview fits content — same path as status menu.
+#[tauri::command]
+pub async fn open_tray_popup(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    close_sibling_popups(&app, "tray-popup");
+
+    let win = ensure_tray_popup_window(&app, &state)?;
+    apply_saved_material(&win, &state);
+    let _ = win.hide();
+    let _ = win.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
+    let _ = win.set_position(LogicalPosition::new(x, y));
+    let _ = win.unminimize();
     // Do not show yet — TrayPopupApp fits height, then slide-reveal.
     let _ = app.emit("tray-popup-opened", ());
     Ok(())
@@ -1144,7 +1185,7 @@ pub async fn set_plugin_popup_windowed_fullscreen(
     Ok(())
 }
 
-fn load_material_prefs() -> crate::win32::material::MaterialPrefs {
+pub(crate) fn load_material_prefs() -> crate::win32::material::MaterialPrefs {
     use crate::win32::material::MaterialPrefs;
     if let Ok(Some(v)) = crate::db::with_conn(|c| crate::db::material_get(c)) {
         if let Ok(prefs) = serde_json::from_value::<MaterialPrefs>(v) {
@@ -1225,6 +1266,8 @@ pub fn schedule_plugin_window_mica_refresh(app: &AppHandle) {
 /// Re-apply materials to every open popup after prefs change.
 fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::MaterialPrefs) {
     for label in [
+        "main",
+        "island-bar-glass",
         "settings",
         "dock-icon-editor",
         "tray-popup",
@@ -1239,9 +1282,105 @@ fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::M
         "dock-glass",
     ] {
         if let Some(w) = app.get_webview_window(label) {
+            if label == "main" || label == "island-bar-glass" {
+                continue;
+            }
             let _ = crate::win32::material::apply_prefs(&w, prefs);
         }
     }
+    #[cfg(windows)]
+    apply_main_window_material(app);
+}
+
+/// Top status bar Win32 glass: only when on desktop AND barGlass is on.
+/// Over a maximized window: never — Host uses ambient color sampling only.
+///
+/// Marshals to the UI thread with debounce — safe from ambient/watchdog workers.
+pub fn apply_main_window_material(app: &AppHandle) {
+    schedule_main_window_material(app, 120);
+}
+
+/// Setup / tests — caller MUST already be on the UI thread.
+/// Do not use `run_on_main_thread` here (deadlocks if called from setup).
+#[allow(dead_code)]
+pub fn apply_main_window_material_now(app: &AppHandle) {
+    apply_main_window_material_inner(app);
+}
+
+fn apply_main_window_material_inner(app: &AppHandle) {
+    let prefs = load_material_prefs();
+    let bar_glass = get_island_prefs().bar_glass;
+    let desktop = {
+        #[cfg(windows)]
+        {
+            let hwnd = app
+                .get_webview_window("main")
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| h.0 as isize);
+            crate::win32::ambient::is_desktop_scene(hwnd)
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    };
+    let enabled = bar_glass && desktop;
+    #[cfg(windows)]
+    {
+        // Composition attach + foreign BitBlt during AppBar settle freezes WebView2.
+        let enabled = enabled && !crate::win32::work_area::work_area_quiet();
+        crate::win32::island_bar_glass::sync_inner(app, enabled, &prefs);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (enabled, prefs, app);
+    }
+}
+
+#[cfg(windows)]
+fn schedule_main_window_material(app: &AppHandle, debounce_ms: u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    let debounce_ms = if crate::win32::work_area::work_area_quiet() {
+        debounce_ms.max(800)
+    } else {
+        debounce_ms
+    };
+    let gen = GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if debounce_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(debounce_ms));
+        }
+        if GEN.load(Ordering::Relaxed) != gen {
+            return;
+        }
+        let Some(main) = app.get_webview_window("main") else {
+            return;
+        };
+        let _ = main.run_on_main_thread(move || {
+            if GEN.load(Ordering::Relaxed) != gen {
+                return;
+            }
+            apply_main_window_material_inner(&app);
+        });
+    });
+}
+
+#[cfg(not(windows))]
+fn schedule_main_window_material(app: &AppHandle, _debounce_ms: u64) {
+    apply_main_window_material_inner(app);
+}
+
+/// Keep glass strip geometry in sync after main HWND / island resize.
+#[tauri::command]
+pub fn reassert_main_bar_geometry(
+    app: AppHandle,
+    island_width: Option<f64>,
+    island_height: Option<f64>,
+) {
+    let _ = (island_width, island_height);
+    apply_main_window_material(&app);
 }
 
 #[tauri::command]
@@ -1303,6 +1442,15 @@ pub fn apply_window_effect(
     } else {
         base
     };
+    // Main / island-bar-glass: material owned by sibling strip sync.
+    if window.label() == "main" || window.label() == "island-bar-glass" {
+        apply_main_window_material(window.app_handle());
+        return Ok(if get_island_prefs().bar_glass {
+            prefs.kind.as_str().to_string()
+        } else {
+            "none".into()
+        });
+    }
     crate::win32::material::apply_prefs(&window, &prefs)?;
     Ok(prefs.kind.as_str().to_string())
 }
@@ -2622,7 +2770,7 @@ pub fn is_wifi_auth_popup_open(app: AppHandle) -> bool {
 }
 
 #[tauri::command]
-pub fn invoke_tray_icon(
+pub async fn invoke_tray_icon(
     hwnd: isize,
     callback_msg: u32,
     uid: u32,
@@ -2631,14 +2779,13 @@ pub fn invoke_tray_icon(
     id: Option<String>,
 ) -> Result<(), String> {
     let click = crate::win32::tray::TrayClick::parse(action.as_deref().unwrap_or("left"));
-    crate::win32::tray::invoke_icon_by_id(
-        id,
-        hwnd,
-        callback_msg,
-        uid,
-        version.unwrap_or(0),
-        click,
-    )
+    let version = version.unwrap_or(0);
+    // Off the async worker — tray notify / menu adapt must not stall the pump.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::win32::tray::invoke_icon_by_id(id, hwnd, callback_msg, uid, version, click)
+    })
+    .await
+    .map_err(|e| format!("tray invoke join: {e}"))?
 }
 
 /// 点开岛通知 / 确认托盘注意力：flashing → 0，下次新消息可再弹。
@@ -3196,12 +3343,22 @@ pub struct IslandPrefsDto {
     pub pull_content: String,
     #[serde(default = "default_bar_resident_pref")]
     pub bar_resident: String,
+    /// Top bar themed blur material (sample + glass overlay, or desktop blur only).
+    #[serde(default = "default_bar_glass_pref")]
+    pub bar_glass: bool,
+    /// Never sample these apps' window chrome (`exe:` / `proc:` bind keys).
+    #[serde(default)]
+    pub ignore_ambient_apps: Vec<String>,
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
     /// pluginId → presence gates (stable tray pin_key / window exe key)
     #[serde(default)]
     pub scenario_gates: std::collections::HashMap<String, ScenarioGateDto>,
+}
+
+fn default_bar_glass_pref() -> bool {
+    true
 }
 
 fn default_bar_resident_pref() -> String {
@@ -3215,6 +3372,8 @@ impl Default for IslandPrefsDto {
             immerse_idle_sec: 8,
             pull_content: "plugin:com.window-hub.weather".into(),
             bar_resident: default_bar_resident_pref(),
+            bar_glass: true,
+            ignore_ambient_apps: Vec::new(),
             msg_notify: true,
             msg_notify_text: "收到一条消息".into(),
             msg_notify_sec: 4,
@@ -3281,6 +3440,8 @@ impl From<crate::db::IslandPrefsRow> for IslandPrefsDto {
             immerse_idle_sec: p.immerse_idle_sec,
             pull_content: p.pull_content,
             bar_resident: p.bar_resident,
+            bar_glass: p.bar_glass,
+            ignore_ambient_apps: parse_ignore_ambient_apps_json(&p.ignore_ambient_apps_json),
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text,
             msg_notify_sec: p.msg_notify_sec,
@@ -3296,6 +3457,8 @@ impl From<&IslandPrefsDto> for crate::db::IslandPrefsRow {
             immerse_idle_sec: p.immerse_idle_sec,
             pull_content: p.pull_content.clone(),
             bar_resident: p.bar_resident.clone(),
+            bar_glass: p.bar_glass,
+            ignore_ambient_apps_json: ignore_ambient_apps_to_json(&p.ignore_ambient_apps),
             msg_notify: p.msg_notify,
             msg_notify_text: p.msg_notify_text.clone(),
             msg_notify_sec: p.msg_notify_sec,
@@ -3326,12 +3489,38 @@ fn normalize_bar_resident(raw: &str) -> String {
     t.to_string()
 }
 
+fn parse_ignore_ambient_apps_json(raw: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Vec<String>>(raw) else {
+        return Vec::new();
+    };
+    normalize_ignore_ambient_apps(v)
+}
+
+fn ignore_ambient_apps_to_json(apps: &[String]) -> String {
+    serde_json::to_string(&normalize_ignore_ambient_apps(apps.to_vec()))
+        .unwrap_or_else(|_| "[]".into())
+}
+
+fn normalize_ignore_ambient_apps(apps: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for k in apps {
+        let t = k.trim().to_string();
+        if t.is_empty() || !seen.insert(t.clone()) {
+            continue;
+        }
+        out.push(t);
+    }
+    out
+}
+
 fn normalize_island_prefs(mut p: IslandPrefsDto) -> IslandPrefsDto {
     p.immerse_idle_sec = p.immerse_idle_sec.clamp(2, 300);
     p.msg_notify_sec = p.msg_notify_sec.clamp(2, 30);
     p.pull_content = normalize_pull_content(&p.pull_content);
     p.bar_resident = normalize_bar_resident(&p.bar_resident);
     p.scenario_gates = normalize_scenario_gates(p.scenario_gates);
+    p.ignore_ambient_apps = normalize_ignore_ambient_apps(p.ignore_ambient_apps);
     p.msg_notify_text = {
         let t = p.msg_notify_text.trim().to_string();
         if t.is_empty() {
@@ -3393,9 +3582,24 @@ pub fn set_island_prefs(app: AppHandle, prefs: IslandPrefsDto) -> Result<IslandP
         g.open_tray_key.clear();
     }
     let next = normalize_island_prefs(prefs);
+    let bar_glass_changed = prev.bar_glass != next.bar_glass;
+    let ignore_ambient_apps_changed = prev.ignore_ambient_apps != next.ignore_ambient_apps;
     let row = crate::db::IslandPrefsRow::from(&next);
     crate::db::with_conn(|c| crate::db::island_set(c, &row))?;
     let _ = app.emit("island-prefs", &next);
+    if bar_glass_changed || ignore_ambient_apps_changed {
+        apply_main_window_material(&app);
+    }
+    if ignore_ambient_apps_changed {
+        #[cfg(windows)]
+        {
+            crate::win32::ambient::sync_ignore_ambient_apps(next.ignore_ambient_apps.clone());
+            crate::win32::ambient::reset_sampling_gate();
+            let hwnd = main_hwnd(&app);
+            let strip = crate::win32::ambient::sample(hwnd);
+            let _ = app.emit("ambient-color", &strip);
+        }
+    }
     Ok(next)
 }
 

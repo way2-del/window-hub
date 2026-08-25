@@ -16,6 +16,7 @@ import {
   applyIslandPrefsSnapshot,
   getIslandPrefs,
   hydrateIslandPrefs,
+  refreshIslandPrefsFromDb,
   setIslandPrefs,
   subscribeIslandPrefs,
   clampStagingPanelH,
@@ -23,6 +24,11 @@ import {
   STAGING_PANEL_H_DEFAULT,
   type IslandPrefs,
 } from "./islandPrefs";
+import {
+  syncGlassCss,
+  subscribeSystemDark,
+  type GlassPrefs,
+} from "./glassPrefs";
 import { islandNotifyBus, type IslandNotifyBanner } from "./plugins/islandNotify";
 import {
   actionsForSlot,
@@ -83,6 +89,32 @@ const CLICK_SLOP = 6;
 const SPRING_MS = 320;
 
 type IslandSize = { width: number; height: number };
+
+function enabledPullContent(raw: string): string {
+  const pid = parsePluginPanelId(raw);
+  if (!pid) return raw || "";
+  return pluginRegistry.get(pid)?.enabled ? raw : "";
+}
+
+/** 情景临时 > 显式会话 > 用户「下拉内容」 */
+function resolveIslandPullContent(opts: {
+  scenarioOwner: string | null;
+  scenarioPull: string | null;
+  sessionOverride: string | null;
+  sessionOverrideActive: boolean;
+  pullContent: string;
+}): string {
+  if (opts.scenarioOwner) {
+    const sp = opts.scenarioPull ?? `plugin:${opts.scenarioOwner}`;
+    const v = enabledPullContent(sp);
+    if (v) return v;
+  }
+  if (opts.sessionOverrideActive && opts.sessionOverride) {
+    const v = enabledPullContent(opts.sessionOverride);
+    if (v) return v;
+  }
+  return enabledPullContent(opts.pullContent);
+}
 
 /** 窗口实际高度 = 岛高 + 可选冲突通知叠层 */
 function winHeight(islandH: number) {
@@ -407,12 +439,13 @@ async function sampleStripBands(
   }
 }
 
-type Material = "none";
+type Material = "none" | "mica-alt" | "blur" | "aero" | "acrylic";
 
 type Ambient = {
   r: number;
   g: number;
   b: number;
+  hwnd?: number;
   width?: number;
   offset_x?: number;
   span_width?: number;
@@ -484,11 +517,46 @@ async function screenLogicalWidth() {
 
 /** 窗口高度跟随岛高；AppBar 始终折叠高度，不跟着展开变。 */
 let cachedScreenW: number | null = null;
+/** 供 Win32 顶栏材质裁剪：展开时 = 顶栏条 ∪ 岛壳 */
+let liveIslandClip = { width: ISLAND_COLLAPSED_W_DEFAULT, height: ISLAND_BAR_H };
 
 async function setBarHeight(islandH: number) {
   if (cachedScreenW == null) cachedScreenW = await screenLogicalWidth();
   const width = cachedScreenW;
-  await getCurrentWindow().setSize(new LogicalSize(width, winHeight(islandH)));
+  const targetH = winHeight(islandH);
+  // Cold start: avoid redundant setSize when HWND already matches — WebView2
+  // geometry thrash during AppBar settle is a common "未响应" trigger.
+  let needSize = true;
+  try {
+    const cur = await getCurrentWindow().innerSize();
+    const scale = (await getCurrentWindow().scaleFactor()) || 1;
+    const curW = Math.round(cur.width / scale);
+    const curH = Math.round(cur.height / scale);
+    if (Math.abs(curW - width) <= 2 && Math.abs(curH - targetH) <= 2) {
+      needSize = false;
+    }
+  } catch {
+    /* resize anyway */
+  }
+  if (needSize) {
+    await getCurrentWindow().setSize(new LogicalSize(width, targetH));
+  }
+  try {
+    const raisedIsland = islandH > ISLAND_BAR_H + 2;
+    const clipW = raisedIsland
+      ? Math.max(liveIslandClip.width, liveExpanded.width)
+      : liveIslandClip.width;
+    const clipH = raisedIsland
+      ? Math.max(islandH, liveIslandClip.height, liveExpanded.height)
+      : islandH;
+    liveIslandClip = { width: clipW, height: clipH };
+    await invoke("reassert_main_bar_geometry", {
+      islandWidth: clipW,
+      islandHeight: clipH,
+    });
+  } catch {
+    /* noop */
+  }
   // 展开面板伸进桌面工作区 → TOPMOST；折叠条交回 AppBar 常规层级
   const raised = islandH > ISLAND_BAR_H + 2;
   try {
@@ -498,12 +566,25 @@ async function setBarHeight(islandH: number) {
   }
 }
 
+/** Sync CSS theme + let Rust decide Win32 glass (desktop always on). */
+async function applyBarMaterial(): Promise<{ dark?: boolean; kind?: Material }> {
+  try {
+    const prefs = await invoke<GlassPrefs>("get_material_prefs");
+    const dark = await syncGlassCss(prefs);
+    const kind = await invoke<string>("apply_window_effect", {});
+    return { dark, kind: (kind as Material) || "mica-alt" };
+  } catch {
+    return {};
+  }
+}
+
 function App() {
   const [expanded, setExpanded] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
-  const [material] = useState<Material>("none");
-  const [ambient, setAmbient] = useState<Ambient>({ r: 32, g: 32, b: 34 });
+  const [material, setMaterial] = useState<Material>("mica-alt");
+  const [ambient, setAmbient] = useState<Ambient>({ r: 32, g: 32, b: 34, hwnd: 0 });
+  const [barGlassDark, setBarGlassDark] = useState(true);
   const [chromeLeft, setChromeLeft] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
   const [chromeCenter, setChromeCenter] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
   const [chromeRight, setChromeRight] = useState(() => chromeTokens({ r: 32, g: 32, b: 34 }));
@@ -628,6 +709,21 @@ function App() {
   widthForBarLabelRef.current = widthForBarLabel;
   const [dropTarget, setDropTarget] = useState(false);
   const [panelOverride, setPanelOverride] = useState<string | null>(null);
+  const panelSessionRef = useRef<string | null>(null);
+  const panelSessionArmedRef = useRef(false);
+
+  function clearSessionPanel() {
+    panelSessionRef.current = null;
+    panelSessionArmedRef.current = false;
+    setPanelOverride(null);
+  }
+
+  /** 会话 override 仅应在展开态有效；收起后残留会盖住「下拉内容」设置 */
+  function clearStalePanelOverride() {
+    if (!expandedRef.current && revealRef.current <= 0.01) {
+      clearSessionPanel();
+    }
+  }
   const [dropPluginId, setDropPluginId] = useState<string | null>(() =>
     resolveIslandDropPluginId(),
   );
@@ -841,7 +937,10 @@ function App() {
       setPanelOverride((prev) => {
         if (!prev?.startsWith("plugin:")) return prev;
         const pid = prev.slice("plugin:".length);
-        return pluginRegistry.get(pid)?.enabled ? prev : null;
+        if (pluginRegistry.get(pid)?.enabled) return prev;
+        panelSessionRef.current = null;
+        panelSessionArmedRef.current = false;
+        return null;
       });
       // Drop cached pull / bar targets only after plugins are loaded.
       // Before bootstrap, registry is empty — treating that as "disabled" wiped prefs on every restart.
@@ -1151,6 +1250,7 @@ function App() {
   function paintDom(next: IslandSize, nextReveal: number) {
     sizeRef.current = next;
     revealRef.current = nextReveal;
+    liveIslandClip = { width: next.width, height: next.height };
     // 顶角直角贴屏；壳层向上 bleed 1px，盖住 WebView 顶边发丝缝
     const topSquare = 1;
     const gap = 0;
@@ -1305,7 +1405,11 @@ function App() {
   /** 点击展开：宽高交错长大，不经过宽扁中间态。force = 岛栏/拖入/通知打开会话。 */
   async function expand(opts?: { force?: boolean }) {
     if (busy.current || expandedRef.current) return;
-    if (!opts?.force && !canDefaultPullExpand()) return;
+    if (!opts?.force) {
+      clearSessionPanel();
+      await refreshIslandPrefsFromDb().then(setIslandPrefsState);
+      if (!canDefaultPullExpand()) return;
+    }
     bumpIslandActivity();
     const token = ++gen.current;
     busy.current = true;
@@ -1347,7 +1451,10 @@ function App() {
 
   /** 收起：一条时间线交错收高度与宽度 */
   async function collapse() {
-    if (!expandedRef.current && revealRef.current <= 0.01) return;
+    if (!expandedRef.current && revealRef.current <= 0.01) {
+      clearSessionPanel();
+      return;
+    }
     bumpIslandActivity();
     const token = ++gen.current;
     busy.current = true;
@@ -1371,7 +1478,7 @@ function App() {
       setSize(settled);
       setReveal(0);
       // 拖入会话覆盖仅本次展开有效；收起后恢复用户「下拉内容」
-      setPanelOverride(null);
+      clearSessionPanel();
       if (
         searchModeRef.current ||
         isFileSearchPlugin(scenarioOwnerRef.current)
@@ -1437,6 +1544,8 @@ function App() {
     }
     // 未配置下拉内容：不进入下拉手势（岛栏 chip / 拖入仍走 openPluginSession）
     if (!canDefaultPullExpand()) return;
+    clearSessionPanel();
+    void refreshIslandPrefsFromDb().then(setIslandPrefsState);
     bumpIslandActivity();
     e.currentTarget.setPointerCapture(e.pointerId);
     const needRaise = lastWinH.current < winHeight(liveExpanded.height);
@@ -1504,7 +1613,9 @@ function App() {
     }
     if (open) {
       setSpringing(false);
+      clearSessionPanel();
       void (async () => {
+        await refreshIslandPrefsFromDb().then(setIslandPrefsState);
         busy.current = true;
         const token = ++gen.current;
         try {
@@ -1542,7 +1653,7 @@ function App() {
       paintDom(settled, 0);
       setSize(settled);
       setReveal(0);
-      setPanelOverride(null);
+      clearSessionPanel();
       scheduleImmerse();
     })();
   }
@@ -1645,12 +1756,67 @@ function App() {
     void (async () => {
       await setBarHeight(ISLAND_BAR_H);
       lastWinH.current = winHeight(ISLAND_BAR_H);
-      try {
-        await invoke("set_window_material", { material: "none" });
-      } catch {
-        /* noop */
-      }
+      const r = await applyBarMaterial();
+      if (r.dark != null) setBarGlassDark(r.dark);
+      if (r.kind) setMaterial(r.kind);
     })();
+  }, [islandPrefs.barGlass]);
+
+  // Desktop ↔ window flips: re-sync (desktop forces Win32 glass on).
+  useEffect(() => {
+    void applyBarMaterial().then((r) => {
+      if (r.dark != null) setBarGlassDark(r.dark);
+      if (r.kind) setMaterial(r.kind);
+    });
+  }, [ambient.hwnd]);
+
+  useEffect(() => {
+    let unSettings: (() => void) | undefined;
+    void listen("settings-closed", () => {
+      bumpIslandActivity();
+      window.dispatchEvent(new CustomEvent("wh-chrome-tokens"));
+    }).then((fn) => {
+      unSettings = fn;
+    });
+    return () => {
+      unSettings?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unMat: (() => void) | undefined;
+    void listen<GlassPrefs>("material-prefs", (ev) => {
+      void (async () => {
+        try {
+          const dark = await syncGlassCss(ev.payload);
+          setBarGlassDark(dark);
+          const kind = await invoke<string>("apply_window_effect", {});
+          setMaterial((kind as Material) || "mica-alt");
+        } catch {
+          /* noop */
+        }
+      })();
+    }).then((fn) => {
+      unMat = fn;
+    });
+    const unDark = subscribeSystemDark(() => {
+      void invoke<GlassPrefs>("get_material_prefs")
+        .then((prefs) => {
+          if (prefs.dark != null) return;
+          return syncGlassCss(prefs).then((dark) => {
+            setBarGlassDark(dark);
+            return invoke<string>("apply_window_effect", {});
+          });
+        })
+        .then((kind) => {
+          if (kind) setMaterial((kind as Material) || "mica-alt");
+        })
+        .catch(() => undefined);
+    });
+    return () => {
+      unMat?.();
+      unDark();
+    };
   }, []);
 
   // React 每次 commit 可能用 style={{width:size.width}} 盖掉 paintDom 的即时宽；
@@ -1720,7 +1886,22 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const fallback = { r: ambient.r, g: ambient.g, b: ambient.b };
+    const onDesktop = (ambient.hwnd ?? 0) === 0;
+    const desktopGlass = onDesktop && islandPrefs.barGlass;
+    // 桌面 Win32 材质会混入主题 tint，反色按「壁纸×材质」感知色，避免跟纯壁纸采样偏差
+    const mixGlass = (rgb: Rgb): Rgb => {
+      if (!desktopGlass) return rgb;
+      const tint = barGlassDark
+        ? { r: 28, g: 28, b: 30 }
+        : { r: 245, g: 245, b: 250 };
+      const t = 0.42;
+      return {
+        r: Math.round(rgb.r * (1 - t) + tint.r * t),
+        g: Math.round(rgb.g * (1 - t) + tint.g * t),
+        b: Math.round(rgb.b * (1 - t) + tint.b * t),
+      };
+    };
+    const fallback = mixGlass({ r: ambient.r, g: ambient.g, b: ambient.b });
 
     void (async () => {
       let left = fallback;
@@ -1729,12 +1910,20 @@ function App() {
       if (ambient.png_base64 && (ambient.width ?? 0) > 1) {
         const bands = await sampleStripBands(ambient.png_base64);
         if (bands) {
-          left = bands.left;
-          center = bands.center;
-          right = bands.right;
+          left = mixGlass(bands.left);
+          center = mixGlass(bands.center);
+          right = mixGlass(bands.right);
         }
       }
       if (cancelled) return;
+      // 桌面 Win32 顶栏材质整条一致 — 左右勿再按壁纸分段反色
+      if (desktopGlass) {
+        const tokens = chromeTokens(center);
+        setChromeLeft(tokens);
+        setChromeCenter(tokens);
+        setChromeRight(tokens);
+        return;
+      }
       setChromeLeft(chromeTokens(left));
       setChromeCenter(chromeTokens(center));
       setChromeRight(chromeTokens(right));
@@ -1743,18 +1932,38 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [ambient.r, ambient.g, ambient.b, ambient.png_base64, ambient.width]);
+  }, [
+    ambient.r,
+    ambient.g,
+    ambient.b,
+    ambient.hwnd,
+    ambient.png_base64,
+    ambient.width,
+    barGlassDark,
+    islandPrefs.barGlass,
+  ]);
 
   // After chrome CSS vars commit — shortcuts iframes mirror --chrome-left-* by hand.
   useEffect(() => {
     window.dispatchEvent(new CustomEvent("wh-chrome-tokens"));
   }, [chromeLeft.fg, chromeLeft.shadow, chromeRight.fg, chromeCenter.fg]);
 
+  const sessionOverrideActive = Boolean(
+    panelSessionArmedRef.current &&
+      panelOverride &&
+      panelOverride === panelSessionRef.current &&
+      (expanded || pulling || reveal > 0.12 || busy.current),
+  );
+  const resolvedPullContent = resolveIslandPullContent({
+    scenarioOwner,
+    scenarioPull,
+    sessionOverride: panelSessionRef.current,
+    sessionOverrideActive,
+    pullContent: islandPrefs.pullContent,
+  });
+
   /** 当前会话 / 投放 / 情景插件：同步面板壳尺寸 */
-  const sizePluginId =
-    parsePluginPanelId(
-      scenarioPull ?? panelOverride ?? islandPrefs.pullContent,
-    ) ?? dropPluginId;
+  const sizePluginId = parsePluginPanelId(resolvedPullContent) ?? dropPluginId;
 
   useEffect(() => {
     if (!sizePluginId) return;
@@ -1796,7 +2005,10 @@ function App() {
   }, [sizePluginId]);
 
   useEffect(() => {
-    void hydrateIslandPrefs().then(setIslandPrefsState);
+    void hydrateIslandPrefs().then((prefs) => {
+      setIslandPrefsState(prefs);
+      clearStalePanelOverride();
+    });
     const unsub = subscribeIslandPrefs(setIslandPrefsState);
     const unsubBus = islandNotifyBus.subscribe((b) => {
       if (!b) {
@@ -1827,6 +2039,7 @@ function App() {
     });
     void listen<IslandPrefs>("island-prefs", (ev) => {
       setIslandPrefsState(applyIslandPrefsSnapshot(ev.payload));
+      clearStalePanelOverride();
     }).then((fn) => {
       unlistenPrefs = fn;
     });
@@ -1874,16 +2087,15 @@ function App() {
           overlayBarRef.current = null;
           return null;
         });
-        setPanelOverride((prev) => {
-          if (prev !== `plugin:${pluginId}`) return prev;
+        if (panelSessionRef.current === `plugin:${pluginId}`) {
+          clearSessionPanel();
           // 下拉为「无」：清空后直接收起，勿落回空面板
           if (!hasConfiguredPullContent() && expandedRef.current) {
             queueMicrotask(() => {
               if (expandedRef.current) void collapse();
             });
           }
-          return null;
-        });
+        }
         // 常驻+下拉皆无：清空后立刻沉浸，勿留黑色空岛
         queueMicrotask(() => {
           if (!expandedRef.current) scheduleImmerse();
@@ -2092,9 +2304,13 @@ function App() {
       const pluginId = ev.payload?.pluginId;
       if (action === "open" && pluginId) {
         armPluginSession(pluginId);
-        if (!expandedRef.current) void expand({ force: true });
+        if (!expandedRef.current) {
+          void expand({ force: true }).then(() => {
+            if (!expandedRef.current) clearSessionPanel();
+          });
+        }
       } else if (action === "close") {
-        setPanelOverride(null);
+        clearSessionPanel();
         if (expandedRef.current) void collapse();
       }
     }).then((fn) => {
@@ -2315,12 +2531,7 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [islandPrefs.msgNotify]);
 
-  const effectivePullContent = (() => {
-    const raw = scenarioPull ?? panelOverride ?? islandPrefs.pullContent;
-    const pid = parsePluginPanelId(raw);
-    if (!pid) return raw || "";
-    return pluginRegistry.get(pid)?.enabled ? raw : "";
-  })();
+  const effectivePullContent = resolvedPullContent;
   /**
    * 主岛已被临时占用时，通知不得盖住栏内内容，改为下方独立胶囊：
    * Alt+空格搜索 / 情景临时（正在播放等）/ 下拉展开。
@@ -2566,6 +2777,8 @@ function App() {
     setShellPanelH(h);
     liveExpanded.width = w;
     liveExpanded.height = h;
+    panelSessionRef.current = `plugin:${pluginId}`;
+    panelSessionArmedRef.current = true;
     setPanelOverride(`plugin:${pluginId}`);
   }
 
@@ -2573,7 +2786,8 @@ function App() {
     if (!pluginId || !pluginRegistry.get(pluginId)?.enabled) return;
     armPluginSession(pluginId);
     if (!expandedRef.current) {
-      void expand({ force: true });
+      await expand({ force: true });
+      if (!expandedRef.current) clearSessionPanel();
     }
   }
 
@@ -2612,14 +2826,15 @@ function App() {
       setSearchDraft("");
       setSearchSubmit(null);
     }
-    setPanelOverride(null);
+    clearSessionPanel();
     if (isFileSearchPlugin(scenarioOwnerRef.current)) {
-      const searchPid =
-        resolveIslandSearchPluginId() ?? "com.window-hub.file-search";
+      const searchPid = scenarioOwnerRef.current;
       clearScenarioLayer();
-      void invoke("hub_island_release_scenario", {
-        pluginId: searchPid,
-      }).catch(() => undefined);
+      if (searchPid) {
+        void invoke("hub_island_release_scenario", {
+          pluginId: searchPid,
+        }).catch(() => undefined);
+      }
     }
   }
 
@@ -2669,50 +2884,46 @@ function App() {
   }
 
   async function enterIslandSearchMode() {
+    const pluginId = resolveIslandSearchPluginId();
+    if (!pluginId) return;
+
     clearSearchLeaveTimer();
     searchLeavingRef.current = false;
     setSearchLeaving(false);
-    const FALLBACK = "com.window-hub.file-search";
-    const pluginId = resolveIslandSearchPluginId() ?? FALLBACK;
-    const rec = pluginRegistry.get(pluginId);
+
     const canClaim =
-      Boolean(rec?.enabled) &&
-      Boolean(rec?.manifest.slots?.["island.scenario"]) &&
-      (rec?.manifest.capabilities ?? []).includes("island.bar") &&
-      (rec?.manifest.capabilities ?? []).includes("island.panel") &&
+      Boolean(pluginRegistry.get(pluginId)?.manifest.slots?.["island.scenario"]) &&
+      (pluginRegistry.get(pluginId)?.manifest.capabilities ?? []).includes(
+        "island.bar",
+      ) &&
+      (pluginRegistry.get(pluginId)?.manifest.capabilities ?? []).includes(
+        "island.panel",
+      ) &&
       scenarioGateAllows(pluginId);
+    if (!canClaim) return;
 
     bumpIslandActivity();
-    // 先亮搜索栏（不依赖 claim 成败）
     searchModeRef.current = true;
     setSearchMode(true);
     setSearchDraft("");
     setSearchSubmit(null);
     liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
 
-    if (canClaim) {
-      scenarioOwnerRef.current = pluginId;
-      setScenarioOwner(pluginId);
-      setScenarioPull(`plugin:${pluginId}`);
-      // 搜索态由 Host chrome 画输入框，不再用 setBar 文案占位
-      setScenarioBar({
-        pluginId,
-        text: " ",
-        title: "Alt+空格 · Everything",
-      });
-      try {
-        await invoke("hub_island_claim_scenario", { pluginId });
-      } catch (err) {
-        console.warn("[island-search] claimScenario", err);
-      }
-      armPluginSession(pluginId);
-    } else if (!rec?.enabled) {
-      console.warn(
-        "[island-search] plugin missing/disabled:",
-        pluginId,
-        "— still showing search chrome",
-      );
+    scenarioOwnerRef.current = pluginId;
+    setScenarioOwner(pluginId);
+    setScenarioPull(`plugin:${pluginId}`);
+    // 搜索态由 Host chrome 画输入框，不再用 setBar 文案占位
+    setScenarioBar({
+      pluginId,
+      text: " ",
+      title: "Alt+空格 · Everything",
+    });
+    try {
+      await invoke("hub_island_claim_scenario", { pluginId });
+    } catch (err) {
+      console.warn("[island-search] claimScenario", err);
     }
+    armPluginSession(pluginId);
 
     // 仅激活折叠搜索栏；若当前已展开则收起但保留搜索态
     if (expandedRef.current) {
@@ -2727,6 +2938,7 @@ function App() {
   async function toggleIslandSearchMode() {
     // 离场动画中再按热键 → 取消离场并重新进入（避免「时好时坏」被吞）
     if (searchLeavingRef.current) {
+      if (!resolveIslandSearchPluginId()) return;
       clearSearchLeaveTimer();
       searchLeavingRef.current = false;
       setSearchLeaving(false);
@@ -2743,6 +2955,7 @@ function App() {
       }
       return;
     }
+    if (!resolveIslandSearchPluginId()) return;
     await enterIslandSearchMode();
   }
   toggleIslandSearchHotkeyRef.current = () => {
@@ -2750,8 +2963,8 @@ function App() {
   };
 
   async function openFileSearchFavorites() {
-    const FALLBACK = "com.window-hub.file-search";
-    const pluginId = resolveIslandSearchPluginId() ?? FALLBACK;
+    const pluginId = resolveIslandSearchPluginId();
+    if (!pluginId) return;
     bumpIslandActivity();
     await enterIslandSearchMode();
     armPluginSession(pluginId);
@@ -2903,6 +3116,10 @@ function App() {
     return () => un?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const ambientFromWindow = (ambient.hwnd ?? 0) !== 0;
+  /** Win32 模糊仅桌面 + 开关；有窗口时始终只用吸色 */
+  const barGlassOn = !ambientFromWindow && islandPrefs.barGlass;
 
   const ambientCss = {
     ["--island-top-gap" as string]: `${TOP_GAP}px`,
@@ -3111,13 +3328,17 @@ function App() {
 
   return (
     <div
-      className={`shell${shellExpanded ? " is-expanded" : ""}`}
+      className={`shell${shellExpanded ? " is-expanded" : ""}${barGlassOn ? " has-bar-glass" : ""}${ambientFromWindow ? " has-ambient" : ""}${barGlassOn && !ambientFromWindow ? " is-desktop-glass" : ""}`}
       style={ambientCss}
       data-material={material}
       data-chrome-left={chromeLeft.scheme}
       data-chrome-right={chromeRight.scheme}
     >
-      <div className="ambient-strip" style={stripStyle} aria-hidden />
+      {/* 有窗口：吸色条；桌面+模糊开：仅透出下层 Win32 材质 */}
+      {ambientFromWindow ? (
+        <div className="ambient-strip" style={stripStyle} aria-hidden />
+      ) : null}
+      {barGlassOn ? <div className="bar-glass" aria-hidden /> : null}
 
       {expanded && (
         <div
@@ -3173,7 +3394,7 @@ function App() {
         }
       >
         <div
-          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${notifyInline ? " is-notifying" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar || dropTarget ? " has-staging" : ""}${resolveIslandBarAdaptive(barPluginId).enabled ? " has-adaptive-bar" : ""}`}
+          className={`island-root${expanded ? " is-expanded" : ""}${pulling ? " is-pulling" : ""}${springing ? " is-springing" : ""}${immersed ? " is-immersed" : ""}${notifyInline ? " is-notifying" : ""}${showSearchChrome ? " is-searching" : ""}${dropTarget ? " is-drop-target" : ""}${islandBar || dropTarget ? " has-staging" : ""}${resolveIslandBarAdaptive(barPluginId).enabled ? " has-adaptive-bar" : ""}`}
           role="button"
           tabIndex={0}
           aria-expanded={expanded}
@@ -3185,7 +3406,11 @@ function App() {
                 : "灵动岛"
           }
           data-chrome={
-            dropTarget ? "dark" : immersed ? chromeCenter.scheme : "dark"
+            dropTarget || showSearchChrome
+              ? "dark"
+              : immersed
+                ? chromeCenter.scheme
+                : "dark"
           }
           data-notify-accent={
             notifyInline ? msgBanner?.accentColor || undefined : undefined
@@ -3431,8 +3656,9 @@ function App() {
               className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}`}
               onClick={(e) => e.stopPropagation()}
             >
-              {effectivePullContent || panelOverride ? (
+              {effectivePullContent || panelSessionRef.current ? (
                 <IslandPanelHost
+                  key={activePanelPluginId ?? "none"}
                   pullContent={effectivePullContent}
                   active={panelActive}
                   searchSubmit={searchSubmit}

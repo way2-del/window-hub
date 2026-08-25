@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(windows)]
 use parking_lot::Mutex;
@@ -37,8 +37,23 @@ static DROP_KEEPALIVE: OnceLock<Mutex<DropTargetKeepAlive>> = OnceLock::new();
 static DROP_APP: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
 
 /// Install after the dock webview exists. Safe to call repeatedly (rebinds).
+/// OLE registration must run on the UI thread — marshals via `run_on_main_thread`.
 #[cfg(windows)]
 pub fn install_dock_file_drop(app: &AppHandle, hwnd_raw: isize) {
+    let app = app.clone();
+    let runner = app
+        .get_webview_window("dock")
+        .or_else(|| app.get_webview_window("main"));
+    let Some(win) = runner else {
+        return;
+    };
+    let _ = win.run_on_main_thread(move || {
+        install_dock_file_drop_on_main(&app, hwnd_raw);
+    });
+}
+
+#[cfg(windows)]
+fn install_dock_file_drop_on_main(app: &AppHandle, hwnd_raw: isize) {
     use std::ffi::c_void;
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
@@ -101,15 +116,13 @@ pub fn install_dock_file_drop(app: &AppHandle, hwnd_raw: isize) {
 #[cfg(not(windows))]
 pub fn install_dock_file_drop(_app: &AppHandle, _hwnd_raw: isize) {}
 
-/// Schedule a couple of rebinds so WebView2 child HWNDs get the drop target.
+/// One late rebind so WebView2 child HWNDs get the drop target without boot storms.
 #[cfg(windows)]
 pub fn schedule_dock_file_drop_rebind(app: &AppHandle, hwnd_raw: isize) {
     let app = app.clone();
     std::thread::spawn(move || {
-        for ms in [400u64, 1200, 2500] {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            install_dock_file_drop(&app, hwnd_raw);
-        }
+        std::thread::sleep(std::time::Duration::from_millis(5000));
+        install_dock_file_drop(&app, hwnd_raw);
     });
 }
 

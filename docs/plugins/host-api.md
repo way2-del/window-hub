@@ -17,11 +17,12 @@
 | `windows.read` | list / get / subscribe | ✅ |
 | `windows.focus` | focus（敏感，安装须明示） | ✅ |
 | `media.keys` | 系统媒体键 play_pause/next/previous/stop（敏感） | ✅ |
+| `media.camera` | 摄像头预览；`hub.media.resetCameraPermission` / `openCameraPrivacySettings`（敏感） | ✅ |
 | `notify` | `hub.notify`（需 slot `island.notify`） | ✅ Popup / Panel / Shortcuts |
 | `clipboard.read` / `clipboard.write` | 剪贴板 | ❌ schema 占位，无 API |
 | `network` | `hub.fetch` + `permissions.network` 白名单 | ✅ |
 | `everything.search` | Everything 本机文件搜索 / 打开 / 定位（敏感；需本机 Everything 运行） | ✅ |
-| `system.monitor` | 本机 CPU / 内存 / 磁盘 / 温度快照（敏感） | ✅ |
+| `system.monitor` | `hub.sysmon.snapshot`（CPU/内存/磁盘/温度） | ✅ |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。  
 设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。  
@@ -101,6 +102,15 @@ DnD → `island.drop` 赢家。`excludeFromPullContent: true` → 不进下拉�
 | `resize({ width, height })` | 调整已打开弹窗尺寸（经 clamp） |
 | `openAsWindow(opts?)` | 关闭当前无边框弹窗并重开为**系统标题栏**窗口（Excalidraw「窗口化」按钮） |
 
+## `hub.media.*`
+
+| 方法 | Capability | 说明 |
+|------|------------|------|
+| `sendKey(action)` | `media.keys` | `play_pause` / `next` / `previous` / `stop` |
+| `prepareCamera()` | `media.camera` | 打开摄像头面板时安装 WebView2 权限回调（按需，非启动） |
+| `resetCameraPermission()` | `media.camera` | 将 WebView2 相机权限重置为允许（拒绝后可再开） |
+| `openCameraPrivacySettings()` | `media.camera` | 打开 Windows「隐私 → 相机」设置 |
+
 ## `hub.everything.*`（需 `everything.search`）
 
 经 Host 内置 Everything SDK（`Everything64.dll` IPC）查询本机索引。**需本机 Everything 客户端正在运行。**
@@ -171,6 +181,4 @@ hub.fetch(url: string, opts?: {
 
 Hub 未提供的能力 → 独立进程脚本 + 本地 HTTP，设置页登记自启。见 [companion-scripts.md](./companion-scripts.md)。  
 **禁止**未审核原生二进制进主进程。
-
-
 

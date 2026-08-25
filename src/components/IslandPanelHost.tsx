@@ -149,6 +149,10 @@ export default function IslandPanelHost({
     void (async () => {
       try {
         const runtime = pluginRegistry.get(pluginId);
+        // Camera PermissionRequested: only when a media.camera panel is opened.
+        if ((runtime?.manifest.capabilities ?? []).includes("media.camera")) {
+          await invoke("hub_camera_prepare", { pluginId }).catch(() => undefined);
+        }
         const panel = runtime?.manifest.entry?.panel ?? "panel.html";
         let html = await invoke<string>("hub_plugin_read_text", {
           pluginId,
@@ -425,6 +429,7 @@ html,body{margin:0;height:100%;background:#000;color:#f4f4f5;color-scheme:dark;o
   return (
     <iframe
       ref={iframeRef}
+      key={pluginId}
       className="panel-plugin-frame"
       title={`plugin-panel-${pluginId}`}
       srcDoc={srcdoc}

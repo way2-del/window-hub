@@ -40,7 +40,7 @@ description: >-
 | 岛通知横幅 | `island.notify` | （无独立 iframe；`hub.notify`） | `notify` |
 | 托管弹窗 | — | `entry.popup` | `popup` |
 
-**命名：** 顶栏左区叫**快捷区**，勿称 Dock。Dock / Widget 为后续表面，**schema 尚无对应 slot**。
+**命名：** 顶栏左区叫**快捷区**，勿称 Dock。Dock 为独立底栏。
 
 ## AI 端到端流程（按序执行）
 
@@ -270,7 +270,7 @@ API：`docs/plugins/host-api.md` · SDK：`docs/plugins/sdk.md`
 
 - `hub.clipboard.*`
 - `entry.development` 热链到 `localhost` Vite（仅 `__dev` 目录安装）
-- Dock / Widget slot
+- Dock / Widget slot（未实现）
 - 远程市场 / 签名 `.whpx` / CLI publish
 - 统一三表面完全相同的 `hub` 全集（快捷区可 popup；岛/面板不能开弹窗 — **有意不同**）
 - 通知按钮自定义坐标（仅允许 `slot: start|end`，见 island-notify skill）

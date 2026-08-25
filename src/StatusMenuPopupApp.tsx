@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
 import { fitPopupToContent } from "./popupFit";
+import { bootstrapPlugins } from "./plugins/bootstrap";
 import "./components/StatusMenu.css";
 
 declare global {
@@ -222,6 +223,7 @@ export default function StatusMenuPopupApp() {
 
     const start = async () => {
       await syncGlass();
+      await bootstrapPlugins();
       if (cancelled) return;
       let n = 0;
       try {

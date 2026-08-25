@@ -2,6 +2,7 @@
 
 import { pluginRegistry } from "./registry";
 import type { IslandBarState, PluginManifest } from "./types";
+import { isPluginSurfaceEnabled } from "./surfacePrefs";
 
 export type { IslandBarState };
 
@@ -63,7 +64,8 @@ export function listIslandBarPlugins() {
       (p) =>
         p.enabled &&
         p.manifest.slots?.["island.bar"] &&
-        (p.manifest.capabilities ?? []).includes("island.bar"),
+        (p.manifest.capabilities ?? []).includes("island.bar") &&
+        isPluginSurfaceEnabled(p.pluginId, "island.bar", p.manifest),
     )
     .sort(
       (a, b) => orderOf(a.manifest, "island.bar") - orderOf(b.manifest, "island.bar"),

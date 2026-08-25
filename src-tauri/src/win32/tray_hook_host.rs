@@ -66,7 +66,7 @@ pub fn resolve_dll_path() -> Option<PathBuf> {
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     candidates.push(manifest.join("resources").join("window_hub_trayhook.dll"));
-    for profile in ["debug", "release"] {
+    for profile in ["debug", "release", "release-fast"] {
         candidates.push(manifest.join("target").join(profile).join("window_hub_trayhook.dll"));
         // Preferred: trayhook artifacts live under package target/ (tauri-dev safe).
         candidates.push(

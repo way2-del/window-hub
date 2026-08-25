@@ -369,9 +369,9 @@ fn confirm_temp_admin(_action_label: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// ShellExecuteEx `runas` + wait. Used for one-shot service install/uninstall UAC.
+/// ShellExecuteEx `runas` + wait. Used for one-shot UAC helpers (SCM / …).
 #[cfg(windows)]
-fn run_elevated_helper_and_wait(arg: &str, action_label: &str) -> Result<(), String> {
+pub(crate) fn run_elevated_helper_and_wait(arg: &str, action_label: &str) -> Result<(), String> {
     confirm_temp_admin(action_label)?;
 
     use std::os::windows::ffi::OsStrExt;
@@ -430,7 +430,7 @@ fn run_elevated_helper_and_wait(arg: &str, action_label: &str) -> Result<(), Str
 }
 
 #[cfg(not(windows))]
-fn run_elevated_helper_and_wait(_arg: &str, _action_label: &str) -> Result<(), String> {
+pub(crate) fn run_elevated_helper_and_wait(_arg: &str, _action_label: &str) -> Result<(), String> {
     Err("仅支持 Windows".into())
 }
 

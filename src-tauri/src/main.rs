@@ -7,7 +7,6 @@ fn main() {
         window_hub_lib::run_autostart_service();
         return;
     }
-    // One-shot elevated helper: install SCM autostart then exit (no GUI stay-elevated).
     if args.iter().any(|a| a == "--install-autostart-service") {
         #[cfg(windows)]
         {
@@ -38,6 +37,7 @@ fn main() {
         #[cfg(not(windows))]
         std::process::exit(1);
     }
+
     #[cfg(windows)]
     window_hub_lib::ensure_single_instance();
     window_hub_lib::run()

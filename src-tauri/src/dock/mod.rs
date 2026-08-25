@@ -3327,11 +3327,19 @@ async fn ensure_dock_window_inner(
     let glass_w = width;
     let height = dock_window_height(prefs.magnification);
 
+    let mat_prefs = state
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .normalize();
+    let theme_boot = crate::win32::material::theme_bootstrap_script(&mat_prefs);
+
     // Glass strip first (below icons): owns SWCA material at fixed DOCK_H.
     if app.get_webview_window(DOCK_GLASS_LABEL).is_none() {
-        let glass_init = r#"
-          window.__WH_IS_DOCK_GLASS__ = true;
-        "#;
+        let glass_init = format!(
+            "window.__WH_IS_DOCK_GLASS__ = true;\n{theme_boot}"
+        );
         let glass = WebviewWindowBuilder::new(
             app,
             DOCK_GLASS_LABEL,
@@ -3351,7 +3359,7 @@ async fn ensure_dock_window_inner(
         .skip_taskbar(true)
         .focused(false)
         .visible(false)
-        .initialization_script(glass_init)
+        .initialization_script(&glass_init)
         .build()
         .map_err(|e| format!("open dock-glass failed: {e}"))?;
         let _ = glass.set_ignore_cursor_events(true);
@@ -3366,6 +3374,12 @@ async fn ensure_dock_window_inner(
         if let Ok(gh) = glass.hwnd() {
             win32_dock_glass_set_round(gh.0 as isize, prefs.corner_radius_px);
         }
+        // Let WebView2 + DWM settle before spawning the icons layer.
+        tauri::async_runtime::spawn_blocking(|| {
+            std::thread::sleep(std::time::Duration::from_millis(280));
+        })
+        .await
+        .ok();
     } else if let Some(glass) = app.get_webview_window(DOCK_GLASS_LABEL) {
         let _ = glass.set_ignore_cursor_events(true);
         let _ = glass.set_shadow(false);
@@ -3392,9 +3406,7 @@ async fn ensure_dock_window_inner(
         return Ok(());
     }
 
-    let init = r#"
-      window.__WH_IS_DOCK__ = true;
-    "#;
+    let init = format!("window.__WH_IS_DOCK__ = true;\n{theme_boot}");
 
     let win = WebviewWindowBuilder::new(
         app,
@@ -3418,7 +3430,7 @@ async fn ensure_dock_window_inner(
     // Use our OLE target in `file_drop` — wry's handler leaves a no-drop cursor
     // on this frameless HWND and blocks reliable HTML5 / pointer DnD.
     .disable_drag_drop_handler()
-    .initialization_script(init)
+    .initialization_script(&init)
     .build()
     .map_err(|e| format!("open dock failed: {e}"))?;
 
@@ -3451,30 +3463,39 @@ pub async fn ensure_dock_window(
     Ok(())
 }
 
-/// Called from app setup when dock was enabled last session.
-pub fn bootstrap_dock(app: &AppHandle) {
+/// Called from boot pipeline when dock was enabled last session.
+/// Returns a receiver that fires once when dual-WebView bootstrap completes (or fails).
+pub fn bootstrap_dock(app: &AppHandle) -> Option<std::sync::mpsc::Receiver<Result<(), String>>> {
     let mut prefs = load_dock_prefs();
     if !prefs.enabled {
-        return;
+        return None;
     }
     prefs.hide_system_taskbar = true;
     let _ = save_dock_prefs(&prefs);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let app2 = app.clone();
     let prefs2 = prefs.clone();
     tauri::async_runtime::spawn(async move {
         let state = app2.state::<MaterialState>();
         let vis = app2.state::<Arc<DockVisibility>>();
-        if let Err(e) = ensure_dock_window_inner(&app2, &*state, &*vis, &prefs2).await {
+        let result = ensure_dock_window_inner(&app2, &*state, &*vis, &prefs2).await;
+        let ok = result.is_ok();
+        if ok {
+            // Taskbar already hidden in spawn_watchdog (before top AppBar). Idempotent.
+            apply_taskbar_for_dock(true);
+            eprintln!("[boot] dock: webviews ready");
+        } else if let Err(ref e) = result {
             eprintln!("[dock] bootstrap failed: {e}");
+        }
+        let _ = tx.send(result);
+        if !ok {
             return;
         }
-        // Taskbar already hidden in spawn_watchdog (before top AppBar). Idempotent.
-        apply_taskbar_for_dock(true);
-        // One delayed material/place pass — do not loop (races auto-hide animation).
+        // One delayed material/place pass — after boot READY so it does not race WebView create.
         let app3 = app2.clone();
         let prefs3 = prefs2.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(400));
+            std::thread::sleep(std::time::Duration::from_millis(2000));
             if let Some(vis) = app3.try_state::<Arc<DockVisibility>>() {
                 if vis.is_busy() {
                     return;
@@ -3482,12 +3503,20 @@ pub fn bootstrap_dock(app: &AppHandle) {
             }
             position_dock_window(&app3, &prefs3);
             let state = app3.state::<MaterialState>();
+            let mat = state
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .normalize();
             if let Some(g) = app3.get_webview_window(DOCK_GLASS_LABEL) {
-                apply_saved_material_pub(&g, &*state);
+                // Soft retint only — full deferred apply flashes dark on bootstrap.
+                let _ = crate::win32::material::reassert_dock_glass(&g, &mat);
             }
             if let Some(w) = app3.get_webview_window("dock") {
-                apply_saved_material_pub(&w, &*state);
+                let _ = crate::win32::material::apply_prefs(&w, &mat);
             }
         });
     });
+    Some(rx)
 }

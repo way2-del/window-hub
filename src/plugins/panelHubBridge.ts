@@ -35,6 +35,9 @@ const ALLOWED_CMDS = new Set([
   "hub_windows_get",
   "hub_windows_focus",
   "hub_media_send_key",
+  "hub_camera_prepare",
+  "hub_camera_reset_permission",
+  "hub_camera_open_privacy_settings",
   "hub_notify",
   "hub_fetch",
   "hub_everything_status",
@@ -150,6 +153,16 @@ export function panelHubBootstrapScript(pluginId: string): string {
     media: {
       sendKey: function (action) {
         return invoke("hub_media_send_key", withPlugin({ action: action }));
+      },
+      /** Call once when a camera panel is about to open (Host also does this). */
+      prepareCamera: function () {
+        return invoke("hub_camera_prepare", withPlugin());
+      },
+      resetCameraPermission: function () {
+        return invoke("hub_camera_reset_permission", withPlugin());
+      },
+      openCameraPrivacySettings: function () {
+        return invoke("hub_camera_open_privacy_settings", withPlugin());
       }
     },
     everything: {

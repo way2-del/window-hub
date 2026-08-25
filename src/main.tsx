@@ -21,6 +21,7 @@ declare global {
   interface Window {
     __WH_IS_SETTINGS__?: boolean;
     __WH_SETTINGS_FOCUS_PLUGIN__?: string;
+    __WH_SETTINGS_FOCUS_NAV__?: string;
     __WH_IS_TRAY_POPUP__?: boolean;
     __WH_IS_STATUS_MENU_POPUP__?: boolean;
     __WH_IS_INPUT_LANG_POPUP__?: boolean;
@@ -31,6 +32,7 @@ declare global {
     __WH_IS_PLUGIN_POPUP__?: boolean;
     __WH_IS_DOCK__?: boolean;
     __WH_IS_DOCK_GLASS__?: boolean;
+    __WH_IS_ISLAND_BAR_GLASS__?: boolean;
     __WH_IS_DOCK_ICON_EDITOR__?: boolean;
     __WH_DOCK_ICON_EDITOR_FOCUS__?: string;
     __WH_PLUGIN_ID__?: string;
@@ -49,11 +51,13 @@ type WindowKind =
   | "plugin-popup"
   | "dock"
   | "dock-glass"
+  | "island-bar-glass"
   | "dock-icon-editor";
 
 function resolveWindowKind(): WindowKind {
   if (window.__WH_IS_DOCK_ICON_EDITOR__ === true) return "dock-icon-editor";
   if (window.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
+  if (window.__WH_IS_ISLAND_BAR_GLASS__ === true) return "island-bar-glass";
   if (window.__WH_IS_DOCK__ === true) return "dock";
   if (window.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
   if (window.__WH_IS_WIFI_AUTH_POPUP__ === true) return "wifi-auth";
@@ -67,6 +71,7 @@ function resolveWindowKind(): WindowKind {
     const label = getCurrentWindow().label;
     if (label === "dock-icon-editor") return "dock-icon-editor";
     if (label === "dock-glass") return "dock-glass";
+    if (label === "island-bar-glass") return "island-bar-glass";
     if (label === "dock") return "dock";
     if (label === "plugin-popup" || label === "plugin-window") return "plugin-popup";
     if (label === "wifi-auth-popup") return "wifi-auth";
@@ -82,6 +87,7 @@ function resolveWindowKind(): WindowKind {
   const q = new URLSearchParams(window.location.search).get("window");
   if (q === "dock-icon-editor") return "dock-icon-editor";
   if (q === "dock-glass") return "dock-glass";
+  if (q === "island-bar-glass") return "island-bar-glass";
   if (q === "dock") return "dock";
   if (q === "plugin-popup" || q === "plugin-window") return "plugin-popup";
   if (q === "wifi-auth") return "wifi-auth";
@@ -115,7 +121,7 @@ const bodyClass =
                   ? "is-plugin-popup"
                   : kind === "dock-icon-editor"
                     ? ["is-dock-icon-editor", "is-settings"]
-                    : kind === "dock" || kind === "dock-glass"
+                    : kind === "dock" || kind === "dock-glass" || kind === "island-bar-glass"
                       ? "is-dock"
                       : "is-island";
 if (Array.isArray(bodyClass)) {
@@ -143,11 +149,13 @@ document.title =
                   ? "插件"
                   : kind === "dock-glass"
                     ? "Dock Glass"
-                    : kind === "dock-icon-editor"
-                      ? "修改图标"
-                      : kind === "dock"
-                        ? "Dock"
-                        : "灵动岛";
+                    : kind === "island-bar-glass"
+                      ? "Island Bar Glass"
+                      : kind === "dock-icon-editor"
+                        ? "修改图标"
+                    : kind === "dock"
+                      ? "Dock"
+                      : "灵动岛";
 
 const root = document.getElementById("root") as HTMLElement;
 if (kind === "settings" || kind === "dock-icon-editor") {
@@ -160,6 +168,7 @@ if (kind === "settings" || kind === "dock-icon-editor") {
 if (
   kind === "dock" ||
   kind === "dock-glass" ||
+  kind === "island-bar-glass" ||
   kind === "chrome-tip" ||
   kind === "input-lang" ||
   kind === "wifi" ||
@@ -190,7 +199,7 @@ ReactDOM.createRoot(root).render(
       <DockIconEditorApp />
     ) : kind === "dock" ? (
       <DockApp />
-    ) : kind === "dock-glass" ? (
+    ) : kind === "dock-glass" || kind === "island-bar-glass" ? (
       <DockGlassApp />
     ) : (
       <App />

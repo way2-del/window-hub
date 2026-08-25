@@ -1,11 +1,13 @@
 //! Ambient strip color.
 //! - Maximized / fullscreen window:
 //!   - **edge**: GetWindowDC at junction (+1px), then screen BitBlt if DC empty —
-//!     screen path skipped while Win11 Snap Layouts is visible.
+//!     screen path skipped while Win11 Snap Layouts is visible, and while Hub
+//!     chrome (tip / island panel / popups) covers the sample row.
 //!   - **center**: solid color from that same junction band
 //! - Windowed → desktop wallpaper (edge may use wallpaper top-row strip).
 //! - After a target switch: live-sample ~5s then lock until next switch.
 //! - Never PrintWindow on the hot path (full-frame PW can hang the process).
+//! - Never sample Hub chrome HWNDs (tip / menus / glass / dock) as targets.
 
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +152,56 @@ mod win {
     static SAMPLE_MODE: AtomicU8 = AtomicU8::new(MODE_EDGE);
     /// True while still in the post-switch settle window (watcher polls faster).
     static SETTLING: AtomicBool = AtomicBool::new(true);
+    /// prefs_island.ignore_ambient_apps — never read SQLite on the ambient hot path.
+    static IGNORE_AMBIENT_APPS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    pub fn sync_ignore_ambient_apps(keys: Vec<String>) {
+        if let Ok(mut slot) = IGNORE_AMBIENT_APPS.lock() {
+            *slot = keys
+                .into_iter()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect();
+        }
+    }
+
+    fn exe_stem_from_key(key: &str) -> String {
+        if let Some(rest) = key.strip_prefix("exe:") {
+            rest.rsplit('\\')
+                .next()
+                .unwrap_or(rest)
+                .trim_end_matches(".exe")
+                .trim_end_matches(".EXE")
+                .to_ascii_lowercase()
+        } else if let Some(rest) = key.strip_prefix("proc:") {
+            rest.trim().to_ascii_lowercase()
+        } else {
+            String::new()
+        }
+    }
+
+    fn is_ignored_ambient_hwnd(hwnd: HWND) -> bool {
+        let keys = match IGNORE_AMBIENT_APPS.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return false,
+        };
+        if keys.is_empty() {
+            return false;
+        }
+        let Some(direct) =
+            crate::win32::enum_windows::window_key_for_hwnd(hwnd.0 as isize)
+        else {
+            return false;
+        };
+        if keys.iter().any(|k| k == &direct) {
+            return true;
+        }
+        let stem = exe_stem_from_key(&direct);
+        if stem.is_empty() {
+            return false;
+        }
+        keys.iter().any(|k| exe_stem_from_key(k) == stem)
+    }
 
     struct SampleGate {
         /// 0 = wallpaper / none; else target HWND. `isize::MIN` = uninitialized.
@@ -182,6 +234,15 @@ mod win {
             },
             Ordering::SeqCst,
         );
+        reset_sampling_gate_inner();
+    }
+
+    /// Unlock settle state — mode change or ignore-ambient toggle.
+    pub fn reset_sampling_gate() {
+        reset_sampling_gate_inner();
+    }
+
+    fn reset_sampling_gate_inner() {
         // Mode change → unlock and re-settle.
         if let Ok(mut g) = GATE.lock() {
             g.target_key = isize::MIN;
@@ -426,7 +487,8 @@ mod win {
     }
 
     /// Optional screen sample at work-area top + 1px.
-    /// Skip when Snap Layouts is up (would paint the strip dark).
+    /// Skip when Snap Layouts is up, or Hub tip / island panel / menus cover the row
+    /// (otherwise those chrome pixels get 吸色 into the status strip).
     unsafe fn capture_junction_row(
         island: HWND,
         target_wr: RECT,
@@ -437,6 +499,9 @@ mod win {
             return None;
         }
         let screen_y = junction_screen_y(island)?;
+        if hub_chrome_blocks_screen_sample(island, screen_y) {
+            return None;
+        }
         let x0 = (target_wr.left + left_inset).max(target_wr.left);
         let src_w = vis_w.min(target_wr.right - x0).max(1);
         let dst_w = src_w.min(MAX_RIBBON_W).max(1);
@@ -446,6 +511,75 @@ mod win {
             return None;
         }
         Some(avg)
+    }
+
+    /// True when expanded island / tip / popup / menu would pollute a screen BitBlt
+    /// at the AppBar junction row.
+    fn hub_chrome_blocks_screen_sample(island: HWND, screen_y: i32) -> bool {
+        unsafe {
+            let mut mine = RECT::default();
+            if GetWindowRect(island, &mut mine).is_ok() {
+                // Expanded island panel hangs below the bar into the sample band.
+                if (mine.bottom - mine.top) > 56 {
+                    return true;
+                }
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(island, Some(&mut pid));
+            if pid == 0 {
+                return false;
+            }
+            struct Ctx {
+                pid: u32,
+                island: isize,
+                y0: i32,
+                y1: i32,
+                found: bool,
+            }
+            let ctx = Box::new(Ctx {
+                pid,
+                island: island.0 as isize,
+                y0: screen_y,
+                y1: screen_y + TOP_ROWS.max(1),
+                found: false,
+            });
+            let ptr = Box::into_raw(ctx);
+            unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+                let ctx = &mut *(lparam.0 as *mut Ctx);
+                if ctx.found {
+                    return BOOL(0);
+                }
+                if (hwnd.0 as isize) == ctx.island {
+                    return BOOL(1);
+                }
+                if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                    return BOOL(1);
+                }
+                if is_cloaked(hwnd) {
+                    return BOOL(1);
+                }
+                let mut wpid = 0u32;
+                GetWindowThreadProcessId(hwnd, Some(&mut wpid));
+                if wpid != ctx.pid {
+                    return BOOL(1);
+                }
+                // Thin top glass strip sits above the junction — ignore if it
+                // does not actually cover the sample Y band.
+                let mut wr = RECT::default();
+                if GetWindowRect(hwnd, &mut wr).is_err() {
+                    return BOOL(1);
+                }
+                if wr.bottom <= ctx.y0 || wr.top >= ctx.y1 {
+                    return BOOL(1);
+                }
+                // Full-width dock at bottom never hits this Y; center tip / menus do.
+                ctx.found = true;
+                BOOL(0)
+            }
+            let _ = EnumWindows(Some(cb), LPARAM(ptr as isize));
+            let ctx = Box::from_raw(ptr);
+            ctx.found
+        }
     }
 
     fn is_snap_class_name(c: &str) -> bool {
@@ -696,11 +830,24 @@ mod win {
         unsafe {
             let fg = root_of(GetForegroundWindow());
             // Snap UI as foreground, or caption window that isn't IsZoomed (drag preview).
-            if !is_excluded(fg, self_hwnd) && is_true_maximized_for_ambient(fg) {
+            if !is_excluded(fg, self_hwnd)
+                && !is_ignored_ambient_hwnd(fg)
+                && is_true_maximized_for_ambient(fg)
+            {
                 return Some(fg);
             }
         }
-        topmost_fullscreen(self_hwnd)
+        if let Some(hwnd) = topmost_fullscreen(self_hwnd) {
+            if !is_ignored_ambient_hwnd(hwnd) {
+                return Some(hwnd);
+            }
+        }
+        None
+    }
+
+    /// No maximized / fullscreen target → wallpaper / desktop path.
+    pub fn is_desktop_scene(self_hwnd: Option<isize>) -> bool {
+        pick_target(self_hwnd).is_none()
     }
 
     /// Desktop wallpaper path, or empty if solid-color desktop.
@@ -1538,9 +1685,15 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    get_mode, is_settling, poll_changed, sample, sample_nonblocking, set_ambient_sample_target,
-    set_mode,
+    get_mode, is_desktop_scene, is_settling, poll_changed, reset_sampling_gate, sample,
+    sample_nonblocking, set_ambient_sample_target, set_mode, sync_ignore_ambient_apps,
 };
+
+#[cfg(not(windows))]
+pub fn sync_ignore_ambient_apps(_keys: Vec<String>) {}
+
+#[cfg(not(windows))]
+pub fn reset_sampling_gate() {}
 
 #[cfg(not(windows))]
 pub fn set_ambient_sample_target(_hwnd: Option<isize>, _top_inset_px: i32) {}
@@ -1558,6 +1711,11 @@ pub fn sample_nonblocking(_self_hwnd: Option<isize>) -> AmbientStrip {
 #[cfg(not(windows))]
 pub fn poll_changed(_self_hwnd: Option<isize>) -> Option<AmbientStrip> {
     None
+}
+
+#[cfg(not(windows))]
+pub fn is_desktop_scene(_self_hwnd: Option<isize>) -> bool {
+    true
 }
 
 #[cfg(not(windows))]

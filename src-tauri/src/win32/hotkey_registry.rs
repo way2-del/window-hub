@@ -312,6 +312,27 @@ fn vk_from_token(key: &str) -> Result<u32, String> {
     Ok(vk)
 }
 
+/// Mirrors Host `resolveIslandSearchPluginId`: enabled plugin with everything.search + island slots.
+fn has_enabled_island_search_plugin() -> bool {
+    crate::plugin_install::list_installed_plugins_sync()
+        .into_iter()
+        .any(|p| {
+            if !p.enabled {
+                return false;
+            }
+            let caps = |name: &str| p.capabilities.iter().any(|c| c == name);
+            if !(caps("everything.search") && caps("island.panel") && caps("island.bar")) {
+                return false;
+            }
+            let slots = p.manifest.get("slots");
+            slots
+                .and_then(|s| s.get("island.scenario"))
+                .is_some()
+                && slots.and_then(|s| s.get("island.panel")).is_some()
+                && slots.and_then(|s| s.get("island.bar")).is_some()
+        })
+}
+
 fn collect_bindings() -> Result<(Vec<LiveBinding>, Vec<HotkeyBindingDto>), String> {
     let prefs = load_prefs();
     let mut dtos: Vec<HotkeyBindingDto> = Vec::new();
@@ -388,21 +409,29 @@ fn collect_bindings() -> Result<(Vec<LiveBinding>, Vec<HotkeyBindingDto>), Strin
             Ok(())
         };
 
-    for (chord_raw, action, bind_id) in [
-        (island_chord.as_str(), ACTION_ISLAND_SEARCH, ID_ISLAND_SEARCH),
-        (dock_chord.as_str(), ACTION_DOCK_TOGGLE, ID_DOCK_TOGGLE),
-    ] {
+    // Island search is only live while an enabled search plugin exists.
+    if has_enabled_island_search_plugin() {
         push_live(
             &mut live,
             &mut used_chords,
             &mut base_hotkey_id,
             &mut next_id,
-            bind_id.to_string(),
-            action.to_string(),
+            ID_ISLAND_SEARCH.to_string(),
+            ACTION_ISLAND_SEARCH.to_string(),
             None,
-            chord_raw,
+            island_chord.as_str(),
         )?;
     }
+    push_live(
+        &mut live,
+        &mut used_chords,
+        &mut base_hotkey_id,
+        &mut next_id,
+        ID_DOCK_TOGGLE.to_string(),
+        ACTION_DOCK_TOGGLE.to_string(),
+        None,
+        dock_chord.as_str(),
+    )?;
 
     let plugins = crate::plugin_install::list_installed_plugins_sync();
     for p in plugins {

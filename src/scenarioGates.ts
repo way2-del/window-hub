@@ -34,6 +34,16 @@ export function windowKeyOf(w: WindowKeySource): string {
   return "";
 }
 
+/** Tray `process` field → same bind key as `windowKeyOf` (for ambient ignore list). */
+export function processKeyOf(raw: string): string {
+  const t = String(raw || "").trim();
+  if (!t) return "";
+  if (t.includes("\\") || /^[a-zA-Z]:/.test(t)) {
+    return windowKeyOf({ exe: t.replace(/\//g, "\\") });
+  }
+  return windowKeyOf({ exe_name: t });
+}
+
 export function trayKeyOf(t: TrayKeySource): string {
   const pk = String(t.pin_key || "").trim();
   if (pk) return pk;

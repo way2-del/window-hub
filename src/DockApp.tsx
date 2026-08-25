@@ -21,7 +21,12 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
-import { applyGlassCss, type GlassPrefs } from "./glassPrefs";
+import {
+  applyGlassCss,
+  subscribeSystemDark,
+  syncGlassCss,
+  type GlassPrefs,
+} from "./glassPrefs";
 import {
   hideChromeHoverTip,
   showChromeHoverTip,
@@ -1000,18 +1005,28 @@ export default function DockApp() {
 
   useEffect(() => {
     let cancelled = false;
+    // Seed from Rust init script so chrome CSS matches settings before IPC returns.
+    const seeded =
+      typeof window !== "undefined" &&
+      typeof (window as Window & { __WH_THEME_DARK__?: boolean }).__WH_THEME_DARK__ ===
+        "boolean"
+        ? (window as Window & { __WH_THEME_DARK__?: boolean }).__WH_THEME_DARK__
+        : undefined;
+    if (typeof seeded === "boolean") {
+      applyGlassCss({ kind: "mica-alt", dark: seeded }, seeded);
+    }
+
+    let followSystem = typeof seeded !== "boolean";
     const applyMaterial = async () => {
       try {
         const material = await invoke<GlassPrefs>("get_material_prefs");
-        const sysDark = await invoke<boolean>("system_apps_dark").catch(() => undefined);
-        applyGlassCss(
-          {
-            kind: "mica-alt",
-            dark: material.dark,
-            acrylicAlpha: material.acrylicAlpha,
-          },
-          sysDark,
-        );
+        if (cancelled) return;
+        followSystem = material.dark == null;
+        await syncGlassCss({
+          kind: "mica-alt",
+          dark: material.dark,
+          acrylicAlpha: material.acrylicAlpha,
+        });
         await invoke("apply_window_effect", {}).catch(() => undefined);
       } catch {
         /* noop */
@@ -1020,10 +1035,15 @@ export default function DockApp() {
     void applyMaterial();
     const retryA = window.setTimeout(() => {
       void applyMaterial();
-    }, 150);
-    const retryB = window.setTimeout(() => {
-      void applyMaterial();
-    }, 400);
+    }, 180);
+
+    const unSys = subscribeSystemDark(() => {
+      if (!followSystem || cancelled) return;
+      void (async () => {
+        await syncGlassCss({ kind: "mica-alt", dark: null });
+        await invoke("apply_window_effect", {}).catch(() => undefined);
+      })();
+    });
 
     const refreshDisplay = async () => {
       try {
@@ -1107,8 +1127,18 @@ export default function DockApp() {
       // Titles flap every poll; only rebuild dock tiles when exe set changes.
       applyWindowList(e.payload?.windows ?? [], true);
     }).then((u) => unsubs.push(u));
-    void listen("material-prefs", () => {
-      void applyMaterial();
+    void listen<GlassPrefs>("material-prefs", (e) => {
+      const material = e.payload;
+      if (material) {
+        followSystem = material.dark == null;
+        void syncGlassCss({
+          kind: "mica-alt",
+          dark: material.dark,
+          acrylicAlpha: material.acrylicAlpha,
+        }).then(() => invoke("apply_window_effect", {}).catch(() => undefined));
+      } else {
+        void applyMaterial();
+      }
     }).then((u) => unsubs.push(u));
     void listen<{ active?: boolean; magnification?: number }>("dock-mag-preview", (e) => {
       if (cancelled) return;
@@ -1162,8 +1192,8 @@ export default function DockApp() {
     return () => {
       cancelled = true;
       window.clearTimeout(retryA);
-      window.clearTimeout(retryB);
       window.clearInterval(winTimer);
+      unSys();
       for (const u of unsubs) u();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };

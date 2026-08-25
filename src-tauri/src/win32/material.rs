@@ -138,7 +138,7 @@ pub fn apply(window: &WebviewWindow, material: WindowMaterial) -> Result<(), Str
     )
 }
 
-/// Clear all backdrop materials (main top bar stays transparent for ambient color).
+/// Clear all backdrop materials (popups / explicit "none" on main).
 #[cfg(windows)]
 pub fn clear(window: &WebviewWindow) -> Result<(), String> {
     crate::win32::blur_glass::clear(window)
@@ -173,6 +173,27 @@ pub fn reassert_prefs(window: &WebviewWindow, prefs: &MaterialPrefs) -> Result<(
     }
 }
 
+/// Soft dock-glass refresh (no nested deferred frost storms).
+#[cfg(windows)]
+pub fn reassert_dock_glass(window: &WebviewWindow, prefs: &MaterialPrefs) -> Result<(), String> {
+    let dark = Some(resolve_dark(prefs.dark));
+    crate::win32::blur_glass::reassert_dock_glass_layer(window, dark)
+}
+
+#[cfg(not(windows))]
+pub fn reassert_dock_glass(_window: &WebviewWindow, _prefs: &MaterialPrefs) -> Result<(), String> {
+    Ok(())
+}
+
+/// Early HTML theme tokens for dock / dock-glass (before React paints).
+pub fn theme_bootstrap_script(prefs: &MaterialPrefs) -> String {
+    let dark = resolve_dark(prefs.dark);
+    let theme = if dark { "dark" } else { "light" };
+    format!(
+        r#"window.__WH_THEME_DARK__={dark};(function(){{var r=document.documentElement;r.dataset.theme="{theme}";r.style.colorScheme="{theme}";}})();"#
+    )
+}
+
 #[cfg(windows)]
 pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
     use tauri::Manager;
@@ -186,10 +207,14 @@ pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
         || label == "plugin-window"
         || (label == "plugin-popup"
             && crate::win32::blur_glass::is_native_frame_plugin_popup(window));
+    let dockish = label == "dock" || label == "dock-glass";
     let _ = apply_prefs(window, &prefs);
-    // Framed Mica windows: one late soft retry. Five full clear/reapply cycles flash white.
+    // Framed Mica: one late soft retry. Dock: short soft reassert only —
+    // full apply_dock_glass_layer stacks deferred frost and flashes dark.
     let delays: &'static [u64] = if framed {
         &[180]
+    } else if dockish {
+        &[120, 320]
     } else {
         &[40, 100, 220, 450, 800]
     };
@@ -199,7 +224,6 @@ pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
             let Some(win) = app.get_webview_window(&label) else {
                 return;
             };
-            // Window was closed/recreated (e.g. Excalidraw 弹窗→窗口化): stop touching dead HWND.
             let hwnd1 = win.hwnd().ok().map(|h| h.0 as isize);
             if hwnd0.is_some() && hwnd0 != hwnd1 {
                 return;
@@ -213,6 +237,8 @@ pub fn apply_prefs_deferred(window: &WebviewWindow, prefs: &MaterialPrefs) {
             }
             if framed {
                 let _ = reassert_prefs(&win, &prefs);
+            } else if label == "dock-glass" {
+                let _ = reassert_dock_glass(&win, &prefs);
             } else {
                 let _ = apply_prefs(&win, &prefs);
             }

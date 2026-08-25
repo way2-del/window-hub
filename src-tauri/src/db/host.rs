@@ -140,12 +140,22 @@ pub struct IslandPrefsRow {
     pub pull_content: String,
     #[serde(default = "default_bar_resident")]
     pub bar_resident: String,
+    /// Top bar themed blur material (ambient + glass overlay).
+    #[serde(default = "default_bar_glass")]
+    pub bar_glass: bool,
+    /// JSON array of window bind keys (`exe:` / `proc:`) to skip for ambient sampling.
+    #[serde(default = "default_ignore_ambient_apps_json")]
+    pub ignore_ambient_apps_json: String,
     pub msg_notify: bool,
     pub msg_notify_text: String,
     pub msg_notify_sec: u32,
     /// JSON object: pluginId → { trayKeys, windowKeys }
     #[serde(default = "default_scenario_gates_json")]
     pub scenario_gates_json: String,
+}
+
+fn default_bar_glass() -> bool {
+    true
 }
 
 fn default_bar_resident() -> String {
@@ -156,10 +166,16 @@ fn default_scenario_gates_json() -> String {
     "{}".into()
 }
 
+fn default_ignore_ambient_apps_json() -> String {
+    "[]".into()
+}
+
 pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
     conn.query_row(
         "SELECT auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
                 COALESCE(bar_resident, 'com.window-hub.weather'),
+                COALESCE(bar_glass, 1),
+                COALESCE(ignore_ambient_apps_json, '[]'),
                 COALESCE(scenario_gates_json, '{}')
          FROM prefs_island WHERE id = 1",
         [],
@@ -172,7 +188,9 @@ pub fn island_get(conn: &Connection) -> Result<Option<IslandPrefsRow>, String> {
                 msg_notify_text: r.get(4)?,
                 msg_notify_sec: r.get::<_, i64>(5)? as u32,
                 bar_resident: r.get(6)?,
-                scenario_gates_json: r.get(7)?,
+                bar_glass: r.get::<_, i64>(7)? != 0,
+                ignore_ambient_apps_json: r.get(8)?,
+                scenario_gates_json: r.get(9)?,
             })
         },
     )
@@ -184,8 +202,8 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
     conn.execute(
         "INSERT INTO prefs_island(
             id, auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
-            bar_resident, scenario_gates_json, updated_at
-         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9)
+            bar_resident, bar_glass, ignore_ambient_apps_json, scenario_gates_json, updated_at
+         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
          ON CONFLICT(id) DO UPDATE SET
            auto_immerse=excluded.auto_immerse,
            immerse_idle_sec=excluded.immerse_idle_sec,
@@ -194,6 +212,8 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
            msg_notify_text=excluded.msg_notify_text,
            msg_notify_sec=excluded.msg_notify_sec,
            bar_resident=excluded.bar_resident,
+           bar_glass=excluded.bar_glass,
+           ignore_ambient_apps_json=excluded.ignore_ambient_apps_json,
            scenario_gates_json=excluded.scenario_gates_json,
            updated_at=excluded.updated_at",
         params![
@@ -204,6 +224,8 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
             p.msg_notify_text,
             p.msg_notify_sec as i64,
             p.bar_resident,
+            p.bar_glass as i64,
+            p.ignore_ambient_apps_json,
             p.scenario_gates_json,
             now_ms(),
         ],
@@ -354,6 +376,8 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           msg_notify_text TEXT NOT NULL,
           msg_notify_sec INTEGER NOT NULL,
           bar_resident TEXT NOT NULL DEFAULT 'com.window-hub.weather',
+          bar_glass INTEGER NOT NULL DEFAULT 1,
+          ignore_ambient_apps_json TEXT NOT NULL DEFAULT '[]',
           scenario_gates_json TEXT NOT NULL DEFAULT '{}',
           updated_at INTEGER NOT NULL
         );

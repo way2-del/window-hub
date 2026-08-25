@@ -1,4 +1,4 @@
-fn main() {
+﻿fn main() {
     // Ensure frontend embed invalidates when Vite output changes.
     // Without this, release-fast incremental builds can keep a stale/empty
     // asset map → runtime "asset not found: index.html".
@@ -77,7 +77,7 @@ fn build_trayhook() {
     // PROFILE is only "debug"|"release" even for custom profiles — derive the real
     // output dir from OUT_DIR (.../target/<profile>/build/<pkg>/out).
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-    let trayhook_release = profile == "release";
+    let trayhook_release = profile == "release" || profile == "release-fast";
     let package_profile_dir = env::var_os("OUT_DIR")
         .map(PathBuf::from)
         .and_then(|out| {
@@ -181,3 +181,4 @@ fn build_trayhook() {
         }
     }
 }
+

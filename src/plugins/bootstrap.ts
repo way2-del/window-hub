@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { pluginRegistry } from "./registry";
 import type { PluginCapability, PluginManifest } from "./types";
+import { refreshSurfaceSettingsCache } from "./surfacePrefs";
 
 export type InstalledPluginDto = {
   id: string;
@@ -42,8 +43,9 @@ function applyInstalled(list: InstalledPluginDto[]) {
 export async function bootstrapPlugins(): Promise<InstalledPluginDto[]> {
   try {
     const list = await invoke<InstalledPluginDto[]>("list_installed_plugins");
-    applyInstalled(list);
-    return list;
+  applyInstalled(list);
+  void refreshSurfaceSettingsCache(list.map((p) => p.id));
+  return list;
   } catch (err) {
     console.error("[bootstrapPlugins]", err);
     // Leave pluginsReady false so startup sync does not wipe island prefs.

@@ -32,6 +32,9 @@ sysinfo = "0.33"
 [target.'cfg(windows)'.dependencies]
 # Vendored: blank NIF_ICON frames (WeChat flash) must not be dropped.
 systray-util = { path = "vendor/systray-util" }
+webview2-com = "0.38"
+# Match webview2-com / wry (Interface::cast); app Win32 APIs stay on windows 0.58.
+windows-core-wv = { package = "windows-core", version = "0.61" }
 winreg = "0.52"
 windows-core = { version = "0.58" }
 windows = { version = "0.58", features = [

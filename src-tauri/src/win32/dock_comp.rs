@@ -9,7 +9,7 @@
 
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
 use std::sync::Mutex;
 
 use parking_lot::Mutex as ParkingMutex;
@@ -70,6 +70,39 @@ struct CapsulePose {
     ox: f32,
 }
 static PREFERRED_CAPSULE: ParkingMutex<Option<CapsulePose>> = ParkingMutex::new(None);
+/// Last resolved dock theme: -1 unknown, 0 light, 1 dark.
+/// Place/resize frost refresh often passes `dark: None` — must not fall back to dark tint.
+static LAST_THEME_DARK: AtomicI8 = AtomicI8::new(-1);
+
+pub fn set_theme_dark(dark: bool) {
+    LAST_THEME_DARK.store(if dark { 1 } else { 0 }, Ordering::SeqCst);
+}
+
+pub fn theme_dark() -> Option<bool> {
+    match LAST_THEME_DARK.load(Ordering::SeqCst) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+/// Prefer explicit arg; else last dock theme; else Windows Apps theme.
+pub fn resolve_theme_dark(dark: Option<bool>) -> bool {
+    if let Some(d) = dark {
+        set_theme_dark(d);
+        return d;
+    }
+    if let Some(d) = theme_dark() {
+        return d;
+    }
+    let d = crate::win32::material::system_apps_dark();
+    set_theme_dark(d);
+    d
+}
+
+fn preferred_capsule() -> Option<CapsulePose> {
+    *PREFERRED_CAPSULE.lock()
+}
 
 pub fn begin_width_tween() {
     WIDTH_TWEEN_ACTIVE.store(true, Ordering::SeqCst);
@@ -91,10 +124,6 @@ pub fn remember_capsule(width_px: f32, height_px: f32, offset_x: f32) {
         h: height_px.max(1.0),
         ox: offset_x.max(0.0),
     });
-}
-
-fn preferred_capsule() -> Option<CapsulePose> {
-    *PREFERRED_CAPSULE.lock()
 }
 
 struct DockCompSession {
@@ -125,6 +154,11 @@ fn ensure_dispatcher_queue() -> Result<(), String> {
     *slot = Some(controller);
     *COMP_THREAD.lock() = Some(std::thread::current().id());
     Ok(())
+}
+
+/// Shared WinRT dispatcher for all Composition surfaces (dock-glass + main bar).
+pub fn ensure_shared_dispatcher() -> Result<(), String> {
+    ensure_dispatcher_queue()
 }
 
 fn enable_host_backdrop_attr(hwnd: HWND, on: bool) {
@@ -228,10 +262,10 @@ fn radius_px(hwnd: HWND, radius_logical: u32, height_px: f32) -> f32 {
 }
 
 fn tint_for(dark: Option<bool>) -> Color {
-    if dark == Some(false) {
-        pack_tint_color(245, 245, 250, 120)
-    } else {
+    if resolve_theme_dark(dark) {
         pack_tint_color(28, 28, 30, 110)
+    } else {
+        pack_tint_color(245, 245, 250, 120)
     }
 }
 
@@ -764,6 +798,7 @@ pub fn attach_or_update_sized(
     radius_logical: u32,
     dark: Option<bool>,
 ) -> Result<(), String> {
+    let dark = Some(resolve_theme_dark(dark));
     let r = radius_logical.min(DOCK_CORNER_RADIUS_MAX);
     if r < DOCK_COMP_RADIUS_MIN {
         detach();

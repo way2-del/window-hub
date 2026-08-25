@@ -467,10 +467,15 @@ pub fn set_plugin_enabled(
         return Err("plugin not installed".into());
     };
     p.enabled = enabled;
+    let has_everything = p.capabilities.iter().any(|c| c == "everything.search");
     save_registry(&reg)?;
     if !enabled {
         close_plugin_popup(&app);
         pins.inner_remove(&id);
+        #[cfg(windows)]
+        if has_everything {
+            crate::everything::reset_if_idle();
+        }
     } else {
         pins.reload_plugin(&id);
         crate::companion_scripts::start_launchers_for_plugin(&id);

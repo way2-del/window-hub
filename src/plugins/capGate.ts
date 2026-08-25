@@ -11,6 +11,7 @@ const CAP_LABELS: Record<PluginCapability, string> = {
   "windows.read": "可枚举窗口标题与进程",
   "windows.focus": "可切换其它窗口焦点",
   "media.keys": "可发送系统媒体键（播放/暂停/切歌）",
+  "media.camera": "可使用摄像头并重置 WebView 相机权限",
   "clipboard.read": "可读剪贴板",
   "clipboard.write": "可写剪贴板",
   network: "可访问网络（受白名单限制）",
@@ -40,6 +41,7 @@ export function isSensitiveCapability(cap: PluginCapability): boolean {
   return (
     cap === "windows.focus" ||
     cap === "media.keys" ||
+    cap === "media.camera" ||
     cap === "clipboard.read" ||
     cap === "clipboard.write" ||
     cap === "staging" ||

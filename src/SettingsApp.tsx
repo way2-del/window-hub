@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  applyIslandPrefsSnapshot,
   getIslandPrefs,
   hydrateIslandPrefs,
   setIslandPrefs,
+  subscribeIslandPrefs,
   type IslandPrefs,
 } from "./islandPrefs";
 import {
@@ -24,6 +26,7 @@ import { subscribeSystemDark, syncGlassCss } from "./glassPrefs";
 import SqliteDevPanel from "./components/SqliteDevPanel";
 import PluginsMarketPanel from "./PluginsMarketPanel";
 import ShortcutsScopeSettings from "./components/ShortcutsScopeSettings";
+import IgnoreAmbientAppsSettings from "./components/IgnoreAmbientAppsSettings";
 import HotkeysSettingsPanel from "./components/HotkeysSettingsPanel";
 import {
   parseScopes,
@@ -34,6 +37,10 @@ import {
   subscribeSettingsToast,
   type SettingsToastPayload,
 } from "./components/settingsToastBus";
+import {
+  refreshSurfaceSettingsCache,
+  subscribeSurfaceSettingsCache,
+} from "./plugins/surfacePrefs";
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
@@ -457,7 +464,14 @@ const IDLE_OPTIONS = [
 ];
 
 export default function SettingsApp() {
-  const [nav, setNav] = useState<NavId>("general");
+  const [nav, setNav] = useState<NavId>(() => {
+    const n =
+      typeof window !== "undefined" && typeof window.__WH_SETTINGS_FOCUS_NAV__ === "string"
+        ? window.__WH_SETTINGS_FOCUS_NAV__.trim()
+        : "";
+    if (n === "dock" || n === "shortcuts" || n === "plugins") return n as NavId;
+    return "general";
+  });
   const [query, setQuery] = useState("");
   const [ambientMode, setAmbientMode] = useState<AmbientMode>("edge");
   const [ambient, setAmbient] = useState<Ambient>({ r: 32, g: 32, b: 34 });
@@ -523,21 +537,50 @@ export default function SettingsApp() {
   });
 
   useEffect(() => {
-    let un: (() => void) | undefined;
+    const unsubs: Array<() => void> = [];
+    void listen<string>("settings-focus-nav", (ev) => {
+      const n = (ev.payload ?? "").trim();
+      if (
+        n === "dock" ||
+        n === "shortcuts" ||
+        n === "plugins" ||
+        n === "theme" ||
+        n === "hotkeys" ||
+        n === "tray" ||
+        n === "developer" ||
+        n === "general"
+      ) {
+        setNav(n as NavId);
+      }
+    }).then((fn) => unsubs.push(fn));
+
     void listen<string>("settings-focus-plugin", (ev) => {
       const id = typeof ev.payload === "string" ? ev.payload.trim() : "";
       if (!id) return;
       setFocusPluginId(id);
       setNav("plugins");
-    }).then((fn) => {
-      un = fn;
-    });
+    }).then((fn) => unsubs.push(fn));
+
     if (focusPluginId) setNav("plugins");
-    return () => un?.();
+    return () => unsubs.forEach((fn) => fn());
     // eslint-disable-next-line react-hooks/exhaustive-deps -- seed nav once from init focus
   }, []);
 
   useEffect(() => subscribeSettingsToast(setSettingsToast), []);
+
+  useEffect(() => {
+    const unsub = subscribeIslandPrefs(setIslandPrefsState);
+    let unlisten: (() => void) | undefined;
+    void listen<IslandPrefs>("island-prefs", (ev) => {
+      setIslandPrefsState(applyIslandPrefsSnapshot(ev.payload));
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unsub();
+      unlisten?.();
+    };
+  }, []);
 
   const pullOptions = useMemo(() => {
     const panels = listPanelProviders(pluginRegistry.listPanelManifests());
@@ -879,11 +922,14 @@ export default function SettingsApp() {
     void bootstrapPlugins().then((list) => {
       setInstalled(list);
       bumpRegistry((n) => n + 1);
+      void refreshSurfaceSettingsCache(list.map((p) => p.id));
     });
     void subscribeInstalledPlugins((list) => {
       setInstalled(list);
       bumpRegistry((n) => n + 1);
+      void refreshSurfaceSettingsCache(list.map((p) => p.id));
     }).then((fn) => unsubs.push(fn));
+    unsubs.push(subscribeSurfaceSettingsCache(() => bumpRegistry((n) => n + 1)));
 
     void refreshLaunchers();
     void listen("script-launchers-changed", () => {
@@ -977,8 +1023,12 @@ export default function SettingsApp() {
   }
 
   async function updateIslandPrefs(partial: Partial<IslandPrefs>) {
-    const next = await setIslandPrefs(partial);
-    setIslandPrefsState(next);
+    try {
+      const next = await setIslandPrefs(partial);
+      setIslandPrefsState(next);
+    } catch (e) {
+      console.error("[settings] island prefs save failed", e);
+    }
   }
 
   async function persistTrayPrefs(
@@ -1473,8 +1523,47 @@ export default function SettingsApp() {
                 </label>
               </section>
               <section className="settings-card">
+                <h2>顶栏模糊材质</h2>
+                <p className="card-desc">
+                  仅在桌面（无最大化窗口）时生效：开启后顶栏使用 Win32 模糊材质。有窗口时始终只用吸色，不叠加模糊。
+                </p>
+                <label className="pref-row">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">桌面启用顶栏模糊</span>
+                    <span className="pref-row-desc">
+                      关：桌面也回黑胶囊；开：仅桌面全宽 Win32 材质
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${islandPrefs.barGlass ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={islandPrefs.barGlass}
+                    onClick={() => updateIslandPrefs({ barGlass: !islandPrefs.barGlass })}
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+              </section>
+              <section className="settings-card">
                 <h2>顶栏采样</h2>
-                <p className="card-desc">灵动岛顶栏颜色跟随当前窗口顶部边缘。</p>
+                <p className="card-desc">
+                  灵动岛顶栏颜色跟随当前窗口顶部边缘（与是否开启模糊无关）。
+                </p>
+                <label className="pref-row">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">忽略窗口吸色</span>
+                    <span className="pref-row-desc">
+                      从窗口或托盘勾选；仅列表内程序不参与顶栏吸色
+                    </span>
+                  </span>
+                </label>
+                <IgnoreAmbientAppsSettings
+                  keys={islandPrefs.ignoreAmbientApps}
+                  onChange={(ignoreAmbientApps) =>
+                    updateIslandPrefs({ ignoreAmbientApps })
+                  }
+                />
                 <div className="mode-list">
                   {AMBIENT_MODES.map((item) => (
                     <button

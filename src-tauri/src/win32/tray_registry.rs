@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use parking_lot::Mutex;
 use windows::core::GUID;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
@@ -63,8 +64,15 @@ fn process_stem(path: &Path) -> String {
         .to_string()
 }
 
+/// Serialize registry + EnumWindows — concurrent calls deadlock / hang the shell.
+static REGISTRY_ENUM_LOCK: Mutex<()> = Mutex::new(());
+
 fn enum_top_level_exe_hwnds() -> Vec<(isize, String)> {
-    use parking_lot::Mutex;
+    let _guard = REGISTRY_ENUM_LOCK.lock();
+    enum_top_level_exe_hwnds_unlocked()
+}
+
+fn enum_top_level_exe_hwnds_unlocked() -> Vec<(isize, String)> {
     use windows::Win32::Foundation::{BOOL, LPARAM};
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -74,12 +82,10 @@ fn enum_top_level_exe_hwnds() -> Vec<(isize, String)> {
         EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
     };
 
-    static BUF: Mutex<Vec<(isize, String)>> = Mutex::new(Vec::new());
-    {
-        BUF.lock().clear();
-    }
+    let mut out: Vec<(isize, String)> = Vec::new();
 
-    unsafe extern "system" fn callback(hwnd: HWND, _: LPARAM) -> BOOL {
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let buf = &mut *(lparam.0 as *mut Vec<(isize, String)>);
         if !IsWindowVisible(hwnd).as_bool() {
             return BOOL(1);
         }
@@ -91,26 +97,27 @@ fn enum_top_level_exe_hwnds() -> Vec<(isize, String)> {
         let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return BOOL(1);
         };
-        let mut buf = [0u16; 520];
-        let mut size = buf.len() as u32;
+        let mut buf16 = [0u16; 520];
+        let mut size = buf16.len() as u32;
         let ok = QueryFullProcessImageNameW(
             proc,
             PROCESS_NAME_WIN32,
-            windows::core::PWSTR(buf.as_mut_ptr()),
+            windows::core::PWSTR(buf16.as_mut_ptr()),
             &mut size,
         );
         let _ = windows::Win32::Foundation::CloseHandle(proc);
         if ok.is_ok() && size > 0 {
-            let path = String::from_utf16_lossy(&buf[..size as usize]).to_ascii_lowercase();
-            BUF.lock().push((hwnd.0 as isize, path));
+            let path = String::from_utf16_lossy(&buf16[..size as usize]).to_ascii_lowercase();
+            buf.push((hwnd.0 as isize, path));
         }
         BOOL(1)
     }
 
     unsafe {
-        let _ = EnumWindows(Some(callback), LPARAM(0));
+        let ptr = &mut out as *mut Vec<(isize, String)> as isize;
+        let _ = EnumWindows(Some(callback), LPARAM(ptr));
     }
-    BUF.lock().clone()
+    out
 }
 
 fn notify_rect_ok(ident: &NOTIFYICONIDENTIFIER) -> bool {
@@ -220,9 +227,15 @@ fn exe_process_alive(exe_lower: &str, windows: &[(isize, String)]) -> bool {
     windows.iter().any(|(_, path)| path == exe_lower)
 }
 
-/// Icons Windows still considers present (GetRect / process / soft heuristics).
-/// Order follows `UIOrderList` (taskbar promoted first, then overflow) — same as Seelen.
-pub fn enum_running() -> Vec<RegTrayIcon> {
+/// Icons Windows still considers present.
+/// `fast`: skip `Shell_NotifyIconGetRect` — can hang while Explorer/AppBar settles.
+pub fn enum_running(fast: bool) -> Vec<RegTrayIcon> {
+    let _guard = REGISTRY_ENUM_LOCK.lock();
+    let windows = enum_top_level_exe_hwnds_unlocked();
+    enum_running_with_windows(fast, &windows)
+}
+
+fn enum_running_with_windows(fast: bool, windows: &[(isize, String)]) -> Vec<RegTrayIcon> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let Ok(settings) =
         hkcu.open_subkey_with_flags(r"Control Panel\NotifyIconSettings", KEY_READ)
@@ -235,7 +248,6 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
         return Vec::new();
     };
 
-    let windows = enum_top_level_exe_hwnds();
     let mut registers = Vec::new();
 
     for chunk in raw.bytes.chunks(8) {
@@ -247,7 +259,6 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
             continue;
         };
 
-        // ExecutablePath may be missing for some shell / system icons.
         let path_with_guid: String = regkey.get_value("ExecutablePath").unwrap_or_default();
         let executable_path = PathBuf::from(&path_with_guid);
         let exe_lower = path_with_guid.to_ascii_lowercase();
@@ -265,13 +276,15 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
         let icon_uid: Option<u32> = regkey.get_value("UID").ok();
         let is_promoted: u32 = regkey.get_value("IsPromoted").unwrap_or(0);
 
-        let rect_ok = if let Some(ref guid) = icon_guid {
+        let rect_ok = if fast {
+            false
+        } else if let Some(ref guid) = icon_guid {
             is_running_guid(guid)
         } else if let Some(uid) = icon_uid {
             if exe_lower.is_empty() {
                 false
             } else {
-                is_running_uid(uid, &exe_lower, &windows)
+                is_running_uid(uid, &exe_lower, windows)
             }
         } else {
             false
@@ -283,7 +296,11 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
                     .and_then(|s| s.to_str())
                     .is_some_and(|s| s.eq_ignore_ascii_case(&process))
             });
-        let is_running = rect_ok || exe_process_alive(&exe_lower, &windows) || stem_alive;
+        let is_running = if fast {
+            stem_alive || exe_process_alive(&exe_lower, windows)
+        } else {
+            rect_ok || stem_alive || exe_process_alive(&exe_lower, windows)
+        };
 
         if !is_running {
             continue;
@@ -301,7 +318,6 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
         });
     }
 
-    // Hot path — quiet by default (reconcile can run often at startup).
     if std::env::var_os("WH_TRAY_REGISTRY_LOG").is_some() {
         eprintln!(
             "[tray] registry running icons: {} (of {} order entries)",
@@ -313,8 +329,10 @@ pub fn enum_running() -> Vec<RegTrayIcon> {
 }
 
 /// Soft pool for matching UIA overflow names when GetRect under-counts.
-pub fn enum_match_pool() -> Vec<RegTrayIcon> {
-    let mut base = enum_running();
+pub fn enum_match_pool(fast: bool) -> Vec<RegTrayIcon> {
+    let _guard = REGISTRY_ENUM_LOCK.lock();
+    let windows = enum_top_level_exe_hwnds_unlocked();
+    let mut base = enum_running_with_windows(fast, &windows);
     let seen: std::collections::HashSet<String> = base.iter().map(|r| r.key.clone()).collect();
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -326,7 +344,6 @@ pub fn enum_match_pool() -> Vec<RegTrayIcon> {
     let Ok(raw) = settings.get_raw_value("UIOrderList") else {
         return base;
     };
-    let windows = enum_top_level_exe_hwnds();
 
     for chunk in raw.bytes.chunks(8) {
         if chunk.len() < 8 {

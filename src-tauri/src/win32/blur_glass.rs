@@ -120,6 +120,12 @@ fn clear_vibrancy(window: &WebviewWindow) {
 
 pub fn clear(window: &WebviewWindow) -> Result<(), String> {
     clear_vibrancy(window);
+    if window.label() == "main" {
+        if let Ok(hwnd) = hwnd_of(window) {
+            clear_window_region(hwnd);
+            apply_mica_chrome(hwnd, None, false);
+        }
+    }
     Ok(())
 }
 
@@ -162,7 +168,7 @@ fn prepare_hwnd_for_system_backdrop(hwnd: HWND) {
     }
 }
 
-fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
+fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>, round_corners: bool) {
     unsafe {
         if let Some(d) = dark {
             let v: u32 = u32::from(d);
@@ -173,8 +179,10 @@ fn apply_mica_chrome(hwnd: HWND, dark: Option<bool>) {
                 std::mem::size_of::<u32>() as u32,
             );
         }
-        // Maximized + ROUND often forces an opaque black caption; match Win11 apps.
-        let corner = if windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool() {
+        // Top AppBar strip: square edges. Other popups keep OS rounding when not maximized.
+        let corner = if !round_corners
+            || windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool()
+        {
             DWMWCP_DONOTROUND
         } else {
             DWMWCP_ROUND
@@ -230,11 +238,16 @@ fn clear_webview_fill(window: &WebviewWindow) {
 /// charcoal slab under WebView2. SWCA acrylic samples the desktop reliably.
 fn apply_swca_acrylic(hwnd: HWND, dark: Option<bool>) -> Result<(), String> {
     disable_system_backdrop(hwnd);
-    let tint = if dark == Some(false) {
-        pack_gradient(245, 245, 250, 120)
-    } else {
+    // Prefer explicit; else last dock theme; else OS apps theme. Do not write dock memory here.
+    let is_dark = dark.unwrap_or_else(|| {
+        crate::win32::dock_comp::theme_dark()
+            .unwrap_or_else(crate::win32::material::system_apps_dark)
+    });
+    let tint = if is_dark {
         // Keep tint lighter than CSS wash so wallpaper still bleeds through.
         pack_gradient(28, 28, 30, 110)
+    } else {
+        pack_gradient(245, 245, 250, 120)
     };
     if !set_window_composition_attribute(
         hwnd,
@@ -282,7 +295,7 @@ pub fn apply_plugin_window_glass(window: &WebviewWindow, dark: Option<bool>) -> 
             return Err("apply plugin-window glass failed".into());
         }
     }
-    apply_mica_chrome(hwnd, dark);
+    apply_mica_chrome(hwnd, dark, true);
     clear_webview_fill(window);
     Ok(())
 }
@@ -297,7 +310,12 @@ pub fn apply_system_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(
     // Unified SWCA acrylic for dock + popups. Mixing SYSTEMBACKDROP on one HWND
     // with SWCA on another can wipe blur when a sibling window opens.
     apply_swca_acrylic(hwnd, dark)?;
-    apply_mica_chrome(hwnd, dark);
+    let square = matches!(window.label(), "main" | "island-bar-glass");
+    apply_mica_chrome(hwnd, dark, !square);
+    if square {
+        // Thin top strip: hard square edges (no Win11 soft round).
+        force_square_full_hwnd(hwnd);
+    }
     clear_webview_fill(window);
     Ok(())
 }
@@ -337,7 +355,7 @@ pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> 
     let is_dark = dark.unwrap_or(true);
 
     // Dark + backdrop FIRST — clearing SWCA before this paints a white frame flash.
-    apply_mica_chrome(hwnd, Some(is_dark));
+    apply_mica_chrome(hwnd, Some(is_dark), true);
     set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
 
     // Drop SWCA so SYSTEMBACKDROP owns the full frame (caption included).
@@ -347,7 +365,7 @@ pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> 
     clear_webview_fill(window);
 
     // Re-assert after clear (some builds drop immersive mode when SWCA is disabled).
-    apply_mica_chrome(hwnd, Some(is_dark));
+    apply_mica_chrome(hwnd, Some(is_dark), true);
     set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
 
     unsafe {
@@ -389,7 +407,7 @@ pub fn apply_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> 
 pub fn reassert_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
     let hwnd = hwnd_of(window)?;
     let is_dark = dark.unwrap_or(true);
-    apply_mica_chrome(hwnd, Some(is_dark));
+    apply_mica_chrome(hwnd, Some(is_dark), true);
     set_system_backdrop(hwnd, DWMSBT_MAINWINDOW);
     unsafe {
         let caption = framed_caption_color(hwnd, is_dark);
@@ -416,6 +434,16 @@ pub fn reassert_settings_frame_mica(window: &WebviewWindow, dark: Option<bool>) 
     Ok(())
 }
 
+/// Soft dock-glass refresh — chrome + tint only, no nested deferred frost loop.
+pub fn reassert_dock_glass_layer(window: &WebviewWindow, dark: Option<bool>) -> Result<(), String> {
+    let hwnd = hwnd_of(window)?;
+    let radius = dock_corner_radius_px();
+    apply_dock_glass_frost(window, hwnd, dark, radius)?;
+    let _ = window.set_shadow(false);
+    strip_class_drop_shadow(hwnd);
+    Ok(())
+}
+
 /// Dock glass strip.
 ///
 /// - Radius 0–8: SWCA acrylic + system DWM corners.
@@ -432,26 +460,19 @@ pub fn apply_dock_glass_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
     let _ = window.set_shadow(false);
     strip_class_drop_shadow(hwnd);
 
+    // One late soft settle — avoid stacking with apply_prefs_deferred full reapplies.
     let win = window.clone();
     let dark_c = dark;
-    // Two deferred refreshes is enough for WebView2 reparent; the old 5-hit
-    // loop stacked with hover resize and could stall the UI thread.
     std::thread::spawn(move || {
-        for ms in [60_u64, 220] {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            let w = win.clone();
-            let dark_inner = dark_c;
-            let w2 = w.clone();
-            let _ = w.run_on_main_thread(move || {
-                if let Ok(h) = hwnd_of(&w2) {
-                    let r = dock_corner_radius_px();
-                    let _ = apply_dock_glass_frost(&w2, h, dark_inner, r);
-                    let _ = w2.set_shadow(false);
-                    strip_class_drop_shadow(h);
-                    clear_webview_fill(&w2);
-                }
-            });
-        }
+        std::thread::sleep(std::time::Duration::from_millis(140));
+        let w2 = win.clone();
+        let _ = win.run_on_main_thread(move || {
+            let _ = reassert_dock_glass_layer(&w2, dark_c);
+            if let Ok(h) = hwnd_of(&w2) {
+                clear_webview_fill(&w2);
+                strip_class_drop_shadow(h);
+            }
+        });
     });
     clear_webview_fill(window);
     Ok(())
@@ -808,7 +829,7 @@ pub fn strip_frameless_popup_titlebar(hwnd_raw: isize) {
             );
         }
     }
-    apply_mica_chrome(hwnd, None);
+    apply_mica_chrome(hwnd, None, true);
     let thickness: u32 = 0;
     let _ = unsafe {
         DwmSetWindowAttribute(
@@ -858,6 +879,7 @@ fn apply_dock_glass_frost(
     dark: Option<bool>,
     corner_radius_logical: u32,
 ) -> Result<(), String> {
+    let dark = Some(crate::win32::dock_comp::resolve_theme_dark(dark));
     let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
     apply_dock_glass_chrome(hwnd, dark, r);
     // Composition owns the smooth capsule — a GDI SetWindowRgn here makes
@@ -910,6 +932,28 @@ fn clear_window_region(hwnd: HWND) {
     }
 }
 
+/// Hard square clip for a thin bar HWND (island-bar-glass / collapsed main).
+fn force_square_full_hwnd(hwnd: HWND) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    apply_mica_chrome(hwnd, None, false);
+    unsafe {
+        let mut rc = RECT::default();
+        if GetClientRect(hwnd, &mut rc).is_err() {
+            return;
+        }
+        let w = rc.right - rc.left;
+        let h = rc.bottom - rc.top;
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let rgn = CreateRectRgn(0, 0, w, h);
+        let _ = SetWindowRgn(hwnd, rgn, true);
+    }
+}
+
 fn disable_blur_behind(hwnd: HWND) {
     use windows::Win32::Graphics::Dwm::{
         DwmEnableBlurBehindWindow, DWM_BB_ENABLE, DWM_BLURBEHIND,
@@ -940,22 +984,25 @@ fn dock_corner_radius_px() -> u32 {
 }
 
 /// Place/resize hook — refreshes Composition clip or DWM corners.
+/// Preserves last dock light/dark tint (never pass bare `None` into tint_for).
 pub fn apply_dock_glass_round_frost_sized_pub(
     hwnd: HWND,
     corner_radius_logical: u32,
     size_px: Option<(f32, f32)>,
 ) {
     let r = corner_radius_logical.min(crate::win32::dock_comp::DOCK_CORNER_RADIUS_MAX);
-    apply_dock_glass_chrome(hwnd, None, r);
+    let dark = Some(crate::win32::dock_comp::resolve_theme_dark(None));
+    apply_dock_glass_chrome(hwnd, dark, r);
     // Same as frost attach: leave region clear so Composition silhouette stays smooth when wide.
     clear_window_region(hwnd);
     disable_blur_behind(hwnd);
     if crate::win32::dock_comp::uses_composition(r) {
         // Layout-only refresh: never ACCENT_DISABLED (that blacks out HostBackdrop).
         disable_system_backdrop(hwnd);
-        let _ = crate::win32::dock_comp::sync_attach_or_update_sized(hwnd, size_px, r, None);
+        let _ = crate::win32::dock_comp::sync_attach_or_update_sized(hwnd, size_px, r, dark);
     } else {
         crate::win32::dock_comp::detach();
+        let _ = apply_swca_acrylic(hwnd, dark);
     }
 }
 
@@ -1004,6 +1051,16 @@ pub fn apply_effect(
         "dock" => return apply_dock_icons_layer(window, dark),
         // Glass strip: acrylic without rounded DWM chrome/shadow.
         "dock-glass" => return apply_dock_glass_layer(window, dark),
+        // Island overlay: Composition bar strip on `main` (see `bar_comp`).
+        "main" => {
+            clear(window)?;
+            return Ok(());
+        }
+        // Legacy label — sibling HWND retired; keep hidden if old profile still has it.
+        "island-bar-glass" => {
+            let _ = window.hide();
+            return Ok(());
+        }
         // Decorated settings / icon editor / plugin OS window: Mica on caption.
         "settings" | "dock-icon-editor" | "plugin-window" => {
             if matches!(kind, WindowMaterial::MicaAlt) {

@@ -4,6 +4,7 @@ import type {
   ShortcutItem,
   ShortcutsPluginRuntime,
 } from "./types";
+import { isPluginSurfaceEnabled } from "./surfacePrefs";
 
 export type InstalledPluginMeta = {
   id: string;
@@ -62,7 +63,12 @@ class PluginRegistry {
 
   listShortcuts(): ShortcutsPluginRuntime[] {
     return [...this.plugins.values()]
-      .filter((p) => p.enabled && p.manifest.slots?.shortcuts)
+      .filter(
+        (p) =>
+          p.enabled &&
+          p.manifest.slots?.shortcuts &&
+          isPluginSurfaceEnabled(p.pluginId, "shortcuts", p.manifest),
+      )
       .sort(
         (a, b) =>
           (a.manifest.slots!.shortcuts!.order ?? 100) -

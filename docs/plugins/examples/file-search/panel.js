@@ -460,20 +460,36 @@ async function runSearch(query, opts = {}) {
   state.loading = true;
   state.error = null;
   render();
+  const searchGen = (state._searchGen = (state._searchGen || 0) + 1);
   try {
-    const res = await hub().everything.search(buildEverythingQuery(q), {
+    const hubApi = hub();
+    if (!hubApi?.everything?.search) {
+      throw new Error("hub.everything 不可用（插件未就绪）");
+    }
+    const searchPromise = hubApi.everything.search(buildEverythingQuery(q), {
       max: 60,
     });
+    const timeoutPromise = new Promise((_, reject) => {
+      window.setTimeout(
+        () => reject(new Error("搜索超时，请确认 Everything 正在运行后重试")),
+        6000,
+      );
+    });
+    const res = await Promise.race([searchPromise, timeoutPromise]);
+    if (searchGen !== state._searchGen) return;
     state.results = Array.isArray(res?.results) ? res.results : [];
     state.total = Number(res?.total) || state.results.length;
     await pushHistory(q);
   } catch (e) {
+    if (searchGen !== state._searchGen) return;
     state.results = [];
     state.total = 0;
     state.error = String(e?.message || e);
   } finally {
-    state.loading = false;
-    render();
+    if (searchGen === state._searchGen) {
+      state.loading = false;
+      render();
+    }
   }
 }
 
@@ -1066,7 +1082,11 @@ function renderResults() {
           <button type="button" class="link" id="backHome">返回</button>
         </div>
         <div class="results-list">
-          ${hits || (state.loading ? "" : `<div class="empty-mini">无结果</div>`)}
+          ${
+            state.loading
+              ? `<div class="empty-mini">搜索中…</div>`
+              : hits || `<div class="empty-mini">${state.error ? escapeHtml(state.error) : "无结果"}</div>`
+          }
         </div>
       </div>
     </div>
@@ -1318,12 +1338,35 @@ async function openFavoritesHome() {
   render();
 }
 
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      window.setTimeout(
+        () => reject(new Error(`${label}超时（${Math.round(ms / 1000)}s）`)),
+        ms,
+      );
+    }),
+  ]);
+}
+
 async function boot() {
-  await loadStore();
-  await refreshStatus();
+  await withTimeout(loadStore(), 5000, "读取配置");
+  await withTimeout(refreshStatus(), 4000, "检测 Everything");
   render();
   window.addEventListener("wh-island-search", onHostSearch);
+
+  // Host posts leave while expand animation is still running (panelActive=false).
+  // Bootstrap also sync-fires onLeave when registering during phase===leave —
+  // that used to unmountBoard() right after the first render and leave a blank panel.
+  let panelSessionLive = false;
+  hub().panel?.onEnter?.(() => {
+    panelSessionLive = true;
+    if (state.view === "home") render();
+  });
   hub().panel?.onLeave?.(() => {
+    if (!panelSessionLive) return;
+    panelSessionLive = false;
     state.view = "home";
     state.query = "";
     state.results = [];

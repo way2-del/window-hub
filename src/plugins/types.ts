@@ -11,6 +11,7 @@ export type PluginCapability =
   | "windows.read"
   | "windows.focus"
   | "media.keys"
+  | "media.camera"
   | "clipboard.read"
   | "clipboard.write"
   | "network"
