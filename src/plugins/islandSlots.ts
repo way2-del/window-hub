@@ -1,8 +1,11 @@
 /** Resolve island slot winners from PluginRegistry (no hardcoded plugin ids). */
 
+import { arePluginsReady } from "./bootstrap";
 import { pluginRegistry } from "./registry";
 import type { IslandBarState, PluginManifest } from "./types";
 import { isPluginSurfaceEnabled } from "./surfacePrefs";
+
+export const ISLAND_SEARCH_PLUGIN_ID = "com.window-hub.file-search";
 
 export type { IslandBarState };
 
@@ -34,7 +37,7 @@ export function resolveIslandDropPluginId(): string | null {
 
 /** Enabled Everything 搜索情景：everything.search + island.scenario + panel + bar. */
 export function resolveIslandSearchPluginId(): string | null {
-  const FALLBACK = "com.window-hub.file-search";
+  const FALLBACK = ISLAND_SEARCH_PLUGIN_ID;
   const list = pluginRegistry.listAll().filter(
     (p) =>
       p.enabled &&
@@ -46,15 +49,39 @@ export function resolveIslandSearchPluginId(): string | null {
       Boolean(p.manifest.slots?.["island.bar"]),
   );
   list.sort((a, b) => {
+    const aDev = a.pluginId.endsWith("__dev") ? 1 : 0;
+    const bDev = b.pluginId.endsWith("__dev") ? 1 : 0;
+    if (aDev !== bDev) return aDev - bDev;
     const ao = a.manifest.slots?.["island.scenario"]?.order ?? 100;
     const bo = b.manifest.slots?.["island.scenario"]?.order ?? 100;
     return ao - bo;
   });
   if (list[0]?.pluginId) return list[0].pluginId;
-  // 官方 id 兜底：即使 slots 尚未升级也能先亮搜索栏
+  // 官方 id 兜底：即使 slots 尚未升级也能先亮搜索栏；已入库且禁用则绝不打开
   const fb = pluginRegistry.get(FALLBACK);
-  if (fb?.enabled) return FALLBACK;
+  if (fb) return fb.enabled ? FALLBACK : null;
+  // 插件列表尚在 bootstrap 且尚未入库：乐观使用内置文件搜索 id
+  if (!arePluginsReady()) return FALLBACK;
   return null;
+}
+
+/** Host 搜索情景是否可 claim（bootstrap 中对官方插件放宽 manifest 检查） */
+export function islandSearchScenarioClaimOk(
+  pluginId: string,
+  scenarioGateAllows: (pluginId: string) => boolean,
+): boolean {
+  if (!scenarioGateAllows(pluginId)) return false;
+  const rec = pluginRegistry.get(pluginId);
+  if (rec) {
+    if (!rec.enabled) return false;
+    return (
+      Boolean(rec.manifest.slots?.["island.scenario"]) &&
+      (rec.manifest.capabilities ?? []).includes("island.bar") &&
+      (rec.manifest.capabilities ?? []).includes("island.panel")
+    );
+  }
+  const base = pluginId.replace(/__dev$/, "");
+  return base === ISLAND_SEARCH_PLUGIN_ID && !arePluginsReady();
 }
 
 export function listIslandBarPlugins() {
@@ -196,9 +223,8 @@ export const PANEL_VIEW_H_DEFAULT = 220;
 
 /**
  * Resolve plugin island panel shell size.
- * - If settings declare panelWidth/panelHeight → staging clamps (中转站)
- * - Else honor slots.defaultSize, fallback 380×220 (备忘/天气型)
- * Never force weather-sized plugins through staging 440–720×120–184 clamps.
+ * - Staging clamps only when manifest declares panelWidth/panelHeight (中转站)
+ * - Else honor slots.defaultSize, fallback 380×220
  */
 export function resolvePluginPanelShellSize(
   pluginId: string,
@@ -209,7 +235,12 @@ export function resolvePluginPanelShellSize(
   },
 ): { w: number; h: number } {
   const defaults = resolvePanelDefaultSize(pluginId);
+  const manifest = getPluginManifest(pluginId);
+  const declaresStagingSize = (manifest?.settings ?? []).some(
+    (s) => s.key === "panelWidth" || s.key === "panelHeight",
+  );
   const hasStagingKeys =
+    declaresStagingSize &&
     !!settings &&
     (settings.panelWidth != null || settings.panelHeight != null);
 

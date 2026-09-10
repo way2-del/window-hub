@@ -40,6 +40,8 @@ import { normalizeStagingChanged } from "./stagingApi";
 import {
   formatStagingBarText,
   isStagingPanelShell,
+  islandSearchScenarioClaimOk,
+  ISLAND_SEARCH_PLUGIN_ID,
   measureIslandBarLabelWidth,
   resolveIslandBarAdaptive,
   resolveIslandDropPluginId,
@@ -52,6 +54,7 @@ import { pluginRegistry } from "./plugins/registry";
 import {
   scenarioPresenceOk,
   trayKeyOf,
+  trayKeysMatch,
   windowKeyOf,
 } from "./scenarioGates";
 import { hideChromeHoverTip, hostTipPointerProps, installChromeHoverTipGlobalDismiss } from "./chromeHoverTip";
@@ -86,7 +89,6 @@ const HEIGHT_MS = 280;
 const MORPH_MS = 420;
 const PULL_OPEN = 0.52;
 const CLICK_SLOP = 6;
-const SPRING_MS = 320;
 
 type IslandSize = { width: number; height: number };
 
@@ -135,15 +137,6 @@ function pullProgress(dy: number) {
   const t = clamp01(dy / 210);
   // 阻力：越拉越沉
   return 1 - Math.pow(1 - t, 1.85);
-}
-
-function sizeFromProgress(p: number): IslandSize {
-  const t = clamp01(p);
-  return {
-    // 跟手用亚像素，避免取整造成顶部黑条一顿一顿
-    width: lerp(liveCollapsed.width, liveExpanded.width, t),
-    height: lerp(liveCollapsed.height, liveExpanded.height, t),
-  };
 }
 
 /** 岛底圆角半径（与 islandPath 共用，供 BorderBeam 贴合） */
@@ -524,6 +517,14 @@ async function setBarHeight(islandH: number) {
   if (cachedScreenW == null) cachedScreenW = await screenLogicalWidth();
   const width = cachedScreenW;
   const targetH = winHeight(islandH);
+  const raised = islandH > ISLAND_BAR_H + 2;
+  if (raised) {
+    try {
+      await invoke("float_overlay");
+    } catch {
+      /* noop outside tauri */
+    }
+  }
   // Cold start: avoid redundant setSize when HWND already matches — WebView2
   // geometry thrash during AppBar settle is a common "未响应" trigger.
   let needSize = true;
@@ -539,7 +540,11 @@ async function setBarHeight(islandH: number) {
     /* resize anyway */
   }
   if (needSize) {
-    await getCurrentWindow().setSize(new LogicalSize(width, targetH));
+    try {
+      await invoke("resize_main_island", { windowHeight: targetH });
+    } catch {
+      await getCurrentWindow().setSize(new LogicalSize(width, targetH));
+    }
   }
   try {
     const raisedIsland = islandH > ISLAND_BAR_H + 2;
@@ -557,12 +562,12 @@ async function setBarHeight(islandH: number) {
   } catch {
     /* noop */
   }
-  // 展开面板伸进桌面工作区 → TOPMOST；折叠条交回 AppBar 常规层级
-  const raised = islandH > ISLAND_BAR_H + 2;
-  try {
-    await invoke(raised ? "float_overlay" : "settle_overlay");
-  } catch {
-    /* noop outside tauri */
+  if (!raised) {
+    try {
+      await invoke("settle_overlay");
+    } catch {
+      /* noop outside tauri */
+    }
   }
 }
 
@@ -610,6 +615,7 @@ function App() {
   const [scenarioOwner, setScenarioOwner] = useState<string | null>(null);
   const [scenarioBar, setScenarioBar] = useState<IslandBarState | null>(null);
   const [scenarioPull, setScenarioPull] = useState<string | null>(null);
+  const scenarioPullRef = useRef(scenarioPull);
   const residentBarRef = useRef(residentBar);
   const overlayBarRef = useRef(overlayBar);
   const scenarioOwnerRef = useRef(scenarioOwner);
@@ -625,6 +631,7 @@ function App() {
   residentBarRef.current = residentBar;
   overlayBarRef.current = overlayBar;
   scenarioOwnerRef.current = scenarioOwner;
+  scenarioPullRef.current = scenarioPull;
   scenarioBarRef.current = scenarioBar;
 
   function clearScenarioLayer() {
@@ -757,6 +764,8 @@ function App() {
   const [searchLeaving, setSearchLeaving] = useState(false);
   const searchLeavingRef = useRef(false);
   const searchLeaveTimerRef = useRef<number | null>(null);
+  /** 热键连按防抖：enter 异步未完成时忽略重复 toggle */
+  const searchToggleBusyRef = useRef(false);
   /**
    * 搜索 chrome 只认 Host searchMode / 离场动画，不跟 scenarioOwner 抖动
    *（正在播放等会抢 claim，不能让输入框跟着丢）。
@@ -779,6 +788,8 @@ function App() {
   const islandPrefsRef = useRef(islandPrefs);
   /** pin_key / id → flash→island; missing = true. Synced from tray-prefs. */
   const trayFlashNotifyRef = useRef<Record<string, boolean>>({});
+  /** Tray ids we already surfaced on the island for the current flash episode. */
+  const trayBannerShownRef = useRef<Set<string>>(new Set());
   const msgBannerRef = useRef<MsgBanner | null>(null);
   const notifyRef = useRef<HTMLDivElement>(null);
   const swipe = useRef<{
@@ -800,6 +811,10 @@ function App() {
   const islandUiRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const lastWinH = useRef(winHeight(ISLAND_BAR_H));
+  /** 窗口真实逻辑高度（lastWinH 可能被预拉高污染，拖拽必须以实测为准） */
+  const actualWinHRef = useRef(winHeight(ISLAND_BAR_H));
+  /** 悬停离开后的窗口收回 debounce，避免「预拉高 → 离开收回 → 按下拖拽」竞态裁切 */
+  const leaveShrinkTimer = useRef<number | null>(null);
   const idleTimer = useRef<number | null>(null);
   const drag = useRef<{
     pointerId: number;
@@ -819,10 +834,28 @@ function App() {
   shellPanelHRef.current = shellPanelH;
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
 
+  /** 面板尺寸：refs 优先，避免 expand/morph 中 React state 滞后把 liveExpanded 打回 380×220 */
+  function resolvePanelSizingPluginId(): string | null {
+    const owner = scenarioOwnerRef.current;
+    if (owner) {
+      const sp = scenarioPullRef.current ?? `plugin:${owner}`;
+      const v = enabledPullContent(sp);
+      if (v) return parsePluginPanelId(v);
+    }
+    if (panelSessionArmedRef.current && panelSessionRef.current) {
+      const v = enabledPullContent(panelSessionRef.current);
+      if (v) return parsePluginPanelId(v);
+    }
+    return parsePluginPanelId(
+      enabledPullContent(islandPrefsRef.current.pullContent),
+    );
+  }
+
   function isFileSearchPlugin(pluginId: string | null | undefined): boolean {
     if (!pluginId) return false;
+    const base = pluginId.replace(/__dev$/, "");
     return (
-      pluginId === "com.window-hub.file-search" ||
+      base === ISLAND_SEARCH_PLUGIN_ID ||
       pluginId === resolveIslandSearchPluginId()
     );
   }
@@ -908,12 +941,18 @@ function App() {
           Boolean(rec?.manifest.slots?.["island.scenario"]) &&
           barOk(owner);
         if (ok) return owner;
-        // 搜索锁中文件搜索被卸载才退 chrome；其它情景掉线不碰 searchMode
-        if (isFileSearchPlugin(owner) && searchModeRef.current) {
-          searchModeRef.current = false;
-          setSearchMode(false);
-          setSearchDraft("");
-          setSearchSubmit(null);
+        // 文件搜索被禁用/卸载：完整退出搜索会话（含展开态与窗口高度）
+        if (isFileSearchPlugin(owner)) {
+          const searchLive =
+            searchModeRef.current ||
+            searchLeavingRef.current ||
+            expandedRef.current ||
+            panelSessionRef.current;
+          if (searchLive) {
+            exitIslandSearchChrome({ animated: false });
+            if (expandedRef.current) void collapse();
+            void shrinkIslandWindow();
+          }
         }
         setScenarioBar(null);
         setScenarioPull(null);
@@ -1011,6 +1050,89 @@ function App() {
     const prefId = parsePluginPanelId(islandPrefsRef.current.pullContent);
     if (!prefId) return false;
     return pluginEnabled(prefId);
+  }
+
+  function barResidentPanelPluginId(): string | null {
+    const pref = islandPrefsRef.current.barResident?.trim();
+    if (!pref || !pluginEnabled(pref)) return null;
+    const rec = pluginRegistry.get(pref);
+    if (!rec) return null;
+    if (!rec.manifest.slots?.["island.panel"]) return null;
+    if (!(rec.manifest.capabilities ?? []).includes("island.panel")) return null;
+    return pref;
+  }
+
+  /** 壳层点击/下拉应打开的插件：下拉内容优先，否则岛栏常驻（与点 chip 一致） */
+  function resolveShellExpandPluginId(): string | null {
+    const pullPid = parsePluginPanelId(
+      enabledPullContent(islandPrefsRef.current.pullContent),
+    );
+    if (pullPid) return pullPid;
+    return barResidentPanelPluginId();
+  }
+
+  function syncLiveExpandedForPlugin(pluginId: string) {
+    const { w, h } = resolvePluginPanelShellSize(pluginId, null, {
+      w: clampStagingPanelW,
+      h: clampStagingPanelH,
+    });
+    liveExpanded.width = w;
+    liveExpanded.height = h;
+    shellPanelWRef.current = w;
+    shellPanelHRef.current = h;
+    setShellPanelW(w);
+    setShellPanelH(h);
+  }
+
+  async function readActualWinH(): Promise<number> {
+    try {
+      const cur = await getCurrentWindow().innerSize();
+      const scale = (await getCurrentWindow().scaleFactor()) || 1;
+      return Math.round(cur.height / scale);
+    } catch {
+      return actualWinHRef.current;
+    }
+  }
+
+  async function raiseIslandWindow(islandH: number): Promise<void> {
+    await setBarHeight(islandH);
+    const targetWinH = winHeight(islandH);
+    lastWinH.current = targetWinH;
+    // 轮询直到 HWND 真变高；单次 SetWindowPos 后立即读可能仍是旧高
+    for (let i = 0; i < 16; i++) {
+      const actual = await readActualWinH();
+      actualWinHRef.current = actual;
+      if (actual >= targetWinH - 2) return;
+      if (i === 0 || i === 4 || i === 8) {
+        await setBarHeight(islandH);
+      }
+      await new Promise<void>((r) => window.setTimeout(r, 8));
+    }
+  }
+
+  async function shrinkIslandWindow(): Promise<void> {
+    await setBarHeight(ISLAND_BAR_H);
+    const targetWinH = winHeight(ISLAND_BAR_H);
+    lastWinH.current = targetWinH;
+    actualWinHRef.current = targetWinH;
+  }
+
+  /** 展开动画中：岛形长高时窗口必须已到位（点击/会话路径） */
+  function raiseWindowIfNeeded(islandH: number) {
+    if (islandH <= ISLAND_BAR_H + 2) return;
+    if (pullingRef.current) return; // 拖拽手势不跟手长高，见 openPluginSession
+    if (
+      revealRef.current <= 0.02 &&
+      !expandedRef.current &&
+      !busy.current &&
+      !morphingRef.current
+    ) {
+      return;
+    }
+    const targetWinH = winHeight(islandH);
+    if (actualWinHRef.current >= targetWinH - 2) return;
+    lastWinH.current = targetWinH;
+    void raiseIslandWindow(islandH);
   }
 
   /** 用户配置了可用的岛栏常驻 */
@@ -1121,6 +1243,11 @@ function App() {
     const id = (keys.id || "").trim();
     if (pin && map[pin] === false) return false;
     if (id && map[id] === false) return false;
+    for (const [k, v] of Object.entries(map)) {
+      if (v !== false) continue;
+      if (pin && trayKeysMatch(k, pin, liveTrayKeysRef.current)) return false;
+      if (id && trayKeysMatch(k, id, liveTrayKeysRef.current)) return false;
+    }
     return true;
   }
 
@@ -1130,6 +1257,9 @@ function App() {
     const pinKey = (att.pin_key || "").trim();
     if (!trayFlashNotifyAllowed({ id: att.id, pinKey })) {
       console.info("[tray-attention] skipped: flash notify off", att.id, pinKey);
+      return;
+    }
+    if (trayBannerShownRef.current.has(att.id)) {
       return;
     }
     if (expandedRef.current || revealRef.current > 0.05) {
@@ -1152,6 +1282,7 @@ function App() {
       title,
       iconBytes: (att.icon_png_base64 || "").length,
     });
+    trayBannerShownRef.current.add(att.id);
     islandNotifyBus.push({
       source: "tray",
       title: title || text,
@@ -1186,6 +1317,7 @@ function App() {
       callback_msg: number;
       version?: number;
       flashing?: boolean;
+      system_tray?: boolean;
     }>,
   ) {
     if (expandedRef.current || revealRef.current > 0.05) return;
@@ -1198,8 +1330,16 @@ function App() {
     }
     if (msgBannerRef.current) return;
 
+    const flashingIds = new Set(
+      icons.filter((i) => i.flashing && !i.system_tray).map((i) => i.id),
+    );
+    for (const id of trayBannerShownRef.current) {
+      if (!flashingIds.has(id)) trayBannerShownRef.current.delete(id);
+    }
+
     const flashing = icons.find((i) => {
-      if (!i.flashing) return false;
+      if (!i.flashing || i.system_tray) return false;
+      if (trayBannerShownRef.current.has(i.id)) return false;
       return trayFlashNotifyAllowed({
         id: i.id,
         pinKey: (i.pin_key || "").trim(),
@@ -1241,9 +1381,9 @@ function App() {
     }, delayMs);
   }
 
-  /** 用户配置了可用的下拉插件面板时，才允许点击/手势下拉。 */
-  function canDefaultPullExpand(): boolean {
-    return hasConfiguredPullContent();
+  /** 壳层手势：下拉内容或岛栏常驻面板均可展开 */
+  function canShellPullExpand(): boolean {
+    return resolveShellExpandPluginId() != null;
   }
 
   /** 直接改 DOM；动画中不走 React，避免 ambient 等重渲染把路径打回旧值 */
@@ -1300,12 +1440,8 @@ function App() {
       ui.style.width = "";
       ui.style.minHeight = "";
     }
-    const panel = panelRef.current;
-    if (panel) {
-      const open = nextReveal > 0.12;
-      panel.style.opacity = open ? String(Math.min(1, (nextReveal - 0.12) / 0.55)) : "0";
-      panel.classList.toggle("is-open", open);
-    }
+    // panel is-open / opacity：React className + CSS（勿在此写 opacity，会闪黑）
+    raiseWindowIfNeeded(next.height);
   }
 
   /** 按帧插值：只刷 DOM（回弹等简单过渡） */
@@ -1379,17 +1515,21 @@ function App() {
           hE = 1 - channelEase(p, 0.2, 1);
           rE = 1 - channelEase(p, 0, 0.35);
         }
+        const expandW = shellPanelWRef.current;
+        const expandH = shellPanelHRef.current;
         paintDom(
           {
-            width: lerp(liveCollapsed.width, liveExpanded.width, wE),
-            height: lerp(liveCollapsed.height, liveExpanded.height, hE),
+            width: lerp(liveCollapsed.width, expandW, wE),
+            height: lerp(liveCollapsed.height, expandH, hE),
           },
           rE,
         );
         if (p < 1) {
           requestAnimationFrame(step);
         } else {
-          const end = opening ? { ...liveExpanded } : collapsedNow();
+          const end = opening
+            ? { width: expandW, height: expandH }
+            : collapsedNow();
           const endReveal = opening ? 1 : 0;
           if (opening) morphingRef.current = false;
           paintDom(end, endReveal);
@@ -1408,7 +1548,14 @@ function App() {
     if (!opts?.force) {
       clearSessionPanel();
       await refreshIslandPrefsFromDb().then(setIslandPrefsState);
-      if (!canDefaultPullExpand()) return;
+      const pid = resolveShellExpandPluginId();
+      if (!pid) return;
+      armPluginSession(pid);
+    } else {
+      const pid =
+        parsePluginPanelId(panelSessionRef.current ?? "") ??
+        resolvePanelSizingPluginId();
+      if (pid) syncLiveExpandedForPlugin(pid);
     }
     bumpIslandActivity();
     const token = ++gen.current;
@@ -1422,8 +1569,7 @@ function App() {
       // 点击展开：立刻直角贴顶
       morphingRef.current = true;
       paintDom(sizeRef.current, revealRef.current);
-      await setBarHeight(liveExpanded.height);
-      lastWinH.current = winHeight(liveExpanded.height);
+      await raiseIslandWindow(shellPanelHRef.current);
       if (token !== gen.current) return;
       setExpanded(true);
       await animateMorph(token, true);
@@ -1434,7 +1580,12 @@ function App() {
         busy.current = false;
         // 若展开过程中目标尺寸已切到中转站，收尾再贴合一次
         if (expandedRef.current) {
-          const t = { width: liveExpanded.width, height: liveExpanded.height };
+          const t = {
+            width: shellPanelWRef.current,
+            height: shellPanelHRef.current,
+          };
+          liveExpanded.width = t.width;
+          liveExpanded.height = t.height;
           if (
             Math.abs(sizeRef.current.width - t.width) > 1 ||
             Math.abs(sizeRef.current.height - t.height) > 1
@@ -1509,12 +1660,16 @@ function App() {
   }
 
   /** 拉高悬浮窗到展开高度（AppBar 高度不变）；拖拽前预热，避免裁切黑块 */
-  function ensureExpandedWindow(): Promise<void> {
-    if (lastWinH.current >= winHeight(liveExpanded.height)) {
-      return Promise.resolve();
+  async function ensureExpandedWindow(): Promise<void> {
+    const islandH = liveExpanded.height;
+    const targetWinH = winHeight(islandH);
+    const actualWinH = await readActualWinH();
+    actualWinHRef.current = actualWinH;
+    if (actualWinH >= targetWinH - 2) {
+      lastWinH.current = targetWinH;
+      return;
     }
-    lastWinH.current = winHeight(liveExpanded.height);
-    return setBarHeight(liveExpanded.height);
+    await raiseIslandWindow(islandH);
   }
 
   function onIslandPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
@@ -1542,36 +1697,37 @@ function App() {
         return;
       }
     }
-    // 未配置下拉内容：不进入下拉手势（岛栏 chip / 拖入仍走 openPluginSession）
-    if (!canDefaultPullExpand()) return;
+    // 未配置下拉/常驻面板：不进入下拉手势（拖入仍走 openPluginSession）
+    if (!canShellPullExpand()) return;
+    const shellPid = resolveShellExpandPluginId();
+    if (shellPid) syncLiveExpandedForPlugin(shellPid);
     clearSessionPanel();
     void refreshIslandPrefsFromDb().then(setIslandPrefsState);
     bumpIslandActivity();
+    if (leaveShrinkTimer.current != null) {
+      window.clearTimeout(leaveShrinkTimer.current);
+      leaveShrinkTimer.current = null;
+    }
     e.currentTarget.setPointerCapture(e.pointerId);
-    const needRaise = lastWinH.current < winHeight(liveExpanded.height);
     drag.current = {
       pointerId: e.pointerId,
       startY: e.clientY,
       lastY: e.clientY,
       moved: false,
       active: true,
-      winReady: !needRaise,
+      winReady: false,
     };
     setSpringing(false);
     pullingRef.current = true;
     setPulling(true);
-    // 按下瞬间就把 SVG 顶角改成直角贴顶（与手势同帧）
-    paintDom(sizeRef.current, revealRef.current);
-    // 必须先拉高窗口再长高岛形；否则 #root overflow 会把胶囊裁成顶部黑矩形，跟手滞后
-    if (needRaise) {
-      void ensureExpandedWindow().then(() => {
-        const d = drag.current;
-        if (!d || d.pointerId !== e.pointerId) return;
-        d.winReady = true;
-        // 以当前指位重新锚定，避免等待期间的位移一次性捅出去
-        d.startY = d.lastY;
-      });
-    }
+    // 拖拽过程不跟手长高岛形（会与窗口抬高抢跑 → 闪裁）；
+    // 松手后与点击相同走 openPluginSession / animateMorph。
+    paintDom(collapsedNow(), 0);
+    void ensureExpandedWindow().then(() => {
+      const d = drag.current;
+      if (!d || d.pointerId !== e.pointerId) return;
+      d.winReady = actualWinHRef.current >= winHeight(liveExpanded.height) - 2;
+    });
   }
 
   function onIslandPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
@@ -1596,66 +1752,28 @@ function App() {
     const d = drag.current;
     if (!d?.active || d.pointerId !== e.pointerId) return;
     d.lastY = e.clientY;
-    // 窗口未就绪时只记位置，不拉高外形（避免裁切黑块）
-    if (!d.winReady) return;
-    const raw = e.clientY - d.startY;
-    if (Math.abs(raw) > CLICK_SLOP) d.moved = true;
-    const p = pullProgress(raw);
-    paintDom(sizeFromProgress(p), p);
+    if (Math.abs(e.clientY - d.startY) > CLICK_SLOP) d.moved = true;
+    // 故意不 paintDom 长高：展开动画与点击共用 openPluginSession
   }
 
+  /** 下拉手势结束：打开时与点击同一路径，避免跟手长高造成闪裁 */
   function finishPull(open: boolean) {
     drag.current = null;
     pullingRef.current = false;
     setPulling(false);
-    if (open && !canDefaultPullExpand()) {
-      open = false;
-    }
-    if (open) {
-      setSpringing(false);
+    setSpringing(false);
+    const settled = snapCollapsedFromBar();
+    paintDom(settled, 0);
+    setSize(settled);
+    setReveal(0);
+    if (open && canShellPullExpand()) {
       clearSessionPanel();
-      void (async () => {
-        await refreshIslandPrefsFromDb().then(setIslandPrefsState);
-        busy.current = true;
-        const token = ++gen.current;
-        try {
-          await setBarHeight(liveExpanded.height);
-          lastWinH.current = winHeight(liveExpanded.height);
-          if (token !== gen.current) return;
-          setExpanded(true);
-          await animateVisual({ ...liveExpanded }, 1, HEIGHT_MS, token);
-          if (token !== gen.current) return;
-          setPanelActive(true);
-        } finally {
-          if (token === gen.current) busy.current = false;
-        }
-      })();
+      const pid = resolveShellExpandPluginId();
+      if (pid) void openPluginSession(pid);
       return;
     }
-    setSpringing(true);
-    setPanelActive(false);
-    void (async () => {
-      const token = ++gen.current;
-      morphingRef.current = true;
-      snapCollapsedFromBar();
-      paintDom(sizeRef.current, revealRef.current);
-      if (token !== gen.current) return;
-      // 未拉满：从当前尺寸收回（不走完整倒放，避免跳变）
-      await animateVisual(collapsedNow(), 0, SPRING_MS, token);
-      if (token !== gen.current) return;
-      setSpringing(false);
-      if (!expandedRef.current && !trayOpenRef.current) {
-        await setBarHeight(ISLAND_BAR_H);
-        lastWinH.current = winHeight(ISLAND_BAR_H);
-      }
-      morphingRef.current = false;
-      const settled = snapCollapsedFromBar();
-      paintDom(settled, 0);
-      setSize(settled);
-      setReveal(0);
-      clearSessionPanel();
-      scheduleImmerse();
-    })();
+    clearSessionPanel();
+    void shrinkIslandWindow().then(() => scheduleImmerse());
   }
 
   function onIslandPointerUp(e: ReactPointerEvent<HTMLDivElement>) {
@@ -1711,18 +1829,11 @@ function App() {
       /* noop */
     }
     if (!d.moved) {
-      drag.current = null;
-      pullingRef.current = false;
-      setPulling(false);
-      setSpringing(false);
-      setSize({ ...sizeRef.current });
-      setReveal(revealRef.current);
-      void expand();
+      finishPull(true);
       return;
     }
-    setSize({ ...sizeRef.current });
-    setReveal(revealRef.current);
-    finishPull(revealRef.current >= PULL_OPEN);
+    const dy = d.lastY - d.startY;
+    finishPull(pullProgress(dy) >= PULL_OPEN);
   }
 
   function onIslandPointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
@@ -1748,7 +1859,10 @@ function App() {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       if (expandedRef.current) void collapse();
-      else if (canDefaultPullExpand()) void expand();
+      else if (canShellPullExpand()) {
+        const pid = resolveShellExpandPluginId();
+        if (pid) void openPluginSession(pid);
+      }
     }
   }
 
@@ -1983,6 +2097,7 @@ function App() {
     };
     // Sync from manifest first so expand never uses stale staging 560×152
     apply(null);
+    const unsubReg = pluginRegistry.subscribe(() => apply(null));
     void invoke<Record<string, unknown>>("hub_settings_get_all", {
       pluginId: sizePluginId,
     })
@@ -2000,6 +2115,7 @@ function App() {
     });
     return () => {
       cancelled = true;
+      unsubReg();
       unlisten?.();
     };
   }, [sizePluginId]);
@@ -2038,7 +2154,16 @@ function App() {
       unsubPlugins = fn;
     });
     void listen<IslandPrefs>("island-prefs", (ev) => {
-      setIslandPrefsState(applyIslandPrefsSnapshot(ev.payload));
+      const prev = islandPrefsRef.current;
+      const next = applyIslandPrefsSnapshot(ev.payload);
+      setIslandPrefsState(next);
+      if (next.pullContent !== prev.pullContent) {
+        const sessPid = parsePluginPanelId(panelSessionRef.current ?? "");
+        const wantPid = parsePluginPanelId(
+          enabledPullContent(next.pullContent),
+        );
+        if (sessPid && sessPid !== wantPid) clearSessionPanel();
+      }
       clearStalePanelOverride();
     }).then((fn) => {
       unlistenPrefs = fn;
@@ -2329,7 +2454,8 @@ function App() {
       }
       if (
         action === "fileSearch.openFavorites" ||
-        (ev.payload?.pluginId === "com.window-hub.file-search" &&
+        (ev.payload?.pluginId?.replace(/__dev$/, "") ===
+          ISLAND_SEARCH_PLUGIN_ID &&
           action === "openFavorites")
       ) {
         void openFavoritesHotkeyRef.current?.();
@@ -2354,6 +2480,7 @@ function App() {
       callback_msg: number;
       version?: number;
       flashing?: boolean;
+      system_tray?: boolean;
     };
     const syncPresenceFromTrays = (icons: TrayIconFlash[]) => {
       refreshPresenceKeys(icons, undefined);
@@ -2462,6 +2589,7 @@ function App() {
         callback_msg: number;
         version?: number;
         flashing?: boolean;
+        system_tray?: boolean;
       }>
     >("list_tray_icons")
       .then((icons) => syncFlashingTrayBanner(icons ?? []))
@@ -2531,7 +2659,12 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [islandPrefs.msgNotify]);
 
-  const effectivePullContent = resolvedPullContent;
+  const effectivePullContent =
+    resolvedPullContent ||
+    (sessionOverrideActive ? panelOverride : null) ||
+    "";
+  const panelHostPluginId =
+    parsePluginPanelId(effectivePullContent || panelOverride || "") ?? "none";
   /**
    * 主岛已被临时占用时，通知不得盖住栏内内容，改为下方独立胶囊：
    * Alt+空格搜索 / 情景临时（正在播放等）/ 下拉展开。
@@ -2546,7 +2679,6 @@ function App() {
   const notifyInline = Boolean(msgBanner) && !notifyConflict;
   const weatherBarExiting =
     notifyInline || (searchActive && !searchLeaving);
-  const activePanelPluginId = parsePluginPanelId(effectivePullContent);
   const stagingBar = islandBar?.text ?? "";
   const dropPluginName = dropPluginId
     ? pluginRegistry.get(dropPluginId)?.manifest.name?.trim() || "中转站"
@@ -2711,12 +2843,15 @@ function App() {
     searchLeaving,
   ]);
 
-  const viewW = activePanelPluginId ? shellPanelW : VIEW_W_DEFAULT;
-  const viewH = activePanelPluginId ? shellPanelH : VIEW_H_DEFAULT;
+  const sizingPluginId = resolvePanelSizingPluginId();
+  const viewW = sizingPluginId ? shellPanelWRef.current : VIEW_W_DEFAULT;
+  const viewH = sizingPluginId ? shellPanelHRef.current : VIEW_H_DEFAULT;
   const pluginStagingShell =
-    !!activePanelPluginId && isStagingPanelShell(viewW, viewH);
-  liveExpanded.width = viewW;
-  liveExpanded.height = viewH;
+    !!sizingPluginId && isStagingPanelShell(viewW, viewH);
+  if (!busy.current && !morphingRef.current) {
+    liveExpanded.width = viewW;
+    liveExpanded.height = viewH;
+  }
 
   /** 展开态下目标尺寸变化时做宽高插值（天气 ↔ 中转站） */
   function morphExpandedSize(target: IslandSize) {
@@ -2752,18 +2887,30 @@ function App() {
   // 展开中且目标尺寸变化：大岛↔小岛都走动画（清空中转站 / 打开中转站）
   // 跳过正在 expand/collapse 的帧，避免 ++gen 打断开合 morph
   useLayoutEffect(() => {
-    liveExpanded.width = viewW;
-    liveExpanded.height = viewH;
+    const targetW = sizingPluginId ? shellPanelWRef.current : VIEW_W_DEFAULT;
+    const targetH = sizingPluginId ? shellPanelHRef.current : VIEW_H_DEFAULT;
+    if (!busy.current && !morphingRef.current) {
+      liveExpanded.width = targetW;
+      liveExpanded.height = targetH;
+    }
     if (!expanded) return;
     if (busy.current || morphingRef.current) return;
     // 无会话、也无可用下拉内容 → 收起，避免空壳面板
-    if (!activePanelPluginId) {
+    if (!sizingPluginId) {
       void collapse();
       return;
     }
-    morphExpandedSize({ width: viewW, height: viewH });
+    // 搜索会话未主动关闭：禁止 morph 把已展开面板缩回小尺寸
+    if (
+      searchModeRef.current &&
+      (targetW < sizeRef.current.width - 2 ||
+        targetH < sizeRef.current.height - 2)
+    ) {
+      return;
+    }
+    morphExpandedSize({ width: targetW, height: targetH });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePanelPluginId, viewW, viewH, expanded]);
+  }, [sizingPluginId, shellPanelW, shellPanelH, expanded]);
 
   /** 打开会话面板前同步 liveExpanded 为目标插件尺寸（同步读 defaultSize，避免直开时仍用中转站 560×152） */
   function armPluginSession(pluginId: string) {
@@ -2792,23 +2939,27 @@ function App() {
   }
 
   async function focusIslandSearchInput() {
-    try {
-      await getCurrentWindow().setFocus();
-    } catch {
-      /* ignore */
-    }
-    const tryFocus = (left: number) => {
+    /** DOM 聚焦重试（等 React 提交搜索 input） */
+    const attemptDomFocus = () => {
       const el = searchInputRef.current;
-      if (el) {
-        el.focus({ preventScroll: true });
-        el.select();
-        return;
-      }
-      if (left > 0) requestAnimationFrame(() => tryFocus(left - 1));
+      if (!el) return false;
+      el.focus({ preventScroll: true });
+      el.select();
+      return document.activeElement === el;
     };
-    queueMicrotask(() => tryFocus(10));
-    window.setTimeout(() => tryFocus(4), 40);
-    window.setTimeout(() => tryFocus(2), 120);
+    const scheduleDomFocus = () => {
+      queueMicrotask(() => attemptDomFocus());
+      for (const ms of [0, 50, 120, 250, 400]) {
+        window.setTimeout(() => attemptDomFocus(), ms);
+      }
+    };
+    try {
+      await invoke("float_overlay");
+      await invoke("activate_main_island");
+    } catch {
+      /* noop outside tauri */
+    }
+    scheduleDomFocus();
   }
 
   function clearSearchLeaveTimer() {
@@ -2884,6 +3035,9 @@ function App() {
   }
 
   async function enterIslandSearchMode() {
+    if (!arePluginsReady()) {
+      await bootstrapPlugins();
+    }
     const pluginId = resolveIslandSearchPluginId();
     if (!pluginId) return;
 
@@ -2891,20 +3045,14 @@ function App() {
     searchLeavingRef.current = false;
     setSearchLeaving(false);
 
-    const canClaim =
-      Boolean(pluginRegistry.get(pluginId)?.manifest.slots?.["island.scenario"]) &&
-      (pluginRegistry.get(pluginId)?.manifest.capabilities ?? []).includes(
-        "island.bar",
-      ) &&
-      (pluginRegistry.get(pluginId)?.manifest.capabilities ?? []).includes(
-        "island.panel",
-      ) &&
-      scenarioGateAllows(pluginId);
-    if (!canClaim) return;
+    if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
 
     bumpIslandActivity();
+    // float/activate 在 focusIslandSearchInput 内异步完成（勿在此同步 setFocus）
     searchModeRef.current = true;
     setSearchMode(true);
+    immersedRef.current = false;
+    setImmersed(false);
     setSearchDraft("");
     setSearchSubmit(null);
     liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
@@ -2936,13 +3084,20 @@ function App() {
   }
 
   async function toggleIslandSearchMode() {
+    if (searchToggleBusyRef.current) return;
+    // 热键连按：勿在 toggle 层 await bootstrap，交给 enterIslandSearchMode
     // 离场动画中再按热键 → 取消离场并重新进入（避免「时好时坏」被吞）
     if (searchLeavingRef.current) {
       if (!resolveIslandSearchPluginId()) return;
       clearSearchLeaveTimer();
       searchLeavingRef.current = false;
       setSearchLeaving(false);
-      await enterIslandSearchMode();
+      searchToggleBusyRef.current = true;
+      try {
+        await enterIslandSearchMode();
+      } finally {
+        searchToggleBusyRef.current = false;
+      }
       return;
     }
     if (searchModeRef.current) {
@@ -2956,7 +3111,12 @@ function App() {
       return;
     }
     if (!resolveIslandSearchPluginId()) return;
-    await enterIslandSearchMode();
+    searchToggleBusyRef.current = true;
+    try {
+      await enterIslandSearchMode();
+    } finally {
+      searchToggleBusyRef.current = false;
+    }
   }
   toggleIslandSearchHotkeyRef.current = () => {
     void toggleIslandSearchMode();
@@ -2965,8 +3125,11 @@ function App() {
   async function openFileSearchFavorites() {
     const pluginId = resolveIslandSearchPluginId();
     if (!pluginId) return;
+    if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
     bumpIslandActivity();
     await enterIslandSearchMode();
+    // enter may no-op if plugin became unavailable mid-flight
+    if (!searchModeRef.current && scenarioOwnerRef.current !== pluginId) return;
     armPluginSession(pluginId);
     const fire = () =>
       setSearchSubmit({
@@ -3386,7 +3549,6 @@ function App() {
             left: "50%",
             right: "auto",
             translate: "-50% 0",
-            // 与 paintDom / sizeRef 对齐；adaptive 变宽时 useLayoutEffect 会再刷 sizeRef
             width: size.width,
             height: size.height,
             ["--island-r-bot"]: `${islandBottomRadius(size.width, size.height)}px`,
@@ -3401,7 +3563,7 @@ function App() {
           aria-label={
             expanded
               ? "收起灵动岛"
-              : canDefaultPullExpand()
+              : canShellPullExpand()
                 ? "下拉或点击展开灵动岛"
                 : "灵动岛"
           }
@@ -3424,16 +3586,32 @@ function App() {
           onPointerUp={onIslandPointerUp}
           onPointerCancel={onIslandPointerCancel}
           onPointerEnter={() => {
+            if (leaveShrinkTimer.current != null) {
+              window.clearTimeout(leaveShrinkTimer.current);
+              leaveShrinkTimer.current = null;
+            }
             // 悬停时预拉高窗口，按下拖动即可立刻跟手
-            if (!canDefaultPullExpand()) return;
+            if (!canShellPullExpand()) return;
+            const pid = resolveShellExpandPluginId();
+            if (pid) syncLiveExpandedForPlugin(pid);
             if (!expandedRef.current && !busy.current) void ensureExpandedWindow();
           }}
           onPointerLeave={() => {
             void hideChromeHoverTip();
             if (drag.current?.active || expandedRef.current || busy.current) return;
             if (revealRef.current > 0.01) return;
-            lastWinH.current = winHeight(ISLAND_BAR_H);
-            void setBarHeight(ISLAND_BAR_H);
+            // 搜索会话未主动关闭：保持岛/窗口尺寸，不因移出鼠标收回
+            if (searchModeRef.current || searchLeavingRef.current) return;
+            if (leaveShrinkTimer.current != null) {
+              window.clearTimeout(leaveShrinkTimer.current);
+            }
+            leaveShrinkTimer.current = window.setTimeout(() => {
+              leaveShrinkTimer.current = null;
+              if (drag.current?.active || expandedRef.current || busy.current) return;
+              if (revealRef.current > 0.01) return;
+              if (searchModeRef.current || searchLeavingRef.current) return;
+              void shrinkIslandWindow();
+            }, 320);
           }}
           onClick={() => {
             // 左滑划掉 / 明显滑动后忽略 click，避免误开应用
@@ -3653,20 +3831,27 @@ function App() {
 
             <div
               ref={panelRef}
-              className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}`}
+              className={`island-panel is-plugin${pluginStagingShell ? " is-plugin-sized" : ""}${
+                expanded || reveal > 0.12 ? " is-open" : ""
+              }`}
               onClick={(e) => e.stopPropagation()}
             >
-              {effectivePullContent || panelSessionRef.current ? (
+              {effectivePullContent || panelOverride ? (
                 <IslandPanelHost
-                  key={activePanelPluginId ?? "none"}
-                  pullContent={effectivePullContent}
-                  active={panelActive}
+                  key={panelHostPluginId}
+                  pullContent={effectivePullContent || panelOverride || ""}
+                  active={panelActive || expanded}
                   searchSubmit={searchSubmit}
                   onPanelClose={() => {
                     if (expandedRef.current) void collapse();
                   }}
                 />
-              ) : null}
+              ) : (
+                <div className="panel-plugin-empty">
+                  面板未绑定插件
+                  <span>请在设置 → 灵动岛中选择「下拉内容」</span>
+                </div>
+              )}
             </div>
           </div>
         </div>

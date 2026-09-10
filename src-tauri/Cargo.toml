@@ -1,6 +1,6 @@
 [package]
 name = "window-hub"
-version = "0.1.0"
+version = "0.2.0"
 description = "Windows window mosaic hub with ECS capture and input forwarding"
 authors = ["you"]
 edition = "2021"
@@ -84,6 +84,12 @@ windows = { version = "0.58", features = [
   "UI_Composition_Desktop",
 ] }
 
+# Dev: line-tables-only keeps stack traces but avoids full DWARF (often tens of GB).
+[profile.dev]
+debug = "line-tables-only"
+# Cap incremental cache growth; still fast enough for day-to-day rebuilds.
+incremental = true
+
 # Formal release: keep reasonable link cost (thin LTO).
 [profile.release]
 lto = "thin"
@@ -93,6 +99,7 @@ strip = true
 # Local iterate: prioritize rebuild/link speed over peak runtime opt.
 # First build of this profile is still a full cold compile (~same as release);
 # later incremental rebuilds are much faster with incremental = true.
+# Prefer this OR debug for daily work — keeping both profiles warm doubles disk use.
 [profile.release-fast]
 inherits = "release"
 lto = false

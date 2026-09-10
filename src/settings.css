@@ -436,9 +436,11 @@ a {
   width: 42px;
   height: 24px;
   flex-shrink: 0;
+  padding: 0;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.16);
   border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
   transition: background 160ms ease;
 }
 
@@ -2999,4 +3001,107 @@ html[data-theme="light"] .dock-icon-editor-preview-stage {
 }
 .shortcuts-scope-picker-block {
   margin-top: 10px;
+}
+
+/* ---- About ---- */
+.about-hero-card {
+  padding: 20px 18px;
+}
+
+.about-hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.about-mark {
+  flex-shrink: 0;
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: linear-gradient(145deg, #0a84ff 0%, #5e5ce6 55%, #bf5af2 100%);
+  box-shadow: 0 8px 20px rgba(10, 132, 255, 0.28);
+}
+
+.about-hero-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.about-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--glass-fg, #f3f4f6);
+}
+
+.about-tagline {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--glass-fg-muted, #9ca3af);
+}
+
+.about-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.about-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(10, 132, 255, 0.35);
+  border: 1px solid rgba(10, 132, 255, 0.45);
+}
+
+.about-badge.is-muted {
+  color: var(--glass-fg-muted, #9ca3af);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.about-version-value {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--glass-fg, #f3f4f6);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.about-version-value.is-channel {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64d2ff;
+}
+
+.about-version-value.is-id {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.85;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html[data-theme="light"] .about-mark {
+  box-shadow: 0 8px 18px rgba(10, 132, 255, 0.22);
+}
+
+html[data-theme="light"] .about-badge.is-muted {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.08);
 }

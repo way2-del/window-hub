@@ -101,7 +101,11 @@ fn find_explorer_tray() -> Option<(HWND, u32)> {
             return None;
         }
         // Prefer the real tray (has TrayNotifyWnd child), not a spy popup.
-        let _ = FindWindowExW(hwnd, HWND::default(), w!("TrayNotifyWnd"), None);
+        let notify = FindWindowExW(hwnd, HWND::default(), w!("TrayNotifyWnd"), None).ok();
+        if notify.map(|h| h.0.is_null()).unwrap_or(true) {
+            // Shell_TrayWnd exists but tray notify subtree not ready yet.
+            return None;
+        }
         let mut pid = 0u32;
         let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if tid == 0 {
@@ -109,6 +113,11 @@ fn find_explorer_tray() -> Option<(HWND, u32)> {
         }
         Some((hwnd, tid))
     }
+}
+
+/// True when explorer's tray notify tree is present (safe to install WH_CALLWNDPROC).
+pub fn shell_tray_ready() -> bool {
+    find_explorer_tray().is_some()
 }
 
 unsafe fn create_ipc() -> Result<(HANDLE, *mut TrayHookShared, HANDLE), String> {

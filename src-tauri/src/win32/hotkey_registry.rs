@@ -768,6 +768,13 @@ fn fire_binding(app: &AppHandle, b: &LiveBinding) {
             vis.apply_hotkey_toggle(app);
         }
     }
+    if b.action == ACTION_ISLAND_SEARCH {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
+        }
+    }
     let payload = serde_json::json!({
         "id": b.id,
         "scope": if b.plugin_id.is_some() { "plugin" } else { "system" },

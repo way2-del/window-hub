@@ -1,7 +1,7 @@
 {
   "name": "window-hub",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,8 @@
     "tauri": "tauri",
     "tauri:build": "tauri build",
     "tauri:build:fast": "tauri build --no-bundle -- --profile release-fast",
-    "tauri:build:bundle": "tauri build --bundles nsis"
+    "tauri:build:bundle": "tauri build --bundles nsis",
+    "clean:target": "powershell -ExecutionPolicy Bypass -File scripts/clean-rust-target.ps1"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",

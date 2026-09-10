@@ -9,7 +9,7 @@ description: >-
 
 Slot：`island.panel`。展开内容由插件 Web 入口提供（iframe）；**无 Host 内置天气/镜子面板**。
 
-**插件面板尺寸**：`hub.settings.panelWidth` / `panelHeight`（`settings[]`）→ 否则 `slots["island.panel"].defaultSize` → 否则 380×220。中转站默认高 **152**、宽 560。**禁止按插件 id 硬编码壳型**。
+**插件面板尺寸**：`hub.settings.panelWidth` / `panelHeight`（`settings[]`）→ 否则 `slots["island.panel"].defaultSize` → 否则 380×220。文件搜索默认 **560×400**；中转站默认高 **152**、宽 560。
 
 **资源文件名（硬约定）：** Host 只注入同目录 **`panel.css` / `panel.js`**（与 `entry.panel` 旁路），勿只提供 `index.html`。
 

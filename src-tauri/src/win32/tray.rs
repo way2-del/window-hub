@@ -8,6 +8,9 @@
 //!
 //! Fallback: vendored `systray-util` spy when the hook fails to install.
 //! UIA / demote_all are **not** on the click or startup hot path.
+//!
+//! Boot: wait for `TrayNotifyWnd`, then a resident watchdog keeps
+//! `TaskbarCreated` + hook rehang until 常显 pins are clickable (cold-start).
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +39,9 @@ pub struct TrayIconInfo {
     /// Always keep on the menubar rail (IME / input language). Auto-pinned.
     #[serde(default)]
     pub resident: bool,
+    /// Windows shell tray (蓝牙/资源管理器/时钟等) — never flash-attention or auto-rail.
+    #[serde(default)]
+    pub system_tray: bool,
 }
 
 /// Rising-edge tray blink for island notification UI.
@@ -112,6 +118,14 @@ mod win {
 
     /// Recent fingerprint-change timestamps — rapid swaps ≈ blink without blank frames.
     static FP_CHANGES: LazyLock<Mutex<HashMap<String, Vec<std::time::Instant>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Last NIS_HIDDEN bit per icon — toggles are a classic WeChat blink signal.
+    static LAST_HIDDEN: LazyLock<Mutex<HashMap<String, bool>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Registry IconStreams snapshot hash — blink fallback when hook misses frames.
+    static REG_SNAPSHOT_FP: LazyLock<Mutex<HashMap<String, u64>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
     /// User acknowledged island/tray attention — ignore leftover blink frames for a bit.
@@ -234,6 +248,80 @@ mod win {
         }
     }
 
+    fn pin_key_stem(key: &str) -> String {
+        let k = key.trim().to_ascii_lowercase();
+        if k.starts_with("exe:") || k.starts_with("proc:") {
+            if let Some(colon) = k.rfind(':') {
+                let maybe_uid = &k[colon + 1..];
+                if colon > 4 && maybe_uid.chars().all(|c| c.is_ascii_digit()) {
+                    return k[..colon].to_string();
+                }
+            }
+        }
+        k
+    }
+
+    fn pin_key_uid(key: &str) -> Option<u32> {
+        let stem = pin_key_stem(key);
+        let k = key.trim().to_ascii_lowercase();
+        if stem == k {
+            return None;
+        }
+        let uid = k.strip_prefix(&format!("{stem}:"))?;
+        uid.parse().ok()
+    }
+
+    fn live_keys_with_stem(icons: &[TrayIconInfo], stem: &str) -> Vec<String> {
+        icons
+            .iter()
+            .map(|i| pin_key_of(i))
+            .filter(|pk| pin_key_stem(pk) == stem)
+            .collect()
+    }
+
+    /// Multi-instance safe: same exe + different uid are distinct (dual WeChat).
+    fn resolve_tray_bind_key(raw: &str, icons: &[TrayIconInfo], remap: &HashMap<String, String>) -> String {
+        if let Some(pk) = remap.get(raw) {
+            return pk.clone();
+        }
+        let stem = pin_key_stem(raw);
+        if stem != raw.trim().to_ascii_lowercase() {
+            let matches = live_keys_with_stem(icons, &stem);
+            if matches.len() == 1 {
+                let sole = &matches[0];
+                if let Some(uid) = pin_key_uid(raw) {
+                    // Do not migrate a saved uid onto a different live instance.
+                    if uid != 0 {
+                        if pin_key_uid(sole) != Some(uid) {
+                            return raw.to_string();
+                        }
+                    } else if pin_key_uid(sole).is_some_and(|u| u != 0) {
+                        // Registry stub uid=0 → sole live icon with real uid.
+                        return sole.clone();
+                    }
+                }
+                return sole.clone();
+            }
+            if matches.len() > 1 {
+                if let Some(uid) = pin_key_uid(raw) {
+                    for icon in icons {
+                        if icon.uid == uid && pin_key_stem(&pin_key_of(icon)) == stem {
+                            return pin_key_of(icon);
+                        }
+                    }
+                }
+                return raw.to_string();
+            }
+            if let Some(pk) = remap.get(&stem) {
+                let stem_live = live_keys_with_stem(icons, &stem);
+                if stem_live.len() <= 1 {
+                    return pk.clone();
+                }
+            }
+        }
+        raw.to_string()
+    }
+
     /// Rewrite pinned / menu_heights onto reboot-stable `pin_key`s. Returns true if changed.
     fn normalize_prefs_keys(prefs: &mut TrayPrefs, icons: &[TrayIconInfo]) -> bool {
         let mut remap: HashMap<String, String> = HashMap::new();
@@ -251,15 +339,31 @@ mod win {
             if !path.is_empty() {
                 remap.insert(format!("exe:{path}:{}", icon.uid), pk.clone());
             }
-            let stem = icon.process.trim().to_ascii_lowercase();
-            if !stem.is_empty() {
-                remap.insert(format!("proc:{stem}:{}", icon.uid), pk.clone());
+            let stem = pin_key_stem(&pk);
+            if stem != pk {
+                let stem_live = live_keys_with_stem(icons, &stem);
+                if stem_live.len() <= 1 {
+                    remap.insert(stem, pk.clone());
+                }
+            }
+            let stem_proc = icon.process.trim().to_ascii_lowercase();
+            if !stem_proc.is_empty() {
+                remap.insert(format!("proc:{stem_proc}:{}", icon.uid), pk.clone());
             }
         }
 
         let resolve = |raw: &str| -> String {
-            if let Some(pk) = remap.get(raw) {
-                return pk.clone();
+            let resolved = resolve_tray_bind_key(raw, icons, &remap);
+            if resolved != raw {
+                return resolved;
+            }
+            // Overflow/registry stubs often carry uid=0 until spy hook delivers the real uid.
+            if pin_key_uid(raw) == Some(0) {
+                let stem = pin_key_stem(raw);
+                let matches = live_keys_with_stem(icons, &stem);
+                if matches.len() == 1 {
+                    return matches[0].clone();
+                }
             }
             if is_legacy_hwnd_uid(raw) {
                 let uid = raw
@@ -415,6 +519,35 @@ mod win {
             "2c77a81e-41cc-4178-a3a7-5f8a987568e6" => Some("输入法切换"),
             _ => None,
         }
+    }
+
+    /// Shell-owned tray glyphs (蓝牙 / 资源管理器 / 时钟 …) — not user-app attention.
+    fn is_shell_system_tray(id: &str, process: &str, tip: &str) -> bool {
+        if known_system_name(id).is_some() {
+            return true;
+        }
+        let proc = process.trim().to_ascii_lowercase();
+        if matches!(
+            proc.as_str(),
+            "explorer"
+                | "shellexperiencehost"
+                | "systemsettings"
+                | "applicationframehost"
+                | "backgroundtaskhost"
+                | "runtimebroker"
+        ) {
+            return true;
+        }
+        let tip_l = tip.trim().to_ascii_lowercase();
+        if tip_l.contains("bluetooth")
+            || tip.contains("蓝牙")
+            || tip_l.contains("file explorer")
+            || tip.contains("文件资源管理器")
+            || tip.contains("资源管理器")
+        {
+            return true;
+        }
+        false
     }
 
     /// Input language abbreviation + IME mode/branding — always 常显 on the rail.
@@ -581,6 +714,165 @@ mod win {
             .unwrap_or_default()
     }
 
+    fn hash_bytes(bytes: &[u8]) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    }
+
+    fn slot_icon_fingerprint(slot: &crate::win32::tray_hook_ipc::TrayHookSlot) -> String {
+        if slot.icon_w == 0 || slot.icon_h == 0 {
+            return String::new();
+        }
+        let w = slot.icon_w as usize;
+        let h = slot.icon_h as usize;
+        let n = w
+            .saturating_mul(h)
+            .saturating_mul(4)
+            .min(crate::win32::tray_hook_ipc::ICON_BYTES);
+        format!("rgba:{}", hash_bytes(&slot.icon_rgba[..n]))
+    }
+
+    /// Lookup prior icon row — GUID updates may replace legacy `hwnd:uid` ids.
+    fn find_prev_icon(id: &str, hwnd: isize, uid: u32) -> Option<TrayIconInfo> {
+        let icons = ICONS.lock();
+        if let Some(p) = icons.get(id) {
+            return Some(p.clone());
+        }
+        if hwnd != 0 {
+            let legacy = format!("{hwnd}:{uid}");
+            if legacy != id {
+                if let Some(p) = icons.get(&legacy) {
+                    return Some(p.clone());
+                }
+            }
+            for (key, info) in icons.iter() {
+                if key != id && info.hwnd == hwnd && info.uid == uid {
+                    return Some(info.clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn prev_fingerprint(id: &str, hwnd: isize, uid: u32) -> Option<String> {
+        let fps = OS_FINGERPRINT.lock();
+        if let Some(fp) = fps.get(id) {
+            return Some(fp.clone());
+        }
+        if hwnd != 0 {
+            let legacy = format!("{hwnd}:{uid}");
+            if let Some(fp) = fps.get(&legacy) {
+                return Some(fp.clone());
+            }
+        }
+        None
+    }
+
+    fn migrate_icon_tracking(from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        {
+            let mut fps = OS_FINGERPRINT.lock();
+            if let Some(fp) = fps.remove(from) {
+                fps.entry(to.to_string()).or_insert(fp);
+            }
+        }
+        {
+            let mut map = FP_CHANGES.lock();
+            if let Some(v) = map.remove(from) {
+                map.entry(to.to_string()).or_insert(v);
+            }
+        }
+        {
+            let mut map = LAST_HIDDEN.lock();
+            if let Some(v) = map.remove(from) {
+                map.entry(to.to_string()).or_insert(v);
+            }
+        }
+        {
+            let mut map = REG_SNAPSHOT_FP.lock();
+            if let Some(v) = map.remove(from) {
+                map.entry(to.to_string()).or_insert(v);
+            }
+        }
+        {
+            let mut ack = ATTENTION_ACK.lock();
+            if let Some(v) = ack.remove(from) {
+                ack.entry(to.to_string()).or_insert(v);
+            }
+        }
+    }
+
+    /// Record NIS_HIDDEN; returns true when the bit flipped vs last observation.
+    fn note_hidden_toggle(id: &str, hidden: Option<bool>) -> bool {
+        let Some(h) = hidden else {
+            return false;
+        };
+        match LAST_HIDDEN.lock().insert(id.to_string(), h) {
+            Some(prev) => prev != h,
+            None => false,
+        }
+    }
+
+    /// Arm tray blink / island attention from shell notify updates.
+    ///
+    /// Arm `flashing` only for likely IM/message trays — avoids spurious island notify.
+    fn should_arm_flashing(
+        id: &str,
+        hwnd: isize,
+        uid: u32,
+        process: &str,
+        tip: &str,
+        is_update: bool,
+        blank_frame: bool,
+        fingerprint: &str,
+        tip_changed: bool,
+    ) -> bool {
+        if is_shell_system_tray(id, process, tip) || !is_likely_im_tray(process, tip) {
+            return false;
+        }
+        let prev_fp = prev_fingerprint(id, hwnd, uid);
+        let fp_changed = prev_fp.as_ref().is_some_and(|p| p != fingerprint);
+        let from_or_to_blank =
+            blank_frame || prev_fp.as_deref() == Some("__blank__");
+
+        let rapid_swap = if fp_changed {
+            let now = std::time::Instant::now();
+            let mut map = FP_CHANGES.lock();
+            let times = map.entry(id.to_string()).or_default();
+            times.push(now);
+            times.retain(|t| now.duration_since(*t).as_millis() < 2500);
+            times.len() >= 2
+        } else {
+            false
+        };
+
+        let icon_swap = is_update
+            && fp_changed
+            && prev_fp
+                .as_ref()
+                .is_some_and(|p| !p.is_empty() && p.as_str() != "__blank__")
+            && !fingerprint.is_empty()
+            && fingerprint != "__blank__";
+
+        let tencent_tip = is_tencent_im(process, tip) && is_update && tip_changed;
+
+        let arm = from_or_to_blank
+            || (is_update && (rapid_swap || icon_swap || tencent_tip || tip_changed));
+
+        if arm {
+            eprintln!(
+                "[tray] flash-arm id={id} blank={blank_frame} from_blank={} rapid={rapid_swap} icon_swap={icon_swap} tip={tip_changed} proc={process:?} label={tip:?}",
+                from_or_to_blank && !blank_frame
+            );
+        }
+        arm
+    }
+
     fn to_info(icon: &SystrayIcon, is_update: bool) -> TrayIconInfo {
         let id = icon.stable_id.to_string();
         let hwnd = icon.window_handle.unwrap_or(0);
@@ -590,7 +882,7 @@ mod win {
         let process = process_label(hwnd);
         let mut tooltip = resolve_label(&id, &icon.tooltip, &process, hwnd);
 
-        let prev = ICONS.lock().get(&id).cloned();
+        let prev = find_prev_icon(&id, hwnd, uid);
 
         // Keep a previously resolved friendly name if this update has no tip.
         if looks_like_raw_id(&tooltip) || tooltip == "未知应用" {
@@ -626,30 +918,20 @@ mod win {
         }
 
         let mut flashing = prev.as_ref().map(|p| p.flashing).unwrap_or(false);
-        if is_update {
-            let prev_fp = OS_FINGERPRINT.lock().get(&id).cloned();
-            let fp_changed = prev_fp.as_ref().is_some_and(|p| p != &fingerprint);
-            let vis_changed = prev.as_ref().map(|p| p.area != area).unwrap_or(false);
-            // Classic tray blink (WeChat etc.): blank HICON frames and/or
-            // NIS_HIDDEN toggles. Also arm on rapid glyph oscillation.
-            let from_or_to_blank =
-                blank_frame || prev_fp.as_deref() == Some("__blank__");
-            let rapid_swap = if fp_changed {
-                let now = std::time::Instant::now();
-                let mut map = FP_CHANGES.lock();
-                let times = map.entry(id.clone()).or_default();
-                times.push(now);
-                times.retain(|t| now.duration_since(*t).as_millis() < 2500);
-                times.len() >= 2
-            } else {
-                false
-            };
-            if blank_frame || vis_changed || from_or_to_blank || rapid_swap {
-                flashing = true;
-            }
-        }
-        if flashing && attention_suppressed(&id) {
-            flashing = false;
+        let tip_changed = prev.as_ref().map(|p| p.tooltip != tooltip).unwrap_or(false);
+        let _ = note_hidden_toggle(&id, Some(!icon.is_visible));
+        if should_arm_flashing(
+            &id,
+            hwnd,
+            uid,
+            &process,
+            &tooltip,
+            is_update,
+            blank_frame,
+            &fingerprint,
+            tip_changed,
+        ) {
+            flashing = true;
         }
 
         OS_FINGERPRINT.lock().insert(id.clone(), fingerprint);
@@ -663,6 +945,10 @@ mod win {
             compute_pin_key(guid, hwnd, uid, &process)
         };
         let resident = is_language_ime_icon(&id, &process, &tooltip);
+        let system_tray = is_shell_system_tray(&id, &process, &tooltip);
+        if system_tray {
+            flashing = false;
+        }
 
         TrayIconInfo {
             id: id.clone(),
@@ -677,6 +963,7 @@ mod win {
             area,
             flashing,
             resident,
+            system_tray,
         }
     }
 
@@ -801,15 +1088,19 @@ mod win {
         if changed {
             let mut fps = OS_FINGERPRINT.lock();
             let mut changes = FP_CHANGES.lock();
+            let mut hidden = LAST_HIDDEN.lock();
+            let mut reg_fps = REG_SNAPSHOT_FP.lock();
             for id in dead.iter().chain(drop_ids.iter()) {
                 fps.remove(id);
                 changes.remove(id);
+                hidden.remove(id);
+                reg_fps.remove(id);
             }
         }
         changed
     }
 
-    fn upsert_icon(info: TrayIconInfo) {
+    fn upsert_icon(mut info: TrayIconInfo) {
         let proc = info.process.trim().to_ascii_lowercase();
         let id = info.id.clone();
         let uid = info.uid;
@@ -837,6 +1128,19 @@ mod win {
         let mut armed_attention: Option<TrayAttention> = None;
         {
             let mut icons = ICONS.lock();
+            // Shell may promote runtime id `hwnd:uid` → GUID on later NIM_MODIFY.
+            if looks_like_guid_id(&id) && info.hwnd != 0 {
+                let legacy = format!("{}:{}", info.hwnd, info.uid);
+                if legacy != id && icons.contains_key(&legacy) {
+                    if let Some(old) = icons.remove(&legacy) {
+                        if old.flashing && !info.system_tray {
+                            info.flashing = true;
+                        }
+                        migrate_icon_tracking(&legacy, &id);
+                    }
+                    REG_KEY_BY_ID.lock().remove(&legacy);
+                }
+            }
             // When spy delivers a real icon, drop matching registry stubs only — never
             // another live icon (dual WeChat / multi-instance).
             if clickable_new {
@@ -869,8 +1173,11 @@ mod win {
                     }
                 }
             }
+            if info.system_tray {
+                info.flashing = false;
+            }
             let was_flashing = icons.get(&id).map(|p| p.flashing).unwrap_or(false);
-            if info.flashing && !was_flashing && !attention_suppressed(&id) {
+            if info.flashing && !was_flashing && !attention_suppressed(&id) && !info.system_tray {
                 armed_attention = Some(TrayAttention {
                     id: info.id.clone(),
                     pin_key: pin_key_of(&info),
@@ -1075,11 +1382,26 @@ mod win {
         None
     }
 
+    /// Broadcast `TaskbarCreated` so apps re-register Shell_NotifyIcon.
+    /// `force` uses a shorter gap so boot recovery can retry after the first cold-start shot.
     fn broadcast_taskbar_created() {
+        broadcast_taskbar_created_inner(false);
+    }
+
+    fn broadcast_taskbar_created_force() {
+        broadcast_taskbar_created_inner(true);
+    }
+
+    fn broadcast_taskbar_created_inner(force: bool) {
+        let min_gap = if force {
+            std::time::Duration::from_secs(8)
+        } else {
+            std::time::Duration::from_secs(20)
+        };
         {
             let mut last = LAST_TASKBAR_CREATED.lock();
             if let Some(t) = *last {
-                if t.elapsed() < std::time::Duration::from_secs(20) {
+                if t.elapsed() < min_gap {
                     return;
                 }
             }
@@ -1093,8 +1415,79 @@ mod win {
             let msg = RegisterWindowMessageW(w!("TaskbarCreated"));
             if msg != 0 {
                 let _ = SendNotifyMessageW(HWND_BROADCAST, msg, None, None);
+                eprintln!(
+                    "[tray] TaskbarCreated broadcast ({})",
+                    if force { "force" } else { "normal" }
+                );
             }
         }
+    }
+
+    /// Whether a saved 常显 pin key has a live clickable tray icon.
+    fn clickable_matches_pin(saved: &str, clickable: &[TrayIconInfo]) -> bool {
+        let saved = saved.trim();
+        if saved.is_empty() || clickable.is_empty() {
+            return false;
+        }
+        let remap = HashMap::new();
+        let resolved = resolve_tray_bind_key(saved, clickable, &remap);
+        let stem = pin_key_stem(saved);
+        let uid = pin_key_uid(saved);
+        for icon in clickable {
+            let pk = pin_key_of(icon);
+            if saved == pk || saved == icon.id || resolved == pk {
+                return true;
+            }
+            if pin_key_stem(&pk) == stem {
+                let iu = pin_key_uid(&pk);
+                if let (Some(a), Some(b)) = (uid, iu) {
+                    if a == b {
+                        return true;
+                    }
+                } else if live_keys_with_stem(clickable, &stem).len() == 1 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Pinned (常显) keys still missing a clickable live icon.
+    fn missing_pinned_clickable() -> Vec<String> {
+        let pinned = get_prefs().pinned;
+        if pinned.is_empty() {
+            return Vec::new();
+        }
+        let clickable: Vec<TrayIconInfo> = ICONS
+            .lock()
+            .values()
+            .filter(|i| is_clickable(i))
+            .cloned()
+            .collect();
+        pinned
+            .into_iter()
+            .filter(|p| !clickable_matches_pin(p, &clickable))
+            .collect()
+    }
+
+    fn tray_needs_resident_recover(in_boot_window: bool) -> bool {
+        if clickable_icon_count() == 0 {
+            return true;
+        }
+        // During cold boot, keep pulling until user 常显 pins show up (apps may
+        // register after our first TaskbarCreated, which was rate-limited away).
+        in_boot_window && !missing_pinned_clickable().is_empty()
+    }
+
+    fn wait_for_shell_tray(timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if crate::win32::tray_hook_host::shell_tray_ready() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        crate::win32::tray_hook_host::shell_tray_ready()
     }
 
     fn guid_bytes_to_id(bytes: &[u8; 16]) -> String {
@@ -1167,16 +1560,18 @@ mod win {
         };
 
         let id = stable_id_from_slot(slot);
-        let prev = ICONS.lock().get(&id).cloned();
+        let hwnd_raw = slot.hwnd as isize;
+        let uid_raw = slot.uid;
+        let prev = find_prev_icon(&id, hwnd_raw, uid_raw);
 
         // hwnd/uid identify the icon and are present even without NIF_* on MODIFY.
         let hwnd = if slot.hwnd != 0 {
-            slot.hwnd as isize
+            hwnd_raw
         } else {
             prev.as_ref().map(|p| p.hwnd).unwrap_or(0)
         };
         let uid = if slot.uid != 0 || prev.is_none() {
-            slot.uid
+            uid_raw
         } else {
             prev.as_ref().map(|p| p.uid).unwrap_or(0)
         };
@@ -1229,14 +1624,25 @@ mod win {
         } else {
             String::new()
         };
+        // Tip/state-only MODIFY must not rewrite the glyph fingerprint — otherwise a
+        // retained display PNG looks like "left blank", or a no-op looks like a swap.
         let fingerprint = if blank_frame {
             "__blank__".to_string()
-        } else if !os_png.is_empty() {
-            os_png.clone()
+        } else if slot.flags & NIF_ICON != 0 {
+            let rgba_fp = slot_icon_fingerprint(slot);
+            if !rgba_fp.is_empty() {
+                rgba_fp
+            } else if !os_png.is_empty() {
+                format!("png:{}", hash_bytes(os_png.as_bytes()))
+            } else if let Some(prev_fp) = prev_fingerprint(&id, hwnd, uid) {
+                prev_fp
+            } else {
+                String::new()
+            }
+        } else if let Some(prev_fp) = prev_fingerprint(&id, hwnd, uid) {
+            prev_fp
         } else {
-            prev.as_ref()
-                .map(|p| p.icon_png_base64.clone())
-                .unwrap_or_default()
+            String::new()
         };
 
         let hidden = slot.flags & NIF_STATE != 0 && slot.state & NIS_HIDDEN != 0;
@@ -1267,26 +1673,25 @@ mod win {
         }
 
         let mut flashing = prev.as_ref().map(|p| p.flashing).unwrap_or(false);
-        if is_update {
-            let prev_fp = OS_FINGERPRINT.lock().get(&id).cloned();
-            let fp_changed = prev_fp.as_ref().is_some_and(|p| p != &fingerprint);
-            let from_or_to_blank = blank_frame || prev_fp.as_deref() == Some("__blank__");
-            let rapid_swap = if fp_changed {
-                let now = std::time::Instant::now();
-                let mut map = FP_CHANGES.lock();
-                let times = map.entry(id.clone()).or_default();
-                times.push(now);
-                times.retain(|t| now.duration_since(*t).as_millis() < 2500);
-                times.len() >= 2
-            } else {
-                false
-            };
-            if blank_frame || from_or_to_blank || rapid_swap {
-                flashing = true;
-            }
-        }
-        if flashing && attention_suppressed(&id) {
-            flashing = false;
+        let tip_changed = prev.as_ref().map(|p| p.tooltip != tooltip).unwrap_or(false);
+        let hidden_opt = if slot.flags & NIF_STATE != 0 {
+            Some(hidden)
+        } else {
+            None
+        };
+        let _ = note_hidden_toggle(&id, hidden_opt);
+        if should_arm_flashing(
+            &id,
+            hwnd,
+            uid,
+            &process,
+            &tooltip,
+            is_update,
+            blank_frame,
+            &fingerprint,
+            tip_changed,
+        ) {
+            flashing = true;
         }
         OS_FINGERPRINT.lock().insert(id.clone(), fingerprint);
 
@@ -1299,6 +1704,10 @@ mod win {
             compute_pin_key(guid, hwnd, uid, &process)
         };
         let resident = is_language_ime_icon(&id, &process, &tooltip);
+        let system_tray = is_shell_system_tray(&id, &process, &tooltip);
+        if system_tray {
+            flashing = false;
+        }
 
         TrayIconInfo {
             id,
@@ -1313,6 +1722,7 @@ mod win {
             area,
             flashing,
             resident,
+            system_tray,
         }
     }
 
@@ -1333,6 +1743,8 @@ mod win {
                 ICONS.lock().remove(&id);
                 OS_FINGERPRINT.lock().remove(&id);
                 FP_CHANGES.lock().remove(&id);
+                LAST_HIDDEN.lock().remove(&id);
+                REG_SNAPSHOT_FP.lock().remove(&id);
                 ATTENTION_ACK.lock().remove(&id);
                 REG_KEY_BY_ID.lock().remove(&id);
                 let _ = sweep_icons();
@@ -1462,6 +1874,7 @@ mod win {
                         }
                     };
                     let resident = is_language_ime_icon(&id, &process, &tip);
+                    let system_tray = is_shell_system_tray(&id, &process, &tip);
                     TrayIconInfo {
                         id: id.clone(),
                         pin_key,
@@ -1475,6 +1888,7 @@ mod win {
                         area: area.to_string(),
                         flashing: false,
                         resident,
+                        system_tray,
                     }
                 },
             );
@@ -1511,6 +1925,15 @@ mod win {
                     reg_map.insert(id.clone(), item.key.clone());
                     keep_ids.insert(id.clone());
                     if let Some(info) = icons.get_mut(&id) {
+                        let sys = is_shell_system_tray(&id, &info.process, &info.tooltip);
+                        if info.system_tray != sys {
+                            info.system_tray = sys;
+                            changed = true;
+                        }
+                        if sys && info.flashing {
+                            info.flashing = false;
+                            changed = true;
+                        }
                         if info.area != area {
                             info.area = area.to_string();
                             changed = true;
@@ -1522,16 +1945,19 @@ mod win {
                             info.tooltip = tip;
                             changed = true;
                         }
-                        if info.icon_png_base64.is_empty() && !item.icon_snapshot.is_empty() {
-                            let b64 = snapshot_to_png_b64(&item.icon_snapshot);
-                            if !b64.is_empty() {
-                                info.icon_png_base64 = b64;
-                                changed = true;
-                            }
-                        }
                         if info.process.is_empty() && !item.process.is_empty() {
                             info.process = item.process.clone();
                             changed = true;
+                        }
+                        if !item.icon_snapshot.is_empty() {
+                            let snap_hash = hash_bytes(&item.icon_snapshot);
+                            let mut reg_fps = REG_SNAPSHOT_FP.lock();
+                            reg_fps.insert(id.clone(), snap_hash);
+                            let b64 = snapshot_to_png_b64(&item.icon_snapshot);
+                            if !b64.is_empty() && info.icon_png_base64 != b64 {
+                                info.icon_png_base64 = b64;
+                                changed = true;
+                            }
                         }
                     }
                 } else if seed_stubs && registry_stub_seed_enabled() {
@@ -1639,7 +2065,7 @@ mod win {
                 let mut slow_pending = true;
                 loop {
                     let interval = if started.elapsed().as_secs() < 30 {
-                        std::time::Duration::from_secs(2)
+                        std::time::Duration::from_secs(1)
                     } else {
                         std::time::Duration::from_secs(15)
                     };
@@ -1682,6 +2108,11 @@ mod win {
     }
 
     fn start_hook_loop() -> bool {
+        // Cold boot: explorer.exe can exist before TrayNotifyWnd — wait so SetWindowsHookEx
+        // targets the real shell tray instead of failing or attaching too early.
+        if !wait_for_shell_tray(std::time::Duration::from_secs(45)) {
+            eprintln!("[tray] Shell_TrayWnd/TrayNotifyWnd not ready after 45s");
+        }
         match crate::win32::tray_hook_host::start_host() {
             Ok(true) => {}
             Ok(false) => {
@@ -1700,7 +2131,7 @@ mod win {
             .spawn(|| {
                 // One cold-start refill after the hook is live so NIM_ADDs hit explorer
                 // (and our CALLWNDPROC) — not a spy FindWindow race.
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(std::time::Duration::from_millis(400));
                 broadcast_taskbar_created();
 
                 let mut buf = Vec::with_capacity(16);
@@ -1746,7 +2177,7 @@ mod win {
                 };
                 eprintln!("[tray] spy online (fallback)");
                 std::thread::sleep(std::time::Duration::from_millis(400));
-                broadcast_taskbar_created();
+                broadcast_taskbar_created_force();
 
                 while let Some(event) = systray.events_blocking() {
                     match event {
@@ -1766,6 +2197,8 @@ mod win {
                             ICONS.lock().remove(&key);
                             OS_FINGERPRINT.lock().remove(&key);
                             FP_CHANGES.lock().remove(&key);
+                            LAST_HIDDEN.lock().remove(&key);
+                            REG_SNAPSHOT_FP.lock().remove(&key);
                             REG_KEY_BY_ID.lock().remove(&key);
                             let _ = sweep_icons();
                             publish();
@@ -1808,44 +2241,86 @@ mod win {
         }
 
         std::thread::Builder::new()
-            .name("tray-empty-watchdog".into())
+            .name("tray-resident-watchdog".into())
             .spawn(|| {
-                // Soft recover: one TaskbarCreated + one spy kick. Avoid storm that
-                // freezes Explorer / our message pump ("未响应").
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                if has_clickable_icons() {
-                    eprintln!(
-                        "[tray] watchdog: clickable={} total={} — ok",
-                        clickable_icon_count(),
-                        ICONS.lock().len()
-                    );
-                    return;
-                }
-                eprintln!(
-                    "[tray] watchdog: no clickable (total={}) — TaskbarCreated once",
-                    ICONS.lock().len()
-                );
-                broadcast_taskbar_created();
+                // Keep pulling 常显 / clickable tray icons through cold-boot races.
+                // Old one-shot watchdog exited as soon as IME (or any icon) appeared,
+                // while TaskbarCreated recovery was blocked by the 20s rate limit —
+                // user had to restart Window Hub once shell apps were ready.
+                let started = std::time::Instant::now();
+                let boot_window = std::time::Duration::from_secs(180);
+                let mut attempts: u32 = 0;
+                let mut spy_kicked = false;
+
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                if has_clickable_icons() {
-                    return;
-                }
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (changed, _) = apply_registry_snapshot(true, true);
-                    if changed {
-                        publish();
+
+                loop {
+                    let in_boot = started.elapsed() < boot_window;
+                    if !tray_needs_resident_recover(in_boot) {
+                        if attempts > 0 && in_boot {
+                            eprintln!(
+                                "[tray] resident-watchdog: recovered clickable={} after {attempts} attempts",
+                                clickable_icon_count()
+                            );
+                            attempts = 0;
+                        }
+                        std::thread::sleep(if in_boot {
+                            std::time::Duration::from_secs(2)
+                        } else {
+                            std::time::Duration::from_secs(30)
+                        });
+                        continue;
                     }
-                }));
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                if !has_clickable_icons() {
+
+                    attempts = attempts.saturating_add(1);
+                    let missing = missing_pinned_clickable();
                     eprintln!(
-                        "[tray] watchdog: still no clickable (total={}) — spy fallback",
-                        ICONS.lock().len()
+                        "[tray] resident-watchdog: recover attempt={attempts} clickable={} missing_pinned={} in_boot={in_boot}",
+                        clickable_icon_count(),
+                        missing.len()
                     );
-                    start_spy_fallback();
+                    if !missing.is_empty() && missing.len() <= 8 {
+                        eprintln!("[tray] resident-watchdog: missing={missing:?}");
+                    }
+
+                    match crate::win32::tray_hook_host::ensure_hook() {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            eprintln!("[tray] resident-watchdog: ensure_hook → not live");
+                        }
+                        Err(err) => {
+                            eprintln!("[tray] resident-watchdog: ensure_hook: {err}");
+                        }
+                    }
+                    broadcast_taskbar_created_force();
+
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    if clickable_icon_count() == 0 || !missing_pinned_clickable().is_empty() {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let (changed, _) = apply_registry_snapshot(true, true);
+                            if changed {
+                                publish();
+                            }
+                        }));
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    if !spy_kicked && clickable_icon_count() == 0 && attempts >= 2 {
+                        eprintln!("[tray] resident-watchdog: still empty — spy fallback");
+                        spy_kicked = true;
+                        start_spy_fallback();
+                    }
+
+                    // After boot window, only fight total emptiness (slow).
+                    let wait = if in_boot {
+                        std::time::Duration::from_secs((4 + attempts as u64).min(12))
+                    } else {
+                        std::time::Duration::from_secs(30)
+                    };
+                    std::thread::sleep(wait);
                 }
             })
-            .expect("spawn tray-empty-watchdog");
+            .expect("spawn tray-resident-watchdog");
     }
 
     /// Last measured popup-menu height per icon id (auto mode).
@@ -1884,6 +2359,38 @@ mod win {
         }
         let t = tip.trim();
         t == "微信" || t == "QQ" || t.starts_with("微信")
+    }
+
+    /// Tray icons that plausibly blink for chat/message attention (not generic apps).
+    fn is_likely_im_tray(process: &str, tip: &str) -> bool {
+        if is_tencent_im(process, tip) {
+            return true;
+        }
+        let p = process.trim().to_ascii_lowercase();
+        if p.contains("telegram")
+            || p.contains("discord")
+            || p.contains("slack")
+            || p.contains("dingtalk")
+            || p.contains("feishu")
+            || p.contains("lark")
+            || p.contains("whatsapp")
+            || p.contains("teams")
+            || p.contains("skype")
+            || p.contains("signal")
+            || p.contains("line")
+        {
+            return true;
+        }
+        let t = tip.trim();
+        let tl = t.to_ascii_lowercase();
+        tl.contains("telegram")
+            || tl.contains("discord")
+            || tl.contains("slack")
+            || t.contains("钉钉")
+            || t.contains("飞书")
+            || t.contains("企业微信")
+            || tl.contains("whatsapp")
+            || tl.contains("teams")
     }
 
     fn process_stem_for_pid(pid: u32) -> String {

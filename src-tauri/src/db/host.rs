@@ -203,7 +203,7 @@ pub fn island_set(conn: &Connection, p: &IslandPrefsRow) -> Result<(), String> {
         "INSERT INTO prefs_island(
             id, auto_immerse, immerse_idle_sec, pull_content, msg_notify, msg_notify_text, msg_notify_sec,
             bar_resident, bar_glass, ignore_ambient_apps_json, scenario_gates_json, updated_at
-         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ) VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
          ON CONFLICT(id) DO UPDATE SET
            auto_immerse=excluded.auto_immerse,
            immerse_idle_sec=excluded.immerse_idle_sec,

@@ -318,17 +318,23 @@ pub fn status() -> EverythingStatus {
         };
     }
     unsafe {
+        // SDK: GetMajorVersion returns 0 when Everything IPC is down.
+        // Prefer this over IsDBLoaded / GetLastError (false「未运行」before any query)
+        // and over an empty QueryW probe (can hitch the UI lock on large indexes).
         let major = (api.get_major_version)();
         let minor = (api.get_minor_version)();
         let rev = (api.get_revision)();
-        let err = (api.get_last_error)();
         let db = (api.is_db_loaded)() != 0;
-        let running = db || err != EVERYTHING_ERROR_IPC;
+        let running = major > 0;
         EverythingStatus {
             available: true,
             running,
             db_loaded: db,
-            version: Some(format!("{major}.{minor}.{rev}")),
+            version: if running {
+                Some(format!("{major}.{minor}.{rev}"))
+            } else {
+                None
+            },
             error: if !running {
                 Some(map_error(EVERYTHING_ERROR_IPC))
             } else {

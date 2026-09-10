@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -11,6 +12,8 @@ import {
 } from "./islandPrefs";
 import {
   getScenarioGate,
+  isTrayPinnedKey,
+  trayKeysMatch,
 } from "./scenarioGates";
 import { listPanelProviders } from "./plugins/panelProviders";
 import { listBarResidentProviders, listScenarioProviders } from "./plugins/islandSlots";
@@ -44,7 +47,16 @@ import {
 
 type AmbientMode = "edge" | "center";
 type DarkPref = "auto" | "dark" | "light";
-type NavId = "general" | "theme" | "dock" | "shortcuts" | "hotkeys" | "tray" | "plugins" | "developer";
+type NavId =
+  | "general"
+  | "theme"
+  | "dock"
+  | "shortcuts"
+  | "hotkeys"
+  | "tray"
+  | "plugins"
+  | "developer"
+  | "about";
 
 type DockDisplayMode =
   | "default"
@@ -192,6 +204,8 @@ type TrayIconInfo = {
   flashing?: boolean;
   /** IME / input language — forced 常显 */
   resident?: boolean;
+  /** Windows shell tray — never auto-rail on flash */
+  system_tray?: boolean;
 };
 
 type TrayPrefs = {
@@ -207,18 +221,29 @@ function trayPinKey(icon: TrayIconInfo): string {
   return k || icon.id;
 }
 
-function isTrayPinned(icon: TrayIconInfo, pinned: Set<string>): boolean {
-  return pinned.has(trayPinKey(icon)) || pinned.has(icon.id);
+function isTrayPinned(
+  icon: TrayIconInfo,
+  pinned: Set<string>,
+  liveTrayKeys: string[],
+): boolean {
+  const key = trayPinKey(icon);
+  return isTrayPinnedKey(key, icon.id, pinned, liveTrayKeys);
 }
 
 /** Missing key = notify on flash (default). */
 function isFlashNotifyEnabled(
   icon: TrayIconInfo,
   map: Record<string, boolean>,
+  liveTrayKeys: string[],
 ): boolean {
   const key = trayPinKey(icon);
   if (map[key] === false) return false;
   if (map[icon.id] === false) return false;
+  for (const [k, v] of Object.entries(map)) {
+    if (v !== false) continue;
+    if (trayKeysMatch(k, key, liveTrayKeys)) return false;
+    if (trayKeysMatch(k, icon.id, liveTrayKeys)) return false;
+  }
   return true;
 }
 
@@ -434,6 +459,17 @@ const NAV: { id: NavId; label: string; tint: string; icon: ReactNode }[] = [
       </svg>
     ),
   },
+  {
+    id: "about",
+    label: "关于",
+    tint: "#64d2ff",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 10v6M12 7h.01" strokeLinecap="round" />
+      </svg>
+    ),
+  },
 ];
 
 const AMBIENT_MODES: { id: AmbientMode; label: string; desc: string }[] = [
@@ -484,6 +520,8 @@ export default function SettingsApp() {
   const [trayDetailKey, setTrayDetailKey] = useState<string | null>(null);
   const [menuHeightDraft, setMenuHeightDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  /** Ignore tray-prefs broadcasts while a local save is in flight (hook publish races). */
+  const trayPrefsMuteUntil = useRef(0);
   const [settingsToast, setSettingsToast] = useState<SettingsToastPayload | null>(
     null,
   );
@@ -494,6 +532,13 @@ export default function SettingsApp() {
     startOnBoot: false,
     startOnBootBackend: "none",
   });
+  const [appVersion, setAppVersion] = useState("0.2.0");
+
+  useEffect(() => {
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion("0.2.0"));
+  }, []);
 
   const normalizeGeneralPrefs = (gp: Partial<GeneralPrefs> & { startOnBoot?: boolean }): GeneralPrefs => {
     const backend: AutostartBackend =
@@ -905,6 +950,7 @@ export default function SettingsApp() {
       setTrays(ev.payload);
     }).then((fn) => unsubs.push(fn));
     void listen<TrayPrefs>("tray-prefs", (ev) => {
+      if (Date.now() < trayPrefsMuteUntil.current) return;
       setPinned(ev.payload.pinned ?? []);
       setMenuHeights(ev.payload.menu_heights ?? {});
       setFlashNotify(ev.payload.flash_notify ?? {});
@@ -980,6 +1026,10 @@ export default function SettingsApp() {
   }, [darkPref]);
 
   const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
+  const liveTrayKeys = useMemo(
+    () => trays.map((t) => trayPinKey(t)).filter(Boolean),
+    [trays],
+  );
   const filteredNav = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return NAV;
@@ -1036,6 +1086,7 @@ export default function SettingsApp() {
     nextHeights: Record<string, number>,
     nextFlashNotify: Record<string, boolean> = flashNotify,
   ) {
+    trayPrefsMuteUntil.current = Date.now() + 1200;
     setSaving(true);
     try {
       const prefs = await invoke<TrayPrefs>("set_tray_prefs", {
@@ -1046,8 +1097,10 @@ export default function SettingsApp() {
       setPinned(prefs.pinned ?? nextPinned);
       setMenuHeights(prefs.menu_heights ?? nextHeights);
       setFlashNotify(prefs.flash_notify ?? nextFlashNotify);
-    } catch {
-      /* noop */
+      return prefs;
+    } catch (e) {
+      console.error("[settings] tray prefs save failed", e);
+      throw e;
     } finally {
       setSaving(false);
     }
@@ -1055,18 +1108,44 @@ export default function SettingsApp() {
 
   async function togglePinned(icon: TrayIconInfo) {
     // Input language / IME stay resident — cannot unpin.
-    if (isTrayResident(icon)) return;
+    if (isTrayResident(icon) || saving) return;
     const key = trayPinKey(icon);
-    const next = isTrayPinned(icon, pinnedSet)
-      ? pinned.filter((x) => x !== key && x !== icon.id)
-      : [...pinned.filter((x) => x !== icon.id), key];
+    const prev = pinned;
+    const next = isTrayPinned(icon, pinnedSet, liveTrayKeys)
+      ? pinned.filter(
+          (x) =>
+            !trayKeysMatch(x, key, liveTrayKeys) &&
+            !trayKeysMatch(x, icon.id, liveTrayKeys),
+        )
+      : [
+          ...pinned.filter(
+            (x) =>
+              x !== key &&
+              x !== icon.id &&
+              !trayKeysMatch(x, key, liveTrayKeys) &&
+              !trayKeysMatch(x, icon.id, liveTrayKeys),
+          ),
+          key,
+        ];
     setPinned(next);
-    await persistTrayPrefs(next, menuHeights, flashNotify);
+    try {
+      const prefs = await persistTrayPrefs(next, menuHeights, flashNotify);
+      const resolved = (prefs.pinned ?? []).find(
+        (p) =>
+          p === key ||
+          p === icon.id ||
+          trayKeysMatch(p, key, liveTrayKeys) ||
+          trayKeysMatch(p, icon.id, liveTrayKeys),
+      );
+      if (resolved) setTrayDetailKey(resolved);
+    } catch {
+      setPinned(prev);
+    }
   }
 
   async function toggleFlashNotify(icon: TrayIconInfo) {
     const key = trayPinKey(icon);
-    const on = isFlashNotifyEnabled(icon, flashNotify);
+    const on = isFlashNotifyEnabled(icon, flashNotify, liveTrayKeys);
     const next = { ...flashNotify };
     delete next[icon.id];
     if (on) {
@@ -1386,6 +1465,14 @@ export default function SettingsApp() {
                   excludeFromPullContent 的插件（如天气、镜子）。中转站等排除项不出现在此，经拖入或岛栏摘要临时打开。
                 </p>
                 <div className="mode-list">
+                  <button
+                    type="button"
+                    className={`mode-item${islandPrefs.pullContent === "" ? " is-selected" : ""}`}
+                    onClick={() => updateIslandPrefs({ pullContent: "" })}
+                  >
+                    <span className="mode-label">无</span>
+                    <span className="mode-desc">下拉手势不展开面板（岛栏 chip / 拖入仍可临时打开）</span>
+                  </button>
                   {pullOptions.map((item) => (
                     <button
                       key={item.id}
@@ -2038,7 +2125,7 @@ export default function SettingsApp() {
             if (detailIcon) {
               const key = trayPinKey(detailIcon);
               const resident = isTrayResident(detailIcon);
-              const on = resident || isTrayPinned(detailIcon, pinnedSet);
+              const on = resident || isTrayPinned(detailIcon, pinnedSet, liveTrayKeys);
               const customH = menuHeights[key] ?? menuHeights[detailIcon.id];
               const tencentDefault = isTencentIm(detailIcon);
               return (
@@ -2101,11 +2188,11 @@ export default function SettingsApp() {
                       </div>
                       <button
                         type="button"
-                        className={`pref-switch${on ? " is-on" : ""}${resident ? " is-disabled" : ""}`}
+                        className={`pref-switch${on ? " is-on" : ""}${resident || saving ? " is-disabled" : ""}`}
                         role="switch"
                         aria-checked={on}
-                        aria-disabled={resident || undefined}
-                        disabled={resident}
+                        aria-disabled={resident || saving || undefined}
+                        disabled={resident || saving}
                         onClick={() => void togglePinned(detailIcon)}
                       >
                         <span className="pref-switch-knob" />
@@ -2121,9 +2208,9 @@ export default function SettingsApp() {
                       </div>
                       <button
                         type="button"
-                        className={`pref-switch${isFlashNotifyEnabled(detailIcon, flashNotify) ? " is-on" : ""}`}
+                        className={`pref-switch${isFlashNotifyEnabled(detailIcon, flashNotify, liveTrayKeys) ? " is-on" : ""}`}
                         role="switch"
-                        aria-checked={isFlashNotifyEnabled(detailIcon, flashNotify)}
+                        aria-checked={isFlashNotifyEnabled(detailIcon, flashNotify, liveTrayKeys)}
                         onClick={() => void toggleFlashNotify(detailIcon)}
                       >
                         <span className="pref-switch-knob" />
@@ -2307,6 +2394,61 @@ export default function SettingsApp() {
           )}
 
           {nav === "developer" && <SqliteDevPanel />}
+
+          {nav === "about" && (
+            <>
+              <section className="settings-card about-hero-card">
+                <div className="about-hero">
+                  <div className="about-mark" aria-hidden>
+                    WH
+                  </div>
+                  <div className="about-hero-text">
+                    <h2 className="about-title">Window Hub</h2>
+                    <p className="about-tagline">Windows 灵动岛与桌面增强</p>
+                    <div className="about-badges">
+                      <span className="about-badge">开发预览</span>
+                      <span className="about-badge is-muted">尚未正式上线</span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <h2>版本信息</h2>
+                <p className="card-desc">
+                  采用语义化版本（SemVer）。主版本为 0 表示仍在开发阶段，接口与功能可能变动，不代表正式发行版。
+                </p>
+                <div className="pref-row">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">当前版本</span>
+                    <span className="pref-row-desc">与安装包 / Cargo / package.json 同步</span>
+                  </span>
+                  <span className="about-version-value">{appVersion}</span>
+                </div>
+                <div className="pref-row">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">发布通道</span>
+                    <span className="pref-row-desc">正式上线后将升至 1.0.0 并去掉预览标记</span>
+                  </span>
+                  <span className="about-version-value is-channel">dev</span>
+                </div>
+                <div className="pref-row">
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">应用标识</span>
+                    <span className="pref-row-desc">Windows 包标识符</span>
+                  </span>
+                  <span className="about-version-value is-id">com.xushi.window-hub</span>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <h2>说明</h2>
+                <p className="card-desc">
+                  本版本仅供本地开发与内测使用，不保证数据兼容与长期支持。若需反馈问题，请附带上方版本号。
+                </p>
+              </section>
+            </>
+          )}
         </div>
 
         {settingsToast ? (

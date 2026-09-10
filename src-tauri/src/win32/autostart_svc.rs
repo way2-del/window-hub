@@ -474,6 +474,7 @@ fn service_worker() {
 
     let mut child: Option<HANDLE> = None;
     let mut last_err: Option<String> = None;
+    let mut shell_settled = false;
 
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         // Drop dead child handle.
@@ -527,6 +528,16 @@ fn service_worker() {
             }
             sleep_interruptible(LAUNCH_RETRY_SECS * 1000);
             continue;
+        }
+
+        // explorer.exe can exist before Shell_TrayWnd / TrayNotifyWnd is live.
+        // Settle once per boot so the GUI hook does not race an empty tray.
+        if !shell_settled {
+            shell_settled = true;
+            svc_log(&format!(
+                "session {session}: explorer up — settling shell tray before GUI launch"
+            ));
+            sleep_interruptible(2500);
         }
 
         match launch_gui_in_session(session) {

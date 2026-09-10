@@ -189,10 +189,16 @@ fn emit_plugins(app: &AppHandle, reg: &RegistryFile) {
 }
 
 pub(crate) fn find_installed_plugin(id: &str) -> Option<InstalledPluginRecord> {
-    load_registry()
-        .plugins
-        .into_iter()
-        .find(|p| p.id == id)
+    let reg = load_registry();
+    if let Some(p) = reg.plugins.iter().find(|p| p.id == id).cloned() {
+        return Some(p);
+    }
+    // Host / prefs may still reference the official id while only `__dev` is installed.
+    if !id.ends_with("__dev") {
+        let dev = format!("{id}__dev");
+        return reg.plugins.into_iter().find(|p| p.id == dev);
+    }
+    None
 }
 
 fn close_plugin_popup(app: &AppHandle) {
@@ -257,9 +263,9 @@ pub fn ensure_official_plugins(app: &AppHandle) {
             }
             continue;
         }
-        if plugin_already_installed(&reg, id) {
-            continue;
-        }
+        // Production id missing: always install it (even if a __dev copy exists).
+        // Previously `plugin_already_installed` treated __dev as enough and left
+        // Host code that hard-codes the official id without a panel to load.
         if let Err(e) = install_from_dir(app, &bundled, false) {
             eprintln!("[plugins] ensure {id} failed: {e}");
         }

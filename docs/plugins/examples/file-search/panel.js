@@ -479,6 +479,7 @@ async function runSearch(query, opts = {}) {
     if (searchGen !== state._searchGen) return;
     state.results = Array.isArray(res?.results) ? res.results : [];
     state.total = Number(res?.total) || state.results.length;
+    state.status = { ...(state.status || {}), available: true, running: true, error: null };
     await pushHistory(q);
   } catch (e) {
     if (searchGen !== state._searchGen) return;
@@ -1318,6 +1319,27 @@ function onHostSearch(ev) {
   void runSearch(d.query || "");
 }
 
+/** Host may post search before boot finishes — queue until ready. */
+let bootReady = false;
+let pendingHostSearch = null;
+
+function onHostSearchQueued(ev) {
+  const d = ev?.detail;
+  if (!d) return;
+  if (!bootReady) {
+    pendingHostSearch = d;
+    return;
+  }
+  onHostSearch(ev);
+}
+
+function flushPendingHostSearch() {
+  const d = pendingHostSearch;
+  pendingHostSearch = null;
+  if (!d) return;
+  onHostSearch({ detail: d });
+}
+
 /** Host hotkey: expand to card-group home on the 「常用」 folder. */
 async function openFavoritesHome() {
   const fav =
@@ -1351,10 +1373,36 @@ function withTimeout(promise, ms, label) {
 }
 
 async function boot() {
-  await withTimeout(loadStore(), 5000, "读取配置");
-  await withTimeout(refreshStatus(), 4000, "检测 Everything");
-  render();
-  window.addEventListener("wh-island-search", onHostSearch);
+  // Paint shell immediately so Alt+Space never sticks on a pure-black iframe
+  // while storage / Everything IPC is still warming up.
+  state.store = normalize(null);
+  state.activeFolderId = state.store.folders[0]?.id || null;
+  try {
+    render();
+  } catch (e) {
+    console.warn("[file-search/panel] early render", e);
+  }
+  bootReady = true;
+  window.addEventListener("wh-island-search", onHostSearchQueued);
+  flushPendingHostSearch();
+
+  try {
+    await withTimeout(loadStore(), 5000, "读取配置");
+    await withTimeout(refreshStatus(), 4000, "检测 Everything");
+    render();
+    flushPendingHostSearch();
+  } catch (e) {
+    console.error("[file-search/panel] boot hydrate", e);
+    state.error = String(e?.message || e);
+    try {
+      render();
+    } catch {
+      const root = document.getElementById("root");
+      if (root) {
+        root.innerHTML = `<div class="empty-mini">启动失败：${escapeHtml(e?.message || e)}</div>`;
+      }
+    }
+  }
 
   // Host posts leave while expand animation is still running (panelActive=false).
   // Bootstrap also sync-fires onLeave when registering during phase===leave —
@@ -1362,7 +1410,10 @@ async function boot() {
   let panelSessionLive = false;
   hub().panel?.onEnter?.(() => {
     panelSessionLive = true;
-    if (state.view === "home") render();
+    void refreshStatus()
+      .then(() => render())
+      .catch(() => render());
+    flushPendingHostSearch();
   });
   hub().panel?.onLeave?.(() => {
     if (!panelSessionLive) return;
@@ -1377,6 +1428,12 @@ async function boot() {
     state.hitMenuIndex = null;
     state.flash = null;
     unmountBoard();
+    // Keep a visible home shell if leave races while the iframe is still on-screen.
+    try {
+      render();
+    } catch {
+      /* ignore */
+    }
   });
 }
 

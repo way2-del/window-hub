@@ -9,6 +9,7 @@ import {
   sameOrder,
 } from "../chromeReorder";
 import { invokeTrayRightClick, armTrayLeftClick, fireTrayLeftDouble } from "../trayInvoke";
+import { isTrayPinnedKey } from "../scenarioGates";
 
 export type TrayIconInfo = {
   id: string;
@@ -25,6 +26,8 @@ export type TrayIconInfo = {
   flashing?: boolean;
   /** Third-party IME notify icons — keep on the rail when present. */
   resident?: boolean;
+  /** Windows shell tray (蓝牙/资源管理器等) — never auto-rail on flash. */
+  system_tray?: boolean;
 };
 
 export type TrayPrefs = {
@@ -145,9 +148,16 @@ export function trayPinKey(icon: TrayIconInfo): string {
   return k || icon.id;
 }
 
-export function isTrayPinned(icon: TrayIconInfo, pinned: Set<string> | string[]): boolean {
-  const set = pinned instanceof Set ? pinned : new Set(pinned);
-  return set.has(trayPinKey(icon)) || set.has(icon.id);
+export function isTrayPinned(
+  icon: TrayIconInfo,
+  pinned: Set<string> | string[],
+  liveTrayKeys?: Iterable<string>,
+): boolean {
+  const key = trayPinKey(icon);
+  const live =
+    liveTrayKeys ??
+    (pinned instanceof Set ? pinned : pinned);
+  return isTrayPinnedKey(key, icon.id, pinned, live);
 }
 
 /** Third-party IME notify icons that do show up in the tray hook. */
@@ -499,15 +509,19 @@ export default function TrayCluster({
   }, []);
 
   const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
+  const liveTrayKeys = useMemo(
+    () => icons.map((i) => trayPinKey(i)).filter(Boolean),
+    [icons],
+  );
   const pinnedIcons = useMemo(() => {
-    const pinnedOnly = icons.filter((i) => isTrayPinned(i, pinnedSet));
+    const pinnedOnly = icons.filter((i) => isTrayPinned(i, pinnedSet, liveTrayKeys));
     const rank = new Map(pinned.map((k, i) => [k, i]));
     return [...pinnedOnly].sort((a, b) => {
       const ra = rank.get(trayPinKey(a)) ?? rank.get(a.id) ?? 1e9;
       const rb = rank.get(trayPinKey(b)) ?? rank.get(b.id) ?? 1e9;
       return ra - rb;
     });
-  }, [icons, pinnedSet, pinned]);
+  }, [icons, pinnedSet, pinned, liveTrayKeys]);
   const railIcons = useMemo(() => {
     const seen = new Set<string>();
     const out: TrayIconInfo[] = [];
@@ -523,8 +537,9 @@ export default function TrayCluster({
       if (!residentIds.has(icon.id)) push(icon);
     }
     for (const icon of resident) push(icon);
+    // 第三方应用闪动时临时上图栏；系统托盘（蓝牙/资源管理器等）不自动出现
     for (const icon of icons) {
-      if (icon.flashing) push(icon);
+      if (icon.flashing && !icon.system_tray) push(icon);
     }
     return out;
   }, [icons, pinnedIcons]);
@@ -692,7 +707,7 @@ export default function TrayCluster({
       <div className="tray-rail">
         {railIcons.map((icon) => {
           const pinKey = trayPinKey(icon);
-          const canReorder = !isTrayResident(icon) && isTrayPinned(icon, pinnedSet);
+          const canReorder = !isTrayResident(icon) && isTrayPinned(icon, pinnedSet, liveTrayKeys);
           return (
             <button
               key={icon.id}

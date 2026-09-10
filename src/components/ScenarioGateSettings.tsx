@@ -8,7 +8,9 @@ import {
   type IslandPrefs,
 } from "../islandPrefs";
 import {
+  exePathFromTrayPinKey,
   getScenarioGate,
+  trayKeyPresent,
   upsertScenarioGate,
   windowKeyOf,
   type ScenarioGate,
@@ -168,13 +170,29 @@ export default function ScenarioGateSettings({ pluginId, enabled = true }: Props
     });
   }
   for (const key of gate.trayKeys) {
-    if (liveTrayKeys.has(key)) continue;
+    if (trayKeyPresent(key, liveTrayKeys)) continue;
     if (presenceItems.some((i) => i.kind === "tray" && i.key === key)) continue;
+    const exe = exePathFromTrayPinKey(key);
+    const windowRunning =
+      !!exe &&
+      openWindows.some((w) => {
+        const wk = windowKeyOf(w);
+        if (wk === `exe:${exe}`) return true;
+        const path = String(w.exe || "")
+          .trim()
+          .replace(/\//g, "\\")
+          .toLowerCase();
+        return path === exe;
+      });
     presenceItems.push({
       kind: "tray",
       key,
-      label: "已选（当前不在托盘）",
-      sub: key,
+      label: windowRunning
+        ? "已选（无托盘图标，窗口在运行）"
+        : "已选（当前不在托盘）",
+      sub: windowRunning
+        ? `${key} · 进程在跑但未挂托盘；可取消此项或仅保留上方窗口条件`
+        : key,
       orphan: true,
     });
   }

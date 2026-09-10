@@ -33,7 +33,12 @@ export function parseEnabledSurfaces(
   const raw = settings?.enabledSurfaces;
   if (!Array.isArray(raw) || raw.length === 0) return declared;
   const allowed = new Set(declared);
-  return raw.filter((v): v is PluginSurfaceKey => typeof v === "string" && allowed.has(v as PluginSurfaceKey));
+  // Drop unknown/legacy keys (e.g. removed "desktop"); if nothing valid remains,
+  // fall back to all declared surfaces so Host settings stay usable.
+  const filtered = raw.filter(
+    (v): v is PluginSurfaceKey => typeof v === "string" && allowed.has(v as PluginSurfaceKey),
+  );
+  return filtered.length > 0 ? filtered : declared;
 }
 
 export function isSurfaceEnabled(

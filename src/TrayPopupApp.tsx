@@ -6,6 +6,7 @@ import {
   isTrayPinned,
   isTrayResident,
   trayLabel,
+  trayPinKey,
   type TrayIconInfo,
   type TrayPrefs,
 } from "./components/TrayCluster";
@@ -219,16 +220,25 @@ export default function TrayPopupApp() {
   }, [boot]);
 
   const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
+  const liveTrayKeys = useMemo(
+    () => icons.map((i) => trayPinKey(i)).filter(Boolean),
+    [icons],
+  );
   const pinnedIcons = useMemo(() => {
-    const list = icons.filter((i) => isTrayResident(i) || isTrayPinned(i, pinnedSet));
+    const list = icons.filter(
+      (i) => isTrayResident(i) || isTrayPinned(i, pinnedSet, liveTrayKeys),
+    );
     return [
       ...list.filter((i) => !isTrayResident(i)),
       ...list.filter((i) => isTrayResident(i)),
     ];
-  }, [icons, pinnedSet]);
+  }, [icons, pinnedSet, liveTrayKeys]);
   const overflowIcons = useMemo(
-    () => icons.filter((i) => !isTrayResident(i) && !isTrayPinned(i, pinnedSet)),
-    [icons, pinnedSet],
+    () =>
+      icons.filter(
+        (i) => !isTrayResident(i) && !isTrayPinned(i, pinnedSet, liveTrayKeys),
+      ),
+    [icons, pinnedSet, liveTrayKeys],
   );
 
   if (!boot) {

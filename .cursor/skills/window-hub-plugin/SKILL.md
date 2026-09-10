@@ -74,9 +74,11 @@ my-plugin/
 
 **硬约定（否则空白）：**
 
-- Panel：Host **只**注入 `panel.css` / `panel.js`（与 `entry.panel` 旁路同目录），**不要**只写 `index.html` 指望自动找脚本。
+- Panel：Host **只**读并内联 `panel.css` / `panel.js`（与 `entry.panel` 同目录）进 iframe `srcdoc`；`panel.html` 里的 `<script src>` / `<link>` 会被剥掉。**不要**只写 `index.html`，也**不要**依赖相对路径脚本在岛面板里自行加载。
+- 重型依赖（如 React 看板）可同目录放可选 `board.js`；Host 在 `panel.js` 之前内联。保持 `panel.js` 轻量，重逻辑放 `board.js`。
 - Popup：注入 `popup.css` / `popup.js`（Host 挂 `#app.wg-shell`，**不**用 popup.html 外壳）。边距见 `window-hub-plugin-popup`。
 - Shortcuts：按 entry 文件名 stem 找 `{stem}.css` / `{stem}.js`。
+- 禁止 `alert` / `confirm` / `prompt`；用面板内 UI。岛面板挂载点常用 `#root` 或 `#app`，脚本须在加载后自行 `render`。
 
 `id`：小写 + `.` / `-`，须含 `.`（如 `com.example.foo`）。
 

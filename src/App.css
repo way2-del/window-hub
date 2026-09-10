@@ -1034,7 +1034,7 @@ button {
   display: flex;
   flex: 1;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: stretch;
   min-height: 0;
   padding: var(--island-panel-inset-top, 10px) var(--island-panel-inset, 16px)
     var(--island-panel-inset, 16px);
@@ -1051,12 +1051,18 @@ button {
     var(--island-panel-inset, 16px);
 }
 
+.island-root.is-expanded .island-panel,
 .island-panel.is-open {
-  pointer-events: auto;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  visibility: visible !important;
 }
 
 .island-panel.is-open > * {
   pointer-events: auto;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
 }
 
 /* 中转站矮壳：左右/底略留白避开岛壳底角，勿给 iframe 再套圆角遮罩 */
@@ -1352,28 +1358,33 @@ button {
 }
 
 .tray-icon-btn.is-flashing,
+.tray-icon-btn.is-flashing .tray-glyph,
 .tray-drop-item.is-flashing .tray-glyph {
-  animation: tray-flash 0.9s step-start infinite;
+  animation: tray-flash 0.75s step-start infinite;
 }
 
 @keyframes tray-flash {
   0%,
   49% {
     opacity: 1;
+    filter: brightness(1);
   }
   50%,
   100% {
-    opacity: 0.12;
+    opacity: 0.2;
+    filter: brightness(2);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .tray-icon-btn.is-flashing,
+  .tray-icon-btn.is-flashing .tray-glyph,
   .tray-drop-item.is-flashing .tray-glyph {
     animation: none;
     opacity: 1;
-    outline: 1px solid currentColor;
+    outline: 1px solid color-mix(in srgb, var(--sys-accent, #34c759) 85%, #fff);
     outline-offset: 1px;
+    filter: brightness(1.35);
   }
 }
 

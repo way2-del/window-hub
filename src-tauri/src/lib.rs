@@ -774,6 +774,8 @@ pub fn run() {
             commands::main_cursor_client_pos,
             commands::dock_set_visual_height,
             commands::float_overlay,
+            commands::activate_main_island,
+            commands::resize_main_island,
             commands::settle_overlay,
             commands::open_settings_window,
             commands::close_settings_window,

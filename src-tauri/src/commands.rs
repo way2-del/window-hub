@@ -223,6 +223,83 @@ pub async fn float_overlay(window: WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// 热键呼出岛栏搜索：激活主窗以便键盘直达输入框（async，勿在 sync IPC 里 set_focus）。
+#[tauri::command]
+pub async fn activate_main_island(window: WebviewWindow) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AllowSetForegroundWindow, ASFW_ANY,
+        };
+        unsafe {
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
+        }
+        let _ = crate::win32::enum_windows::focus_window(raw);
+    }
+    let _ = window.set_focus();
+    Ok(())
+}
+
+/// Resize the main island HWND (full monitor width × logical height).
+/// Bypasses `resizable: false` — Tauri `set_size` is unreliable during pull gestures.
+#[tauri::command]
+pub async fn resize_main_island(
+    window: WebviewWindow,
+    window_height: f64,
+) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let raw = hwnd.0 as isize;
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+
+        let hwnd = HWND(raw as *mut _);
+        unsafe {
+            let dpi = GetDpiForWindow(hwnd).max(96) as f64;
+            let scale = dpi / 96.0;
+            let h_px = (window_height * scale).round().max(1.0) as i32;
+
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(mon, &mut info).as_bool() {
+                return Err("resize_main_island: monitor".into());
+            }
+            let mon = info.rcMonitor;
+            let w = (mon.right - mon.left).max(1);
+            SetWindowPos(
+                hwnd,
+                None,
+                mon.left,
+                mon.top,
+                w,
+                h_px,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .map_err(|e| format!("resize_main_island SetWindowPos: {e}"))?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let scale = window.scale_factor().map_err(|e| e.to_string())?;
+        let inner = window.inner_size().map_err(|e| e.to_string())?;
+        let w = inner.width as f64 / scale;
+        window
+            .set_size(tauri::LogicalSize::new(w, window_height))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// 岛收回折叠条：仍保持 TOPMOST（防壁纸软件 / 显示桌面埋掉顶栏）。
 #[tauri::command]
 pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
