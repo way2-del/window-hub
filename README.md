@@ -1,32 +1,123 @@
 # Window Hub
 
-Windows-only desktop tool that parks ordinary application windows off-screen, captures a configurable region of each into a **3-column mosaic**, and forwards mouse/keyboard input from the preview tiles back to the real windows.
+**Windows 顶栏壳** — 用灵动岛、Dock 与系统托盘 chrome 重新组织日常窗口与快捷操作。
 
-## Stack
+> Windows 10+ only · [Tauri 2](https://tauri.app/) + React + Rust / Win32  
+> [English summary](#english)
 
-- **Tauri 2** + React/Vite UI
-- **Rust** backend with standalone **`bevy_ecs`**
-- Win32: `EnumWindows`, off-screen park, `PrintWindow(PW_RENDERFULLCONTENT)`, `PostMessage` input
+## 这是什么
 
-## Run
+Window Hub 不是又一个启动器，而是一层贴合 Windows 的 **宿主壳**：
+
+- **灵动岛** — 顶栏折叠岛、下拉面板、拖放中转、情景占位、通知横幅、可选沉浸式反色
+- **Dock** — 底部坞（显示模式、磁化放大、图标编辑、启动器等）
+- **状态栏 chrome** — 快捷区插件条、系统托盘聚合、WLAN / 以太网与输入法指示器
+- **插件宿主** — 静态包（`.whpx`）+ CapGate（`hub.*`），示例与本地市场入口齐全
+
+旧版「窗口马赛克停靠 / 离屏捕获」能力仍在代码库中，但当前产品主轴是 **岛 + Dock + chrome + 插件**。
+
+## 功能亮点
+
+| 能力 | 说明 |
+|------|------|
+| 灵动岛 | 岛栏摘要、下拉面板、拖放暂存、通知槽位 |
+| Dock | 多显示模式、悬停预览、热键与设置面板 |
+| 网络指示器 | Wi‑Fi 扫描 / 连接；**有线优先**（插上网线显示以太网图标与详情） |
+| 输入法 | 语言与 IME 状态芯片、快捷切换菜单 |
+| 托盘 | 原生托盘钩子、常显钉选、闪烁上岛通知 |
+| 插件 | 快捷区 / 岛面板 / 托管弹窗；官方示例可直接导入 |
+
+## 技术栈
+
+- **UI**：Tauri 2 · Vite · React 19 · TypeScript
+- **后端**：Rust · `bevy_ecs` · SQLite
+- **系统**：Win32（托盘 hook、AppBar / Dock、WLAN、IME、捕获、玻璃材质等）
+- **分发**：NSIS 安装包
+
+## 环境要求
+
+- Windows 10 或更高
+- [Rust](https://rustup.rs/)（MSVC toolchain）
+- [Node.js](https://nodejs.org/) + npm / pnpm
+- WebView2（Win10/11 通常已预装）
+
+## 快速开始
 
 ```bash
 npm install
-npm run tauri dev
+npm run tauri -- dev
 ```
 
-Requires Rust (MSVC), WebView2, and Windows 10+.
+### 常用脚本
 
-## Usage
+| 命令 | 作用 |
+|------|------|
+| `npm run tauri -- dev` | 开发调试 |
+| `npm run tauri:build:fast` | 快速 release（不打安装包） |
+| `npm run tauri:build:bundle` | 打 NSIS 安装包 |
+| `npm run clean:target` | 清理 Rust `target` |
 
-1. Click **附着窗口** on an empty slot and pick a top-level window.
-2. The target is moved off-screen (parked) and appears in the mosaic.
-3. Click/type inside the preview to operate the real window.
-4. Use **截取区域** to drag a ROI; **全窗** resets; **分离** restores the window.
+产物示例：
 
-## Limitations
+- 可执行文件：`src-tauri/target/release/window-hub.exe`
+- 安装包：`src-tauri/target/release/bundle/nsis/Window Hub_*_x64-setup.exe`
 
-- “Minimize” is implemented as **off-screen parking** (true `SW_MINIMIZE` usually blacks out capture and breaks input).
-- Some DirectUI / elevated / UWP apps may ignore `PostMessage` input.
-- Games and exclusive fullscreen are out of scope.
-- Accelerated windows generally need `PW_RENDERFULLCONTENT`; rare black frames may need a future WGC path.
+## 插件开发
+
+| 文档 | 内容 |
+|------|------|
+| [docs/plugins/README.md](docs/plugins/README.md) | 规范总览 |
+| [docs/plugins/host-api.md](docs/plugins/host-api.md) | CapGate 与 `hub.*` |
+| [docs/plugins/sdk.md](docs/plugins/sdk.md) | 分表面 SDK |
+| [docs/plugins/plugin.schema.json](docs/plugins/plugin.schema.json) | `plugin.json` Schema |
+| `docs/plugins/examples/` | 窗口组、中转站、天气、文件搜索等示例 |
+
+原则：**插件 = 静态包**；系统能力由宿主声明（capability）；超出边界用 Companion 独立进程。
+
+## 项目结构（简）
+
+```
+window-hub/
+├── src/                    # React 前端（岛、Dock、托盘、弹窗）
+├── src-tauri/              # Rust / Win32 宿主
+│   └── resources/plugins/
+├── docs/plugins/           # 插件契约与示例
+└── .cursor/skills/         # 开发约定（岛、插件、托盘等）
+```
+
+## 贡献
+
+欢迎 Issue / PR。改动前建议先阅读对应 `.cursor/skills/` 与 `docs/plugins/`，保持岛栏几何、强调色与插件表面一致。
+
+反馈时请尽量附带：Windows 版本、复现步骤、日志或录屏。
+
+## 许可
+
+本仓库根目录 **尚未添加 `LICENSE` 文件**。使用、分发或二次开发前请先与维护者确认许可意向；引入的第三方组件以其各自许可证为准。
+
+---
+
+## English
+
+**Window Hub** is a Windows-only desktop shell built around a Dynamic Island, Dock, and system-tray chrome.
+
+### Highlights
+
+- Dynamic Island — compact bar, pull-down panels, drop staging, notifications
+- Dock — display modes, hover previews, hotkeys
+- Chrome — shortcuts strip, tray aggregation, **WLAN + Ethernet** (wired preferred), IME chips
+- Plugins — static `.whpx` packages via CapGate (`hub.*`); see `docs/plugins/`
+
+### Develop
+
+```bash
+npm install
+npm run tauri -- dev
+npm run tauri:build:bundle   # NSIS installer
+```
+
+Requires Windows 10+, Rust (MSVC), Node.js, and WebView2.
+
+### License
+
+No root `LICENSE` yet — confirm with maintainers before redistribution.

@@ -1,4 +1,4 @@
-//! Host-owned Wi‑Fi indicator (Shell WLAN chrome vanishes with the taskbar).
+//! Host-owned Wi‑Fi / Ethernet indicator (Shell network chrome vanishes with the taskbar).
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,17 @@ pub struct WifiState {
     pub link_mbps: u32,
     pub mac: String,
     pub secured: bool,
+    /// Wired (Ethernet) link is up — tray prefers this over Wi‑Fi glyph.
+    #[serde(default)]
+    pub ethernet_connected: bool,
+    #[serde(default)]
+    pub ethernet_name: String,
+    #[serde(default)]
+    pub ethernet_ip: String,
+    #[serde(default)]
+    pub ethernet_link_mbps: u32,
+    #[serde(default)]
+    pub ethernet_mac: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,8 +55,10 @@ mod win {
     use windows::core::{GUID, HSTRING, PCWSTR};
     use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, BOOL, HANDLE, HWND};
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-        GAA_FLAG_SKIP_MULTICAST, IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH,
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST,
+        GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IF_TYPE_ETHERNET_CSMACD,
+        IF_TYPE_GIGABITETHERNET, IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH,
+        IP_ADAPTER_GATEWAY_ADDRESS_LH,
     };
     use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows::Win32::NetworkManagement::WiFi::{
@@ -176,80 +189,218 @@ mod win {
         Some(attrs)
     }
 
-    unsafe fn adapter_ip_mac_speed() -> (String, String, u32) {
-        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    unsafe fn pwstr_to_string(p: windows::core::PWSTR) -> String {
+        if p.is_null() {
+            return String::new();
+        }
+        p.to_string().unwrap_or_default().trim().to_string()
+    }
+
+    fn is_virtual_adapter(name: &str, desc: &str) -> bool {
+        let s = format!("{name} {desc}").to_ascii_lowercase();
+        [
+            "virtual",
+            "hyper-v",
+            "vethernet",
+            "vmware",
+            "virtualbox",
+            "vbox",
+            "vpn",
+            "tap-windows",
+            "wintun",
+            "wireguard",
+            "bluetooth",
+            "loopback",
+            "pseudo",
+            "teredo",
+            "isatap",
+            "microsoft wi-fi direct",
+            "sangfor",
+            "atrust",
+            "vnic",
+            "docker",
+            "wsl",
+            "npcap",
+        ]
+        .iter()
+        .any(|k| s.contains(k))
+    }
+
+    fn is_ethernet_if_type(if_type: u32) -> bool {
+        if_type == IF_TYPE_ETHERNET_CSMACD || if_type == IF_TYPE_GIGABITETHERNET
+    }
+
+    fn is_apipa(ip: &str) -> bool {
+        ip.starts_with("169.254.")
+    }
+
+    unsafe fn adapter_ipv4(a: &IP_ADAPTER_ADDRESSES_LH) -> String {
+        let mut ua = a.FirstUnicastAddress;
+        while !ua.is_null() {
+            let u = &*ua;
+            let sa_ptr = u.Address.lpSockaddr;
+            if !sa_ptr.is_null() {
+                let sa = &*(sa_ptr as *const SOCKADDR);
+                if sa.sa_family == AF_INET {
+                    let sin = &*(sa_ptr as *const SOCKADDR_IN);
+                    let b = sin.sin_addr.S_un.S_un_b;
+                    return format!("{}.{}.{}.{}", b.s_b1, b.s_b2, b.s_b3, b.s_b4);
+                }
+            }
+            ua = u.Next;
+        }
+        String::new()
+    }
+
+    unsafe fn adapter_has_gateway(a: &IP_ADAPTER_ADDRESSES_LH) -> bool {
+        let mut g = a.FirstGatewayAddress;
+        while !g.is_null() {
+            let gw = &*(g as *const IP_ADAPTER_GATEWAY_ADDRESS_LH);
+            let sa_ptr = gw.Address.lpSockaddr;
+            if !sa_ptr.is_null() {
+                let sa = &*(sa_ptr as *const SOCKADDR);
+                if sa.sa_family == AF_INET {
+                    return true;
+                }
+            }
+            g = gw.Next;
+        }
+        false
+    }
+
+    unsafe fn adapter_mac(a: &IP_ADAPTER_ADDRESSES_LH) -> String {
+        if a.PhysicalAddressLength >= 6 {
+            format!(
+                "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                a.PhysicalAddress[0],
+                a.PhysicalAddress[1],
+                a.PhysicalAddress[2],
+                a.PhysicalAddress[3],
+                a.PhysicalAddress[4],
+                a.PhysicalAddress[5]
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    /// Walk adapters once; fill Wi‑Fi IP/MAC/speed and Ethernet link details.
+    /// Prefers the in-use wired NIC (has gateway / non-APIPA) over VMware/Hyper-V.
+    unsafe fn adapter_wifi_and_ethernet() -> ((String, String, u32), EthernetSnapshot) {
+        let empty_wifi = (String::new(), String::new(), 0u32);
+        let empty_eth = EthernetSnapshot::default();
+        let flags = GAA_FLAG_SKIP_ANYCAST
+            | GAA_FLAG_SKIP_MULTICAST
+            | GAA_FLAG_SKIP_DNS_SERVER
+            | GAA_FLAG_INCLUDE_GATEWAYS;
         let mut size = 0u32;
         let probe = GetAdaptersAddresses(AF_INET.0 as u32, flags, None, None, &mut size);
         if size == 0
             && probe != ERROR_BUFFER_OVERFLOW.0
             && probe != ERROR_SUCCESS.0
         {
-            return (String::new(), String::new(), 0);
+            return (empty_wifi, empty_eth);
         }
         if size == 0 {
-            return (String::new(), String::new(), 0);
+            return (empty_wifi, empty_eth);
         }
         let mut buf = vec![0u8; size as usize];
         let head = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
         let rc = GetAdaptersAddresses(AF_INET.0 as u32, flags, None, Some(head), &mut size);
         if rc != ERROR_SUCCESS.0 {
-            return (String::new(), String::new(), 0);
+            return (empty_wifi, empty_eth);
         }
+
+        let mut wifi = empty_wifi;
+        // score: higher wins — gateway(+1000), real IP(+100), lower metric bonus
+        let mut best: Option<(i32, EthernetSnapshot)> = None;
 
         let mut cur = head;
         while !cur.is_null() {
             let a = &*cur;
-            if a.IfType == IF_TYPE_IEEE80211 && a.OperStatus == IfOperStatusUp {
-                let mac = if a.PhysicalAddressLength >= 6 {
-                    format!(
-                        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                        a.PhysicalAddress[0],
-                        a.PhysicalAddress[1],
-                        a.PhysicalAddress[2],
-                        a.PhysicalAddress[3],
-                        a.PhysicalAddress[4],
-                        a.PhysicalAddress[5]
-                    )
-                } else {
-                    String::new()
-                };
-                let mbps = (a.TransmitLinkSpeed / 1_000_000) as u32;
-                let mut ip = String::new();
-                let mut ua = a.FirstUnicastAddress;
-                while !ua.is_null() {
-                    let u = &*ua;
-                    let sa_ptr = u.Address.lpSockaddr;
-                    if !sa_ptr.is_null() {
-                        let sa = &*(sa_ptr as *const SOCKADDR);
-                        if sa.sa_family == AF_INET {
-                            let sin = &*(sa_ptr as *const SOCKADDR_IN);
-                            let b = sin.sin_addr.S_un.S_un_b;
-                            ip = format!("{}.{}.{}.{}", b.s_b1, b.s_b2, b.s_b3, b.s_b4);
-                            break;
+            if a.OperStatus == IfOperStatusUp {
+                if a.IfType == IF_TYPE_IEEE80211 && wifi.0.is_empty() {
+                    let mac = adapter_mac(a);
+                    let mbps = (a.TransmitLinkSpeed / 1_000_000) as u32;
+                    let ip = adapter_ipv4(a);
+                    wifi = (ip, mac, mbps);
+                } else if is_ethernet_if_type(a.IfType) {
+                    let name = pwstr_to_string(a.FriendlyName);
+                    let desc = pwstr_to_string(a.Description);
+                    if !is_virtual_adapter(&name, &desc) {
+                        let ip = adapter_ipv4(a);
+                        let has_gw = adapter_has_gateway(a);
+                        let snap = EthernetSnapshot {
+                            connected: true,
+                            name: if name.is_empty() {
+                                "以太网".into()
+                            } else {
+                                name
+                            },
+                            ip: ip.clone(),
+                            link_mbps: (a.TransmitLinkSpeed / 1_000_000) as u32,
+                            mac: adapter_mac(a),
+                        };
+                        let mut score = 0i32;
+                        if has_gw {
+                            score += 1000;
+                        }
+                        if !ip.is_empty() && !is_apipa(&ip) {
+                            score += 100;
+                        } else if !ip.is_empty() {
+                            score += 10;
+                        }
+                        // Prefer lower IPv4 metric (Windows routing preference).
+                        score += 1000i32 - (a.Ipv4Metric as i32).min(999);
+                        let replace = match &best {
+                            None => true,
+                            Some((best_score, _)) => score > *best_score,
+                        };
+                        if replace {
+                            best = Some((score, snap));
                         }
                     }
-                    ua = u.Next;
                 }
-                return (ip, mac, mbps);
             }
             cur = a.Next;
         }
-        (String::new(), String::new(), 0)
+        (
+            wifi,
+            best.map(|(_, s)| s).unwrap_or(empty_eth),
+        )
+    }
+
+    #[derive(Default, Clone)]
+    struct EthernetSnapshot {
+        connected: bool,
+        name: String,
+        ip: String,
+        link_mbps: u32,
+        mac: String,
+    }
+
+    fn apply_ethernet(state: &mut WifiState, eth: EthernetSnapshot) {
+        state.ethernet_connected = eth.connected;
+        state.ethernet_name = eth.name;
+        state.ethernet_ip = eth.ip;
+        state.ethernet_link_mbps = eth.link_mbps;
+        state.ethernet_mac = eth.mac;
     }
 
     fn poll_state() -> WifiState {
+        let (wifi_adapt, eth) = unsafe { adapter_wifi_and_ethernet() };
+        let mut state = WifiState::default();
+        apply_ethernet(&mut state, eth);
+
         let Ok(client) = WlanClient::open() else {
-            return WifiState::default();
+            return state;
         };
         unsafe {
             let Ok((guid, info)) = first_interface(&client) else {
-                return WifiState::default();
+                return state;
             };
             let enabled = query_radio_enabled(&client, &guid);
-            let mut state = WifiState {
-                enabled,
-                ..Default::default()
-            };
+            state.enabled = enabled;
             if !enabled {
                 return state;
             }
@@ -279,7 +430,7 @@ mod win {
                 state.connected = true;
             }
             if state.connected {
-                let (ip, _adapter_mac, mbps) = adapter_ip_mac_speed();
+                let (ip, _adapter_mac, mbps) = wifi_adapt;
                 if !ip.is_empty() {
                     state.ip = ip;
                 }
@@ -300,7 +451,11 @@ mod win {
     }
 
     pub fn get() -> WifiState {
-        STATE.lock().clone()
+        // Always re-poll on IPC read so tray/popup aren't stuck on Default
+        // before the boot-pipeline watcher finishes starting.
+        let next = poll_state();
+        *STATE.lock() = next.clone();
+        next
     }
 
     pub fn start(emit: impl Fn(WifiState) + Send + Sync + 'static) {
@@ -655,7 +810,8 @@ mod win {
     pub fn open_network_settings() -> Result<(), String> {
         unsafe {
             let op = HSTRING::from("open");
-            let file = HSTRING::from("ms-settings:network-wifi");
+            // Status page covers both Wi‑Fi and Ethernet.
+            let file = HSTRING::from("ms-settings:network-status");
             let ret = ShellExecuteW(
                 HWND::default(),
                 PCWSTR(op.as_ptr()),

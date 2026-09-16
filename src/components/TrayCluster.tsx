@@ -51,7 +51,7 @@ export type InputLangState = {
   guidProfile?: string;
 };
 
-/** Host-owned WLAN indicator (Shell WLAN chrome vanishes with taskbar). */
+/** Host-owned WLAN / Ethernet indicator (Shell network chrome vanishes with taskbar). */
 export type WifiState = {
   enabled: boolean;
   connected: boolean;
@@ -61,6 +61,12 @@ export type WifiState = {
   linkMbps: number;
   mac: string;
   secured: boolean;
+  /** Wired link up — tray shows Ethernet glyph instead of Wi‑Fi bars. */
+  ethernetConnected?: boolean;
+  ethernetName?: string;
+  ethernetIp?: string;
+  ethernetLinkMbps?: number;
+  ethernetMac?: string;
 };
 
 export type WifiNetwork = {
@@ -82,10 +88,58 @@ const FALLBACK_WIFI: WifiState = {
   linkMbps: 0,
   mac: "",
   secured: false,
+  ethernetConnected: false,
+  ethernetName: "",
+  ethernetIp: "",
+  ethernetLinkMbps: 0,
+  ethernetMac: "",
 };
+
+/** Computer + cable — matches Windows Ethernet tray glyph. */
+function EthernetGlyph() {
+  return (
+    <svg className="tray-wifi-glyph" width="15" height="15" viewBox="0 0 24 24" aria-hidden>
+      <rect
+        x="3"
+        y="3"
+        width="14"
+        height="11"
+        rx="1.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path
+        d="M7 20h6M10 14v6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M17.5 8.5h2.2a1.3 1.3 0 0 1 1.3 1.3v3.4a1.3 1.3 0 0 1-1.3 1.3H17.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19.2 10.2v2.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 /** Signal bars SVG — thicker 2-arc + tip; off / weak / mid / full. */
 function WifiGlyph({ state }: { state: WifiState }) {
+  if (state.ethernetConnected) {
+    return <EthernetGlyph />;
+  }
   const level = !state.enabled
     ? 0
     : !state.connected
@@ -690,11 +744,26 @@ export default function TrayCluster({
 
   const imeTip = [inputLang.imeName || "输入法", "单击打开输入法菜单"].filter(Boolean).join("\n");
 
-  const wifiTip = !wifi.enabled
-    ? "Wi‑Fi 已关闭\n单击打开 WLAN 菜单"
-    : wifi.connected && wifi.ssid
-      ? `${wifi.ssid}${wifi.signal ? ` · ${wifi.signal}%` : ""}\n单击打开 WLAN 菜单`
-      : "未连接\n单击打开 WLAN 菜单";
+  const wifiTip = wifi.ethernetConnected
+    ? `${wifi.ethernetName || "以太网"}${
+        wifi.ethernetIp ? ` · ${wifi.ethernetIp}` : ""
+      }${wifi.ethernetLinkMbps ? ` · ${wifi.ethernetLinkMbps} Mbps` : ""}\n单击打开网络菜单`
+    : !wifi.enabled
+      ? "Wi‑Fi 已关闭\n单击打开 WLAN 菜单"
+      : wifi.connected && wifi.ssid
+        ? `${wifi.ssid}${wifi.signal ? ` · ${wifi.signal}%` : ""}\n单击打开 WLAN 菜单`
+        : "未连接\n单击打开 WLAN 菜单";
+
+  const wifiOn = Boolean(
+    wifi.ethernetConnected || (wifi.enabled && wifi.connected),
+  );
+  const wifiAria = wifi.ethernetConnected
+    ? `有线网络 ${wifi.ethernetName || "已连接"}`
+    : wifi.enabled
+      ? wifi.connected
+        ? `Wi‑Fi ${wifi.ssid || "已连接"}`
+        : "Wi‑Fi 未连接"
+      : "Wi‑Fi 已关闭";
 
   return (
     <div
@@ -752,16 +821,10 @@ export default function TrayCluster({
           ref={wifiChipRef}
           type="button"
           className={`tray-wifi-btn${wifiMenuOpen ? " is-open" : ""}${
-            wifi.enabled && wifi.connected ? " is-on" : ""
-          }${!wifi.enabled ? " is-off" : ""}`}
+            wifiOn ? " is-on" : ""
+          }${!wifi.enabled && !wifi.ethernetConnected ? " is-off" : ""}`}
           {...hostTipPointerProps(wifiTip)}
-          aria-label={
-            wifi.enabled
-              ? wifi.connected
-                ? `Wi‑Fi ${wifi.ssid || "已连接"}`
-                : "Wi‑Fi 未连接"
-              : "Wi‑Fi 已关闭"
-          }
+          aria-label={wifiAria}
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => { void hideChromeHoverTip(); void openWifiMenu(); }}
         >

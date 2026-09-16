@@ -17,6 +17,11 @@ const FALLBACK: WifiState = {
   linkMbps: 0,
   mac: "",
   secured: false,
+  ethernetConnected: false,
+  ethernetName: "",
+  ethernetIp: "",
+  ethernetLinkMbps: 0,
+  ethernetMac: "",
 };
 
 async function closeSelf() {
@@ -80,6 +85,46 @@ function WifiIcon({
         strokeLinecap="round"
         strokeLinejoin="round"
         opacity={outer}
+      />
+    </svg>
+  );
+}
+
+function EthernetIcon({ accent }: { accent?: boolean }) {
+  const color = accent ? "var(--wifi-accent, var(--sys-accent, #34c759))" : "currentColor";
+  return (
+    <svg className="wifi-ico wifi-eth-ico" width="18" height="18" viewBox="0 0 24 24" aria-hidden>
+      <rect
+        x="3"
+        y="3"
+        width="14"
+        height="11"
+        rx="1.8"
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+      />
+      <path
+        d="M7 20h6M10 14v6"
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M17.5 8.5h2.2a1.3 1.3 0 0 1 1.3 1.3v3.4a1.3 1.3 0 0 1-1.3 1.3H17.5"
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19.2 10.2v2.6"
+        fill="none"
+        stroke={color}
+        strokeWidth="1.6"
+        strokeLinecap="round"
       />
     </svg>
   );
@@ -343,9 +388,76 @@ export default function WifiPopupApp() {
           signal: state.signal || preferredNet?.signal || 99,
         }
       : null;
+  const ethConnected = Boolean(state.ethernetConnected);
+  const ethName = (state.ethernetName || "以太网").trim() || "以太网";
+  const ethIp = (state.ethernetIp || "").trim();
+  const ethMbps = state.ethernetLinkMbps || 0;
+  const ethMac = (state.ethernetMac || "").trim();
 
   return (
-    <div className="wifi-popup-shell" role="dialog" aria-label="WLAN">
+    <div className="wifi-popup-shell" role="dialog" aria-label="网络">
+      {ethConnected ? (
+        <>
+          <div className="wifi-head">
+            <span className="wifi-title">有线网络</span>
+            <span className="wifi-head-status is-on">已连接</span>
+          </div>
+
+          <button
+            type="button"
+            className="wifi-link-row"
+            onClick={() => {
+              void invoke("open_network_settings").catch(console.error);
+              void closeSelf();
+            }}
+          >
+            网络偏好设置
+          </button>
+
+          <div className="wifi-sep" />
+
+          <div className="wifi-preferred wifi-ethernet">
+            <div className="wifi-preferred-main is-static">
+              <EthernetIcon accent />
+              <span className="wifi-ssid">{ethName}</span>
+            </div>
+            <div className="wifi-meta">
+              <div className="wifi-meta-row">
+                <span
+                  className="wifi-copyable"
+                  title={ethIp ? "单击复制 IP" : undefined}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (ethIp) void copyText(ethIp);
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  {ethIp || "—"}
+                </span>
+                <span className="wifi-meta-speed">
+                  {ethMbps > 0 ? `${ethMbps} Mbps` : ""}
+                </span>
+              </div>
+              {ethMac ? (
+                <div
+                  className="wifi-meta-mac wifi-copyable"
+                  title="单击复制 MAC"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void copyText(ethMac);
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  {ethMac}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="wifi-sep" />
+        </>
+      ) : null}
+
       <div className="wifi-head">
         <span className="wifi-title">WLAN</span>
         <button
@@ -360,18 +472,20 @@ export default function WifiPopupApp() {
         </button>
       </div>
 
-      <button
-        type="button"
-        className="wifi-link-row"
-        onClick={() => {
-          void invoke("open_network_settings").catch(console.error);
-          void closeSelf();
-        }}
-      >
-        网络偏好设置
-      </button>
+      {!ethConnected ? (
+        <button
+          type="button"
+          className="wifi-link-row"
+          onClick={() => {
+            void invoke("open_network_settings").catch(console.error);
+            void closeSelf();
+          }}
+        >
+          网络偏好设置
+        </button>
+      ) : null}
 
-      <div className="wifi-sep" />
+      {!ethConnected ? <div className="wifi-sep" /> : null}
 
       {error ? <div className="wifi-error">{error}</div> : null}
 
@@ -430,7 +544,9 @@ export default function WifiPopupApp() {
               </div>
             </div>
           ) : (
-            <div className="wifi-empty">未连接</div>
+            <div className="wifi-empty">
+              {ethConnected ? "WLAN 未连接（当前使用有线）" : "未连接"}
+            </div>
           )}
 
           <div className="wifi-sep" />
@@ -483,7 +599,9 @@ export default function WifiPopupApp() {
           </div>
         </>
       ) : (
-        <div className="wifi-empty">Wi‑Fi 已关闭</div>
+        <div className="wifi-empty">
+          {ethConnected ? "Wi‑Fi 已关闭（当前使用有线）" : "Wi‑Fi 已关闭"}
+        </div>
       )}
     </div>
   );
