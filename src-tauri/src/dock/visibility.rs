@@ -165,6 +165,13 @@ impl DockVisibility {
         }
     }
 
+    pub fn is_interaction_hold(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|g| g.interaction_hold)
+            .unwrap_or(false)
+    }
+
     /// Keep AutoHide while an interactive Dock window-preview tip is visible
     /// (cursor must leave the dock HWND to reach the tip above it).
     pub fn set_preview_tip_keep(&self, keep: bool) {

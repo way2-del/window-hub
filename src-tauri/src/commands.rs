@@ -28,6 +28,178 @@ fn set_dock_preview_tip_keep(app: &AppHandle, keep: bool) {
     }
 }
 
+/// Chrome popups that must be **hidden and reused**, never destroyed on dismiss.
+/// Destroying + rebuilding WebView2 from a click IPC path deadlocks the UI pump
+/// (click → 未响应). Frontend already listens for `*-opened` and re-fits on reuse.
+const REUSABLE_CHROME_POPUPS: &[&str] = &[
+    "tray-popup",
+    "status-menu-popup",
+    "input-lang-popup",
+    "wifi-popup",
+    "wifi-auth-popup",
+];
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex as StdMutex;
+
+static TRAY_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+static STATUS_MENU_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+static INPUT_LANG_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+static WIFI_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+static WIFI_AUTH_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+static PLUGIN_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+/// Serialize every WebviewWindowBuilder::build — concurrent creates freeze the UI pump
+/// (proven by click-trace: tip NEED_BUILD + status-menu open racing → 未响应).
+static WEBVIEW_CREATE_LOCK: StdMutex<()> = StdMutex::new(());
+#[allow(dead_code)]
+static TIP_PREWARM_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+struct WebviewCreateGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    label: &'static str,
+}
+
+impl Drop for WebviewCreateGuard {
+    fn drop(&mut self) {
+        crate::win32::click_trace::log_lock_released(self.label);
+    }
+}
+
+/// Acquire create lock with wait/hold timing in the click-trace log.
+fn lock_webview_create(label: &'static str) -> WebviewCreateGuard {
+    crate::win32::click_trace::log_lock_wait(label);
+    let t0 = std::time::Instant::now();
+    let guard = WEBVIEW_CREATE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::win32::click_trace::log_lock_acquired(label, t0.elapsed().as_millis());
+    WebviewCreateGuard {
+        _guard: guard,
+        label,
+    }
+}
+
+fn mark_popup_visible(label: &str, visible: bool) {
+    let flag = match label {
+        "tray-popup" => &TRAY_POPUP_VISIBLE,
+        "status-menu-popup" => &STATUS_MENU_POPUP_VISIBLE,
+        "input-lang-popup" => &INPUT_LANG_POPUP_VISIBLE,
+        "wifi-popup" => &WIFI_POPUP_VISIBLE,
+        "wifi-auth-popup" => &WIFI_AUTH_POPUP_VISIBLE,
+        "plugin-popup" | "plugin-window" => &PLUGIN_POPUP_VISIBLE,
+        _ => return,
+    };
+    flag.store(visible, Ordering::SeqCst);
+}
+
+fn popup_visible(label: &str) -> bool {
+    match label {
+        "tray-popup" => TRAY_POPUP_VISIBLE.load(Ordering::SeqCst),
+        "status-menu-popup" => STATUS_MENU_POPUP_VISIBLE.load(Ordering::SeqCst),
+        "input-lang-popup" => INPUT_LANG_POPUP_VISIBLE.load(Ordering::SeqCst),
+        "wifi-popup" => WIFI_POPUP_VISIBLE.load(Ordering::SeqCst),
+        "wifi-auth-popup" => WIFI_AUTH_POPUP_VISIBLE.load(Ordering::SeqCst),
+        "plugin-popup" | "plugin-window" => PLUGIN_POPUP_VISIBLE.load(Ordering::SeqCst),
+        _ => false,
+    }
+}
+
+fn emit_chrome_popup_closed(app: &AppHandle, label: &str) {
+    mark_popup_visible(label, false);
+    match label {
+        "tray-popup" => {
+            let _ = app.emit("tray-popup-closed", ());
+        }
+        "plugin-popup" => {
+            let _ = app.emit("plugin-popup-closed", ());
+        }
+        "status-menu-popup" => {
+            set_dock_menu_hold(app, false);
+            let _ = app.emit("status-menu-popup-closed", ());
+        }
+        "input-lang-popup" => {
+            let _ = app.emit("input-lang-popup-closed", ());
+        }
+        "wifi-popup" => {
+            let _ = app.emit("wifi-popup-closed", ());
+        }
+        "wifi-auth-popup" => {
+            let _ = app.emit("wifi-auth-popup-closed", ());
+        }
+        _ => {}
+    }
+}
+
+/// Hide (do not destroy) a reusable chrome popup and emit its closed event.
+pub fn hide_chrome_popup(app: &AppHandle, label: &str) {
+    if let Some(w) = app.get_webview_window(label) {
+        let _ = w.hide();
+    }
+    emit_chrome_popup_closed(app, label);
+}
+
+/// Win32 hide from a worker / focus-loss thread — avoids Tauri `hide()`/`close()`
+/// on a non-UI thread while still keeping the HWND for reuse.
+pub fn hide_chrome_popup_hwnd(app: &AppHandle, label: &str, hwnd_raw: Option<isize>) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        if let Some(raw) = hwnd_raw.filter(|h| *h != 0) {
+            unsafe {
+                let _ = ShowWindow(HWND(raw as *mut _), SW_HIDE);
+            }
+        } else if let Some(w) = app.get_webview_window(label) {
+            let _ = w.hide();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.hide();
+        }
+    }
+    emit_chrome_popup_closed(app, label);
+}
+
+/// Yield the async command past the sync IPC reply path before WebView create.
+/// Never use bare `std::thread` + `WebviewWindowBuilder::build` (click-trace hung
+/// at chrome-prewarm status-menu build → Responding=False / 穿透).
+async fn async_delay_ms(ms: u64) {
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    })
+    .await;
+}
+
+fn create_watchdog(label: &'static str) -> Arc<AtomicBool> {
+    crate::win32::click_trace::mark_create_in_progress(true);
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = done.clone();
+    std::thread::Builder::new()
+        .name("create-watchdog".into())
+        .spawn(move || {
+            for i in 1..=20 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if flag.load(Ordering::SeqCst) {
+                    return;
+                }
+                crate::win32::click_trace::log(
+                    "watchdog",
+                    &format!("{label} STILL_IN_BUILD after {}ms — UI may freeze / 穿透", i * 500),
+                );
+            }
+        })
+        .ok();
+    done
+}
+
+fn finish_watchdog(done: &Arc<AtomicBool>) {
+    done.store(true, Ordering::SeqCst);
+    crate::win32::click_trace::mark_create_in_progress(false);
+}
+
 #[derive(Deserialize)]
 pub struct AttachArgs {
     pub hwnd: isize,
@@ -193,6 +365,7 @@ pub fn dock_set_visual_height(_window: WebviewWindow, _height: i32) -> Result<()
 /// from an IPC handler deadlocks WebView2 on Windows (click → 未响应).
 #[tauri::command]
 pub async fn float_overlay(window: WebviewWindow) -> Result<(), String> {
+    crate::win32::click_trace::log("rust", "float_overlay enter");
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let raw = hwnd.0 as isize;
     crate::win32::switcher::exclude_from_switcher(raw);
@@ -249,6 +422,10 @@ pub async fn resize_main_island(
     window: WebviewWindow,
     window_height: f64,
 ) -> Result<(), String> {
+    crate::win32::click_trace::log(
+        "rust",
+        &format!("resize_main_island enter h={window_height:.1}"),
+    );
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let raw = hwnd.0 as isize;
     #[cfg(windows)]
@@ -259,6 +436,9 @@ pub async fn resize_main_island(
         };
         use windows::Win32::UI::HiDpi::GetDpiForWindow;
         use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+
+        // BEFORE SetWindowPos — Moved/Resized must not pin/bar_comp re-enter.
+        crate::win32::island_bar_glass::suppress_refresh_ms(600);
 
         let hwnd = HWND(raw as *mut _);
         unsafe {
@@ -272,6 +452,7 @@ pub async fn resize_main_island(
                 ..Default::default()
             };
             if !GetMonitorInfoW(mon, &mut info).as_bool() {
+                crate::win32::click_trace::log("rust", "resize_main_island FAIL monitor");
                 return Err("resize_main_island: monitor".into());
             }
             let mon = info.rcMonitor;
@@ -285,8 +466,18 @@ pub async fn resize_main_island(
                 h_px,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             )
-            .map_err(|e| format!("resize_main_island SetWindowPos: {e}"))?;
+            .map_err(|e| {
+                crate::win32::click_trace::log(
+                    "rust",
+                    &format!("resize_main_island FAIL SetWindowPos: {e}"),
+                );
+                format!("resize_main_island SetWindowPos: {e}")
+            })?;
         }
+        // Do NOT call set_overlay_raised / ensure_main_visible / reassert_main_zorder
+        // here — they SetWindowPos again and re-enter Moved while WebView2 is mid
+        // resize → HUNG (click-trace #82 enter h=28 → Moved done → never leave ok).
+        crate::win32::click_trace::log("rust", "resize_main_island leave ok");
     }
     #[cfg(not(windows))]
     {
@@ -300,14 +491,30 @@ pub async fn resize_main_island(
     Ok(())
 }
 
+/// FE collapse path: skip Moved → bar_comp while Tauri setSize shrinks the island.
+#[tauri::command]
+pub fn suppress_island_bar_refresh(ms: Option<u64>) -> Result<(), String> {
+    let ms = ms.unwrap_or(800).clamp(100, 5_000);
+    #[cfg(windows)]
+    {
+        crate::win32::island_bar_glass::suppress_refresh_ms(ms);
+        crate::win32::click_trace::log("rust", &format!("suppress_island_bar_refresh {ms}ms"));
+    }
+    Ok(())
+}
+
 /// 岛收回折叠条：仍保持 TOPMOST（防壁纸软件 / 显示桌面埋掉顶栏）。
 #[tauri::command]
 pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
+    crate::win32::click_trace::log("rust", "settle_overlay enter");
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let raw = hwnd.0 as isize;
     crate::win32::switcher::exclude_from_switcher(raw);
     crate::win32::topmost::set_main_hwnd(raw);
     crate::win32::topmost::set_overlay_raised(false);
+    // Avoid Moved → bar_comp while we SetWindowPos for z-order.
+    #[cfg(windows)]
+    crate::win32::island_bar_glass::suppress_refresh_ms(400);
     let _ = crate::win32::topmost::ensure_main_visible();
     crate::win32::topmost::reassert_main_zorder();
     #[cfg(not(windows))]
@@ -317,6 +524,7 @@ pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
         let _ = window.show();
         let _ = window.set_always_on_top(true);
     }
+    crate::win32::click_trace::log("rust", "settle_overlay leave");
     Ok(())
 }
 
@@ -356,6 +564,22 @@ pub async fn open_settings_window(
         return Ok(());
     }
 
+    // First create: tear down sibling chrome WebViews (hide alone left status-menu
+    // alive while settings built → pump hang). Creating settings while another
+    // chrome WebView is settling hung IsHungAppWindow ~3s after build DONE.
+    for label in ["status-menu-popup", "tray-popup", "chrome-hover-tip"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.hide();
+            let _ = w.close();
+        }
+        emit_chrome_popup_closed(&app, label);
+    }
+    crate::win32::click_trace::log("rust", "open_settings NEED_CREATE async-delay");
+    async_delay_ms(300).await;
+    if app.get_webview_window("settings").is_some() {
+        return Ok(());
+    }
+    crate::win32::click_trace::log("rust", "open_settings after delay, build");
     let focus_js = focus
         .as_ref()
         .map(|pid| {
@@ -374,7 +598,6 @@ pub async fn open_settings_window(
             )
         })
         .unwrap_or_default();
-
     let init = format!(
         r#"
       window.__WH_IS_SETTINGS__ = true;
@@ -387,36 +610,54 @@ pub async fn open_settings_window(
       }});
     "#
     );
-
-    // async command 会把创建窗口挪出 IPC 同步路径，避免 WebView2 死锁
-    let win = WebviewWindowBuilder::new(
-        &app,
-        "settings",
-        WebviewUrl::App("index.html?window=settings".into()),
-    )
-    .title("灵动岛设置")
-    .inner_size(820.0, 560.0)
-    .min_inner_size(720.0, 480.0)
-    .resizable(true)
-    .maximizable(true)
-    .minimizable(true)
-    .closable(true)
-    .decorations(true)
-    .transparent(true)
-    .background_color(Color(0, 0, 0, 0))
-    .always_on_top(false)
-    .skip_taskbar(false)
-    .center()
-    .focused(true)
-    .visible(false)
-    .initialization_script(init)
-    .build()
-    .map_err(|e| format!("open settings failed: {e}"))?;
-
-    // Mica before show — avoids a white undecorated frame on first paint.
-    apply_saved_material(&win, &state);
+    let win = {
+        let _guard = lock_webview_create("settings");
+        if app.get_webview_window("settings").is_some() {
+            return Ok(());
+        }
+        let wd = create_watchdog("settings");
+        let built = WebviewWindowBuilder::new(
+            &app,
+            "settings",
+            WebviewUrl::App("index.html?window=settings".into()),
+        )
+        .title("灵动岛设置")
+        .inner_size(820.0, 560.0)
+        .min_inner_size(720.0, 480.0)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
+        .decorations(true)
+        .transparent(true)
+        .background_color(Color(0, 0, 0, 0))
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .center()
+        .focused(true)
+        .visible(false)
+        .initialization_script(init)
+        .build();
+        finish_watchdog(&wd);
+        built.map_err(|e| format!("settings create failed: {e}"))?
+        // _guard dropped here — must not hold MutexGuard across await
+    };
+    // Defer show/focus past create. One-shot Mica only — no apply_prefs_deferred
+    // multi-pass (that + Settings FE invoke previously hung ~3s after open).
+    async_delay_ms(80).await;
+    {
+        let prefs = read_material_prefs(&state);
+        let _ = crate::win32::material::apply_prefs(&win, &prefs);
+    }
     let _ = win.show();
     let _ = win.set_focus();
+    if let Some(pid) = focus {
+        let _ = app.emit("settings-focus-plugin", pid);
+    }
+    if let Some(n) = nav {
+        let _ = app.emit("settings-focus-nav", n);
+    }
+    crate::win32::click_trace::log("rust", "open_settings build DONE");
     Ok(())
 }
 
@@ -449,8 +690,13 @@ fn ensure_tray_popup_window(
     if let Some(existing) = app.get_webview_window("tray-popup") {
         return Ok(existing);
     }
-
-    let win = WebviewWindowBuilder::new(
+    let _guard = lock_webview_create("tray-popup");
+    if let Some(existing) = app.get_webview_window("tray-popup") {
+        return Ok(existing);
+    }
+    crate::win32::click_trace::log("rust", "ensure_tray_popup_window build START");
+    let wd = create_watchdog("tray-popup");
+    let built = WebviewWindowBuilder::new(
         app,
         "tray-popup",
         WebviewUrl::App("index.html?window=tray".into()),
@@ -469,13 +715,19 @@ fn ensure_tray_popup_window(
     .focused(false)
     .visible(false)
     .initialization_script(TRAY_POPUP_INIT)
-    .build()
-    .map_err(|e| format!("open tray popup failed: {e}"))?;
+    .build();
+    finish_watchdog(&wd);
+    let win = built.map_err(|e| format!("open tray popup failed: {e}"))?;
 
-    apply_saved_material(&win, state);
+    // One-shot material — never apply_prefs_deferred (5× mica hung the pump on chevron).
+    {
+        let prefs = read_material_prefs(state);
+        let _ = crate::win32::material::apply_prefs(&win, &prefs);
+    }
     if let Ok(hwnd) = win.hwnd() {
         crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
     }
+    crate::win32::click_trace::log("rust", "ensure_tray_popup_window build DONE");
     Ok(win)
 }
 
@@ -496,8 +748,70 @@ pub fn prewarm_tray_popup(app: &AppHandle) {
     }
 }
 
+#[allow(dead_code)]
+fn ensure_chrome_hover_tip_window(app: &AppHandle, state: &MaterialState) -> Result<(), String> {
+    if app.get_webview_window("chrome-hover-tip").is_some() {
+        return Ok(());
+    }
+    let _guard = lock_webview_create("chrome-hover-tip");
+    if app.get_webview_window("chrome-hover-tip").is_some() {
+        return Ok(());
+    }
+    crate::win32::click_trace::log("rust", "ensure_chrome_hover_tip_window build START");
+    let wd = create_watchdog("chrome-hover-tip");
+    let init = r#"
+      window.__WH_IS_CHROME_HOVER_TIP__ = true;
+    "#;
+    let built = WebviewWindowBuilder::new(
+        app,
+        "chrome-hover-tip",
+        WebviewUrl::App("index.html?window=chrome-tip".into()),
+    )
+    .title("提示")
+    .inner_size(CHROME_HOVER_TIP_MEASURE_W, CHROME_HOVER_TIP_MEASURE_H)
+    .position(CHROME_HOVER_TIP_PARK_X, CHROME_HOVER_TIP_PARK_Y)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .initialization_script(init)
+    .build();
+    finish_watchdog(&wd);
+    let win = built.map_err(|e| format!("prewarm chrome-hover-tip failed: {e}"))?;
+    park_chrome_hover_tip(&win);
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+    }
+    let _ = win.set_shadow(false);
+    apply_chrome_hover_tip_material(&win, state);
+    // Always click-through until commit decides interactive — avoids covering the
+    // desktop with a transparent tip HWND that eats / passes hits.
+    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.hide();
+    crate::win32::click_trace::log("rust", "ensure_chrome_hover_tip_window build DONE");
+    Ok(())
+}
+
+/// DISABLED: background-thread WebView create freezes the UI pump.
+/// Proven by click-trace: hang at ensure_status_menu_popup_window build
+/// (Responding=False → 穿透). Chrome popups create on first click via async await.
+#[allow(dead_code)]
+pub fn spawn_chrome_popup_prewarm(_app: AppHandle) {
+    crate::win32::click_trace::log("boot", "chrome-prewarm DISABLED (avoids create hang)");
+}
+
 /// 独立窄高托盘弹窗：与设置/插件共用材质配置。
 /// Kept invisible until the webview fits content — same path as status menu.
+/// HWND is reused across opens — never destroy on dismiss (WebView2 deadlock).
+/// First create is deferred off the IPC reply path.
 #[tauri::command]
 pub async fn open_tray_popup(
     app: AppHandle,
@@ -505,33 +819,61 @@ pub async fn open_tray_popup(
     x: f64,
     y: f64,
 ) -> Result<(), String> {
+    if !crate::win32::tray::tray_boot_enabled() {
+        return Err("tray disabled (hang A/B)".into());
+    }
+    crate::win32::click_trace::log("rust", &format!("open_tray_popup enter x={x:.0} y={y:.0}"));
     close_sibling_popups(&app, "tray-popup");
 
+    if let Some(win) = app.get_webview_window("tray-popup") {
+        // Soft reassert only — no deferred mica storm on every chevron click.
+        reassert_saved_material(&win, &state);
+        let _ = win.hide();
+        let _ = win.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
+        let _ = win.set_position(LogicalPosition::new(x, y));
+        let _ = win.unminimize();
+        mark_popup_visible("tray-popup", true);
+        let _ = app.emit("tray-popup-opened", ());
+        crate::win32::click_trace::log("rust", "open_tray_popup REUSE done");
+        return Ok(());
+    }
+
+    // First create: yield past IPC, then build once (same class as settings hang).
+    crate::win32::click_trace::log("rust", "open_tray_popup NEED_CREATE async-delay");
+    async_delay_ms(250).await;
+    if let Some(win) = app.get_webview_window("tray-popup") {
+        reassert_saved_material(&win, &state);
+        let _ = win.hide();
+        let _ = win.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
+        let _ = win.set_position(LogicalPosition::new(x, y));
+        let _ = win.unminimize();
+        mark_popup_visible("tray-popup", true);
+        let _ = app.emit("tray-popup-opened", ());
+        return Ok(());
+    }
+    crate::win32::click_trace::log("rust", "open_tray_popup after delay, ensure");
     let win = ensure_tray_popup_window(&app, &state)?;
-    apply_saved_material(&win, &state);
+    async_delay_ms(60).await;
     let _ = win.hide();
     let _ = win.set_size(LogicalSize::new(TRAY_POPUP_W, TRAY_POPUP_H));
     let _ = win.set_position(LogicalPosition::new(x, y));
     let _ = win.unminimize();
-    // Do not show yet — TrayPopupApp fits height, then slide-reveal.
+    mark_popup_visible("tray-popup", true);
     let _ = app.emit("tray-popup-opened", ());
+    crate::win32::click_trace::log("rust", "open_tray_popup CREATE done");
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_tray_popup(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("tray-popup") {
-        w.close().map_err(|e| e.to_string())?;
-    }
-    let _ = app.emit("tray-popup-closed", ());
+    hide_chrome_popup(&app, "tray-popup");
     Ok(())
 }
 
 #[tauri::command]
-pub fn is_tray_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("tray-popup")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+pub fn is_tray_popup_open(_app: AppHandle) -> bool {
+    let _s = crate::win32::click_trace::Scope::enter("rust", "is_tray_popup_open");
+    popup_visible("tray-popup")
 }
 
 const STATUS_MENU_POPUP_W: f64 = 200.0;
@@ -601,8 +943,58 @@ fn apply_status_menu_payload(win: &WebviewWindow, payload: &StatusMenuOpenPayloa
     ));
 }
 
+fn ensure_status_menu_popup_window(
+    app: &AppHandle,
+    state: &MaterialState,
+    payload: &StatusMenuOpenPayload,
+) -> Result<WebviewWindow, String> {
+    if let Some(existing) = app.get_webview_window("status-menu-popup") {
+        return Ok(existing);
+    }
+    let _guard = lock_webview_create("status-menu-popup");
+    if let Some(existing) = app.get_webview_window("status-menu-popup") {
+        return Ok(existing);
+    }
+    crate::win32::click_trace::log("rust", "ensure_status_menu_popup_window build START");
+    let wd = create_watchdog("status-menu-popup");
+    let built = WebviewWindowBuilder::new(
+        app,
+        "status-menu-popup",
+        WebviewUrl::App("index.html?window=status-menu".into()),
+    )
+    .title("")
+    .inner_size(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .initialization_script(status_menu_init_script(payload))
+    .build();
+    finish_watchdog(&wd);
+    let win = built.map_err(|e| format!("open status menu popup failed: {e}"))?;
+
+    let _ = win.set_shadow(false);
+    apply_saved_material(&win, state);
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+        #[cfg(windows)]
+        crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
+    }
+    crate::win32::click_trace::log("rust", "ensure_status_menu_popup_window build DONE");
+    Ok(win)
+}
+
 /// 左侧状态菜单弹窗：与插件/托盘共用 MicaAlt 材质与深浅色。
 /// Kept invisible until the webview fits content — avoids 80→full height stutter.
+/// First create is deferred off the IPC reply path (inline build → 未响应).
 #[tauri::command]
 pub async fn open_status_menu_popup(
     app: AppHandle,
@@ -614,6 +1006,13 @@ pub async fn open_status_menu_popup(
     after_item_id: Option<String>,
     pin_bottom: Option<f64>,
 ) -> Result<(), String> {
+    crate::win32::click_trace::log(
+        "rust",
+        &format!(
+            "open_status_menu_popup enter x={x:.0} y={y:.0} from_dock={}",
+            from_dock.unwrap_or(false)
+        ),
+    );
     // Hold BEFORE closing siblings / focus moves — AutoHide leave must not win.
     let from_dock = from_dock.unwrap_or(false);
     if from_dock {
@@ -646,61 +1045,33 @@ pub async fn open_status_menu_popup(
             crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
         }
         apply_status_menu_payload(&existing, &payload);
+        mark_popup_visible("status-menu-popup", true);
         let _ = app.emit("status-menu-popup-opened", &payload);
         return Ok(());
     }
 
-    let win = WebviewWindowBuilder::new(
-        &app,
-        "status-menu-popup",
-        WebviewUrl::App("index.html?window=status-menu".into()),
-    )
-    .title("")
-    .inner_size(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H)
-    .resizable(false)
-    .maximizable(false)
-    .minimizable(false)
-    .closable(true)
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .background_color(Color(0, 0, 0, 0))
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .visible(false)
-    .initialization_script(status_menu_init_script(&payload))
-    .build()
-    .map_err(|e| format!("open status menu popup failed: {e}"))?;
-
+    crate::win32::click_trace::log("rust", "open_status_menu_popup NEED_CREATE async-delay");
+    async_delay_ms(100).await;
+    crate::win32::click_trace::log("rust", "open_status_menu_popup after delay, ensure");
+    let win = ensure_status_menu_popup_window(&app, &state, &payload)?;
     let _ = win.set_position(LogicalPosition::new(x, y));
-    let _ = win.set_shadow(false);
-    apply_saved_material(&win, &state);
-    if let Ok(hwnd) = win.hwnd() {
-        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
-        #[cfg(windows)]
-        crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
-    }
-    // Do not show yet — StatusMenuPopupApp fits height, then show().
+    let _ = win.set_size(LogicalSize::new(STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H));
+    apply_status_menu_payload(&win, &payload);
+    mark_popup_visible("status-menu-popup", true);
     let _ = app.emit("status-menu-popup-opened", &payload);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_status_menu_popup(app: AppHandle) -> Result<(), String> {
-    set_dock_menu_hold(&app, false);
-    if let Some(w) = app.get_webview_window("status-menu-popup") {
-        w.close().map_err(|e| e.to_string())?;
-    }
-    let _ = app.emit("status-menu-popup-closed", ());
+    hide_chrome_popup(&app, "status-menu-popup");
     Ok(())
 }
 
 #[tauri::command]
-pub fn is_status_menu_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("status-menu-popup")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+pub fn is_status_menu_popup_open(_app: AppHandle) -> bool {
+    let _s = crate::win32::click_trace::Scope::enter("rust", "is_status_menu_popup_open");
+    popup_visible("status-menu-popup")
 }
 
 const PLUGIN_POPUP_W: f64 = 320.0;
@@ -926,6 +1297,7 @@ fn close_plugin_surfaces(app: &AppHandle) {
     }
     #[cfg(windows)]
     crate::win32::ambient::set_ambient_sample_target(None, 0);
+    mark_popup_visible("plugin-popup", false);
     let _ = app.emit("plugin-popup-closed", ());
 }
 
@@ -985,7 +1357,7 @@ pub async fn open_plugin_popup(
 
     // Idempotent: same surface + same plugin already visible.
     if let Some(existing) = app.get_webview_window(target_label) {
-        let already = existing.is_visible().unwrap_or(false)
+        let already = popup_visible("plugin-popup")
             && popup_plugin_id_of(&existing) == Some(plugin_id.clone());
         if already {
             if let Some(gid) = prefer_group_id.as_ref().filter(|s| !s.is_empty()) {
@@ -1021,6 +1393,7 @@ pub async fn open_plugin_popup(
             }
             let _ = existing.unminimize();
             let _ = existing.set_focus();
+            mark_popup_visible("plugin-popup", true);
             let _ = app.emit("plugin-popup-opened", &plugin_id);
             return Ok(());
         }
@@ -1142,6 +1515,7 @@ pub async fn open_plugin_popup(
         #[cfg(windows)]
         crate::win32::ambient::set_ambient_sample_target(None, 0);
     }
+    mark_popup_visible("plugin-popup", true);
     let _ = app.emit("plugin-popup-opened", &plugin_id);
     Ok(())
 }
@@ -1188,10 +1562,8 @@ pub async fn close_plugin_popup(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn is_plugin_popup_open(app: AppHandle) -> bool {
-    plugin_surface_window(&app)
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+pub fn is_plugin_popup_open(_app: AppHandle) -> bool {
+    popup_visible("plugin-popup")
 }
 
 /// Resize the open plugin popup (clamped). Used by canvas plugins.
@@ -1450,14 +1822,28 @@ fn schedule_main_window_material(app: &AppHandle, _debounce_ms: u64) {
 }
 
 /// Keep glass strip geometry in sync after main HWND / island resize.
+///
+/// **Must be async** — sync invoke right after `resize_main_island` / SetWindowPos
+/// deadlocks WebView2 (click-trace #106 before reassert → never ENTER → HUNG).
 #[tauri::command]
-pub fn reassert_main_bar_geometry(
+pub async fn reassert_main_bar_geometry(
     app: AppHandle,
     island_width: Option<f64>,
     island_height: Option<f64>,
-) {
+) -> Result<(), String> {
+    crate::win32::click_trace::log(
+        "rust",
+        &format!(
+            "reassert_main_bar_geometry enter w={:?} h={:?}",
+            island_width, island_height
+        ),
+    );
     let _ = (island_width, island_height);
+    // Yield past the resize/Moved reply path before scheduling Composition work.
+    async_delay_ms(50).await;
     apply_main_window_material(&app);
+    crate::win32::click_trace::log("rust", "reassert_main_bar_geometry leave");
+    Ok(())
 }
 
 #[tauri::command]
@@ -1527,6 +1913,16 @@ pub fn apply_window_effect(
         } else {
             "none".into()
         });
+    }
+    // Settings / framed windows: soft reassert only. Full apply_prefs clears SWCA
+    // then re-Mica — stacking with apply_prefs_deferred hung the pump after open
+    // (and any later invoke from a settings button could re-enter the same path).
+    if matches!(
+        window.label(),
+        "settings" | "dock-icon-editor" | "plugin-window" | "tray-popup" | "status-menu-popup" | "wifi-popup" | "wifi-auth-popup" | "input-lang-popup"
+    ) {
+        let _ = crate::win32::material::reassert_prefs(&window, &prefs);
+        return Ok(prefs.kind.as_str().to_string());
     }
     crate::win32::material::apply_prefs(&window, &prefs)?;
     Ok(prefs.kind.as_str().to_string())
@@ -1624,6 +2020,29 @@ pub fn health() -> Health {
     }
 }
 
+/// FE / tests: append a line to the click-hang trace (file-only, no HWND).
+#[tauri::command]
+pub fn debug_click_trace(origin: String, msg: String) -> String {
+    crate::win32::click_trace::log(&origin, &msg);
+    crate::win32::click_trace::path_string()
+}
+
+#[tauri::command]
+pub fn debug_click_trace_path() -> String {
+    crate::win32::click_trace::path_string()
+}
+
+#[tauri::command]
+pub fn debug_click_trace_http() -> String {
+    crate::win32::click_trace::http_endpoint()
+}
+
+#[tauri::command]
+pub fn debug_click_trace_clear() {
+    crate::win32::click_trace::clear();
+    crate::win32::click_trace::log("rust", "trace cleared");
+}
+
 /// Legacy shim removed — plugins use hub.storage.
 
 pub fn load_tray_prefs() -> crate::win32::tray::TrayPrefs {
@@ -1651,6 +2070,20 @@ fn save_tray_prefs(prefs: &crate::win32::tray::TrayPrefs) -> Result<(), String> 
 #[tauri::command]
 pub fn list_tray_icons() -> Vec<crate::win32::tray::TrayIconInfo> {
     crate::win32::tray::list_icons()
+}
+
+/// On-demand PNG glyphs (rail / popup). Never push these on every NIM_* emit.
+#[tauri::command]
+pub fn get_tray_icon_glyphs(
+    ids: Vec<String>,
+) -> std::collections::HashMap<String, String> {
+    crate::win32::tray::glyphs_for_ids(&ids)
+}
+
+/// Pause tray-icons FE emits while the island is morphing / resizing.
+#[tauri::command]
+pub fn set_tray_ui_paused(paused: bool) {
+    crate::win32::tray::set_emit_paused(paused);
 }
 
 #[tauri::command]
@@ -1782,10 +2215,17 @@ pub async fn open_input_lang_popup(
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
+        mark_popup_visible("input-lang-popup", true);
         let _ = app.emit("input-lang-popup-opened", ());
         return Ok(());
     }
 
+    crate::win32::click_trace::log("rust", "open_input_lang_popup NEED_CREATE async-delay");
+    async_delay_ms(100).await;
+    if app.get_webview_window("input-lang-popup").is_some() {
+        return Ok(());
+    }
+    crate::win32::click_trace::log("rust", "open_input_lang_popup after delay, build");
     let init = r#"
       window.__WH_IS_INPUT_LANG_POPUP__ = true;
       document.addEventListener('keydown', function (e) {
@@ -1794,8 +2234,12 @@ pub async fn open_input_lang_popup(
         }
       });
     "#;
-
-    let win = WebviewWindowBuilder::new(
+    let _guard = lock_webview_create("input-lang-popup");
+    if app.get_webview_window("input-lang-popup").is_some() {
+        return Ok(());
+    }
+    let wd = create_watchdog("input-lang-popup");
+    let built = WebviewWindowBuilder::new(
         &app,
         "input-lang-popup",
         WebviewUrl::App("index.html?window=input-lang".into()),
@@ -1814,9 +2258,9 @@ pub async fn open_input_lang_popup(
     .focused(true)
     .visible(false)
     .initialization_script(init)
-    .build()
-    .map_err(|e| format!("open input-lang popup failed: {e}"))?;
-
+    .build();
+    finish_watchdog(&wd);
+    let win = built.map_err(|e| format!("input-lang create failed: {e}"))?;
     let _ = win.set_position(LogicalPosition::new(x, y));
     apply_saved_material(&win, &state);
     if let Ok(hwnd) = win.hwnd() {
@@ -1824,24 +2268,21 @@ pub async fn open_input_lang_popup(
     }
     let _ = win.show();
     let _ = win.set_focus();
+    mark_popup_visible("input-lang-popup", true);
     let _ = app.emit("input-lang-popup-opened", ());
+    crate::win32::click_trace::log("rust", "open_input_lang_popup build DONE");
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_input_lang_popup(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("input-lang-popup") {
-        w.close().map_err(|e| e.to_string())?;
-    }
-    let _ = app.emit("input-lang-popup-closed", ());
+    hide_chrome_popup(&app, "input-lang-popup");
     Ok(())
 }
 
 #[tauri::command]
-pub fn is_input_lang_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("input-lang-popup")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+pub fn is_input_lang_popup_open(_app: AppHandle) -> bool {
+    popup_visible("input-lang-popup")
 }
 
 static CHROME_HOVER_TIP: Mutex<Option<ChromeHoverTipPayload>> = Mutex::new(None);
@@ -2420,54 +2861,20 @@ pub async fn show_chrome_hover_tip(
         return Ok(());
     }
 
-    let init = r#"
-      window.__WH_IS_CHROME_HOVER_TIP__ = true;
-    "#;
-
-    let win = WebviewWindowBuilder::new(
-        &app,
-        "chrome-hover-tip",
-        WebviewUrl::App("index.html?window=chrome-tip".into()),
-    )
-    .title("提示")
-    .inner_size(CHROME_HOVER_TIP_MEASURE_W, CHROME_HOVER_TIP_MEASURE_H)
-    .position(CHROME_HOVER_TIP_PARK_X, CHROME_HOVER_TIP_PARK_Y)
-    .resizable(false)
-    .maximizable(false)
-    .minimizable(false)
-    .closable(false)
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .background_color(Color(0, 0, 0, 0))
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .visible(false)
-    .initialization_script(init)
-    .build()
-    .map_err(|e| format!("open chrome hover tip failed: {e}"))?;
-
-    if !still_current() {
-        let _ = win.close();
-        return Ok(());
-    }
-
-    park_chrome_hover_tip(&win);
-    if let Ok(hwnd) = win.hwnd() {
-        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
-    }
-    let _ = win.set_shadow(false);
-    apply_chrome_hover_tip_material(&win, &state);
-    let _ = win.set_ignore_cursor_events(!interactive);
-    let _ = win.set_always_on_top(true);
-    if !still_current() {
-        park_chrome_hover_tip(&win);
-        return Ok(());
-    }
-    let _ = app.emit("chrome-hover-tip-show", &payload);
-    spawn_chrome_tip_leave_watch(app.clone(), seq);
+    // Proven hang (click-trace #10+#13): never build tip HWND on the hover/click
+    // path — races with status-menu/tray create and freezes WebView2. Skip until
+    // boot prewarm (or a quiet background request) has created it.
+    crate::win32::click_trace::log(
+        "rust",
+        "show_chrome_hover_tip SKIP_NO_HWND (no build on hot path)",
+    );
+    request_tip_prewarm(&app);
     Ok(())
+}
+
+fn request_tip_prewarm(_app: &AppHandle) {
+    // DISABLED: same hang class as chrome-prewarm (background WebView::build).
+    crate::win32::click_trace::log("rust", "tip-prewarm DISABLED (no background create)");
 }
 
 /// Apply measured geometry then show once. No-op if a newer show/hide superseded `epoch`.
@@ -2585,30 +2992,15 @@ fn close_sibling_popups(app: &AppHandle, except: &str) {
         if label == except {
             continue;
         }
-        if let Some(w) = app.get_webview_window(label) {
-            let _ = w.close();
-            match label {
-                "tray-popup" => {
-                    let _ = app.emit("tray-popup-closed", ());
-                }
-                "plugin-popup" => {
-                    let _ = app.emit("plugin-popup-closed", ());
-                }
-                "status-menu-popup" => {
-                    set_dock_menu_hold(app, false);
-                    let _ = app.emit("status-menu-popup-closed", ());
-                }
-                "input-lang-popup" => {
-                    let _ = app.emit("input-lang-popup-closed", ());
-                }
-                "wifi-popup" => {
-                    let _ = app.emit("wifi-popup-closed", ());
-                }
-                "wifi-auth-popup" => {
-                    let _ = app.emit("wifi-auth-popup-closed", ());
-                }
-                _ => {}
-            }
+        if app.get_webview_window(label).is_none() {
+            continue;
+        }
+        // Reusable chrome: hide only. Plugin surfaces still tear down (content binds
+        // to a single plugin id and must not show a stale surface).
+        if REUSABLE_CHROME_POPUPS.contains(&label) {
+            hide_chrome_popup(app, label);
+        } else if label == "plugin-popup" {
+            close_plugin_surfaces(app);
         }
     }
 }
@@ -2631,10 +3023,18 @@ pub async fn open_wifi_popup(
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
+        mark_popup_visible("wifi-popup", true);
         let _ = app.emit("wifi-popup-opened", ());
         return Ok(());
     }
 
+    crate::win32::click_trace::log("rust", "open_wifi_popup NEED_CREATE async-delay");
+    async_delay_ms(100).await;
+    let _ = crate::win32::wifi::refresh();
+    if app.get_webview_window("wifi-popup").is_some() {
+        return Ok(());
+    }
+    crate::win32::click_trace::log("rust", "open_wifi_popup after delay, build");
     let init = r#"
       window.__WH_IS_WIFI_POPUP__ = true;
       document.addEventListener('keydown', function (e) {
@@ -2643,8 +3043,12 @@ pub async fn open_wifi_popup(
         }
       });
     "#;
-
-    let win = WebviewWindowBuilder::new(
+    let _guard = lock_webview_create("wifi-popup");
+    if app.get_webview_window("wifi-popup").is_some() {
+        return Ok(());
+    }
+    let wd = create_watchdog("wifi-popup");
+    let built = WebviewWindowBuilder::new(
         &app,
         "wifi-popup",
         WebviewUrl::App("index.html?window=wifi".into()),
@@ -2663,9 +3067,9 @@ pub async fn open_wifi_popup(
     .focused(true)
     .visible(false)
     .initialization_script(init)
-    .build()
-    .map_err(|e| format!("open wifi popup failed: {e}"))?;
-
+    .build();
+    finish_watchdog(&wd);
+    let win = built.map_err(|e| format!("wifi-popup create failed: {e}"))?;
     let _ = win.set_position(LogicalPosition::new(x, y));
     apply_saved_material(&win, &state);
     if let Ok(hwnd) = win.hwnd() {
@@ -2673,24 +3077,21 @@ pub async fn open_wifi_popup(
     }
     let _ = win.show();
     let _ = win.set_focus();
+    mark_popup_visible("wifi-popup", true);
     let _ = app.emit("wifi-popup-opened", ());
+    crate::win32::click_trace::log("rust", "open_wifi_popup build DONE");
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_wifi_popup(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("wifi-popup") {
-        w.close().map_err(|e| e.to_string())?;
-    }
-    let _ = app.emit("wifi-popup-closed", ());
+    hide_chrome_popup(&app, "wifi-popup");
     Ok(())
 }
 
 #[tauri::command]
-pub fn is_wifi_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("wifi-popup")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+pub fn is_wifi_popup_open(_app: AppHandle) -> bool {
+    popup_visible("wifi-popup")
 }
 
 /// Centered global password dialog for joining a secured WLAN.
@@ -2705,46 +3106,20 @@ pub async fn open_wifi_auth_popup(
         return Err("SSID 为空".into());
     }
 
-    // Close the WLAN menu but keep other chrome; auth is the focused modal.
-    if let Some(w) = app.get_webview_window("wifi-popup") {
-        let _ = w.close();
-        let _ = app.emit("wifi-popup-closed", ());
-    }
-    for label in ["tray-popup", "plugin-popup", "status-menu-popup", "input-lang-popup"] {
-        if let Some(w) = app.get_webview_window(label) {
-            let _ = w.close();
-            match label {
-                "tray-popup" => {
-                    let _ = app.emit("tray-popup-closed", ());
-                }
-                "plugin-popup" => {
-                    let _ = app.emit("plugin-popup-closed", ());
-                }
-                "status-menu-popup" => {
-                    set_dock_menu_hold(&app, false);
-                    let _ = app.emit("status-menu-popup-closed", ());
-                }
-                "input-lang-popup" => {
-                    let _ = app.emit("input-lang-popup-closed", ());
-                }
-                _ => {}
-            }
+    // Dismiss siblings but keep HWNDs — auth is the focused modal.
+    hide_chrome_popup(&app, "wifi-popup");
+    for label in ["tray-popup", "status-menu-popup", "input-lang-popup"] {
+        if app.get_webview_window(label).is_some() {
+            hide_chrome_popup(&app, label);
         }
+    }
+    if app.get_webview_window("plugin-popup").is_some()
+        || app.get_webview_window("plugin-window").is_some()
+    {
+        close_plugin_surfaces(&app);
     }
 
     let ssid_js = serde_json::to_string(&ssid).unwrap_or_else(|_| "\"\"".into());
-    let init = format!(
-        r#"
-      window.__WH_IS_WIFI_AUTH_POPUP__ = true;
-      window.__WH_WIFI_AUTH_SSID__ = {ssid_js};
-      document.addEventListener('keydown', function (e) {{
-        if (e.key === 'Escape') {{
-          try {{ window.__TAURI__.core.invoke('close_wifi_auth_popup'); }} catch (_) {{}}
-        }}
-      }});
-    "#
-    );
-
     let (pos_x, pos_y) = {
         let main = app.get_webview_window("main");
         let monitor = main
@@ -2774,11 +3149,35 @@ pub async fn open_wifi_auth_popup(
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
+        mark_popup_visible("wifi-auth-popup", true);
         let _ = app.emit("wifi-auth-popup-opened", &ssid);
         return Ok(());
     }
 
-    let win = WebviewWindowBuilder::new(
+    crate::win32::click_trace::log("rust", "open_wifi_auth_popup NEED_CREATE async-delay");
+    async_delay_ms(100).await;
+    if app.get_webview_window("wifi-auth-popup").is_some() {
+        return Ok(());
+    }
+    crate::win32::click_trace::log("rust", "open_wifi_auth_popup after delay, build");
+    let ssid_js2 = serde_json::to_string(&ssid).unwrap_or_else(|_| "\"\"".into());
+    let init = format!(
+        r#"
+      window.__WH_IS_WIFI_AUTH_POPUP__ = true;
+      window.__WH_WIFI_AUTH_SSID__ = {ssid_js2};
+      document.addEventListener('keydown', function (e) {{
+        if (e.key === 'Escape') {{
+          try {{ window.__TAURI__.core.invoke('close_wifi_auth_popup'); }} catch (_) {{}}
+        }}
+      }});
+    "#
+    );
+    let _guard = lock_webview_create("wifi-auth-popup");
+    if app.get_webview_window("wifi-auth-popup").is_some() {
+        return Ok(());
+    }
+    let wd = create_watchdog("wifi-auth-popup");
+    let built = WebviewWindowBuilder::new(
         &app,
         "wifi-auth-popup",
         WebviewUrl::App(
@@ -2803,9 +3202,9 @@ pub async fn open_wifi_auth_popup(
     .focused(true)
     .visible(false)
     .initialization_script(&init)
-    .build()
-    .map_err(|e| format!("open wifi auth popup failed: {e}"))?;
-
+    .build();
+    finish_watchdog(&wd);
+    let win = built.map_err(|e| format!("wifi-auth create failed: {e}"))?;
     let _ = win.set_position(LogicalPosition::new(pos_x, pos_y));
     apply_saved_material(&win, &state);
     if let Ok(hwnd) = win.hwnd() {
@@ -2813,7 +3212,9 @@ pub async fn open_wifi_auth_popup(
     }
     let _ = win.show();
     let _ = win.set_focus();
+    mark_popup_visible("wifi-auth-popup", true);
     let _ = app.emit("wifi-auth-popup-opened", &ssid);
+    crate::win32::click_trace::log("rust", "open_wifi_auth_popup build DONE");
     Ok(())
 }
 
@@ -2832,18 +3233,13 @@ fn urlencoding_encode(s: &str) -> String {
 
 #[tauri::command]
 pub async fn close_wifi_auth_popup(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("wifi-auth-popup") {
-        w.close().map_err(|e| e.to_string())?;
-    }
-    let _ = app.emit("wifi-auth-popup-closed", ());
+    hide_chrome_popup(&app, "wifi-auth-popup");
     Ok(())
 }
 
 #[tauri::command]
-pub fn is_wifi_auth_popup_open(app: AppHandle) -> bool {
-    app.get_webview_window("wifi-auth-popup")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
+pub fn is_wifi_auth_popup_open(_app: AppHandle) -> bool {
+    popup_visible("wifi-auth-popup")
 }
 
 #[tauri::command]
@@ -2857,12 +3253,16 @@ pub async fn invoke_tray_icon(
 ) -> Result<(), String> {
     let click = crate::win32::tray::TrayClick::parse(action.as_deref().unwrap_or("left"));
     let version = version.unwrap_or(0);
-    // Off the async worker — tray notify / menu adapt must not stall the pump.
+    // Fire-and-forget — awaiting yield_for/SetWindowPos on the invoke path hung
+    // the FE (右键 1.8s yield + left 40ms) and made the whole process 未响应.
     tauri::async_runtime::spawn_blocking(move || {
-        crate::win32::tray::invoke_icon_by_id(id, hwnd, callback_msg, uid, version, click)
-    })
-    .await
-    .map_err(|e| format!("tray invoke join: {e}"))?
+        if let Err(e) =
+            crate::win32::tray::invoke_icon_by_id(id, hwnd, callback_msg, uid, version, click)
+        {
+            eprintln!("[tray] invoke_icon: {e}");
+        }
+    });
+    Ok(())
 }
 
 /// 点开岛通知 / 确认托盘注意力：flashing → 0，下次新消息可再弹。

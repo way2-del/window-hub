@@ -36,7 +36,7 @@ async function closeSelf() {
     await invoke("close_status_menu_popup");
   } catch {
     try {
-      await getCurrentWindow().close();
+      await getCurrentWindow().hide();
     } catch {
       /* noop */
     }

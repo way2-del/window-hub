@@ -20,6 +20,7 @@ pub mod capture;
 pub mod enum_windows;
 pub mod fullscreen;
 pub mod hang;
+pub mod click_trace;
 pub mod input;
 pub mod material;
 pub mod park;

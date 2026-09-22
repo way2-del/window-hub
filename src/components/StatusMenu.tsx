@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { hostTipPointerProps } from "../chromeHoverTip";
+import { clickTrace } from "../clickTrace";
+import { hideChromeHoverTip, hostTipPointerProps } from "../chromeHoverTip";
 import "./StatusMenu.css";
 
 type ForegroundApp = {
@@ -103,19 +104,32 @@ export default function StatusMenu({
   }, [menuOpen]);
 
   async function toggleMenu() {
+    clickTrace("fe-status", "toggleMenu click");
     try {
+      clickTrace("fe-status", "before is_status_menu_popup_open");
       const visible = await invoke<boolean>("is_status_menu_popup_open");
+      clickTrace("fe-status", `is_open=${visible} menuOpen=${menuOpen}`);
       if (visible || menuOpen) {
+        clickTrace("fe-status", "before close_status_menu_popup");
         await invoke("close_status_menu_popup");
+        clickTrace("fe-status", "after close");
         onMenuOpenChange(false);
         return;
       }
       const el = btnRef.current ?? anchorRef.current;
-      if (!el) return;
+      if (!el) {
+        clickTrace("fe-status", "no anchor el");
+        return;
+      }
+      clickTrace("fe-status", "before popupAnchor");
       const { x, y } = await popupAnchor(el);
+      clickTrace("fe-status", `anchor x=${x.toFixed(0)} y=${y.toFixed(0)}`);
+      clickTrace("fe-status", "before open_status_menu_popup");
       await invoke("open_status_menu_popup", { x, y });
+      clickTrace("fe-status", "after open_status_menu_popup");
       onMenuOpenChange(true);
     } catch (e) {
+      clickTrace("fe-status", `error ${String(e)}`);
       console.error(e);
     }
   }
@@ -127,6 +141,11 @@ export default function StatusMenu({
       className={`settings-btn${menuOpen ? " is-active" : ""}`}
       aria-label="状态菜单"
       aria-expanded={menuOpen}
+      onPointerDown={() => {
+        clickTrace("fe-status", "pointerdown");
+        // Cancel in-flight tip create/show before menu IPC (hang race #10+#13).
+        void hideChromeHoverTip();
+      }}
       onClick={() => void toggleMenu()}
     >
       <span className="settings-label" {...hostTipPointerProps(lastLabel.current)}>

@@ -28,7 +28,7 @@ async function closeSelf() {
     await invoke("close_wifi_auth_popup");
   } catch {
     try {
-      await getCurrentWindow().close();
+      await getCurrentWindow().hide();
     } catch {
       /* noop */
     }

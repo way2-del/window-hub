@@ -11,7 +11,7 @@ import {
   type TrayPrefs,
 } from "./components/TrayCluster";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
-import { slideRevealPopup } from "./popupFit";
+import { fitPopupToContent } from "./popupFit";
 import { armTrayLeftClick, fireTrayLeftDouble, invokeTrayRightClick } from "./trayInvoke";
 
 const POPUP_W = 280;
@@ -56,6 +56,7 @@ async function syncGlass() {
   } catch {
     await syncGlassCss({ kind: "mica-alt", dark: true });
   }
+  // Soft reassert once — Rust already applied material on create/reuse.
   await invoke("apply_window_effect", {}).catch(() => undefined);
 }
 
@@ -193,14 +194,17 @@ export default function TrayPopupApp() {
     const gen = ++revealGen.current;
     void (async () => {
       try {
-        await slideRevealPopup({
+        // One setSize + show — never 15-frame slideReveal (SetWindowPos storm → 未响应).
+        await fitPopupToContent({
           width: POPUP_W,
           selector: ".tray-popup-shell",
           minHeight: 72,
           maxHeight: 520,
-          direction: "down",
         });
         if (cancelled || gen !== revealGen.current) return;
+        const win = getCurrentWindow();
+        await win.show();
+        await win.setFocus();
         reuseArmedRef.current = true;
         setEntered(true);
       } catch (e) {

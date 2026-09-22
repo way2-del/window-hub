@@ -9,9 +9,18 @@ import {
 import { BorderBeam } from "border-beam";
 import { dominantColorFromPngBase64 } from "./iconDominantColor";
 import TrayCluster from "./components/TrayCluster";
+import ChromeStatusCluster from "./components/ChromeStatusCluster";
 import ShortcutsHost from "./components/ShortcutsHost";
 import StatusMenu from "./components/StatusMenu";
 import IslandPanelHost from "./components/IslandPanelHost";
+
+/** Must match Rust `tray::TRAY_BOOT_ENABLED_DEFAULT` after slim rewrite. */
+const TRAY_UI_ENABLED = true;
+
+function setTrayUiPaused(paused: boolean) {
+  if (!TRAY_UI_ENABLED) return;
+  void invoke("set_tray_ui_paused", { paused }).catch(() => undefined);
+}
 import {
   applyIslandPrefsSnapshot,
   getIslandPrefs,
@@ -58,6 +67,7 @@ import {
   windowKeyOf,
 } from "./scenarioGates";
 import { hideChromeHoverTip, hostTipPointerProps, installChromeHoverTipGlobalDismiss } from "./chromeHoverTip";
+import { clickTrace } from "./clickTrace";
 import "./App.css";
 import type { WindowInfo } from "./types";
 
@@ -510,40 +520,87 @@ async function screenLogicalWidth() {
 
 /** 窗口高度跟随岛高；AppBar 始终折叠高度，不跟着展开变。 */
 let cachedScreenW: number | null = null;
+/** Last Win32 height we applied — NEVER probe via innerSize/scaleFactor after expand
+ * (click-trace #138→HUNG: shrink path deadlocked on those IPC queries). */
+let lastAppliedBarWinH = ISLAND_BAR_H;
+/** Serialize setBarHeight — morph used to overlap dozens of resize IPC calls. */
+let barHeightTail: Promise<void> = Promise.resolve();
+let barHeightSeq = 0;
 /** 供 Win32 顶栏材质裁剪：展开时 = 顶栏条 ∪ 岛壳 */
 let liveIslandClip = { width: ISLAND_COLLAPSED_W_DEFAULT, height: ISLAND_BAR_H };
 
 async function setBarHeight(islandH: number) {
-  if (cachedScreenW == null) cachedScreenW = await screenLogicalWidth();
+  // Integer px only — fractional morph steps must not each SetWindowPos.
+  const h = Math.round(islandH);
+  const seq = ++barHeightSeq;
+  const run = async () => {
+    // Latest wins: drop superseded morph-frame requests.
+    if (seq !== barHeightSeq) {
+      clickTrace("fe-island", `setBarHeight skip superseded h=${h}`);
+      return;
+    }
+    await setBarHeightInner(h);
+  };
+  barHeightTail = barHeightTail.then(run, run);
+  return barHeightTail;
+}
+
+async function setBarHeightInner(islandH: number) {
+  clickTrace("fe-island", `setBarHeight enter h=${islandH}`);
+  if (cachedScreenW == null) {
+    clickTrace("fe-island", "before screenLogicalWidth");
+    cachedScreenW = await screenLogicalWidth();
+    clickTrace("fe-island", `after screenLogicalWidth w=${cachedScreenW}`);
+  }
   const width = cachedScreenW;
   const targetH = winHeight(islandH);
   const raised = islandH > ISLAND_BAR_H + 2;
   if (raised) {
     try {
+      clickTrace("fe-island", "before float_overlay");
       await invoke("float_overlay");
+      clickTrace("fe-island", "after float_overlay");
     } catch {
       /* noop outside tauri */
     }
   }
-  // Cold start: avoid redundant setSize when HWND already matches — WebView2
-  // geometry thrash during AppBar settle is a common "未响应" trigger.
-  let needSize = true;
-  try {
-    const cur = await getCurrentWindow().innerSize();
-    const scale = (await getCurrentWindow().scaleFactor()) || 1;
-    const curW = Math.round(cur.width / scale);
-    const curH = Math.round(cur.height / scale);
-    if (Math.abs(curW - width) <= 2 && Math.abs(curH - targetH) <= 2) {
-      needSize = false;
-    }
-  } catch {
-    /* resize anyway */
-  }
+  // Compare against last applied height only — querying HWND via Tauri
+  // innerSize/scaleFactor after expand freezes WebView2 (proven HUNG dump).
+  // Use 4px slack so morph float noise never retriggers resize.
+  const needSize = Math.abs(lastAppliedBarWinH - targetH) > 4;
+  clickTrace(
+    "fe-island",
+    `needSize=${needSize} last=${lastAppliedBarWinH} target=${targetH}`,
+  );
   if (needSize) {
     try {
-      await invoke("resize_main_island", { windowHeight: targetH });
-    } catch {
-      await getCurrentWindow().setSize(new LogicalSize(width, targetH));
+      if (!raised) {
+        // BEFORE setSize — same suppress as resize_main_island. Without it,
+        // Moved → bar_comp @200ms races tray-icons / WebView paint → HUNG
+        // (click-trace: after setSize collapse → leave → HUNG ~3s).
+        try {
+          await invoke("suppress_island_bar_refresh", { ms: 800 });
+        } catch {
+          /* noop */
+        }
+        clickTrace("fe-island", `before setSize collapse h=${targetH}`);
+        await getCurrentWindow().setSize(new LogicalSize(width, targetH));
+        lastAppliedBarWinH = targetH;
+        clickTrace("fe-island", "after setSize collapse");
+      } else {
+        clickTrace("fe-island", `before resize_main_island h=${targetH}`);
+        await invoke("resize_main_island", { windowHeight: targetH });
+        lastAppliedBarWinH = targetH;
+        clickTrace("fe-island", "after resize_main_island");
+      }
+    } catch (e) {
+      clickTrace("fe-island", `resize error ${String(e)}`);
+      try {
+        await getCurrentWindow().setSize(new LogicalSize(width, targetH));
+        lastAppliedBarWinH = targetH;
+      } catch {
+        /* noop */
+      }
     }
   }
   try {
@@ -555,20 +612,30 @@ async function setBarHeight(islandH: number) {
       ? Math.max(islandH, liveIslandClip.height, liveExpanded.height)
       : islandH;
     liveIslandClip = { width: clipW, height: clipH };
-    await invoke("reassert_main_bar_geometry", {
-      islandWidth: clipW,
-      islandHeight: clipH,
-    });
+    // Expand only: fire-and-forget material when HWND moved.
+    // Collapse/boot: ZERO settle/reassert IPC — settle SetWindowPos + bar_comp
+    // after resize hung the pump (click-trace #85 / boot #29 HUNG).
+    if (raised && needSize) {
+      clickTrace(
+        "fe-island",
+        `reassert fire-forget w=${clipW} h=${clipH}`,
+      );
+      void invoke("reassert_main_bar_geometry", {
+        islandWidth: clipW,
+        islandHeight: clipH,
+      }).catch(() => undefined);
+    } else if (!raised) {
+      clickTrace(
+        "fe-island",
+        needSize
+          ? "shrink: skip settle+reassert (in-process on resize)"
+          : "bar-height no-op: skip settle",
+      );
+    }
   } catch {
     /* noop */
   }
-  if (!raised) {
-    try {
-      await invoke("settle_overlay");
-    } catch {
-      /* noop outside tauri */
-    }
-  }
+  clickTrace("fe-island", `setBarHeight leave h=${islandH}`);
 }
 
 /** Sync CSS theme + let Rust decide Win32 glass (desktop always on). */
@@ -830,8 +897,8 @@ function App() {
   immersedRef.current = immersed;
   dropPluginIdRef.current = dropPluginId;
   islandPrefsRef.current = islandPrefs;
-  shellPanelWRef.current = shellPanelW;
-  shellPanelHRef.current = shellPanelH;
+  // Do NOT write shellPanelW/H refs from React state here — lagged 380×220 state
+  // was clobbering a correct 400×200 sync mid-expand (two island sizes).
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
 
   /** 面板尺寸：refs 优先，避免 expand/morph 中 React state 滞后把 liveExpanded 打回 380×220 */
@@ -1062,8 +1129,14 @@ function App() {
     return pref;
   }
 
-  /** 壳层点击/下拉应打开的插件：下拉内容优先，否则岛栏常驻（与点 chip 一致） */
+  /** 壳层点击/下拉应打开的插件：情景 claim 优先（与实际渲染一致），再 prefs 下拉 / 岛栏常驻 */
   function resolveShellExpandPluginId(): string | null {
+    const owner = scenarioOwnerRef.current;
+    if (owner) {
+      const sp = scenarioPullRef.current ?? `plugin:${owner}`;
+      const fromScenario = parsePluginPanelId(enabledPullContent(sp));
+      if (fromScenario) return fromScenario;
+    }
     const pullPid = parsePluginPanelId(
       enabledPullContent(islandPrefsRef.current.pullContent),
     );
@@ -1084,55 +1157,26 @@ function App() {
     setShellPanelH(h);
   }
 
-  async function readActualWinH(): Promise<number> {
-    try {
-      const cur = await getCurrentWindow().innerSize();
-      const scale = (await getCurrentWindow().scaleFactor()) || 1;
-      return Math.round(cur.height / scale);
-    } catch {
-      return actualWinHRef.current;
-    }
+  /** Prefer local last-applied height — never query HWND (innerSize deadlocks after expand). */
+  function readActualWinH(): number {
+    return actualWinHRef.current;
   }
 
   async function raiseIslandWindow(islandH: number): Promise<void> {
     await setBarHeight(islandH);
     const targetWinH = winHeight(islandH);
     lastWinH.current = targetWinH;
-    // 轮询直到 HWND 真变高；单次 SetWindowPos 后立即读可能仍是旧高
-    for (let i = 0; i < 16; i++) {
-      const actual = await readActualWinH();
-      actualWinHRef.current = actual;
-      if (actual >= targetWinH - 2) return;
-      if (i === 0 || i === 4 || i === 8) {
-        await setBarHeight(islandH);
-      }
-      await new Promise<void>((r) => window.setTimeout(r, 8));
-    }
+    actualWinHRef.current = targetWinH;
+    // No innerSize poll — each probe was a WebView2 IPC that can freeze the pump
+    // (click-trace: expand OK → shrink enter h=28 → HUNG before resize).
   }
 
   async function shrinkIslandWindow(): Promise<void> {
+    clickTrace("fe-island", "shrinkIslandWindow");
     await setBarHeight(ISLAND_BAR_H);
     const targetWinH = winHeight(ISLAND_BAR_H);
     lastWinH.current = targetWinH;
     actualWinHRef.current = targetWinH;
-  }
-
-  /** 展开动画中：岛形长高时窗口必须已到位（点击/会话路径） */
-  function raiseWindowIfNeeded(islandH: number) {
-    if (islandH <= ISLAND_BAR_H + 2) return;
-    if (pullingRef.current) return; // 拖拽手势不跟手长高，见 openPluginSession
-    if (
-      revealRef.current <= 0.02 &&
-      !expandedRef.current &&
-      !busy.current &&
-      !morphingRef.current
-    ) {
-      return;
-    }
-    const targetWinH = winHeight(islandH);
-    if (actualWinHRef.current >= targetWinH - 2) return;
-    lastWinH.current = targetWinH;
-    void raiseIslandWindow(islandH);
   }
 
   /** 用户配置了可用的岛栏常驻 */
@@ -1441,7 +1485,8 @@ function App() {
       ui.style.minHeight = "";
     }
     // panel is-open / opacity：React className + CSS（勿在此写 opacity，会闪黑）
-    raiseWindowIfNeeded(next.height);
+    // NEVER raiseWindowIfNeeded here — morph rAF called this every frame with
+    // lerp heights → SetWindowPos storm → HUNG on 收起 (lyrics dropdown).
   }
 
   /** 按帧插值：只刷 DOM（回弹等简单过渡） */
@@ -1544,6 +1589,10 @@ function App() {
 
   /** 点击展开：宽高交错长大，不经过宽扁中间态。force = 岛栏/拖入/通知打开会话。 */
   async function expand(opts?: { force?: boolean }) {
+    clickTrace(
+      "fe-island",
+      `expand enter force=${!!opts?.force} busy=${busy.current} expanded=${expandedRef.current}`,
+    );
     if (busy.current || expandedRef.current) return;
     if (!opts?.force) {
       clearSessionPanel();
@@ -1560,6 +1609,7 @@ function App() {
     bumpIslandActivity();
     const token = ++gen.current;
     busy.current = true;
+    setTrayUiPaused(true);
     trayOpenRef.current = false;
     setTrayOpen(false);
     pullingRef.current = false;
@@ -1578,6 +1628,7 @@ function App() {
     } finally {
       if (token === gen.current) {
         busy.current = false;
+        window.setTimeout(() => setTrayUiPaused(false), 500);
         // 若展开过程中目标尺寸已切到中转站，收尾再贴合一次
         if (expandedRef.current) {
           const t = {
@@ -1609,6 +1660,7 @@ function App() {
     bumpIslandActivity();
     const token = ++gen.current;
     busy.current = true;
+    setTrayUiPaused(true);
     try {
       // 先 leave：立刻关摄像头，再开收起动画
       setPanelActive(false);
@@ -1654,6 +1706,8 @@ function App() {
       if (token === gen.current) {
         morphingRef.current = false;
         busy.current = false;
+        // After collapse settle + bar_comp suppress window.
+        window.setTimeout(() => setTrayUiPaused(false), 900);
         scheduleImmerse();
       }
     }
@@ -1663,8 +1717,7 @@ function App() {
   async function ensureExpandedWindow(): Promise<void> {
     const islandH = liveExpanded.height;
     const targetWinH = winHeight(islandH);
-    const actualWinH = await readActualWinH();
-    actualWinHRef.current = actualWinH;
+    const actualWinH = readActualWinH();
     if (actualWinH >= targetWinH - 2) {
       lastWinH.current = targetWinH;
       return;
@@ -1673,6 +1726,10 @@ function App() {
   }
 
   function onIslandPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    clickTrace(
+      "fe-island",
+      `pointerdown btn=${e.button} busy=${busy.current} expanded=${expandedRef.current}`,
+    );
     if (expandedRef.current || busy.current) return;
     if (e.button !== 0) return;
     // 消息提示：仅「内联」横幅支持在主岛上左滑划掉；冲突叠层在独立胶囊上滑
@@ -2463,37 +2520,39 @@ function App() {
     }).then((fn) => {
       unlistenSearchHotkey = fn;
     });
-    void listen<TrayAttention>("tray-attention", (ev) => {
-      console.info("[tray-attention] event", ev.payload?.id, ev.payload?.tooltip);
-      showMsgBanner(ev.payload);
-    }).then((fn) => {
-      unlistenAttn = fn;
-    });
-    type TrayIconFlash = {
-      id: string;
-      pin_key?: string;
-      tooltip: string;
-      process: string;
-      icon_png_base64: string;
-      hwnd: number;
-      uid: number;
-      callback_msg: number;
-      version?: number;
-      flashing?: boolean;
-      system_tray?: boolean;
-    };
-    const syncPresenceFromTrays = (icons: TrayIconFlash[]) => {
-      refreshPresenceKeys(icons, undefined);
-      syncFlashingTrayBanner(icons);
-    };
-    void listen<TrayIconFlash[]>("tray-icons", (ev) => {
-      syncPresenceFromTrays(ev.payload ?? []);
-    }).then((fn) => {
-      unlistenTrayIcons = fn;
-    });
-    void invoke<TrayIconFlash[]>("list_tray_icons")
-      .then((icons) => syncPresenceFromTrays(icons ?? []))
-      .catch(() => undefined);
+    if (TRAY_UI_ENABLED) {
+      void listen<TrayAttention>("tray-attention", (ev) => {
+        console.info("[tray-attention] event", ev.payload?.id, ev.payload?.tooltip);
+        showMsgBanner(ev.payload);
+      }).then((fn) => {
+        unlistenAttn = fn;
+      });
+      type TrayIconFlash = {
+        id: string;
+        pin_key?: string;
+        tooltip: string;
+        process: string;
+        icon_png_base64: string;
+        hwnd: number;
+        uid: number;
+        callback_msg: number;
+        version?: number;
+        flashing?: boolean;
+        system_tray?: boolean;
+      };
+      const syncPresenceFromTrays = (icons: TrayIconFlash[]) => {
+        refreshPresenceKeys(icons, undefined);
+        syncFlashingTrayBanner(icons);
+      };
+      void listen<TrayIconFlash[]>("tray-icons", (ev) => {
+        syncPresenceFromTrays(ev.payload ?? []);
+      }).then((fn) => {
+        unlistenTrayIcons = fn;
+      });
+      void invoke<TrayIconFlash[]>("list_tray_icons")
+        .then((icons) => syncPresenceFromTrays(icons ?? []))
+        .catch(() => undefined);
+    }
 
     let unlistenWindows: (() => void) | undefined;
     const syncWindows = (list: WindowInfo[]) => {
@@ -2571,29 +2630,13 @@ function App() {
   }, [islandPrefs.scenarioGates]);
 
   useEffect(() => {
-    // 收起后：补挂 bus 上已有、或仍在 flashing 的托盘通知
+    // 收起后：只补 bus 上已有横幅，禁止 sync list_tray_icons（PNG 风暴叠 bar_comp → HUNG）
     if (expanded || reveal > 0.05) return;
+    if (!TRAY_UI_ENABLED) return;
     const pending = islandNotifyBus.getCurrent();
     if (pending && !msgBannerRef.current) {
       applyMsgBannerFromBus(pending);
-      return;
     }
-    void invoke<
-      Array<{
-        id: string;
-        tooltip: string;
-        process: string;
-        icon_png_base64: string;
-        hwnd: number;
-        uid: number;
-        callback_msg: number;
-        version?: number;
-        flashing?: boolean;
-        system_tray?: boolean;
-      }>
-    >("list_tray_icons")
-      .then((icons) => syncFlashingTrayBanner(icons ?? []))
-      .catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, reveal]);
 
@@ -3533,7 +3576,11 @@ function App() {
 
       <ShortcutsHost settingsRef={settingsAnchorRef} islandWidth={size.width} />
 
-      <TrayCluster open={trayOpen} onOpenChange={setTrayOpen} />
+      {TRAY_UI_ENABLED ? (
+        <TrayCluster open={trayOpen} onOpenChange={setTrayOpen} />
+      ) : (
+        <ChromeStatusCluster />
+      )}
 
       <BorderBeam
         ref={islandRef}
@@ -3614,6 +3661,10 @@ function App() {
             }, 320);
           }}
           onClick={() => {
+            clickTrace(
+              "fe-island",
+              `click busy=${busy.current} expanded=${expandedRef.current} swipeMoved=${!!swipe.current?.moved}`,
+            );
             // 左滑划掉 / 明显滑动后忽略 click，避免误开应用
             if (swipe.current?.dismissed || swipe.current?.moved) return;
             // 冲突叠层通知不在主岛内，点主岛不处理横幅

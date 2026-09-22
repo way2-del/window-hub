@@ -25,8 +25,8 @@ pub fn set_main_hwnd(hwnd: isize) {
 }
 
 pub fn set_overlay_raised(_raised: bool) {
-    // Collapsed or expanded: always keep TOPMOST on the desktop (unless yielding).
-    reassert_main_zorder();
+    // Flag retained for API compat. Do NOT SetWindowPos here — callers often
+    // invoke this in the middle of a resize (deadlocks WebView2).
 }
 
 /// Drop TOPMOST for `ms` (and clear immediately) so tray flyouts aren't covered.

@@ -36,6 +36,7 @@ import {
   type ShortcutsPluginScope,
 } from "./shortcutsPrefs";
 import PrefSelect from "./components/PrefSelect";
+import { clickTrace } from "./clickTrace";
 import {
   subscribeSettingsToast,
   type SettingsToastPayload,
@@ -869,6 +870,9 @@ export default function SettingsApp() {
   };
 
   useEffect(() => {
+    // Material is already applied by Rust on window create (apply_saved_material).
+    // Do NOT triple-invoke apply_window_effect here — that DWM storm hung the
+    // host ~3s after open_settings (click-trace: build DONE → HUNG, no clicks).
     void syncGlassCss({
       kind: "mica-alt",
       dark: darkPref === "auto" ? null : darkPref === "dark",
@@ -884,19 +888,12 @@ export default function SettingsApp() {
           kind: "mica-alt",
           dark: prefs.dark,
         });
-        await invoke("apply_window_effect", {});
+        // Soft CSS only on boot — one optional soft reassert after paint settles.
         window.setTimeout(() => {
           void invoke("apply_window_effect", {}).catch(() => undefined);
-        }, 120);
-        window.setTimeout(() => {
-          void invoke("apply_window_effect", {}).catch(() => undefined);
-        }, 350);
+        }, 400);
       } catch {
-        try {
-          await invoke("apply_window_effect", {});
-        } catch {
-          /* noop */
-        }
+        /* CSS already synced above */
       }
       try {
         const mode = (await invoke<string>("get_ambient_mode")) as AmbientMode;
@@ -907,11 +904,7 @@ export default function SettingsApp() {
         /* noop */
       }
       try {
-        const [list, prefs] = await Promise.all([
-          invoke<TrayIconInfo[]>("list_tray_icons"),
-          invoke<TrayPrefs>("get_tray_prefs"),
-        ]);
-        setTrays(list);
+        const prefs = await invoke<TrayPrefs>("get_tray_prefs");
         setPinned(prefs.pinned ?? []);
         setMenuHeights(prefs.menu_heights ?? {});
         setFlashNotify(prefs.flash_notify ?? {});
@@ -982,17 +975,29 @@ export default function SettingsApp() {
       void refreshLaunchers();
     }).then((fn) => unsubs.push(fn));
 
-    const poll = window.setInterval(() => {
-      void invoke<TrayIconInfo[]>("list_tray_icons")
-        .then((list) => setTrays(list))
-        .catch(() => undefined);
-    }, 800);
-
     return () => {
-      window.clearInterval(poll);
       unsubs.forEach((fn) => fn());
     };
   }, []);
+
+  // Tray icon list only while the tray tab is visible (was 800ms forever → UI hitch).
+  useEffect(() => {
+    if (nav !== "tray") return;
+    let cancelled = false;
+    const pull = () => {
+      void invoke<TrayIconInfo[]>("list_tray_icons")
+        .then((list) => {
+          if (!cancelled) setTrays(list);
+        })
+        .catch(() => undefined);
+    };
+    pull();
+    const poll = window.setInterval(pull, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(poll);
+    };
+  }, [nav]);
 
   // Leave tray detail when switching away from the tray tab.
   useEffect(() => {
@@ -1408,7 +1413,10 @@ export default function SettingsApp() {
               key={item.id}
               type="button"
               className={`settings-nav-item${nav === item.id ? " is-active" : ""}`}
-              onClick={() => setNav(item.id)}
+              onClick={() => {
+                clickTrace("fe-settings", `nav ${item.id}`);
+                setNav(item.id);
+              }}
             >
               <span className="settings-nav-icon" style={{ background: item.tint }}>
                 {item.icon}

@@ -76,8 +76,12 @@ pub(crate) fn now_ms() -> i64 {
 pub fn init() -> Result<DbState, String> {
     let path = db_path()?;
     let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
-        .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
+    )
+    .map_err(|e| e.to_string())?;
+    // Shrink oversized WAL left by crashed/hung sessions (observed 4MB+).
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     migrate_schema(&conn)?;
     let state = DbState {
         conn: Arc::new(Mutex::new(conn)),

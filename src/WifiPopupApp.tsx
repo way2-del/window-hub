@@ -29,7 +29,7 @@ async function closeSelf() {
     await invoke("close_wifi_popup");
   } catch {
     try {
-      await getCurrentWindow().close();
+      await getCurrentWindow().hide();
     } catch {
       /* noop */
     }
@@ -260,6 +260,23 @@ export default function WifiPopupApp() {
         setState(ev.payload);
         fitWifiPopup();
       }
+    }).then((fn) => {
+      if (!cancelled) unsubs.push(fn);
+      else fn();
+    });
+
+    // HWND reuse: refresh lists when the popup is shown again.
+    void listen("wifi-popup-opened", () => {
+      void (async () => {
+        try {
+          const s = await invoke<WifiState>("get_wifi_state");
+          if (s) setState(s);
+        } catch {
+          /* noop */
+        }
+        await loadNetworks();
+        fitWifiPopup();
+      })();
     }).then((fn) => {
       if (!cancelled) unsubs.push(fn);
       else fn();

@@ -9,8 +9,13 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use windows::Win32::Foundation::HWND;
 
 use super::material::MaterialPrefs;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const LABEL: &str = "island-bar-glass";
+
+/// Skip Moved/Resized → bar_comp until this unix-ms (set after island SetWindowPos).
+static SUPPRESS_REFRESH_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static REFRESH_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn main_hwnd(window: &WebviewWindow) -> Option<HWND> {
     window
@@ -69,7 +74,56 @@ pub fn sync(app: &AppHandle, enabled: bool, prefs: &MaterialPrefs) {
 }
 
 /// Relayout top strip after monitor pin / width change.
+/// Debounced + main-thread only — calling Composition from a worker after
+/// SetWindowPos freezes WebView2 (收起 HUNG after resize leave ok).
 pub fn refresh_layout(app: &AppHandle) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if now < SUPPRESS_REFRESH_UNTIL_MS.load(Ordering::Relaxed) {
+        crate::win32::click_trace::log("bar-comp", "refresh_layout suppressed");
+        return;
+    }
+
+    let gen = REFRESH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if REFRESH_GEN.load(Ordering::Relaxed) != gen {
+            return;
+        }
+        let now2 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if now2 < SUPPRESS_REFRESH_UNTIL_MS.load(Ordering::Relaxed) {
+            crate::win32::click_trace::log("bar-comp", "refresh_layout suppressed (late)");
+            return;
+        }
+        refresh_layout_now(&app);
+    });
+}
+
+/// Skip Moved/Resized → bar_comp for `ms` after island HWND resize.
+pub fn suppress_refresh_ms(ms: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let until = now.saturating_add(ms);
+    SUPPRESS_REFRESH_UNTIL_MS.fetch_max(until, Ordering::Relaxed);
+}
+
+pub fn refresh_suppressed() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    now < SUPPRESS_REFRESH_UNTIL_MS.load(Ordering::Relaxed)
+}
+
+fn refresh_layout_now(app: &AppHandle) {
     if crate::win32::work_area::work_area_quiet() {
         return;
     }
@@ -85,9 +139,16 @@ pub fn refresh_layout(app: &AppHandle) {
     }
     let prefs = crate::commands::load_material_prefs();
     let dark = theme_dark_from_prefs(&prefs);
-    if let Some(hwnd) = main_hwnd(&main) {
-        let _ = crate::win32::bar_comp::refresh_layout(hwnd, dark);
-    }
+    let Some(hwnd) = main_hwnd(&main) else {
+        return;
+    };
+    let hwnd_raw = hwnd.0 as isize;
+    crate::win32::click_trace::log("bar-comp", "refresh_layout_now → main thread");
+    let _ = main.run_on_main_thread(move || {
+        let h = HWND(hwnd_raw as *mut _);
+        let _ = crate::win32::bar_comp::refresh_layout(h, dark);
+        crate::win32::click_trace::log("bar-comp", "refresh_layout_now done");
+    });
 }
 
 /// No-op — Composition attaches on first `sync_inner`. Kept for boot call sites.

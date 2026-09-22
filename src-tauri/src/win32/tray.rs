@@ -1,18 +1,33 @@
-//! System tray icon tracking for Windows 10/11.
+//! Slim tray pipeline (rewrite 2026-09):
+//! - Explorer hook still feeds `ICONS` (needs hwnd/callback for clicks)
+//! - FE emits are **meta-only** (no base64 PNG storms) + debounced ≤4Hz
+//! - Glyphs fetched on demand via `get_tray_icon_glyphs`
+//! - Emit paused while island morphs (`set_tray_ui_paused`)
+//! - No SQLite write on publish; mild cold-start recover only
 //!
-//! Primary pipeline (MyDockFinder-aligned):
-//! 1. **Explorer hook** (`window_hub_trayhook.dll` via `WH_CALLWNDPROC`) —
-//!    intercepts tray `WM_COPYDATA` inside explorer → shared-memory slots
-//! 2. **Notify callback clicks** — `SendNotifyMessage` only (no demote / UIA)
-//! 3. **Registry** — tooltip / snapshot / pin enrichment only (not existence)
-//!
-//! Fallback: vendored `systray-util` spy when the hook fails to install.
-//! UIA / demote_all are **not** on the click or startup hot path.
-//!
-//! Boot: wait for `TrayNotifyWnd`, then a resident watchdog keeps
-//! `TaskbarCreated` + hook rehang until 常显 pins are clickable (cold-start).
+//! Force off: `WH_DISABLE_TRAY=1`. Force on: `WH_ENABLE_TRAY=1`.
 
 use serde::{Deserialize, Serialize};
+
+/// Default ON after slim rewrite.
+pub const TRAY_BOOT_ENABLED_DEFAULT: bool = true;
+
+/// Runtime gate used by boot + commands.
+pub fn tray_boot_enabled() -> bool {
+    if std::env::var("WH_DISABLE_TRAY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if std::env::var("WH_ENABLE_TRAY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    TRAY_BOOT_ENABLED_DEFAULT
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayIconInfo {
@@ -100,7 +115,7 @@ mod win {
     use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{LazyLock, OnceLock};
     use systray_util::{ImageFormat, Systray, SystrayEvent, SystrayIcon};
 
@@ -154,6 +169,10 @@ mod win {
     static HOOK_PRIMARY: AtomicBool = AtomicBool::new(false);
     static SPY_FALLBACK_STARTED: AtomicBool = AtomicBool::new(false);
     static TRAY_FAST_SEED_DONE: AtomicBool = AtomicBool::new(false);
+    /// Coalesce tray-icons FE storms (NIM_* bursts hung island collapse).
+    static PUBLISH_GEN: AtomicU64 = AtomicU64::new(0);
+    /// Island morphing — drop FE emits until clear (queued via publish gen).
+    static EMIT_PAUSED: AtomicBool = AtomicBool::new(false);
 
     /// Registry stubs when spy is primary, or hook is live but still has no icons.
     fn registry_stub_seed_enabled() -> bool {
@@ -176,6 +195,10 @@ mod win {
         let icons: Vec<TrayIconInfo> = ICONS.lock().values().cloned().collect();
         normalize_prefs_keys(&mut prefs, &icons);
         *PREFS.lock() = prefs;
+        persist_prefs_disk();
+        if let Some(emit) = PREFS_EMIT.get() {
+            emit(get_prefs());
+        }
     }
 
     /// Persist current in-memory tray prefs (after pin_key migration).
@@ -465,9 +488,19 @@ mod win {
         cached_menu_height(icon_id)
     }
 
+    pub fn set_emit_paused(paused: bool) {
+        EMIT_PAUSED.store(paused, Ordering::SeqCst);
+        if !paused {
+            // Flush one coalesced snapshot after morph.
+            publish();
+        }
+    }
+
     pub fn list_icons() -> Vec<TrayIconInfo> {
+        if !super::tray_boot_enabled() {
+            return Vec::new();
+        }
         // Never run registry enum on the invoke path — can hitch the UI.
-        // Seeding is owned by reconcile / boot pipeline.
         let _ = sweep_icons();
         let mut v: Vec<_> = ICONS.lock().values().cloned().collect();
         v.sort_by(|a, b| {
@@ -477,6 +510,29 @@ mod win {
                 .then_with(|| a.id.cmp(&b.id))
         });
         v
+    }
+
+    /// Meta-only clone for FE push (strips every PNG — glyphs via get_tray_icon_glyphs).
+    fn list_icons_meta() -> Vec<TrayIconInfo> {
+        let mut v = list_icons();
+        for i in &mut v {
+            i.icon_png_base64.clear();
+        }
+        v
+    }
+
+    /// On-demand glyphs for rail / popup rows that need pixels.
+    pub fn glyphs_for_ids(ids: &[String]) -> std::collections::HashMap<String, String> {
+        let icons = ICONS.lock();
+        let mut out = std::collections::HashMap::new();
+        for id in ids {
+            if let Some(info) = icons.get(id) {
+                if !info.icon_png_base64.is_empty() {
+                    out.insert(id.clone(), info.icon_png_base64.clone());
+                }
+            }
+        }
+        out
     }
 
     fn clean_text(s: &str) -> String {
@@ -1247,13 +1303,26 @@ mod win {
     }
 
     fn publish() {
-        if rewrite_prefs_against_live_icons() {
-            persist_prefs_disk();
-            if let Some(emit) = PREFS_EMIT.get() {
-                emit(get_prefs());
+        // Debounce ≤ ~2.5Hz. Hook NIM_MODIFY bursts must not flood the main WebView.
+        let gen = PUBLISH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if PUBLISH_GEN.load(Ordering::Relaxed) != gen {
+                return;
             }
+            publish_now();
+        });
+    }
+
+    fn publish_now() {
+        if !super::tray_boot_enabled() {
+            return;
         }
-        let list = list_icons();
+        if EMIT_PAUSED.load(Ordering::SeqCst) {
+            return;
+        }
+        // Never write SQLite on the emit hot path (was inside rewrite_prefs).
+        let list = list_icons_meta();
         if let Some(emit) = EMIT.get() {
             emit(list);
         }
@@ -2003,6 +2072,9 @@ mod win {
 
     /// Boot waits for hook icons OR reconcile fast-seed — never blocks on registry EnumWindows.
     pub fn wait_for_tray_seed(timeout: std::time::Duration) -> bool {
+        if !super::tray_boot_enabled() {
+            return true;
+        }
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             if TRAY_FAST_SEED_DONE.load(Ordering::Acquire) || clickable_icon_count() > 0 {
@@ -2216,6 +2288,15 @@ mod win {
         A: Fn(TrayAttention) + Send + Sync + 'static,
         P: Fn(TrayPrefs) + Send + Sync + 'static,
     {
+        if !super::tray_boot_enabled() {
+            eprintln!(
+                "[tray] BOOT DISABLED — hook/reconcile/spy not started (set TRAY_BOOT_ENABLED_DEFAULT or WH_ENABLE_TRAY=1)"
+            );
+            let _ = EMIT.set(Box::new(on_change));
+            let _ = ATTENTION.set(Box::new(on_attention));
+            let _ = PREFS_EMIT.set(Box::new(on_prefs));
+            return;
+        }
         let _ = EMIT.set(Box::new(on_change));
         let _ = ATTENTION.set(Box::new(on_attention));
         let _ = PREFS_EMIT.set(Box::new(on_prefs));
@@ -2240,87 +2321,39 @@ mod win {
             start_spy_fallback();
         }
 
+        // Mild cold-start only — old 180s TaskbarCreated loop stormed publish() forever.
         std::thread::Builder::new()
-            .name("tray-resident-watchdog".into())
+            .name("tray-cold-start".into())
             .spawn(|| {
-                // Keep pulling 常显 / clickable tray icons through cold-boot races.
-                // Old one-shot watchdog exited as soon as IME (or any icon) appeared,
-                // while TaskbarCreated recovery was blocked by the 20s rate limit —
-                // user had to restart Window Hub once shell apps were ready.
-                let started = std::time::Instant::now();
-                let boot_window = std::time::Duration::from_secs(180);
-                let mut attempts: u32 = 0;
-                let mut spy_kicked = false;
-
-                std::thread::sleep(std::time::Duration::from_secs(2));
-
-                loop {
-                    let in_boot = started.elapsed() < boot_window;
-                    if !tray_needs_resident_recover(in_boot) {
-                        if attempts > 0 && in_boot {
-                            eprintln!(
-                                "[tray] resident-watchdog: recovered clickable={} after {attempts} attempts",
-                                clickable_icon_count()
-                            );
-                            attempts = 0;
+                for attempt in 1u32..=4 {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    if clickable_icon_count() > 0 {
+                        eprintln!(
+                            "[tray] cold-start: ok clickable={} after attempt={}",
+                            clickable_icon_count(),
+                            attempt
+                        );
+                        publish();
+                        return;
+                    }
+                    eprintln!("[tray] cold-start attempt={attempt} — soft recover");
+                    let _ = crate::win32::tray_hook_host::ensure_hook();
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let (changed, _) = apply_registry_snapshot(true, true);
+                        if changed {
+                            publish();
                         }
-                        std::thread::sleep(if in_boot {
-                            std::time::Duration::from_secs(2)
-                        } else {
-                            std::time::Duration::from_secs(30)
-                        });
-                        continue;
-                    }
-
-                    attempts = attempts.saturating_add(1);
-                    let missing = missing_pinned_clickable();
-                    eprintln!(
-                        "[tray] resident-watchdog: recover attempt={attempts} clickable={} missing_pinned={} in_boot={in_boot}",
-                        clickable_icon_count(),
-                        missing.len()
-                    );
-                    if !missing.is_empty() && missing.len() <= 8 {
-                        eprintln!("[tray] resident-watchdog: missing={missing:?}");
-                    }
-
-                    match crate::win32::tray_hook_host::ensure_hook() {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            eprintln!("[tray] resident-watchdog: ensure_hook → not live");
-                        }
-                        Err(err) => {
-                            eprintln!("[tray] resident-watchdog: ensure_hook: {err}");
-                        }
-                    }
-                    broadcast_taskbar_created_force();
-
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    if clickable_icon_count() == 0 || !missing_pinned_clickable().is_empty() {
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let (changed, _) = apply_registry_snapshot(true, true);
-                            if changed {
-                                publish();
-                            }
-                        }));
-                    }
-
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    if !spy_kicked && clickable_icon_count() == 0 && attempts >= 2 {
-                        eprintln!("[tray] resident-watchdog: still empty — spy fallback");
-                        spy_kicked = true;
+                    }));
+                    if attempt == 3 && clickable_icon_count() == 0 {
                         start_spy_fallback();
                     }
-
-                    // After boot window, only fight total emptiness (slow).
-                    let wait = if in_boot {
-                        std::time::Duration::from_secs((4 + attempts as u64).min(12))
-                    } else {
-                        std::time::Duration::from_secs(30)
-                    };
-                    std::thread::sleep(wait);
                 }
+                eprintln!(
+                    "[tray] cold-start done clickable={}",
+                    clickable_icon_count()
+                );
             })
-            .expect("spawn tray-resident-watchdog");
+            .expect("spawn tray-cold-start");
     }
 
     /// Last measured popup-menu height per icon id (auto mode).
@@ -2914,12 +2947,10 @@ mod win {
             }
         }
 
-        // Right-click menus need topmost yield; left/dblclk must fire immediately or
-        // a user double-click is already over before messages are posted.
+        // Right-click menus need topmost yield; left/dblclk must fire immediately —
+        // never SetWindowPos the main strip on the left-click hot path (hung pump).
         if matches!(click, TrayClick::Right) {
             crate::win32::topmost::yield_for(1_800);
-        } else {
-            crate::win32::topmost::yield_for(40);
         }
 
         let click_pt = cursor_pos();
@@ -3058,8 +3089,8 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    acknowledge_icon_attention, clickable_count, get_prefs, invoke_icon_by_id, list_icons,
-    set_prefs, start, total_icon_count, wait_for_tray_seed,
+    acknowledge_icon_attention, clickable_count, get_prefs, glyphs_for_ids, invoke_icon_by_id,
+    list_icons, set_emit_paused, set_prefs, start, total_icon_count, wait_for_tray_seed,
 };
 
 #[cfg(not(windows))]
@@ -3081,6 +3112,14 @@ pub fn total_icon_count() -> usize {
 pub fn list_icons() -> Vec<TrayIconInfo> {
     Vec::new()
 }
+
+#[cfg(not(windows))]
+pub fn glyphs_for_ids(_ids: &[String]) -> std::collections::HashMap<String, String> {
+    Default::default()
+}
+
+#[cfg(not(windows))]
+pub fn set_emit_paused(_paused: bool) {}
 
 #[cfg(not(windows))]
 pub fn get_prefs() -> TrayPrefs {

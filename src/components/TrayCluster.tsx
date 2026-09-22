@@ -9,6 +9,7 @@ import {
   sameOrder,
 } from "../chromeReorder";
 import { invokeTrayRightClick, armTrayLeftClick, fireTrayLeftDouble } from "../trayInvoke";
+import { clickTrace } from "../clickTrace";
 import { isTrayPinnedKey } from "../scenarioGates";
 
 export type TrayIconInfo = {
@@ -246,6 +247,8 @@ export function isTrayResident(icon: TrayIconInfo): boolean {
   return /^(en|eng|chs|cht|jp|jpn|kr|kor|中|英|日|韩)$/i.test(tip);
 }
 
+const INPUT_LANG_POPUP_W = 240;
+const WIFI_POPUP_W = 280;
 const TRAY_POPUP_W = 280;
 /** 避开顶栏下方 4px 吸色带，防止弹窗像素污染任务栏色带 */
 const TRAY_POPUP_GAP = 8;
@@ -311,19 +314,24 @@ async function clickTray(icon: TrayIconInfo, action: "left" | "right" | "left-do
   }
 }
 
+/** Cache strip origin — awaiting outerPosition/scaleFactor on every click can freeze after island resize. */
+let cachedAnchor: { factor: number; ox: number; oy: number; at: number } | null = null;
+
 async function popupAnchor(el: HTMLElement, width: number) {
-  const win = getCurrentWindow();
-  const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
+  const now = Date.now();
+  if (!cachedAnchor || now - cachedAnchor.at > 800) {
+    const win = getCurrentWindow();
+    const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
+    cachedAnchor = { factor, ox: outer.x, oy: outer.y, at: now };
+  }
+  const { factor, ox, oy } = cachedAnchor;
   const rect = el.getBoundingClientRect();
-  const logicalX = outer.x / factor;
-  const logicalY = outer.y / factor;
+  const logicalX = ox / factor;
+  const logicalY = oy / factor;
   const x = logicalX + rect.right - width;
   const y = logicalY + rect.bottom + TRAY_POPUP_GAP;
   return { x, y };
 }
-
-const INPUT_LANG_POPUP_W = 240;
-const WIFI_POPUP_W = 280;
 
 export default function TrayCluster({
   open,
@@ -335,6 +343,53 @@ export default function TrayCluster({
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
+  const glyphCacheRef = useRef<Map<string, string>>(new Map());
+
+  /** Merge meta list with on-demand glyphs (emit is PNG-stripped after rewrite). */
+  function mergeGlyphs(list: TrayIconInfo[]): TrayIconInfo[] {
+    const cache = glyphCacheRef.current;
+    return list.map((i) => {
+      if (i.icon_png_base64) {
+        cache.set(i.id, i.icon_png_base64);
+        return i;
+      }
+      const g = cache.get(i.id);
+      return g ? { ...i, icon_png_base64: g } : i;
+    });
+  }
+
+  async function ensureRailGlyphs(list: TrayIconInfo[], pinnedIds: string[]) {
+    const pinnedSet = new Set(pinnedIds);
+    const live = list.map((i) => trayPinKey(i));
+    const need = list
+      .filter((i) => {
+        if (i.icon_png_base64 || glyphCacheRef.current.has(i.id)) return false;
+        return (
+          isTrayResident(i) ||
+          isTrayPinned(i, pinnedSet, live) ||
+          Boolean(i.flashing)
+        );
+      })
+      .map((i) => i.id);
+    if (need.length === 0) return;
+    try {
+      const map = await invoke<Record<string, string>>("get_tray_icon_glyphs", {
+        ids: need,
+      });
+      let changed = false;
+      for (const [id, png] of Object.entries(map ?? {})) {
+        if (png) {
+          glyphCacheRef.current.set(id, png);
+          changed = true;
+        }
+      }
+      if (changed) {
+        setIcons((prev) => mergeGlyphs(prev));
+      }
+    } catch {
+      /* noop */
+    }
+  }
   const [now, setNow] = useState(() => new Date());
   const [inputLang, setInputLang] = useState<InputLangState>(FALLBACK_LANG);
   const [wifi, setWifi] = useState<WifiState>(FALLBACK_WIFI);
@@ -377,9 +432,12 @@ export default function TrayCluster({
           invoke<TrayPrefs>("get_tray_prefs"),
         ]);
         if (!cancelled) {
-          setIcons(list);
-          setPinned(prefs.pinned ?? []);
+          const pin = prefs.pinned ?? [];
+          setPinned(pin);
           setMenuHeights(prefs.menu_heights ?? {});
+          const merged = mergeGlyphs(list);
+          setIcons(merged);
+          void ensureRailGlyphs(merged, pin);
         }
       } catch {
         /* noop */
@@ -407,7 +465,9 @@ export default function TrayCluster({
       try {
         unsubs.push(
           await listen<TrayIconInfo[]>("tray-icons", (ev) => {
-            setIcons(ev.payload);
+            const merged = mergeGlyphs(ev.payload ?? []);
+            setIcons(merged);
+            void ensureRailGlyphs(merged, pinnedRef.current);
           }),
         );
       } catch {
@@ -663,8 +723,11 @@ export default function TrayCluster({
   );
 
   async function openLangMenu() {
+    clickTrace("fe-tray", "openLangMenu");
     try {
+      clickTrace("fe-tray", "before is_input_lang_popup_open");
       const visible = await invoke<boolean>("is_input_lang_popup_open");
+      clickTrace("fe-tray", `lang is_open=${visible}`);
       if (visible || langMenuOpen) {
         await invoke("close_input_lang_popup");
         setLangMenuOpen(false);
@@ -673,16 +736,22 @@ export default function TrayCluster({
       const el = langChipRef.current ?? chevronRef.current;
       if (!el) return;
       const { x, y } = await popupAnchor(el, INPUT_LANG_POPUP_W);
+      clickTrace("fe-tray", "before open_input_lang_popup");
       await invoke("open_input_lang_popup", { x, y });
+      clickTrace("fe-tray", "after open_input_lang_popup");
       setLangMenuOpen(true);
     } catch (e) {
+      clickTrace("fe-tray", `openLangMenu error ${String(e)}`);
       console.error(e);
     }
   }
 
   async function openWifiMenu() {
+    clickTrace("fe-tray", "openWifiMenu");
     try {
+      clickTrace("fe-tray", "before is_wifi_popup_open");
       const visible = await invoke<boolean>("is_wifi_popup_open");
+      clickTrace("fe-tray", `wifi is_open=${visible}`);
       if (visible || wifiMenuOpen) {
         await invoke("close_wifi_popup");
         setWifiMenuOpen(false);
@@ -691,9 +760,12 @@ export default function TrayCluster({
       const el = wifiChipRef.current ?? chevronRef.current;
       if (!el) return;
       const { x, y } = await popupAnchor(el, WIFI_POPUP_W);
+      clickTrace("fe-tray", "before open_wifi_popup");
       await invoke("open_wifi_popup", { x, y });
+      clickTrace("fe-tray", "after open_wifi_popup");
       setWifiMenuOpen(true);
     } catch (e) {
+      clickTrace("fe-tray", `openWifiMenu error ${String(e)}`);
       console.error(e);
     }
   }
@@ -721,19 +793,40 @@ export default function TrayCluster({
   }
 
   async function togglePopup() {
+    clickTrace("fe-tray", "togglePopup click");
+    void hideChromeHoverTip();
     try {
-      const visible = await invoke<boolean>("is_tray_popup_open");
-      if (visible || open) {
+      if (open) {
+        clickTrace("fe-tray", "before close_tray_popup (local open)");
         await invoke("close_tray_popup");
+        clickTrace("fe-tray", "after close");
+        onOpenChange(false);
+        return;
+      }
+      clickTrace("fe-tray", "before is_tray_popup_open");
+      const visible = await invoke<boolean>("is_tray_popup_open");
+      clickTrace("fe-tray", `is_open=${visible} open=${open}`);
+      if (visible) {
+        clickTrace("fe-tray", "before close_tray_popup");
+        await invoke("close_tray_popup");
+        clickTrace("fe-tray", "after close");
         onOpenChange(false);
         return;
       }
       const el = chevronRef.current;
-      if (!el) return;
+      if (!el) {
+        clickTrace("fe-tray", "no chevron el");
+        return;
+      }
+      clickTrace("fe-tray", "before popupAnchor");
       const { x, y } = await popupAnchor(el, TRAY_POPUP_W);
+      clickTrace("fe-tray", `anchor x=${x.toFixed(0)} y=${y.toFixed(0)}`);
+      clickTrace("fe-tray", "before open_tray_popup");
       await invoke("open_tray_popup", { x, y });
+      clickTrace("fe-tray", "after open_tray_popup");
       onOpenChange(true);
     } catch (e) {
+      clickTrace("fe-tray", `error ${String(e)}`);
       console.error(e);
     }
   }
@@ -826,7 +919,11 @@ export default function TrayCluster({
           {...hostTipPointerProps(wifiTip)}
           aria-label={wifiAria}
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => { void hideChromeHoverTip(); void openWifiMenu(); }}
+              onClick={() => {
+                clickTrace("fe-tray", "wifi click");
+                void hideChromeHoverTip();
+                void openWifiMenu();
+              }}
         >
           <WifiGlyph state={wifi} />
         </button>
@@ -838,7 +935,11 @@ export default function TrayCluster({
           {...hostTipPointerProps(langTip)}
           aria-label={`输入语言 ${inputLang.langAbbr}`}
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => { void hideChromeHoverTip(); void onLangClick(); }}
+          onClick={() => {
+            clickTrace("fe-tray", "lang click");
+            void hideChromeHoverTip();
+            void onLangClick();
+          }}
           onContextMenu={(e) => void onLangContext(e)}
         >
           <span className="tray-lang-abbr">{sanitizeLangAbbr(inputLang.langAbbr)}</span>
@@ -851,7 +952,11 @@ export default function TrayCluster({
           {...hostTipPointerProps(imeTip)}
           aria-label={`输入法 ${inputLang.imeName || "IME"}`}
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => { void hideChromeHoverTip(); void openLangMenu(); }}
+          onClick={() => {
+            clickTrace("fe-tray", "ime click");
+            void hideChromeHoverTip();
+            void openLangMenu();
+          }}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -866,6 +971,7 @@ export default function TrayCluster({
           className="tray-clock"
           {...hostTipPointerProps("打开通知中心")}
           onClick={() => {
+            clickTrace("fe-tray", "clock click");
             void hideChromeHoverTip();
             void invoke("open_notification_center").catch((e) => console.error(e));
           }}

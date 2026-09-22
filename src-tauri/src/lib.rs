@@ -447,50 +447,57 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
             std::thread::sleep(Duration::from_millis(350));
 
             // 7) Tray hook + registry seed — before dock WebViews (EnumWindows vs WebView2).
-            boot_log("tray", "starting");
-            {
-                let app_icons = app.clone();
-                let app_attn = app.clone();
-                let app_prefs = app.clone();
-                crate::win32::tray::start(
-                    move |icons| {
-                        let _ = app_icons.emit("tray-icons", &icons);
-                    },
-                    move |attn| {
-                        let _ = app_attn.emit("tray-attention", &attn);
-                    },
-                    move |prefs| {
-                        let _ = app_prefs.emit("tray-prefs", &prefs);
-                    },
-                );
-            }
-            boot_log("tray", "waiting for hook icons");
-            let seeded = crate::win32::tray::wait_for_tray_seed(Duration::from_secs(3));
-            boot_log(
-                "tray",
-                &format!(
-                    "seed done={seeded} total={} clickable={} (+{}ms)",
-                    crate::win32::tray::total_icon_count(),
-                    crate::win32::tray::clickable_count(),
-                    elapsed()
-                ),
-            );
-
-            if crate::win32::tray::clickable_count() == 0 && seeded {
+            if crate::win32::tray::tray_boot_enabled() {
+                boot_log("tray", "starting");
+                {
+                    let app_icons = app.clone();
+                    let app_attn = app.clone();
+                    let app_prefs = app.clone();
+                    crate::win32::tray::start(
+                        move |icons| {
+                            let _ = app_icons.emit("tray-icons", &icons);
+                        },
+                        move |attn| {
+                            let _ = app_attn.emit("tray-attention", &attn);
+                        },
+                        move |prefs| {
+                            let _ = app_prefs.emit("tray-prefs", &prefs);
+                        },
+                    );
+                }
+                boot_log("tray", "waiting for hook icons");
+                let seeded = crate::win32::tray::wait_for_tray_seed(Duration::from_secs(3));
                 boot_log(
                     "tray",
                     &format!(
-                        "WARN no clickable yet total={} — UI may show empty chevron (+{}ms)",
+                        "seed done={seeded} total={} clickable={} (+{}ms)",
                         crate::win32::tray::total_icon_count(),
+                        crate::win32::tray::clickable_count(),
                         elapsed()
                     ),
                 );
-            }
 
-            // Do NOT create tray-popup / extra WebViews here — blocks UI pump
-            // for 10s+ and leaves the island bar transparent (glass never applied).
-            boot_log("tray", &format!("handed off (+{}ms)", elapsed()));
-            std::thread::sleep(Duration::from_millis(200));
+                if crate::win32::tray::clickable_count() == 0 && seeded {
+                    boot_log(
+                        "tray",
+                        &format!(
+                            "WARN no clickable yet total={} — UI may show empty chevron (+{}ms)",
+                            crate::win32::tray::total_icon_count(),
+                            elapsed()
+                        ),
+                    );
+                }
+
+                // Do NOT create tray-popup / extra WebViews here — blocks UI pump
+                // for 10s+ and leaves the island bar transparent (glass never applied).
+                boot_log("tray", &format!("handed off (+{}ms)", elapsed()));
+                std::thread::sleep(Duration::from_millis(200));
+            } else {
+                boot_log(
+                    "tray",
+                    "DISABLED (hang A/B) — hook/reconcile/spy skipped; set WH_ENABLE_TRAY=1 to force",
+                );
+            }
 
             // 8) Dock dual-WebView — block until icons HWND exists (ambient/hotkeys after).
             boot_log("dock", "bootstrap starting");
@@ -545,6 +552,8 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
                     crate::win32::tray::clickable_count()
                 ),
             );
+            // Do NOT prewarm WebViews from a background thread — click-trace proved
+            // hang at ensure_status_menu_popup_window build (Responding=False / 穿透).
         })
         .expect("spawn boot-pipeline");
 }
@@ -554,6 +563,8 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             boot_log("setup", "enter");
+            crate::win32::click_trace::clear();
+            crate::win32::click_trace::log("boot", "setup enter");
             let db = crate::db::init().map_err(|e| {
                 eprintln!("[db] init failed: {e}");
                 e
@@ -587,6 +598,12 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(hwnd) = hwnd_of(&window) {
                     crate::win32::topmost::set_main_hwnd(hwnd);
+                    // Hang watchdog + HTTP FE sink + native click hook.
+                    crate::win32::click_trace::set_main_hwnd(hwnd);
+                    crate::win32::click_trace::log(
+                        "boot",
+                        &format!("main hwnd={hwnd:#x} hang/http/mouse armed"),
+                    );
                 }
                 reassert_window(&window);
                 // Defer bar_comp attach until work-area quiet ends (~5s) — attaching
@@ -617,11 +634,26 @@ pub fn run() {
                     if window.label() == "main"
                         && !island_hidden_for_fullscreen()
                     {
-                        if let Some(w) = window.app_handle().get_webview_window("main") {
-                            pin_top_bar(&w);
-                        }
                         #[cfg(windows)]
-                        crate::win32::island_bar_glass::refresh_layout(window.app_handle());
+                        if crate::win32::island_bar_glass::refresh_suppressed() {
+                            crate::win32::click_trace::log(
+                                "main",
+                                "Moved/Resized skipped (resize suppress)",
+                            );
+                        } else {
+                            crate::win32::click_trace::log("main", "Moved/Resized");
+                            if let Some(w) = window.app_handle().get_webview_window("main") {
+                                pin_top_bar(&w);
+                            }
+                            crate::win32::island_bar_glass::refresh_layout(window.app_handle());
+                            crate::win32::click_trace::log("main", "Moved/Resized done");
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            if let Some(w) = window.app_handle().get_webview_window("main") {
+                                pin_top_bar(&w);
+                            }
+                        }
                     }
                     // Maximize / restore resets caption — debounce full Mica re-apply.
                     if window.label() == "plugin-window" {
@@ -648,12 +680,14 @@ pub fn run() {
                             window.app_handle(),
                         );
                     }
-                    // 托盘 / 插件 / 状态菜单弹窗失焦即关（WebView 侧 focus 事件不总是可靠）
+                    // 托盘 / 状态菜单等失焦：隐藏复用 HWND，勿 WM_CLOSE 销毁
+                    // （销毁后再点开会同步 rebuild WebView2 → 未响应）。
                     if (window.label() == "tray-popup"
                         || window.label() == "plugin-popup"
                         || window.label() == "status-menu-popup"
                         || window.label() == "input-lang-popup"
-                        || window.label() == "wifi-popup")
+                        || window.label() == "wifi-popup"
+                        || window.label() == "wifi-auth-popup")
                         && !*focused
                     {
                         let label = window.label().to_string();
@@ -663,22 +697,13 @@ pub fn run() {
                             std::thread::sleep(Duration::from_millis(60));
                             #[cfg(windows)]
                             {
-                                use windows::Win32::Foundation::HWND;
-                                use windows::Win32::UI::WindowsAndMessaging::{
-                                    GetForegroundWindow, PostMessageW, WM_CLOSE,
-                                };
+                                use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
                                 if let Some(raw) = popup_hwnd {
                                     unsafe {
                                         let fg = GetForegroundWindow();
                                         if fg.0 as isize == raw {
                                             return;
                                         }
-                                        let _ = PostMessageW(
-                                            HWND(raw as *mut _),
-                                            WM_CLOSE,
-                                            windows::Win32::Foundation::WPARAM(0),
-                                            windows::Win32::Foundation::LPARAM(0),
-                                        );
                                     }
                                 }
                             }
@@ -687,30 +712,15 @@ pub fn run() {
                                 if w.is_focused().unwrap_or(false) {
                                     return;
                                 }
-                                let _ = w.close();
                             }
-                            match label.as_str() {
-                                "tray-popup" => {
-                                    let _ = app.emit("tray-popup-closed", ());
+                            if label == "plugin-popup" {
+                                // Plugin surfaces still tear down (bound to one plugin id).
+                                if let Some(w) = app.get_webview_window(&label) {
+                                    let _ = w.close();
                                 }
-                                "plugin-popup" => {
-                                    let _ = app.emit("plugin-popup-closed", ());
-                                }
-                                "status-menu-popup" => {
-                                    if let Some(vis) =
-                                        app.try_state::<std::sync::Arc<crate::dock::DockVisibility>>()
-                                    {
-                                        vis.set_interaction_hold(false);
-                                    }
-                                    let _ = app.emit("status-menu-popup-closed", ());
-                                }
-                                "input-lang-popup" => {
-                                    let _ = app.emit("input-lang-popup-closed", ());
-                                }
-                                "wifi-popup" => {
-                                    let _ = app.emit("wifi-popup-closed", ());
-                                }
-                                _ => {}
+                                let _ = app.emit("plugin-popup-closed", ());
+                            } else {
+                                commands::hide_chrome_popup_hwnd(&app, &label, popup_hwnd);
                             }
                         });
                     }
@@ -761,6 +771,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::health,
+            commands::debug_click_trace,
+            commands::debug_click_trace_path,
+            commands::debug_click_trace_http,
+            commands::debug_click_trace_clear,
             commands::list_open_windows,
             commands::get_open_window,
             commands::focus_open_window,
@@ -776,6 +790,7 @@ pub fn run() {
             commands::float_overlay,
             commands::activate_main_island,
             commands::resize_main_island,
+            commands::suppress_island_bar_refresh,
             commands::settle_overlay,
             commands::open_settings_window,
             commands::close_settings_window,
@@ -840,6 +855,8 @@ pub fn run() {
             commands::get_window_material,
             commands::set_window_material,
             commands::list_tray_icons,
+            commands::get_tray_icon_glyphs,
+            commands::set_tray_ui_paused,
             commands::get_tray_prefs,
             commands::set_tray_prefs,
             commands::get_input_lang,
