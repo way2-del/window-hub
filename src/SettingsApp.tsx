@@ -827,15 +827,32 @@ export default function SettingsApp() {
   const persistGeneralPrefs = async (
     patch: Partial<Pick<GeneralPrefs, "startOnBootBackend">>,
   ) => {
+    const nextBackend = patch.startOnBootBackend ?? generalPrefs.startOnBootBackend;
+    const prev = generalPrefs.startOnBootBackend;
+    // Leaving/entering "系统服务" needs UAC — confirm in FE (Rust MessageBox hung the pump).
+    if (prev === "service" && nextBackend !== "service") {
+      const ok = window.confirm(
+        "关闭或改用计划任务将卸载系统服务自启。\n\n接下来可能弹出 Windows UAC，请点「是」。\n主程序不会保持管理员身份。",
+      );
+      if (!ok) return;
+    }
+    if (prev !== "service" && nextBackend === "service") {
+      const ok = window.confirm(
+        "安装系统服务自启需要临时管理员权限。\n\n接下来可能弹出 Windows UAC，请点「是」。\n主程序不会保持管理员身份。",
+      );
+      if (!ok) return;
+    }
     const next = {
-      startOnBootBackend: patch.startOnBootBackend ?? generalPrefs.startOnBootBackend,
-      startOnBoot: (patch.startOnBootBackend ?? generalPrefs.startOnBootBackend) !== "none",
+      startOnBootBackend: nextBackend,
+      startOnBoot: nextBackend !== "none",
       runAsAdmin: false,
     };
     setGeneralBusy(true);
     setGeneralMsg("");
     try {
-      const saved = normalizeGeneralPrefs(await invoke<GeneralPrefs>("set_general_prefs", { prefs: next }));
+      const saved = normalizeGeneralPrefs(
+        await invoke<GeneralPrefs>("set_general_prefs", { prefs: next }),
+      );
       setGeneralPrefs(saved);
       if (saved.notice) {
         setGeneralMsg(saved.notice);
@@ -986,8 +1003,23 @@ export default function SettingsApp() {
     let cancelled = false;
     const pull = () => {
       void invoke<TrayIconInfo[]>("list_tray_icons")
-        .then((list) => {
-          if (!cancelled) setTrays(list);
+        .then(async (list) => {
+          if (cancelled) return;
+          const ids = (list ?? []).map((i) => i.id).slice(0, 64);
+          let merged = list ?? [];
+          if (ids.length > 0) {
+            try {
+              const map = await invoke<Record<string, string>>("get_tray_icon_glyphs", {
+                ids,
+              });
+              merged = merged.map((i) =>
+                map?.[i.id] ? { ...i, icon_png_base64: map[i.id] } : i,
+              );
+            } catch {
+              /* keep meta */
+            }
+          }
+          if (!cancelled) setTrays(merged);
         })
         .catch(() => undefined);
     };

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  createTrayGlyphCache,
   isTrayPinned,
   isTrayResident,
   trayLabel,
@@ -15,6 +16,7 @@ import { fitPopupToContent } from "./popupFit";
 import { armTrayLeftClick, fireTrayLeftDouble, invokeTrayRightClick } from "./trayInvoke";
 
 const POPUP_W = 280;
+const glyphCache = createTrayGlyphCache();
 
 function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
   if (icon.icon_png_base64) {
@@ -86,10 +88,25 @@ export default function TrayPopupApp() {
           invoke<TrayPrefs>("get_tray_prefs"),
         ]);
         if (cancelled) return;
+        const merged = glyphCache.merge(list);
         setEntered(false);
-        setIcons(list);
+        setIcons(merged);
         setPinned(prefs.pinned ?? []);
-        setBoot({ icons: list, pinned: prefs.pinned ?? [] });
+        setBoot({ icons: merged, pinned: prefs.pinned ?? [] });
+        const need = merged
+          .filter((i) => !i.icon_png_base64)
+          .map((i) => i.id)
+          .slice(0, 64);
+        if (need.length > 0) {
+          void invoke<Record<string, string>>("get_tray_icon_glyphs", { ids: need })
+            .then((map) => {
+              if (cancelled) return;
+              if (glyphCache.ingest(map ?? {}, merged)) {
+                setIcons((prev) => glyphCache.merge(prev));
+              }
+            })
+            .catch(() => undefined);
+        }
       } catch {
         if (cancelled) return;
         setEntered(false);
@@ -144,7 +161,7 @@ export default function TrayPopupApp() {
     });
 
     void listen<TrayIconInfo[]>("tray-icons", (ev) => {
-      setIcons(ev.payload);
+      setIcons(glyphCache.merge(ev.payload ?? []));
     }).then((fn) => {
       if (!cancelled) unsubs.push(fn);
       else fn();
@@ -157,13 +174,7 @@ export default function TrayPopupApp() {
       else fn();
     });
 
-    const poll = window.setInterval(() => {
-      void invoke<TrayIconInfo[]>("list_tray_icons")
-        .then((list) => {
-          if (!cancelled) setIcons(list);
-        })
-        .catch(() => undefined);
-    }, 2000);
+    // No 2s list_tray_icons poll — full PNG hydrate + merge was freezing the popup.
 
     let unFocus: (() => void) | undefined;
     getCurrentWindow()
@@ -182,7 +193,6 @@ export default function TrayPopupApp() {
       cancelled = true;
       window.clearTimeout(retryA);
       window.clearTimeout(retryB);
-      window.clearInterval(poll);
       unsubs.forEach((fn) => fn());
       unFocus?.();
     };

@@ -36,6 +36,8 @@ pub mod tray_hook_host;
 #[cfg(windows)]
 pub mod tray_registry;
 #[cfg(windows)]
+pub mod tray_icon_cache;
+#[cfg(windows)]
 pub mod tray_uia;
 pub mod input_lang;
 pub mod wifi;

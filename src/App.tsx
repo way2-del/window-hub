@@ -1320,29 +1320,42 @@ function App() {
 
     const text = (prefs.msgNotifyText || "收到一条消息").trim() || "收到一条消息";
     const title = (att.tooltip || att.process || "").trim();
-    console.info("[tray-attention] show", {
-      id: att.id,
-      pinKey,
-      title,
-      iconBytes: (att.icon_png_base64 || "").length,
-    });
     trayBannerShownRef.current.add(att.id);
-    islandNotifyBus.push({
-      source: "tray",
-      title: title || text,
-      body: text,
-      iconPng: att.icon_png_base64,
-      urgency: "active",
-      ttlMs: 0,
-      tray: {
-        iconId: att.id,
-        pinKey: pinKey || undefined,
-        hwnd: att.hwnd,
-        uid: att.uid,
-        callbackMsg: att.callback_msg,
-        version: att.version ?? 0,
-      },
-    });
+
+    const push = (iconPng: string) => {
+      console.info("[tray-attention] show", {
+        id: att.id,
+        pinKey,
+        title,
+        iconBytes: (iconPng || "").length,
+      });
+      islandNotifyBus.push({
+        source: "tray",
+        title: title || text,
+        body: text,
+        iconPng: iconPng || undefined,
+        urgency: "active",
+        ttlMs: 0,
+        tray: {
+          iconId: att.id,
+          pinKey: pinKey || undefined,
+          hwnd: att.hwnd,
+          uid: att.uid,
+          callbackMsg: att.callback_msg,
+          version: att.version ?? 0,
+        },
+      });
+    };
+
+    const existing = (att.icon_png_base64 || "").trim();
+    if (existing) {
+      push(existing);
+      return;
+    }
+    // tray-icons 是 meta-only：补拉一次该 id 的托盘 PNG，避免灵动岛只显示「微」。
+    void invoke<Record<string, string>>("get_tray_icon_glyphs", { ids: [att.id] })
+      .then((map) => push(map?.[att.id] || ""))
+      .catch(() => push(""));
   }
 
   /**

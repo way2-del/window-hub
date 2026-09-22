@@ -330,54 +330,67 @@ fn service_is_installed() -> bool {
     false
 }
 
-/// Ask the user before the Windows UAC prompt (install/uninstall service).
+/// ShellExecuteEx `runas` without waiting — UAC + helper must not block the GUI pump.
+/// Waiting with `INFINITE` on the invoke path made settings 未响应 (IsHungAppWindow).
 #[cfg(windows)]
-fn confirm_temp_admin(action_label: &str) -> Result<(), String> {
+pub(crate) fn spawn_elevated_helper(arg: &str) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, IDCANCEL, MB_ICONINFORMATION, MB_OKCANCEL,
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let exe = current_exe_path()?;
+    let file_w: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let op: Vec<u16> = std::ffi::OsStr::new("runas")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let params: Vec<u16> = std::ffi::OsStr::new(arg)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(op.as_ptr()),
+        lpFile: PCWSTR(file_w.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_HIDE.0 as i32,
+        ..Default::default()
     };
 
-    let title: Vec<u16> = std::ffi::OsStr::new("Window Hub")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let body = format!(
-        "{action_label}\n\n接下来将弹出 Windows 用户账户控制（UAC），请点击「是」。\n主程序不会保持管理员身份运行（避免无法从资源管理器拖放文件）。"
-    );
-    let text: Vec<u16> = std::ffi::OsStr::new(&body)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let ret = unsafe {
-        MessageBoxW(
-            None,
-            PCWSTR(text.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OKCANCEL | MB_ICONINFORMATION,
-        )
-    };
-    if ret == IDCANCEL {
-        return Err("已取消（未请求管理员权限）".into());
+    unsafe {
+        ShellExecuteExW(&mut info).map_err(|_| {
+            "已取消 UAC，或无法请求管理员权限".to_string()
+        })?;
+        // Do not WaitForSingleObject — return so the settings WebView stays responsive.
+        if !info.hProcess.is_invalid() {
+            let _ = CloseHandle(info.hProcess);
+        }
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn confirm_temp_admin(_action_label: &str) -> Result<(), String> {
-    Ok(())
+pub(crate) fn spawn_elevated_helper(_arg: &str) -> Result<(), String> {
+    Err("仅支持 Windows".into())
 }
 
-/// ShellExecuteEx `runas` + wait. Used for one-shot UAC helpers (SCM / …).
+/// Legacy wait path (elevated helpers / tests). Prefer `spawn_elevated_helper` from UI.
 #[cfg(windows)]
-pub(crate) fn run_elevated_helper_and_wait(arg: &str, action_label: &str) -> Result<(), String> {
-    confirm_temp_admin(action_label)?;
-
+pub(crate) fn run_elevated_helper_and_wait(arg: &str, _action_label: &str) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::WaitForSingleObject;
     use windows::Win32::UI::Shell::{
         ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
     };
@@ -415,10 +428,14 @@ pub(crate) fn run_elevated_helper_and_wait(arg: &str, action_label: &str) -> Res
         if info.hProcess.is_invalid() {
             return Err("已取消 UAC，或无法请求管理员权限".into());
         }
-        let wait = WaitForSingleObject(info.hProcess, INFINITE);
+        // Cap wait — never INFINITE on a path that can touch the UI process.
+        let wait = WaitForSingleObject(info.hProcess, 90_000);
         let mut code = 1u32;
         let _ = windows::Win32::System::Threading::GetExitCodeProcess(info.hProcess, &mut code);
         let _ = CloseHandle(info.hProcess);
+        if wait == WAIT_TIMEOUT {
+            return Err("等待临时管理员助手超时（请在 UAC 中确认后重试）".into());
+        }
         if wait != WAIT_OBJECT_0 {
             return Err("等待临时管理员助手结束失败".into());
         }
@@ -434,7 +451,7 @@ pub(crate) fn run_elevated_helper_and_wait(_arg: &str, _action_label: &str) -> R
     Err("仅支持 Windows".into())
 }
 
-/// Returns `Some(notice)` when a one-shot UAC helper ran.
+/// Returns `Some(notice)` when a one-shot UAC helper was launched (or ran elevated).
 #[cfg(windows)]
 fn ensure_service_uninstalled() -> Result<Option<String>, String> {
     if !service_is_installed() {
@@ -444,12 +461,10 @@ fn ensure_service_uninstalled() -> Result<Option<String>, String> {
         crate::win32::autostart_svc::uninstall_service()?;
         return Ok(Some("已卸载系统服务自启。".into()));
     }
-    run_elevated_helper_and_wait(
-        "--uninstall-autostart-service",
-        "卸载系统服务自启需要临时管理员权限。",
-    )?;
+    // Fire UAC helper without waiting — blocking Wait+UAC hung settings (未响应).
+    spawn_elevated_helper("--uninstall-autostart-service")?;
     Ok(Some(
-        "已通过临时管理员权限卸载系统服务；当前窗口仍为普通权限。".into(),
+        "已请求管理员权限卸载系统服务；请在 UAC 中点「是」。当前窗口保持普通权限。".into(),
     ))
 }
 
@@ -458,7 +473,7 @@ fn ensure_service_uninstalled() -> Result<Option<String>, String> {
     Ok(None)
 }
 
-/// Returns `Some(notice)` when a one-shot UAC helper ran (or refreshed while elevated).
+/// Returns `Some(notice)` when a one-shot UAC helper was launched (or ran elevated).
 #[cfg(windows)]
 fn ensure_service_installed() -> Result<Option<String>, String> {
     let exe = current_exe_path()?;
@@ -470,15 +485,9 @@ fn ensure_service_installed() -> Result<Option<String>, String> {
     if service_is_installed() {
         return Ok(None);
     }
-    run_elevated_helper_and_wait(
-        "--install-autostart-service",
-        "安装系统服务自启需要临时管理员权限。",
-    )?;
-    if !service_is_installed() {
-        return Err("服务安装未完成（可能取消了 UAC）".into());
-    }
+    spawn_elevated_helper("--install-autostart-service")?;
     Ok(Some(
-        "已通过临时管理员权限安装系统服务；登录后由服务以普通权限拉起主程序。".into(),
+        "已请求管理员权限安装系统服务；请在 UAC 中点「是」。登录后由服务以普通权限拉起主程序。".into(),
     ))
 }
 
@@ -585,11 +594,16 @@ pub fn get_general_prefs() -> GeneralPrefsView {
 }
 
 #[tauri::command]
-pub fn set_general_prefs(mut prefs: GeneralPrefs) -> Result<GeneralPrefsView, String> {
+pub async fn set_general_prefs(mut prefs: GeneralPrefs) -> Result<GeneralPrefsView, String> {
     prefs.run_as_admin = false;
-    let notice = apply_launch_flags(&mut prefs)?;
-    save_prefs(&prefs)?;
-    Ok(prefs_view(&prefs, notice))
+    // Off the async IPC worker — SCM / ShellExecute must not stall the pump.
+    tauri::async_runtime::spawn_blocking(move || {
+        let notice = apply_launch_flags(&mut prefs)?;
+        save_prefs(&prefs)?;
+        Ok(prefs_view(&prefs, notice))
+    })
+    .await
+    .map_err(|e| format!("set_general_prefs join: {e}"))?
 }
 
 /// Relaunch current exe; `as_admin` uses ShellExecute runas (UAC).

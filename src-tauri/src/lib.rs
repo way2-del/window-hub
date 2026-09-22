@@ -465,8 +465,9 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
                         },
                     );
                 }
-                boot_log("tray", "waiting for hook icons");
-                let seeded = crate::win32::tray::wait_for_tray_seed(Duration::from_secs(3));
+                boot_log("tray", "waiting for spy/hook icons");
+                // Short wait — do not block dock for long; spy fills async.
+                let seeded = crate::win32::tray::wait_for_tray_seed(Duration::from_secs(1));
                 boot_log(
                     "tray",
                     &format!(
@@ -495,7 +496,7 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
             } else {
                 boot_log(
                     "tray",
-                    "DISABLED (hang A/B) — hook/reconcile/spy skipped; set WH_ENABLE_TRAY=1 to force",
+                    "DISABLED — set WH_ENABLE_TRAY=1 for spy-only; WH_TRAY_HOOK=1 / WH_TRAY_SOFT_SEED=1 opt-in",
                 );
             }
 

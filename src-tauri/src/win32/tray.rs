@@ -9,24 +9,34 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Default ON after slim rewrite.
-pub const TRAY_BOOT_ENABLED_DEFAULT: bool = true;
+/// Default OFF — enable with `WH_ENABLE_TRAY=1`.
+/// Safe path is **spy only** (no explorer WH_CALLWNDPROC, no registry soft-seed).
+/// Opt-in: `WH_TRAY_HOOK=1` (explorer hook), `WH_TRAY_SOFT_SEED=1` (registry stubs).
+pub const TRAY_BOOT_ENABLED_DEFAULT: bool = false;
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
 /// Runtime gate used by boot + commands.
 pub fn tray_boot_enabled() -> bool {
-    if std::env::var("WH_DISABLE_TRAY")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
+    if env_flag("WH_DISABLE_TRAY") {
         return false;
     }
-    if std::env::var("WH_ENABLE_TRAY")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
+    if env_flag("WH_ENABLE_TRAY") {
         return true;
     }
     TRAY_BOOT_ENABLED_DEFAULT
+}
+
+fn tray_hook_enabled() -> bool {
+    env_flag("WH_TRAY_HOOK")
+}
+
+fn tray_soft_seed_enabled() -> bool {
+    env_flag("WH_TRAY_SOFT_SEED")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,16 +181,35 @@ mod win {
     static TRAY_FAST_SEED_DONE: AtomicBool = AtomicBool::new(false);
     /// Coalesce tray-icons FE storms (NIM_* bursts hung island collapse).
     static PUBLISH_GEN: AtomicU64 = AtomicU64::new(0);
+    /// Only one publish debounce worker — never spawn-per-NIM (thread storm → 未响应).
+    static PUBLISH_SCHEDULED: AtomicBool = AtomicBool::new(false);
     /// Island morphing — drop FE emits until clear (queued via publish gen).
     static EMIT_PAUSED: AtomicBool = AtomicBool::new(false);
 
-    /// Registry stubs when spy is primary, or hook is live but still has no icons.
-    fn registry_stub_seed_enabled() -> bool {
-        !HOOK_PRIMARY.load(Ordering::SeqCst) || ICONS.lock().is_empty()
+    /// Clone tray row **without** PNG bytes (publish / click / prefs must use this).
+    fn meta_of(i: &TrayIconInfo) -> TrayIconInfo {
+        TrayIconInfo {
+            id: i.id.clone(),
+            pin_key: i.pin_key.clone(),
+            tooltip: i.tooltip.clone(),
+            process: i.process.clone(),
+            uid: i.uid,
+            hwnd: i.hwnd,
+            callback_msg: i.callback_msg,
+            version: i.version,
+            icon_png_base64: String::new(),
+            area: i.area.clone(),
+            flashing: i.flashing,
+            resident: i.resident,
+            system_tray: i.system_tray,
+        }
     }
 
-    fn has_clickable_icons() -> bool {
-        ICONS.lock().values().any(is_clickable)
+    /// Soft-seed unmatched NotifyIconSettings rows while their process is alive.
+    /// Always on: hook often misses NIM_ADD after TaskbarCreated (WeChat / WE / ACE).
+    /// Fast path only (no GetRect) — see apply_registry_snapshot / reconcile_once.
+    fn registry_stub_seed_enabled() -> bool {
+        true
     }
 
     fn clickable_icon_count() -> usize {
@@ -192,7 +221,7 @@ mod win {
     }
 
     pub fn set_prefs(mut prefs: TrayPrefs) {
-        let icons: Vec<TrayIconInfo> = ICONS.lock().values().cloned().collect();
+        let icons: Vec<TrayIconInfo> = ICONS.lock().values().map(meta_of).collect();
         normalize_prefs_keys(&mut prefs, &icons);
         *PREFS.lock() = prefs;
         persist_prefs_disk();
@@ -500,9 +529,10 @@ mod win {
         if !super::tray_boot_enabled() {
             return Vec::new();
         }
-        // Never run registry enum on the invoke path — can hitch the UI.
+        // Meta only — never hydrate/clone PNG on the list path (App + popup poll hung here).
+        // Pixels: get_tray_icon_glyphs / FE local cache.
         let _ = sweep_icons();
-        let mut v: Vec<_> = ICONS.lock().values().cloned().collect();
+        let mut v: Vec<_> = ICONS.lock().values().map(meta_of).collect();
         v.sort_by(|a, b| {
             a.tooltip
                 .to_lowercase()
@@ -512,27 +542,76 @@ mod win {
         v
     }
 
-    /// Meta-only clone for FE push (strips every PNG — glyphs via get_tray_icon_glyphs).
+    /// Meta-only for FE push — never clones PNG base64 (that hung the process).
     fn list_icons_meta() -> Vec<TrayIconInfo> {
-        let mut v = list_icons();
-        for i in &mut v {
-            i.icon_png_base64.clear();
-        }
+        // No sweep on publish — must stay O(n) cheap.
+        let mut v: Vec<_> = ICONS.lock().values().map(meta_of).collect();
+        v.sort_by(|a, b| {
+            a.tooltip
+                .to_lowercase()
+                .cmp(&b.tooltip.to_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        });
         v
     }
 
-    /// On-demand glyphs for rail / popup rows that need pixels.
+    /// On-demand PNG glyphs (rail / popup). Does not clone the whole icon table.
     pub fn glyphs_for_ids(ids: &[String]) -> std::collections::HashMap<String, String> {
-        let icons = ICONS.lock();
         let mut out = std::collections::HashMap::new();
-        for id in ids {
-            if let Some(info) = icons.get(id) {
+        let mut backfill: Vec<(String, String)> = Vec::new();
+        {
+            let icons = ICONS.lock();
+            for id in ids {
+                let Some(info) = icons.get(id) else {
+                    continue;
+                };
                 if !info.icon_png_base64.is_empty() {
                     out.insert(id.clone(), info.icon_png_base64.clone());
+                    continue;
+                }
+                let mut png = String::new();
+                let pk = pin_key_of(info);
+                crate::win32::tray_icon_cache::hydrate(&pk, &info.process, &info.id, &mut png);
+                if !png.is_empty() {
+                    out.insert(id.clone(), png.clone());
+                    backfill.push((id.clone(), png));
+                }
+            }
+        }
+        if !backfill.is_empty() {
+            let mut icons = ICONS.lock();
+            for (id, png) in backfill {
+                if let Some(info) = icons.get_mut(&id) {
+                    if info.icon_png_base64.is_empty() {
+                        info.icon_png_base64 = png;
+                    }
                 }
             }
         }
         out
+    }
+
+    /// Fill empty PNG from persistent cache (read-only).
+    fn hydrate_icon_png(info: &mut TrayIconInfo) {
+        if !info.icon_png_base64.is_empty() {
+            return;
+        }
+        let pk = pin_key_of(info);
+        crate::win32::tray_icon_cache::hydrate(
+            &pk,
+            &info.process,
+            &info.id,
+            &mut info.icon_png_base64,
+        );
+    }
+
+    /// Persist a newly acquired glyph — tray_icon_cache no-ops duplicate hashes.
+    fn remember_icon_png(info: &TrayIconInfo) {
+        if info.icon_png_base64.is_empty() {
+            return;
+        }
+        let pk = pin_key_of(info);
+        crate::win32::tray_icon_cache::remember(&pk, &info.process, &info.id, &info.icon_png_base64);
     }
 
     fn clean_text(s: &str) -> String {
@@ -1162,6 +1241,10 @@ mod win {
         let uid = info.uid;
         let clickable_new = info.hwnd != 0 && info.callback_msg != 0;
 
+        // Cache I/O outside ICONS lock — holding both caused publish stutter / 未响应.
+        // Skip remember on hot path (disk/hash storms); hydrate empty only.
+        hydrate_icon_png(&mut info);
+
         // Taskmgr: ignore extra ghosts once we already track one clickable / stub.
         if proc == "taskmgr" {
             let icons = ICONS.lock();
@@ -1234,12 +1317,23 @@ mod win {
             }
             let was_flashing = icons.get(&id).map(|p| p.flashing).unwrap_or(false);
             if info.flashing && !was_flashing && !attention_suppressed(&id) && !info.system_tray {
+                // One PNG clone on rising-edge only — safe (publish/list still meta-only).
+                let mut png = info.icon_png_base64.clone();
+                if png.is_empty() {
+                    let pk = pin_key_of(&info);
+                    crate::win32::tray_icon_cache::hydrate(
+                        &pk,
+                        &info.process,
+                        &info.id,
+                        &mut png,
+                    );
+                }
                 armed_attention = Some(TrayAttention {
                     id: info.id.clone(),
                     pin_key: pin_key_of(&info),
                     tooltip: info.tooltip.clone(),
                     process: info.process.clone(),
-                    icon_png_base64: info.icon_png_base64.clone(),
+                    icon_png_base64: png,
                     hwnd: info.hwnd,
                     uid: info.uid,
                     callback_msg: info.callback_msg,
@@ -1303,15 +1397,38 @@ mod win {
     }
 
     fn publish() {
-        // Debounce ≤ ~2.5Hz. Hook NIM_MODIFY bursts must not flood the main WebView.
-        let gen = PUBLISH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            if PUBLISH_GEN.load(Ordering::Relaxed) != gen {
-                return;
-            }
-            publish_now();
-        });
+        // Debounce ≤ ~2.5Hz with a **single** worker thread.
+        // Old code spawned one thread per NIM_* → hundreds of threads → 未响应.
+        let _gen = PUBLISH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        if PUBLISH_SCHEDULED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        std::thread::Builder::new()
+            .name("tray-publish".into())
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    let seen = PUBLISH_GEN.load(Ordering::Relaxed);
+                    publish_now();
+                    // Quiet period: no newer publish requests during this tick.
+                    if PUBLISH_GEN.load(Ordering::Relaxed) == seen {
+                        PUBLISH_SCHEDULED.store(false, Ordering::SeqCst);
+                        // Race: publish() bumped gen after we cleared the flag.
+                        if PUBLISH_GEN.load(Ordering::Relaxed) != seen
+                            && PUBLISH_SCHEDULED
+                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                        {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            })
+            .ok();
     }
 
     fn publish_now() {
@@ -1417,11 +1534,17 @@ mod win {
                 if info.uid != uid {
                     continue;
                 }
-                let path = process_image_path(info.hwnd);
                 let stem_ok =
                     !stem.is_empty() && info.process.trim().eq_ignore_ascii_case(&stem);
-                let path_ok = !path.is_empty() && !exe.is_empty() && path == exe;
-                // Stem-only match: registry ExecutablePath often uses volume GUIDs.
+                // Avoid OpenProcess while holding ICONS unless stem is missing/ambiguous.
+                let path_ok = if stem_ok {
+                    false
+                } else {
+                    let path = process_image_path(info.hwnd);
+                    !path.is_empty()
+                        && !exe.is_empty()
+                        && crate::win32::tray_registry::exe_paths_equivalent(&path, &exe)
+                };
                 if !(path_ok || stem_ok) {
                     continue;
                 }
@@ -1944,7 +2067,7 @@ mod win {
                     };
                     let resident = is_language_ime_icon(&id, &process, &tip);
                     let system_tray = is_shell_system_tray(&id, &process, &tip);
-                    TrayIconInfo {
+                    let mut info = TrayIconInfo {
                         id: id.clone(),
                         pin_key,
                         tooltip: tip,
@@ -1958,32 +2081,144 @@ mod win {
                         flashing: false,
                         resident,
                         system_tray,
-                    }
+                    };
+                    // Read-only under ICONS lock. Disk remember only via upsert_icon (hook).
+                    hydrate_icon_png(&mut info);
+                    info
                 },
             );
             true
         }
 
-    /// Apply registry enrichment into ICONS (tooltips / snapshots / area). Stubs are
-    /// seeded when spy is primary or the hook has not delivered any icon yet.
+    /// Apply registry enrichment into ICONS (tooltips / snapshots / area).
+    /// Soft-seed unmatched rows when `seed_stubs`.
+    /// `fast=true` must never call Shell_NotifyIconGetRect (Explorer hang risk).
+    ///
+    /// Critical: **never** `snapshot_to_png_b64` / hydrate while holding `ICONS`
+    /// (that blocked every click invoke → whole process 未响应).
     fn apply_registry_snapshot(seed_stubs: bool, fast: bool) -> (bool, usize) {
         use crate::win32::tray_registry;
 
         let pool = tray_registry::enum_match_pool(fast);
+        let seed = seed_stubs && registry_stub_seed_enabled();
         let mut changed = false;
         let mut missing = 0usize;
         let mut keep_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut pending_snap_fp: Vec<(String, u64)> = Vec::new();
+        let mut pending_png: Vec<(String, String)> = Vec::new();
+        let mut pending_stubs: Vec<TrayIconInfo> = Vec::new();
 
+        // Snapshot ids currently clickable (for keep set) without long lock.
+        let clickable_ids: std::collections::HashSet<String> = {
+            let icons = ICONS.lock();
+            icons
+                .iter()
+                .filter(|(_, i)| is_clickable(i))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        keep_ids.extend(clickable_ids.iter().cloned());
+
+        // Decide matches / stub builds **without** holding ICONS across PNG encode.
+        {
+            let icons = ICONS.lock();
+            for item in &pool {
+                let area = if item.is_promoted {
+                    "taskbar"
+                } else {
+                    "overflow"
+                };
+                if let Some(id) = match_reg_to_spy(&icons, item) {
+                    keep_ids.insert(id.clone());
+                    let needs_png = icons
+                        .get(&id)
+                        .map(|i| i.icon_png_base64.is_empty() && !item.icon_snapshot.is_empty())
+                        .unwrap_or(false);
+                    if needs_png {
+                        pending_png.push((id.clone(), String::new())); // placeholder; fill below
+                        pending_snap_fp.push((id.clone(), hash_bytes(&item.icon_snapshot)));
+                    }
+                    // Light field updates applied in second pass.
+                    let _ = area;
+                } else if seed {
+                    missing += 1;
+                    let id = reg_icon_id(item);
+                    keep_ids.insert(id.clone());
+                    if !icons.contains_key(&id) && match_reg_to_spy(&icons, item).is_none() {
+                        // Build stub shell now; PNG filled outside lock.
+                        let tip = tip_from_reg(item, None);
+                        let process = item.process.clone();
+                        let pin_key = {
+                            let guid = item
+                                .icon_guid
+                                .as_ref()
+                                .map(|g| crate::win32::tray_registry::guid_key(g));
+                            let path = item
+                                .executable_path
+                                .to_string_lossy()
+                                .to_ascii_lowercase();
+                            let uid = item.icon_uid.unwrap_or(0);
+                            if let Some(ref g) = guid {
+                                if looks_like_guid_id(g) {
+                                    g.clone()
+                                } else if !path.is_empty() {
+                                    format!("exe:{path}:{uid}")
+                                } else {
+                                    compute_pin_key(None, 0, uid, &item.process)
+                                }
+                            } else if !path.is_empty() {
+                                format!("exe:{path}:{uid}")
+                            } else {
+                                compute_pin_key(None, 0, uid, &item.process)
+                            }
+                        };
+                        let resident = is_language_ime_icon(&id, &process, &tip);
+                        let system_tray = is_shell_system_tray(&id, &process, &tip);
+                        pending_stubs.push(TrayIconInfo {
+                            id: id.clone(),
+                            pin_key,
+                            tooltip: tip,
+                            process,
+                            uid: item.icon_uid.unwrap_or(0),
+                            hwnd: 0,
+                            callback_msg: 0,
+                            version: 0,
+                            icon_png_base64: String::new(),
+                            area: area.to_string(),
+                            flashing: false,
+                            resident,
+                            system_tray,
+                        });
+                        if !item.icon_snapshot.is_empty() {
+                            pending_png.push((id, String::new()));
+                        }
+                    }
+                } else {
+                    missing += 1;
+                }
+            }
+        }
+
+        // Encode PNGs outside ICONS (can take 100ms+ per IconSnapShot).
+        let mut encoded: HashMap<String, String> = HashMap::new();
+        for item in &pool {
+            let id_match = {
+                let icons = ICONS.lock();
+                match_reg_to_spy(&icons, item)
+            };
+            let id = id_match.unwrap_or_else(|| reg_icon_id(item));
+            if pending_png.iter().any(|(i, _)| i == &id) && !item.icon_snapshot.is_empty() {
+                let b64 = snapshot_to_png_b64(&item.icon_snapshot);
+                if !b64.is_empty() {
+                    encoded.insert(id, b64);
+                }
+            }
+        }
+
+        // Apply updates under a short lock — no encode here.
         {
             let mut icons = ICONS.lock();
             let mut reg_map = REG_KEY_BY_ID.lock();
-
-            for (id, info) in icons.iter() {
-                if is_clickable(info) {
-                    keep_ids.insert(id.clone());
-                }
-            }
-
             for item in &pool {
                 let area = if item.is_promoted {
                     "taskbar"
@@ -1992,7 +2227,6 @@ mod win {
                 };
                 if let Some(id) = match_reg_to_spy(&icons, item) {
                     reg_map.insert(id.clone(), item.key.clone());
-                    keep_ids.insert(id.clone());
                     if let Some(info) = icons.get_mut(&id) {
                         let sys = is_shell_system_tray(&id, &info.process, &info.tooltip);
                         if info.system_tray != sys {
@@ -2018,30 +2252,34 @@ mod win {
                             info.process = item.process.clone();
                             changed = true;
                         }
-                        if !item.icon_snapshot.is_empty() {
-                            let snap_hash = hash_bytes(&item.icon_snapshot);
-                            let mut reg_fps = REG_SNAPSHOT_FP.lock();
-                            reg_fps.insert(id.clone(), snap_hash);
-                            let b64 = snapshot_to_png_b64(&item.icon_snapshot);
-                            if !b64.is_empty() && info.icon_png_base64 != b64 {
-                                info.icon_png_base64 = b64;
+                        if info.icon_png_base64.is_empty() {
+                            if let Some(b64) = encoded.get(&id) {
+                                info.icon_png_base64 = b64.clone();
                                 changed = true;
                             }
                         }
                     }
-                } else if seed_stubs && registry_stub_seed_enabled() {
-                    missing += 1;
-                    if upsert_stub_from_reg(&mut icons, &mut reg_map, item, None, area) {
-                        changed = true;
-                    }
-                    keep_ids.insert(reg_icon_id(item));
-                } else if seed_stubs {
-                    missing += 1;
                 }
             }
-
-            // Drop stale non-clickable stubs not matched this pass.
-            if seed_stubs {
+            if seed {
+                for mut stub in pending_stubs {
+                    let id = stub.id.clone();
+                    if icons.contains_key(&id) {
+                        continue;
+                    }
+                    if let Some(b64) = encoded.get(&id) {
+                        stub.icon_png_base64 = b64.clone();
+                    }
+                    // Do NOT hydrate under ICONS lock.
+                    reg_map.insert(id.clone(), {
+                        pool.iter()
+                            .find(|p| reg_icon_id(p) == id)
+                            .map(|p| p.key.clone())
+                            .unwrap_or_default()
+                    });
+                    icons.insert(id, stub);
+                    changed = true;
+                }
                 let drop_ids: Vec<String> = icons
                     .iter()
                     .filter(|(id, info)| !is_clickable(info) && !keep_ids.contains(*id))
@@ -2055,18 +2293,22 @@ mod win {
             }
         }
 
+        if !pending_snap_fp.is_empty() {
+            let mut reg_fps = REG_SNAPSHOT_FP.lock();
+            for (id, h) in pending_snap_fp {
+                reg_fps.insert(id, h);
+            }
+        }
+
         if sweep_icons() {
             changed = true;
         }
         (changed, missing)
     }
 
-    /// Enrich from registry only — never TaskbarCreated / UIA.
-    /// Seed stubs while the live hook/spy list has no clickable icons yet.
+    /// Periodic reconcile: enrich only — no stub seed / PNG encode storm.
     fn reconcile_once() -> bool {
-        let seed = !has_clickable_icons();
-        let fast = crate::win32::work_area::work_area_quiet();
-        let (changed, _) = apply_registry_snapshot(seed, fast);
+        let (changed, _) = apply_registry_snapshot(false, true);
         changed
     }
 
@@ -2103,35 +2345,28 @@ mod win {
 
                 let clickable = clickable_icon_count();
                 let total = ICONS.lock().len();
-                if clickable > 0 || (HOOK_PRIMARY.load(Ordering::SeqCst) && total > 0) {
-                    eprintln!(
-                        "[tray] reconcile: hook already has total={total} clickable={clickable} — skip registry EnumWindows"
-                    );
-                    publish();
-                    TRAY_FAST_SEED_DONE.store(true, Ordering::Release);
-                } else {
-                    eprintln!("[tray] reconcile: fast registry seed begin (hook empty)");
-                    let seed_stubs = registry_stub_seed_enabled();
-                    let seed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        apply_registry_snapshot(seed_stubs, true)
-                    }));
-                    match seed {
-                        Ok((changed, missing)) => {
-                            eprintln!(
-                                "[tray] startup enrich (fast): changed={changed} missing={missing} icons={} clickable={} hook={}",
-                                ICONS.lock().len(),
-                                clickable_icon_count(),
-                                HOOK_PRIMARY.load(Ordering::SeqCst)
-                            );
-                            let _ = changed;
-                            publish();
-                        }
-                        Err(err) => {
-                            eprintln!("[tray] startup enrich panicked: {err:?}");
-                        }
+                eprintln!(
+                    "[tray] reconcile: enrich-only begin (total={total} clickable={clickable}) — no soft-seed PNG storm"
+                );
+                let seed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // false = never soft-seed / encode IconSnapShot on this thread.
+                    apply_registry_snapshot(false, true)
+                }));
+                match seed {
+                    Ok((changed, missing)) => {
+                        eprintln!(
+                            "[tray] startup enrich (fast): changed={changed} missing={missing} icons={} clickable={}",
+                            ICONS.lock().len(),
+                            clickable_icon_count(),
+                        );
+                        let _ = changed;
+                        publish();
                     }
-                    TRAY_FAST_SEED_DONE.store(true, Ordering::Release);
+                    Err(err) => {
+                        eprintln!("[tray] startup enrich panicked: {err:?}");
+                    }
                 }
+                TRAY_FAST_SEED_DONE.store(true, Ordering::Release);
 
                 let started = std::time::Instant::now();
                 let mut slow_pending = true;
@@ -2142,22 +2377,22 @@ mod win {
                         std::time::Duration::from_secs(15)
                     };
                     std::thread::sleep(interval);
-                    // Full GetRect enrich only after work-area quiet window ends.
-                    // Skip entirely when hook already filled the list — GetRect can hang Explorer.
+                    // Optional one-shot GetRect enrich only when the list is still thin.
+                    // Never run when we already have a usable set — GetRect can hang Explorer.
                     if slow_pending
                         && started.elapsed().as_secs() >= 20
                         && !crate::win32::work_area::work_area_quiet()
                     {
                         slow_pending = false;
-                        if clickable_icon_count() >= 3 {
+                        if clickable_icon_count() > 0 {
                             eprintln!(
                                 "[tray] reconcile: skip full GetRect (already clickable={})",
                                 clickable_icon_count()
                             );
                         } else {
-                            eprintln!("[tray] reconcile: running full GetRect enrich");
+                            eprintln!("[tray] reconcile: running full GetRect enrich (empty clickable)");
                             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                apply_registry_snapshot(!has_clickable_icons(), false)
+                                apply_registry_snapshot(true, false)
                             })) {
                                 Ok((true, _)) => publish(),
                                 Ok((false, _)) => {}
@@ -2180,29 +2415,28 @@ mod win {
     }
 
     fn start_hook_loop() -> bool {
-        // Cold boot: explorer.exe can exist before TrayNotifyWnd — wait so SetWindowsHookEx
-        // targets the real shell tray instead of failing or attaching too early.
-        if !wait_for_shell_tray(std::time::Duration::from_secs(45)) {
-            eprintln!("[tray] Shell_TrayWnd/TrayNotifyWnd not ready after 45s");
-        }
-        match crate::win32::tray_hook_host::start_host() {
-            Ok(true) => {}
-            Ok(false) => {
-                eprintln!("[tray] hook host returned false");
-                return false;
-            }
-            Err(err) => {
-                eprintln!("[tray] hook install failed: {err}");
-                return false;
-            }
-        }
-        HOOK_PRIMARY.store(true, Ordering::SeqCst);
-
+        // Never block the boot pipeline on Shell_TrayWnd (was up to 45s + SetWindowsHookEx).
         std::thread::Builder::new()
-            .name("tray-hook".into())
+            .name("tray-hook-install".into())
             .spawn(|| {
-                // One cold-start refill after the hook is live so NIM_ADDs hit explorer
-                // (and our CALLWNDPROC) — not a spy FindWindow race.
+                if !wait_for_shell_tray(std::time::Duration::from_secs(45)) {
+                    eprintln!("[tray] Shell_TrayWnd/TrayNotifyWnd not ready after 45s");
+                }
+                match crate::win32::tray_hook_host::start_host() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!("[tray] hook host returned false");
+                        start_spy_fallback();
+                        return;
+                    }
+                    Err(err) => {
+                        eprintln!("[tray] hook install failed: {err}");
+                        start_spy_fallback();
+                        return;
+                    }
+                }
+                HOOK_PRIMARY.store(true, Ordering::SeqCst);
+
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 broadcast_taskbar_created();
 
@@ -2226,7 +2460,7 @@ mod win {
                     }
                 }
             })
-            .expect("spawn tray-hook");
+            .expect("spawn tray-hook-install");
         true
     }
 
@@ -2248,8 +2482,9 @@ mod win {
                     }
                 };
                 eprintln!("[tray] spy online (fallback)");
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                broadcast_taskbar_created_force();
+                // Delay TaskbarCreated — immediate force + hook was hanging cold start.
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                broadcast_taskbar_created();
 
                 while let Some(event) = systray.events_blocking() {
                     match event {
@@ -2281,7 +2516,9 @@ mod win {
             .expect("spawn tray-spy");
     }
 
-    /// Start tray tracking: explorer hook first, spy only if hook fails.
+    /// Start tray tracking.
+    /// Default when `WH_ENABLE_TRAY=1`: **spy only** — no explorer hook, no soft-seed.
+    /// Those two were hanging the whole process before any icon appeared.
     pub fn start<F, A, P>(on_change: F, on_attention: A, on_prefs: P)
     where
         F: Fn(Vec<TrayIconInfo>) + Send + Sync + 'static,
@@ -2290,7 +2527,7 @@ mod win {
     {
         if !super::tray_boot_enabled() {
             eprintln!(
-                "[tray] BOOT DISABLED — hook/reconcile/spy not started (set TRAY_BOOT_ENABLED_DEFAULT or WH_ENABLE_TRAY=1)"
+                "[tray] BOOT DISABLED — set WH_ENABLE_TRAY=1 for spy-only tray"
             );
             let _ = EMIT.set(Box::new(on_change));
             let _ = ATTENTION.set(Box::new(on_attention));
@@ -2301,57 +2538,58 @@ mod win {
         let _ = ATTENTION.set(Box::new(on_attention));
         let _ = PREFS_EMIT.set(Box::new(on_prefs));
 
-        // Recover if a previous build left the cursor hidden via ShowCursor.
-        #[cfg(windows)]
-        {
-            use windows::Win32::UI::WindowsAndMessaging::ShowCursor;
-            unsafe {
-                for _ in 0..16 {
-                    if ShowCursor(true) >= 0 {
-                        break;
-                    }
-                }
-            }
-        }
+        // Cache load on a bg thread — never block start on index parse.
+        std::thread::Builder::new()
+            .name("tray-icon-cache-load".into())
+            .spawn(|| {
+                crate::win32::tray_icon_cache::load();
+            })
+            .ok();
 
-        if start_hook_loop() {
-            start_reconcile_loop();
+        let use_hook = super::tray_hook_enabled();
+        let use_soft = super::tray_soft_seed_enabled();
+        eprintln!(
+            "[tray] starting safe mode: hook={} soft_seed={} (spy always on unless hook-only)",
+            use_hook, use_soft
+        );
+
+        if use_hook {
+            // Explorer injection — opt-in only; can freeze the shell if hook misbehaves.
+            let _ = start_hook_loop();
         } else {
-            start_reconcile_loop();
             start_spy_fallback();
         }
 
-        // Mild cold-start only — old 180s TaskbarCreated loop stormed publish() forever.
+        if use_soft {
+            start_reconcile_loop();
+        }
+
+        // One delayed TaskbarCreated for spy/hook refill — no soft-seed storm.
         std::thread::Builder::new()
             .name("tray-cold-start".into())
-            .spawn(|| {
-                for attempt in 1u32..=4 {
-                    std::thread::sleep(std::time::Duration::from_secs(3));
-                    if clickable_icon_count() > 0 {
-                        eprintln!(
-                            "[tray] cold-start: ok clickable={} after attempt={}",
-                            clickable_icon_count(),
-                            attempt
-                        );
-                        publish();
-                        return;
-                    }
-                    eprintln!("[tray] cold-start attempt={attempt} — soft recover");
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if use_hook {
                     let _ = crate::win32::tray_hook_host::ensure_hook();
+                }
+                broadcast_taskbar_created();
+                eprintln!(
+                    "[tray] cold-start TaskbarCreated done clickable={} total={}",
+                    clickable_icon_count(),
+                    total_icon_count()
+                );
+                // Soft-seed only if explicitly requested — never by default.
+                if use_soft {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let (changed, _) = apply_registry_snapshot(true, true);
+                        let (changed, missing) = apply_registry_snapshot(true, true);
+                        eprintln!(
+                            "[tray] soft-seed once changed={changed} missing={missing}"
+                        );
                         if changed {
                             publish();
                         }
                     }));
-                    if attempt == 3 && clickable_icon_count() == 0 {
-                        start_spy_fallback();
-                    }
                 }
-                eprintln!(
-                    "[tray] cold-start done clickable={}",
-                    clickable_icon_count()
-                );
             })
             .expect("spawn tray-cold-start");
     }
@@ -2754,7 +2992,7 @@ mod win {
         let tip = info.tooltip.trim().to_ascii_lowercase();
         let pin = pin_key_of(info);
         let icons = ICONS.lock();
-        // Prefer same pin_key / uid+process; never uid alone.
+        // Prefer same pin_key / uid+process; never uid alone. meta_of — no PNG clone.
         icons
             .values()
             .find(|c| {
@@ -2763,7 +3001,7 @@ mod win {
                     && !pin.is_empty()
                     && pin_key_of(c) == pin
             })
-            .cloned()
+            .map(meta_of)
             .or_else(|| {
                 if proc.is_empty() {
                     return None;
@@ -2776,7 +3014,7 @@ mod win {
                             && c.process.trim().eq_ignore_ascii_case(&proc)
                             && (info.uid == 0 || c.uid == info.uid)
                     })
-                    .cloned()
+                    .map(meta_of)
             })
             .or_else(|| {
                 if proc.is_empty() {
@@ -2787,10 +3025,10 @@ mod win {
                     .filter(|c| {
                         is_clickable(c) && c.process.trim().eq_ignore_ascii_case(&proc)
                     })
-                    .cloned()
+                    .map(meta_of)
                     .collect();
                 if hits.len() == 1 {
-                    Some(hits[0].clone())
+                    Some(hits.into_iter().next().unwrap())
                 } else if !tip.is_empty() {
                     hits.into_iter().find(|c| {
                         c.tooltip.trim().eq_ignore_ascii_case(&tip)
@@ -2810,15 +3048,16 @@ mod win {
         click: TrayClick,
     ) -> Result<(), String> {
         // Resolve from cache when frontend passes an id (registry stubs have hwnd=0).
+        // Use meta_of — never clone PNG on the click path (was freezing workers).
         let resolved = {
             let icons = ICONS.lock();
             if let Some(ref id) = id {
-                icons.get(id).cloned()
+                icons.get(id).map(meta_of)
             } else if hwnd != 0 {
                 icons
                     .values()
                     .find(|i| i.hwnd == hwnd && i.uid == uid)
-                    .cloned()
+                    .map(meta_of)
             } else {
                 None
             }

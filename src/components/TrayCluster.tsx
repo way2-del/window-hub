@@ -203,6 +203,75 @@ export function trayPinKey(icon: TrayIconInfo): string {
   return k || icon.id;
 }
 
+/** Lookup keys: pin_key, process stem — reboot-stable (not hwnd:uid). */
+export function trayGlyphKeys(icon: TrayIconInfo): string[] {
+  const keys: string[] = [];
+  const push = (s: string) => {
+    const k = s.trim().toLowerCase();
+    if (!k || keys.includes(k)) return;
+    keys.push(k);
+  };
+  push(trayPinKey(icon));
+  const proc = (icon.process || "").trim().toLowerCase();
+  if (proc) {
+    push(`proc:${proc}`);
+    push(proc);
+  }
+  const id = (icon.id || "").trim().toLowerCase();
+  if (id && !id.includes(":")) push(id);
+  return keys;
+}
+
+/** Session glyph store keyed by pin_key / process. No localStorage (sync JSON froze UI). */
+export function createTrayGlyphCache() {
+  const mem = new Map<string, string>();
+
+  const lookup = (icon: TrayIconInfo): string | undefined => {
+    for (const k of trayGlyphKeys(icon)) {
+      const hit = mem.get(k);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+
+  const remember = (icon: TrayIconInfo, png: string) => {
+    if (!png || png.length < 32) return;
+    for (const k of trayGlyphKeys(icon)) {
+      mem.set(k, png);
+    }
+    const id = (icon.id || "").trim().toLowerCase();
+    if (id) mem.set(id, png);
+  };
+
+  const merge = (list: TrayIconInfo[]): TrayIconInfo[] =>
+    list.map((i) => {
+      if (i.icon_png_base64) {
+        remember(i, i.icon_png_base64);
+        return i;
+      }
+      const g = lookup(i);
+      return g ? { ...i, icon_png_base64: g } : i;
+    });
+
+  const missingIds = (list: TrayIconInfo[]): string[] =>
+    list.filter((i) => !i.icon_png_base64 && !lookup(i)).map((i) => i.id);
+
+  const ingest = (idToPng: Record<string, string>, list: TrayIconInfo[]) => {
+    const byId = new Map(list.map((i) => [i.id, i]));
+    let changed = false;
+    for (const [id, png] of Object.entries(idToPng ?? {})) {
+      if (!png || png.length < 32) continue;
+      const icon = byId.get(id);
+      if (icon) remember(icon, png);
+      else mem.set(id.toLowerCase(), png);
+      changed = true;
+    }
+    return changed;
+  };
+
+  return { merge, missingIds, ingest, remember, lookup };
+}
+
 export function isTrayPinned(
   icon: TrayIconInfo,
   pinned: Set<string> | string[],
@@ -343,47 +412,29 @@ export default function TrayCluster({
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
-  const glyphCacheRef = useRef<Map<string, string>>(new Map());
+  const glyphCacheRef = useRef(createTrayGlyphCache());
+  const lastGlyphFetchRef = useRef(0);
 
-  /** Merge meta list with on-demand glyphs (emit is PNG-stripped after rewrite). */
+  /** Merge meta list with cached / on-demand glyphs (emit is PNG-stripped). */
   function mergeGlyphs(list: TrayIconInfo[]): TrayIconInfo[] {
-    const cache = glyphCacheRef.current;
-    return list.map((i) => {
-      if (i.icon_png_base64) {
-        cache.set(i.id, i.icon_png_base64);
-        return i;
-      }
-      const g = cache.get(i.id);
-      return g ? { ...i, icon_png_base64: g } : i;
-    });
+    return glyphCacheRef.current.merge(list);
   }
 
-  async function ensureRailGlyphs(list: TrayIconInfo[], pinnedIds: string[]) {
-    const pinnedSet = new Set(pinnedIds);
-    const live = list.map((i) => trayPinKey(i));
+  async function ensureRailGlyphs(list: TrayIconInfo[], _pinnedIds: string[]) {
     const need = list
-      .filter((i) => {
-        if (i.icon_png_base64 || glyphCacheRef.current.has(i.id)) return false;
-        return (
-          isTrayResident(i) ||
-          isTrayPinned(i, pinnedSet, live) ||
-          Boolean(i.flashing)
-        );
-      })
-      .map((i) => i.id);
+      .filter((i) => !i.icon_png_base64 && !glyphCacheRef.current.lookup(i))
+      .map((i) => i.id)
+      .slice(0, 32);
     if (need.length === 0) return;
+    const now = Date.now();
+    // Avoid invoke storms on every tray-icons emit (was stacking with cache writes → 未响应).
+    if (now - lastGlyphFetchRef.current < 1500) return;
+    lastGlyphFetchRef.current = now;
     try {
       const map = await invoke<Record<string, string>>("get_tray_icon_glyphs", {
         ids: need,
       });
-      let changed = false;
-      for (const [id, png] of Object.entries(map ?? {})) {
-        if (png) {
-          glyphCacheRef.current.set(id, png);
-          changed = true;
-        }
-      }
-      if (changed) {
+      if (glyphCacheRef.current.ingest(map ?? {}, list)) {
         setIcons((prev) => mergeGlyphs(prev));
       }
     } catch {
