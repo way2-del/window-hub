@@ -1,3 +1,5 @@
+import { useProgressiveGlyphs } from "../features/tray/useProgressiveGlyphs";
+import ControlCenterButton from "../features/controlCenter/ControlCenterButton";
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -413,34 +415,16 @@ export default function TrayCluster({
   const [pinned, setPinned] = useState<string[]>([]);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
   const glyphCacheRef = useRef(createTrayGlyphCache());
-  const lastGlyphFetchRef = useRef(0);
 
-  /** Merge meta list with cached / on-demand glyphs (emit is PNG-stripped). */
-  function mergeGlyphs(list: TrayIconInfo[]): TrayIconInfo[] {
-    return glyphCacheRef.current.merge(list);
-  }
 
-  async function ensureRailGlyphs(list: TrayIconInfo[], _pinnedIds: string[]) {
-    const need = list
-      .filter((i) => !i.icon_png_base64 && !glyphCacheRef.current.lookup(i))
-      .map((i) => i.id)
-      .slice(0, 32);
-    if (need.length === 0) return;
-    const now = Date.now();
-    // Avoid invoke storms on every tray-icons emit (was stacking with cache writes → 未响应).
-    if (now - lastGlyphFetchRef.current < 1500) return;
-    lastGlyphFetchRef.current = now;
-    try {
-      const map = await invoke<Record<string, string>>("get_tray_icon_glyphs", {
-        ids: need,
-      });
-      if (glyphCacheRef.current.ingest(map ?? {}, list)) {
-        setIcons((prev) => mergeGlyphs(prev));
+  useProgressiveGlyphs(
+    icons.filter(i => !i.icon_png_base64 && !glyphCacheRef.current.lookup(i)).map(i => i.id),
+    map => {
+      if (glyphCacheRef.current.ingest(map, icons)) {
+        setIcons(prev => glyphCacheRef.current.merge(prev));
       }
-    } catch {
-      /* noop */
-    }
-  }
+    },
+  );
   const [now, setNow] = useState(() => new Date());
   const [inputLang, setInputLang] = useState<InputLangState>(FALLBACK_LANG);
   const [wifi, setWifi] = useState<WifiState>(FALLBACK_WIFI);
@@ -465,6 +449,35 @@ export default function TrayCluster({
   pinnedRef.current = pinned;
   menuHeightsRef.current = menuHeights;
 
+  // Subscribe before snapshot. Late snapshots must not replace newer tray events.
+  useEffect(() => {
+    let cancelled = false;
+    let revision = 0;
+    let unlisten: (() => void) | undefined;
+    const apply = (list: TrayIconInfo[]) => setIcons(glyphCacheRef.current.merge(list));
+    void invoke<TrayPrefs>("get_tray_prefs").then(prefs => {
+      if (cancelled) return;
+      setPinned(prefs.pinned ?? []);
+      setMenuHeights(prefs.menu_heights ?? {});
+    }).catch(() => undefined);
+    void (async () => {
+      try {
+        const stop = await listen<TrayIconInfo[]>("tray-icons", event => {
+          if (cancelled) return;
+          revision++;
+          apply(event.payload ?? []);
+        });
+        if (cancelled) { stop(); return; }
+        unlisten = stop;
+      } catch { /* the initial snapshot remains available if subscription fails */ }
+      const before = revision;
+      try {
+        const list = await invoke<TrayIconInfo[]>("list_tray_icons");
+        if (!cancelled && before === revision) apply(list);
+      } catch { /* later events can still supply icons */ }
+    })();
+    return () => { cancelled = true; unlisten?.(); };
+  }, []);
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
 
   useEffect(() => {
@@ -477,47 +490,6 @@ export default function TrayCluster({
     const unsubs: Array<() => void> = [];
 
     void (async () => {
-      try {
-        const [list, prefs] = await Promise.all([
-          invoke<TrayIconInfo[]>("list_tray_icons"),
-          invoke<TrayPrefs>("get_tray_prefs"),
-        ]);
-        if (!cancelled) {
-          const pin = prefs.pinned ?? [];
-          setPinned(pin);
-          setMenuHeights(prefs.menu_heights ?? {});
-          const merged = mergeGlyphs(list);
-          setIcons(merged);
-          void ensureRailGlyphs(merged, pin);
-        }
-      } catch {
-        /* noop */
-      }
-
-      // After unified chrome reveal, re-pull once (boot may have seeded after first list).
-      try {
-        unsubs.push(
-          await listen("host-boot-ready", () => {
-            void Promise.all([
-              invoke<TrayIconInfo[]>("list_tray_icons"),
-              invoke<TrayPrefs>("get_tray_prefs"),
-            ])
-              .then(([list, prefs]) => {
-                if (cancelled) return;
-                const pin = prefs.pinned ?? [];
-                setPinned(pin);
-                setMenuHeights(prefs.menu_heights ?? {});
-                const merged = mergeGlyphs(list);
-                setIcons(merged);
-                void ensureRailGlyphs(merged, pin);
-              })
-              .catch(() => undefined);
-          }),
-        );
-      } catch {
-        /* noop */
-      }
-
       try {
         const lang = await invoke<InputLangState>("get_input_lang");
         if (!cancelled && lang) {
@@ -537,17 +509,6 @@ export default function TrayCluster({
         /* keep fallback */
       }
 
-      try {
-        unsubs.push(
-          await listen<TrayIconInfo[]>("tray-icons", (ev) => {
-            const merged = mergeGlyphs(ev.payload ?? []);
-            setIcons(merged);
-            void ensureRailGlyphs(merged, pinnedRef.current);
-          }),
-        );
-      } catch {
-        /* noop */
-      }
       try {
         unsubs.push(
           await listen<TrayPrefs>("tray-prefs", (ev) => {
@@ -1040,6 +1001,8 @@ export default function TrayCluster({
         >
           <span className="tray-ime-mark">{imeChipLabel(inputLang)}</span>
         </button>
+
+        <ControlCenterButton />
 
         <button
           type="button"

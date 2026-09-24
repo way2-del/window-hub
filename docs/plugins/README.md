@@ -4,6 +4,7 @@
 
 | 文件 | 内容 |
 |------|------|
+| [development.md](development.md) | Agent 插件工作流、只改插件的边界与任务范围检查 |
 | [plugin.schema.json](plugin.schema.json) | `plugin.json` JSON Schema |
 | [host-api.md](host-api.md) | CapGate 与 `hub.*` |
 | [sdk.md](sdk.md) | 分表面 `window.hub` |
@@ -18,5 +19,5 @@
 
 **总 skill（AI 跑通流程）：** `.cursor/skills/window-hub-plugin/SKILL.md`
 
-**原则：** 插件 = 静态包；系统能力在宿主（声明 capability）；超出用 Companion 独立进程。  
+**原则：** 插件 = 静态包；只使用宿主已公开 API（声明 capability）。能力缺口记录在插件文档，不在插件任务中修改宿主；Companion 仅使用已开放且任务授权的协议。
 **命名：** 顶栏左区 = **快捷区**；Dock 仅指后续底部坞。

@@ -1,5 +1,7 @@
 # 排查：插件 / SQLite / 资源 / 更早 commit
 
+> 历史排障记录，以下“已做/请验证”是当时上下文，不是当前执行指令。监控工具现位于 `scripts/dev/monitor-resources.ps1`，新日志写 `workspace/logs/`。
+
 ## 已做
 
 1. **禁用全部插件**（备份在 `plugins\registry.json.bak-before-disable-*`）  

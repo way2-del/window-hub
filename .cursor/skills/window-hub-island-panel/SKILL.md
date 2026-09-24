@@ -17,6 +17,7 @@ Slot：`island.panel`。展开内容由插件 Web 入口提供（iframe）；**�
 
 - 槽位解析：`src/plugins/islandSlots.ts`（`island.bar` / `island.drop` / `resolvePanelDefaultSize`）
 - 宽高常量：`src/islandPrefs.ts` → `STAGING_PANEL_W_*` / `STAGING_PANEL_H_*` / clamp*
+- 宿主形状/运动纯策略：`src/features/island/{geometry,motion,pullContent}.ts`；插件任务只查询契约，不修改这些系统实现
 - 样式：`src/App.css` → `.island-panel.is-plugin-sized`
 
 ## 固定几何（禁止随意改数）

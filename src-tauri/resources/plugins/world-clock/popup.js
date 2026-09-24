@@ -56,6 +56,8 @@
     zoneA: "__local__",
     zoneB: "Europe/London",
     settingsOpen: false,
+    displayParts: "time",
+    hourFormat: "24",
     timer: null,
   };
 
@@ -125,8 +127,9 @@
       minute,
       second,
       isDay,
-      time: `${hour}:${String(minute).padStart(2, "0")}`,
-      dateLine: `${month}月${day}日 ${WEEKDAYS[wd]}${period}`,
+      time: `${state.hourFormat === "12" ? hour % 12 || 12 : hour}:${String(minute).padStart(2, "0")}`,
+      period: state.hourFormat === "12" ? period : "",
+      dateLine: `${month}月${day}日 ${WEEKDAYS[wd]}`,
     };
   }
 
@@ -203,7 +206,7 @@
     return `<div class="wc-col">
       <div class="wc-name">${labelOf(raw)}</div>
       ${dialSvg(clock)}
-      <div class="wc-big">${clock.time}</div>
+      <div class="wc-big">${clock.time}<span class="wc-period">${clock.period}</span></div>
       <div class="wc-date">${clock.dateLine}</div>
     </div>`;
   }
@@ -229,6 +232,14 @@
           <label for="wc-zone-b">时区二（快捷区优先显示）</label>
           <select id="wc-zone-b">${optionsHtml(state.zoneB)}</select>
         </div>
+        <div class="wc-field">
+          <label for="wc-display-parts">快捷区显示内容</label>
+          <select id="wc-display-parts">${[{"value":"time","label":"时间"},{"value":"date","label":"日期"},{"value":"weekday","label":"星期"},{"value":"date,time","label":"日期 + 时间"},{"value":"weekday,time","label":"星期 + 时间"},{"value":"date,weekday","label":"日期 + 星期"},{"value":"date,weekday,time","label":"日期 + 星期 + 时间"},{"value":"icon","label":"仅时钟图标"}].map(o => `<option value="${o.value}"${o.value === state.displayParts ? " selected" : ""}>${o.label}</option>`).join("")}</select>
+        </div>
+        <div class="wc-field">
+          <label for="wc-hour-format">时间格式（快捷区和弹窗）</label>
+          <select id="wc-hour-format"><option value="24"${state.hourFormat === "24" ? " selected" : ""}>24 小时制</option><option value="12"${state.hourFormat === "12" ? " selected" : ""}>12 小时制</option></select>
+        </div>
         <p class="wc-hint">快捷区不显示本机时钟（顶栏已有）。默认时区一跟随系统，时区二为伦敦。表盘按该时区昼夜切换白/黑底。</p>
       </div>
     `;
@@ -253,6 +264,8 @@
     };
     bind("wc-zone-a", "zoneA");
     bind("wc-zone-b", "zoneB");
+    bind("wc-display-parts", "displayParts");
+    bind("wc-hour-format", "hourFormat");
   }
 
   function tickClocks() {
@@ -268,6 +281,8 @@
       if (all && typeof all === "object") {
         if (all.zoneA != null) state.zoneA = String(all.zoneA);
         if (all.zoneB != null) state.zoneB = String(all.zoneB);
+        if (all.displayParts != null) state.displayParts = String(all.displayParts);
+        if (all.hourFormat != null) state.hourFormat = String(all.hourFormat);
       }
     } catch (e) {
       console.error("[world-clock popup]", e);
@@ -282,6 +297,8 @@
         if (!all || typeof all !== "object") return;
         if (all.zoneA != null) state.zoneA = String(all.zoneA);
         if (all.zoneB != null) state.zoneB = String(all.zoneB);
+        if (all.displayParts != null) state.displayParts = String(all.displayParts);
+        if (all.hourFormat != null) state.hourFormat = String(all.hourFormat);
         render();
       });
     } catch (_) {}

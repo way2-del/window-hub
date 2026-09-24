@@ -359,6 +359,7 @@ mod win {
     }
 
     fn send(cmd: Cmd) {
+        if crate::lifecycle::stopping() { return; }
         let _ = ensure_worker().send(cmd);
     }
 

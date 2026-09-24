@@ -5,11 +5,15 @@
 //!     chrome (tip / island panel / popups) covers the sample row.
 //!   - **center**: solid color from that same junction band
 //! - Windowed → desktop wallpaper (edge may use wallpaper top-row strip).
-//! - After a target switch: live-sample ~5s then lock until next switch.
+//! - After a target switch: settle for 900ms, then refresh windows slowly.
 //! - Never PrintWindow on the hot path (full-frame PW can hang the process).
 //! - Never sample Hub chrome HWNDs (tip / menus / glass / dock) as targets.
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(any(windows, test))]
+#[path = "ambient_policy.rs"]
+mod policy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -256,6 +260,11 @@ mod win {
     /// Watcher: poll often while settling, rarely when locked (only to detect switch).
     pub fn is_settling() -> bool {
         SETTLING.load(Ordering::SeqCst)
+    }
+
+    /// Cheap switch detection only. Never capture or enumerate from this probe.
+    pub fn foreground_key() -> isize {
+        unsafe { GetForegroundWindow().0 as isize }
     }
 
     fn target_key(hwnd: Option<HWND>) -> isize {
@@ -1076,9 +1085,10 @@ mod win {
         })
     }
 
-    /// After target switch: live-sample for SETTLE_MS (always emit strip), then
-    /// lock the last frame. Locked: return `None` until the next window switch.
+    /// Settle after a target switch, then refresh window content at low frequency
+    /// (tabs may change without changing HWND). Wallpaper stays cached.
     pub fn poll_changed(self_hwnd: Option<isize>) -> Option<AmbientStrip> {
+        let foreground = foreground_key();
         let target = pick_target(self_hwnd);
         let key = target_key(target);
 
@@ -1092,8 +1102,11 @@ mod win {
                 SETTLING.store(true, Ordering::SeqCst);
             } else if gate.locked.is_some() {
                 SETTLING.store(false, Ordering::SeqCst);
-                // Locked: no recapture until next switch.
-                return None;
+                // Tabs/pages can change without a new HWND. Refresh slowly;
+                // foreground probes must not become high-frequency captures.
+                if key == 0 || gate.settle_started.is_some_and(|last| last.elapsed() < Duration::from_millis(1200)) {
+                    return None;
+                }
             } else {
                 SETTLING.store(true, Ordering::SeqCst);
             }
@@ -1106,21 +1119,30 @@ mod win {
         };
 
         let strip = strip?;
+        // A slow capture must not repaint the previous foreground window.
+        if foreground_key() != foreground {
+            return None;
+        }
         remember(strip.clone());
 
         let mut gate = GATE.lock().ok()?;
         // Target may have changed mid-sample — only lock if still same.
         if gate.target_key != key {
-            return Some(strip);
+            return None;
         }
 
         gate.last_avg = Some((strip.r, strip.g, strip.b));
         let started = gate.settle_started.get_or_insert_with(Instant::now);
         if started.elapsed() >= Duration::from_millis(SETTLE_MS) {
-            // Freeze last live frame — one final emit, then quiet.
+            let unchanged = gate.locked.as_ref().is_some_and(|old| {
+                old.r == strip.r && old.g == strip.g && old.b == strip.b
+                    && old.width == strip.width && old.span_width == strip.span_width
+                    && old.offset_x == strip.offset_x && old.png_base64 == strip.png_base64
+            });
             gate.locked = Some(strip.clone());
+            gate.settle_started = Some(Instant::now());
             SETTLING.store(false, Ordering::SeqCst);
-            return Some(strip);
+            return if unchanged { None } else { Some(strip) };
         }
 
         SETTLING.store(true, Ordering::SeqCst);
@@ -1594,6 +1616,22 @@ mod win {
                 }
             }
 
+            // Analyze the already mapped ribbon, so dominance matches the bar's
+            // visible area. No extra capture, IPC, locks or UI-thread work.
+            if let Some([r, g, b]) = super::policy::clutter_color(&rgb) {
+                return Some(AmbientStrip {
+                    r,
+                    g,
+                    b,
+                    width: 1,
+                    offset_x: 0,
+                    span_width: bar_logical.max(1),
+                    png_base64: solid_png_b64(r, g, b),
+                    hwnd: target.0 as isize,
+                    mode,
+                });
+            }
+
             let (avg_r, avg_g, avg_b) = {
                 let mut sr = 0u64;
                 let mut sg = 0u64;
@@ -1685,9 +1723,12 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    get_mode, is_desktop_scene, is_settling, poll_changed, reset_sampling_gate, sample,
+    foreground_key, get_mode, is_desktop_scene, is_settling, poll_changed, reset_sampling_gate, sample,
     sample_nonblocking, set_ambient_sample_target, set_mode, sync_ignore_ambient_apps,
 };
+
+#[cfg(not(windows))]
+pub fn foreground_key() -> isize { 0 }
 
 #[cfg(not(windows))]
 pub fn sync_ignore_ambient_apps(_keys: Vec<String>) {}

@@ -1,0 +1,18 @@
+.ambient-strip > .chrome-ambient-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ambient-strip > .chrome-ambient-enter {
+  animation: chrome-ambient-fade 160ms ease-out both;
+}
+
+@keyframes chrome-ambient-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-strip > .chrome-ambient-enter { animation: none; }
+}

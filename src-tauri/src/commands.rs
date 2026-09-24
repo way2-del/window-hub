@@ -2069,7 +2069,7 @@ fn save_tray_prefs(prefs: &crate::win32::tray::TrayPrefs) -> Result<(), String> 
     crate::db::with_conn(|c| crate::db::tray_set(c, &v))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_tray_icons() -> Vec<crate::win32::tray::TrayIconInfo> {
     crate::win32::tray::list_icons()
 }
@@ -2082,7 +2082,7 @@ pub fn refresh_tray_icons() {
 }
 
 /// On-demand PNG glyphs (rail / popup). Never push these on every NIM_* emit.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_tray_icon_glyphs(
     ids: Vec<String>,
 ) -> std::collections::HashMap<String, String> {
@@ -3297,6 +3297,11 @@ pub fn open_notification_center() -> Result<(), String> {
     crate::win32::input::open_notification_center()
 }
 
+#[tauri::command]
+pub fn open_control_center() -> Result<(), String> {
+    crate::win32::input::open_control_center()
+}
+
 /// 当前前台窗口短标签（状态菜单左侧 chip）。
 #[tauri::command]
 pub fn get_foreground_app(window: WebviewWindow) -> crate::win32::status_menu::ForegroundApp {
@@ -3316,19 +3321,20 @@ pub fn show_desktop() -> Result<(), String> {
 
 #[tauri::command]
 pub fn restart_app(app: AppHandle) -> Result<(), String> {
-    // Allow SCM autostart to treat this as a normal handoff, not a user quit.
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(exe);
+    // Child waits for our single-instance lock to disappear before building UI.
+    cmd.arg("--wait-for-restart");
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.current_dir(cwd);
+    }
+    cmd.spawn().map_err(|e| format!("restart spawn failed: {e}"))?;
     #[cfg(windows)]
     {
         crate::win32::autostart_svc::note_expect_relaunch();
         crate::win32::autostart_svc::clear_user_quit();
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut cmd = std::process::Command::new(exe);
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.current_dir(cwd);
-    }
-    cmd.spawn().map_err(|e| format!("restart spawn failed: {e}"))?;
-    app.exit(0);
+    crate::lifecycle::begin_shutdown(Some(app));
     Ok(())
 }
 
@@ -3337,7 +3343,7 @@ pub fn exit_app(app: AppHandle) {
     // Stop WindowHubAutoStart from immediately relaunching the GUI.
     #[cfg(windows)]
     crate::win32::autostart_svc::signal_user_quit();
-    app.exit(0);
+    crate::lifecycle::begin_shutdown(Some(app));
 }
 
 #[tauri::command]

@@ -1424,6 +1424,7 @@ button {
 }
 
 /* Host Input Indicator — always resident (Shell chrome is hidden with taskbar) */
+.chrome-control-center-btn,
 .tray-wifi-btn,
 .tray-lang-btn,
 .tray-ime-btn {
@@ -1444,6 +1445,7 @@ button {
   transition: opacity 140ms ease;
 }
 
+.chrome-control-center-btn:hover,
 .tray-wifi-btn:hover,
 .tray-lang-btn:hover,
 .tray-ime-btn:hover {

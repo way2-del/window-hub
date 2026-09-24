@@ -72,13 +72,14 @@ button,
 }
 
 .wc-chip {
+  width: max-content;
   flex-shrink: 0;
   height: var(--wh-bar-h, 28px);
   padding: 0 8px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  max-width: 160px;
+
   white-space: nowrap;
   overflow: hidden;
   letter-spacing: 0.04em;
@@ -90,7 +91,11 @@ button,
   opacity: 0.78;
 }
 
-.wc-label {
+.wc-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
   font-size: inherit;
   font-weight: inherit;
   line-height: 1;
@@ -98,6 +103,10 @@ button,
 }
 
 .wc-time {
+  display: block;
+  flex-shrink: 0;
+  /* Optical correction for mixed CJK/digits beside the centered clock icon. */
+  transform: translateY(1px);
   font-size: inherit;
   font-weight: inherit;
   line-height: 1;

@@ -1,6 +1,7 @@
 //! Win32 helpers for window enumeration, parking, capture, and input.
 
 pub mod ambient;
+pub mod notification_focus;
 pub mod app_launch;
 #[cfg(windows)]
 pub mod autostart_svc;

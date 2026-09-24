@@ -1,3 +1,10 @@
+import { lerp, clamp01, pullProgress, easeOutSmooth, channelEase } from "./features/island/motion";
+import { createIslandGeometry, ISLAND_CORNER_PATCH_SIZE } from "./features/island/geometry";
+import { resolveIslandPullContent } from "./features/island/pullContent";
+import { chromeTokens, chromeCssVars, type Rgb } from "./features/chrome/tokens";
+import { sampleStripBands } from "./features/chrome/sampleStripBands";
+import { AmbientStrip } from "./features/chrome/AmbientStrip";
+import { useTrayNotificationFocus } from "./features/chrome/useTrayNotificationFocus";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -101,6 +108,9 @@ const MORPH_MS = 420;
 const PULL_OPEN = 0.52;
 const CLICK_SLOP = 6;
 
+const { islandBottomRadius, islandPath, islandNotifyInnerStrokePath, islandNotifyClipSilhouette } =
+  createIslandGeometry(STAGING_PANEL_H_DEFAULT);
+
 type IslandSize = { width: number; height: number };
 
 function enabledPullContent(raw: string): string {
@@ -109,63 +119,12 @@ function enabledPullContent(raw: string): string {
   return pluginRegistry.get(pid)?.enabled ? raw : "";
 }
 
-/** 情景临时 > 显式会话 > 用户「下拉内容」 */
-function resolveIslandPullContent(opts: {
-  scenarioOwner: string | null;
-  scenarioPull: string | null;
-  sessionOverride: string | null;
-  sessionOverrideActive: boolean;
-  pullContent: string;
-}): string {
-  if (opts.scenarioOwner) {
-    const sp = opts.scenarioPull ?? `plugin:${opts.scenarioOwner}`;
-    const v = enabledPullContent(sp);
-    if (v) return v;
-  }
-  if (opts.sessionOverrideActive && opts.sessionOverride) {
-    const v = enabledPullContent(opts.sessionOverride);
-    if (v) return v;
-  }
-  return enabledPullContent(opts.pullContent);
-}
-
 /** 窗口实际高度 = 岛高 + 可选冲突通知叠层 */
 function winHeight(islandH: number) {
   return TOP_GAP + islandH + liveNotifyStackExtra;
 }
 
-function lerp(a: number, b: number, t: number) {
-  return a + (b - a) * t;
-}
 
-function clamp01(t: number) {
-  return Math.max(0, Math.min(1, t));
-}
-
-/** 下拉进度：原位点不动，弹窗高度随拖拽增大 */
-function pullProgress(dy: number) {
-  if (dy <= 0) return 0;
-  const t = clamp01(dy / 210);
-  // 阻力：越拉越沉
-  return 1 - Math.pow(1 - t, 1.85);
-}
-
-/** 岛底圆角半径（与 islandPath 共用，供 BorderBeam 贴合） */
-function islandBottomRadius(width: number, height: number): number {
-  const w = Math.max(28, width);
-  const h = Math.max(28, height);
-  const raw = Math.min(
-    h * 0.5 - 0.01,
-    Math.max(14, 14 + ((h - 28) * 18) / 192),
-    w * 0.5 - 4,
-  );
-  // 较矮面板：底角过大时会切掉四角内容
-  if (h <= STAGING_PANEL_H_DEFAULT + 4) return Math.min(raw, 18);
-  return Math.min(raw, 32);
-}
-
-/** 岛顶左右外侧圆润补丁（源 right-angle.svg = 凹角扇形；左=水平镜像） */
-const ISLAND_CORNER_PATCH_SIZE = 8;
 /** 右上：原点贴岛右上角，扇形在内侧，外轮廓为凹弧 */
 const ISLAND_CORNER_PATCH_D_RIGHT = "M34 0C15.2223 0 0 15.2223 0 34V0H34Z";
 /** 左上：水平镜像 */
@@ -198,249 +157,6 @@ function IslandCornerPatches() {
       </svg>
     </>
   );
-}
-
-/**
- * 灵动岛路径（本地坐标：左上为 0,0，宽高=当前岛尺寸）。
- * 禁止再嵌进更大的「画布居中」坐标系，否则折叠宽与展开画布不一致时黑壳会偏/歪。
- * topSquare≥1：顶角真直角贴边；底角始终圆角。
- */
-function islandPath(width: number, height: number, topSquare = 0, topBleed = 0): string {
-  const w = Math.max(28, width);
-  const h = Math.max(28, height);
-  const x0 = 0;
-  const x1 = w;
-
-  const rBot = islandBottomRadius(w, h);
-  const flat = clamp01(topSquare);
-  const squareTop = flat >= 0.999;
-  const rTop = squareTop ? 0 : Math.max(0.05, rBot * (1 - flat));
-  const k = 0.5522847498;
-  const rkBot = rBot * k;
-  // 顶边可上溢 topBleed，消除贴屏发丝缝；底边仍落在 h
-  const y0 = -Math.max(0, topBleed);
-  const y1 = h;
-  const sideBot = y1 - rBot;
-
-  if (squareTop) {
-    // 顶边直角：纯直线拐角，不用贝塞尔
-    return [
-      `M ${fmt(x0)} ${fmt(y0)}`,
-      `L ${fmt(x1)} ${fmt(y0)}`,
-      `L ${fmt(x1)} ${fmt(sideBot)}`,
-      `C ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1 - rBot)} ${fmt(y1)}`,
-      `L ${fmt(x0 + rBot)} ${fmt(y1)}`,
-      `C ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0)} ${fmt(sideBot)}`,
-      `L ${fmt(x0)} ${fmt(y0)}`,
-      `Z`,
-    ].join(" ");
-  }
-
-  const rkTop = rTop * k;
-  const sideTop = 0 + rTop;
-  return [
-    `M ${fmt(x0 + rTop)} ${fmt(y0)}`,
-    `L ${fmt(x1 - rTop)} ${fmt(y0)}`,
-    `C ${fmt(x1 - rTop + rkTop)} ${fmt(0)}, ${fmt(x1)} ${fmt(0 + rTop - rkTop)}, ${fmt(x1)} ${fmt(sideTop)}`,
-    `L ${fmt(x1)} ${fmt(sideBot)}`,
-    `C ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1 - rBot)} ${fmt(y1)}`,
-    `L ${fmt(x0 + rBot)} ${fmt(y1)}`,
-    `C ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0)} ${fmt(sideBot)}`,
-    `L ${fmt(x0)} ${fmt(sideTop)}`,
-    `C ${fmt(x0)} ${fmt(0 + rTop - rkTop)}, ${fmt(x0 + rTop - rkTop)} ${fmt(0)}, ${fmt(x0 + rTop)} ${fmt(0)}`,
-    `Z`,
-  ].join(" ");
-}
-
-/**
- * 通知描边开口路径：顶左右沿补丁凹弧贴合（凹进去，非外凸耳朵）；不含顶边。
- * 凹弧圆心在补丁外角 ( ±p, p )，从顶外尖接到岛侧壁。
- */
-function islandNotifyInnerStrokePath(
-  width: number,
-  height: number,
-  patch = ISLAND_CORNER_PATCH_SIZE,
-): string {
-  const w = Math.max(28, width);
-  const h = Math.max(28, height);
-  const p = Math.max(4, patch);
-  const x0 = 0;
-  const x1 = w;
-  const rBot = islandBottomRadius(w, h);
-  const k = 0.5522847498;
-  const rkBot = rBot * k;
-  const y1 = h;
-  const sideBot = y1 - rBot;
-  // 凹弧控制点：圆心在 (±p, p)
-  const p1k = p * (1 - k);
-
-  return [
-    // 左：顶外尖 (-p,0) → 凹弧 → 岛左壁 (0,p)
-    `M ${fmt(-p)} ${fmt(0)}`,
-    `C ${fmt(-p1k)} ${fmt(0)}, ${fmt(x0)} ${fmt(p1k)}, ${fmt(x0)} ${fmt(p)}`,
-    `L ${fmt(x0)} ${fmt(sideBot)}`,
-    `C ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0 + rBot)} ${fmt(y1)}`,
-    `L ${fmt(x1 - rBot)} ${fmt(y1)}`,
-    `C ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1)} ${fmt(sideBot)}`,
-    `L ${fmt(x1)} ${fmt(p)}`,
-    // 右：岛右壁 (w,p) → 凹弧 → 顶外尖 (w+p,0)
-    `C ${fmt(x1)} ${fmt(p1k)}, ${fmt(x1 + p1k)} ${fmt(0)}, ${fmt(x1 + p)} ${fmt(0)}`,
-  ].join(" ");
-}
-
-/** 通知描边 clip：岛身 + 左右凹角补丁（闭合） */
-function islandNotifyClipSilhouette(
-  width: number,
-  height: number,
-  patch = ISLAND_CORNER_PATCH_SIZE,
-  topBleed = 0,
-): string {
-  const w = Math.max(28, width);
-  const h = Math.max(28, height);
-  const p = Math.max(4, patch);
-  const bleed = Math.max(0, topBleed);
-  const x0 = 0;
-  const x1 = w;
-  const rBot = islandBottomRadius(w, h);
-  const k = 0.5522847498;
-  const rkBot = rBot * k;
-  const p1k = p * (1 - k);
-  const yTop = -bleed;
-  const y1 = h;
-  const sideBot = y1 - rBot;
-
-  return [
-    `M ${fmt(-p)} ${fmt(yTop)}`,
-    `L ${fmt(x1 + p)} ${fmt(yTop)}`,
-    `L ${fmt(x1 + p)} ${fmt(0)}`,
-    // 右凹弧：外尖 → 岛右壁
-    `C ${fmt(x1 + p1k)} ${fmt(0)}, ${fmt(x1)} ${fmt(p1k)}, ${fmt(x1)} ${fmt(p)}`,
-    `L ${fmt(x1)} ${fmt(sideBot)}`,
-    `C ${fmt(x1)} ${fmt(sideBot + rkBot)}, ${fmt(x1 - rBot + rkBot)} ${fmt(y1)}, ${fmt(x1 - rBot)} ${fmt(y1)}`,
-    `L ${fmt(x0 + rBot)} ${fmt(y1)}`,
-    `C ${fmt(x0 + rBot - rkBot)} ${fmt(y1)}, ${fmt(x0)} ${fmt(sideBot + rkBot)}, ${fmt(x0)} ${fmt(sideBot)}`,
-    `L ${fmt(x0)} ${fmt(p)}`,
-    // 左凹弧：岛左壁 → 外尖
-    `C ${fmt(x0)} ${fmt(p1k)}, ${fmt(-p1k)} ${fmt(0)}, ${fmt(-p)} ${fmt(0)}`,
-    `L ${fmt(-p)} ${fmt(yTop)}`,
-    `Z`,
-  ].join(" ");
-}
-
-function fmt(n: number) {
-  return (Math.round(n * 10) / 10).toString();
-}
-
-/** 近似 cubic-bezier(0.22, 1, 0.36, 1)：快起、尾段丝滑 */
-function easeOutSmooth(t: number) {
-  const x = clamp01(t);
-  // 用 1-(1-x)^3 与 softer 混合，避免「砸到位」的顿挫
-  const a = 1 - Math.pow(1 - x, 3);
-  const b = x * x * (3 - 2 * x); // smoothstep
-  return a * 0.72 + b * 0.28;
-}
-
-/** 把全局进度映射到 [start,end] 子区间，再 ease */
-function channelEase(p: number, start: number, end: number) {
-  return easeOutSmooth(clamp01((p - start) / Math.max(0.001, end - start)));
-}
-
-type Rgb = { r: number; g: number; b: number };
-
-/** sRGB 相对亮度，用于顶栏文字黑白切换 */
-function srgbLuma({ r, g, b }: Rgb) {
-  const toLin = (c: number) => {
-    const s = c / 255;
-    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * toLin(r) + 0.7152 * toLin(g) + 0.0722 * toLin(b);
-}
-
-type ChromeTokens = {
-  fg: string;
-  fgHover: string;
-  shadow: string;
-  glyphShadow: string;
-  scheme: "light" | "dark";
-};
-
-/** 浅色背景用纯黑字，深色背景用白字，避免顶栏看不见 */
-function chromeTokens(rgb: Rgb): ChromeTokens {
-  if (srgbLuma(rgb) >= 0.52) {
-    return {
-      fg: "#000000",
-      fgHover: "#000000",
-      shadow: "none",
-      glyphShadow: "drop-shadow(0 0.5px 0.5px rgba(255, 255, 255, 0.7))",
-      scheme: "light",
-    };
-  }
-  return {
-    fg: "rgba(255, 255, 255, 0.94)",
-    fgHover: "#ffffff",
-    shadow: "0 1px 2px rgba(0, 0, 0, 0.35)",
-    glyphShadow: "drop-shadow(0 1px 1px rgba(0, 0, 0, 0.28))",
-    scheme: "dark",
-  };
-}
-
-function chromeCssVars(prefix: "left" | "right" | "center", t: ChromeTokens): Record<string, string> {
-  return {
-    [`--chrome-${prefix}-fg`]: t.fg,
-    [`--chrome-${prefix}-fg-hover`]: t.fgHover,
-    [`--chrome-${prefix}-shadow`]: t.shadow,
-    [`--chrome-${prefix}-glyph-shadow`]: t.glyphShadow,
-  };
-}
-
-/** 从色带 PNG 左 / 中 / 右采样，左右与岛中文字对比度各用一端 */
-async function sampleStripBands(
-  b64: string,
-): Promise<{ left: Rgb; center: Rgb; right: Rgb } | null> {
-  try {
-    const img = new Image();
-    img.decoding = "async";
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error("png"));
-      img.src = `data:image/png;base64,${b64}`;
-    });
-    const w = Math.max(1, img.naturalWidth);
-    const h = Math.max(1, img.naturalHeight);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return null;
-    ctx.drawImage(img, 0, 0);
-    const band = Math.max(1, Math.floor(w * 0.08));
-    const avg = (x0: number, x1: number): Rgb => {
-      const data = ctx.getImageData(x0, 0, Math.max(1, x1 - x0), h).data;
-      let r = 0;
-      let g = 0;
-      let b = 0;
-      let n = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        r += data[i]!;
-        g += data[i + 1]!;
-        b += data[i + 2]!;
-        n += 1;
-      }
-      return {
-        r: Math.round(r / n),
-        g: Math.round(g / n),
-        b: Math.round(b / n),
-      };
-    };
-    const mid0 = Math.max(0, Math.floor(w / 2 - band / 2));
-    return {
-      left: avg(0, band),
-      center: avg(mid0, mid0 + band),
-      right: avg(Math.max(0, w - band), w),
-    };
-  } catch {
-    return null;
-  }
 }
 
 type Material = "none" | "mica-alt" | "blur" | "aero" | "acrylic";
@@ -1235,6 +951,12 @@ function App() {
     }
     scheduleImmerse();
   }
+
+  useTrayNotificationFocus(
+    msgBanner?.source === "tray" ? msgBanner.notifyId : undefined,
+    msgBanner?.hwnd,
+    dismissMsgBanner,
+  );
 
   function fireNotifyAction(action: NotifyAction) {
     const banner = msgBannerRef.current;
@@ -2152,7 +1874,7 @@ function App() {
     sessionOverride: panelSessionRef.current,
     sessionOverrideActive,
     pullContent: islandPrefs.pullContent,
-  });
+  }, enabledPullContent);
 
   /** 当前会话 / 投放 / 情景插件：同步面板壳尺寸 */
   const sizePluginId = parsePluginPanelId(resolvedPullContent) ?? dropPluginId;
@@ -3657,7 +3379,7 @@ function App() {
     >
       {/* 有窗口：吸色条；桌面+模糊开：仅透出下层 Win32 材质 */}
       {ambientFromWindow ? (
-        <div className="ambient-strip" style={stripStyle} aria-hidden />
+        <AmbientStrip style={stripStyle} />
       ) : null}
       {barGlassOn ? <div className="bar-glass" aria-hidden /> : null}
 

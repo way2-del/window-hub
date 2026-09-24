@@ -2,10 +2,10 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.world-clock",
   "name": "世界时钟",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "official": true,
   "logo": "icon.svg",
-  "description": "快捷区显示另一时区时间（不重复顶栏本机时间）；点击弹窗并排查看两个时区；弹窗内可设置城市。",
+  "description": "快捷区显示时钟图标，可组合日期、星期和时间，支持 12/24 小时制；点击查看双时区时钟。",
   "entry": {
     "shortcuts": "shortcuts.html",
     "popup": "popup.html"
@@ -78,6 +78,62 @@
         { "value": "America/Sao_Paulo", "label": "圣保罗" },
         { "value": "Australia/Sydney", "label": "悉尼" },
         { "value": "Pacific/Auckland", "label": "奥克兰" }
+      ]
+    },
+    {
+      "key": "displayParts",
+      "type": "select",
+      "label": "快捷区显示内容",
+      "default": "time",
+      "options": [
+        {
+          "value": "time",
+          "label": "时间"
+        },
+        {
+          "value": "date",
+          "label": "日期"
+        },
+        {
+          "value": "weekday",
+          "label": "星期"
+        },
+        {
+          "value": "date,time",
+          "label": "日期 + 时间"
+        },
+        {
+          "value": "weekday,time",
+          "label": "星期 + 时间"
+        },
+        {
+          "value": "date,weekday",
+          "label": "日期 + 星期"
+        },
+        {
+          "value": "date,weekday,time",
+          "label": "日期 + 星期 + 时间"
+        },
+        {
+          "value": "icon",
+          "label": "仅时钟图标"
+        }
+      ]
+    },
+    {
+      "key": "hourFormat",
+      "type": "select",
+      "label": "时间格式",
+      "default": "24",
+      "options": [
+        {
+          "value": "24",
+          "label": "24 小时制"
+        },
+        {
+          "value": "12",
+          "label": "12 小时制"
+        }
       ]
     },
     {

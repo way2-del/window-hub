@@ -346,7 +346,7 @@ pub fn save_dock_prefs(prefs: &DockPrefs) -> Result<(), String> {
 
 /// Live-update magnification while the Settings slider is dragged (no disk write).
 /// Emits `dock-mag-preview` so the real Dock fans the middle icons to this scale.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_preview_magnification(
     app: AppHandle,
     vis: State<'_, Arc<DockVisibility>>,
@@ -942,6 +942,8 @@ pub(crate) fn dock_caption_band_px(scale: f64, chrome_top: i32) -> i32 {
 }
 
 fn dock_place_lock() -> &'static std::sync::Mutex<()> {
+    // Window handle/geometry calls below need the UI message pump. Every IPC
+    // entry that reaches this lock must use command(async), never block the UI.
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
@@ -2351,7 +2353,7 @@ fn apply_taskbar_for_dock(hide: bool) {
     let _ = crate::commands::set_system_taskbar_visible(!hide);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_dockico_ini(app: AppHandle, path: String) -> Result<DockPrefs, String> {
     let items = parse_dockico_ini(std::path::Path::new(path.trim()))?;
     let mut prefs = load_dock_prefs();
@@ -2539,7 +2541,7 @@ fn insert_pin_before_trash(items: &mut Vec<DockItem>, item: DockItem) {
 }
 
 /// Drop `.exe` / `.lnk` (and similar) onto the dock to pin them.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_pin_paths(app: AppHandle, paths: Vec<String>) -> Result<DockPrefs, String> {
     let mut prefs = load_dock_prefs();
     let mut added = 0usize;
@@ -2614,7 +2616,7 @@ fn insert_separator_after(items: &mut Vec<DockItem>, after_item_id: Option<&str>
 }
 
 /// Insert a user separator after a pinned tile (or before trash when `after_item_id` is empty).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_add_separator(
     app: AppHandle,
     after_item_id: Option<String>,
@@ -2625,7 +2627,7 @@ pub fn dock_add_separator(
 }
 
 /// Persist a new pin order (ids of `prefs.items`). Unknown ids ignored; missing pins appended.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_reorder_items(app: AppHandle, ordered_ids: Vec<String>) -> Result<DockPrefs, String> {
     let mut prefs = load_dock_prefs();
     if ordered_ids.is_empty() {
@@ -2665,7 +2667,7 @@ pub fn dock_reorder_items(app: AppHandle, ordered_ids: Vec<String>) -> Result<Do
 }
 
 /// Pin a display tile (typically `running:…`) into the fixed dock list.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_pin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, String> {
     let id = item_id.trim().to_string();
     if id.is_empty() {
@@ -2714,7 +2716,7 @@ pub fn dock_pin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, Strin
 }
 
 /// Remove a pinned dock item (not Start / Trash / ephemeral running tiles).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_unpin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, String> {
     let id = item_id.trim().to_string();
     if id.is_empty() {
@@ -3246,7 +3248,7 @@ pub fn get_dock_display_items(app: AppHandle) -> Vec<DockItem> {
     dock_merge_running(&prefs, true)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_relayout(app: AppHandle) {
     let mut prefs = load_dock_prefs();
     if !prefs.enabled {
@@ -3257,7 +3259,7 @@ pub fn dock_relayout(app: AppHandle) {
 }
 
 /// Clear overflow-hidden pins and relayout (status-menu right-click restore).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dock_restore_hidden_items(app: AppHandle) -> Result<DockPrefs, String> {
     let mut prefs = load_dock_prefs();
     if prefs.hidden_item_ids.is_empty() {

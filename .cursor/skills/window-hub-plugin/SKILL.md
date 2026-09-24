@@ -3,7 +3,7 @@ name: window-hub-plugin
 description: >-
   Window Hub 插件开发完整流程 — plugin.json slots/capabilities、三种入口
   (shortcuts/panel/popup)、hub.* 分表面矩阵、settings、.whpx 安装、窗口组与中转站示例。
-  Use when creating/reviewing plugins, scaffolding .whpx packages, or extending CapGate.
+  Use when creating/reviewing plugins or scaffolding .whpx packages using existing host APIs.
 ---
 
 # Window Hub 插件开发（AI 跑通全流程）
@@ -12,16 +12,22 @@ description: >-
 
 - 从零新建插件 / 改 `plugin.json` / 对照示例改槽位
 - 安装、打包、开发目录热更
-- 扩展 Host API / CapGate（先查「勿臆造」）
+- 查询现有 Host API / CapGate（先查「勿臆造」）；扩展能力属于单独的宿主任务
 
 **先读本 skill，再按需打开子 skill**（快捷区 / 岛面板 / 岛通知 / 沉浸 / 窗口组 / 中转站）。
+
+## 插件任务边界（项目所有者要求）
+
+只改指定插件的运行目录、示例目录和可选作者源目录，路径及流程见 [插件开发](../../../docs/plugins/development.md)。开始/结束分别运行 `npm run plugins:scope -- begin <id>` / `end <id>`。
+
+**不得为实现插件修改宿主 `src/`、`src-tauri/src/`、bridge、全局 CSS、配置或其他插件。** 现有 API 不足时，在插件 README 记录缺口与降级，继续可完成部分；只有用户明确提出宿主/API 开发任务才扩展系统。引用宿主源码是查询，不是修改授权。
 
 ## 一句话模型
 
 ```
 插件 = 静态包（HTML/CSS/JS）+ plugin.json
 系统能力 = 只经 window.hub.*（CapGate）
-缺能力 = Companion 独立进程脚本（非 DLL 进主进程）
+缺能力 = 记录 API 缺口 / 使用已支持且已授权的 Companion 协议
 ```
 
 - **禁止** `alert` / `confirm` / `prompt` → 应用内 UI
@@ -58,7 +64,7 @@ description: >-
 | 快捷区白板 + 窗口化全屏 | **Excalidraw** | `docs/plugins/examples/excalidraw/`（CDN 加载；`setWindowedFullscreen`） |
 | 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
-打包资源镜像：`src-tauri/resources/plugins/{window-groups|app-library|transfer-station|weather|mirror|idiom|now-playing|excalidraw}/`（与 docs 示例保持同步）。
+内置插件运行代码维护源：`src-tauri/resources/plugins/<id>/`；对应 docs 示例通过单插件 `plugins:sync` 同步。需要编译的作者源放 `plugins/<id>/`（如 `file-search/board.tsx`），不放宿主 `src/`。
 
 ### 1. 建目录与 `plugin.json`
 
@@ -277,7 +283,7 @@ API：`docs/plugins/host-api.md` · SDK：`docs/plugins/sdk.md`
 - 统一三表面完全相同的 `hub` 全集（快捷区可 popup；岛/面板不能开弹窗 — **有意不同**）
 - 通知按钮自定义坐标（仅允许 `slot: start|end`，见 island-notify skill）
 
-缺能力 → 提 CapGate 提案，或 Companion 本地脚本。
+缺能力 → 在插件文档记录 API 提案或降级；不要自动修改 CapGate。Companion 也必须使用已开放协议并在当前任务授权范围内。
 
 ## Related skills
 
@@ -288,4 +294,3 @@ API：`docs/plugins/host-api.md` · SDK：`docs/plugins/sdk.md`
 - [window-hub-island-immerse](../window-hub-island-immerse/SKILL.md)
 - [window-hub-window-groups](../window-hub-window-groups/SKILL.md)
 - [window-hub-transfer-station](../window-hub-transfer-station/SKILL.md)
-

@@ -311,6 +311,7 @@ mod win {
     /// Auto-hide reclaims work area; a light keep-hidden loop only calls
     /// `SW_HIDE` when Explorer re-shows the bar (no SetWindowPos exile).
     pub fn set_taskbar_visible(visible: bool) -> Result<(), String> {
+        if !visible && crate::lifecycle::stopping() { return Ok(()); }
         let primary = shell_tray_hwnd().ok_or_else(|| "找不到系统任务栏".to_string())?;
 
         if visible {

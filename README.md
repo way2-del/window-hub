@@ -76,16 +76,26 @@ npm run tauri -- dev
 
 ## 项目结构（简）
 
+AI 开发先读 [AGENTS.md](AGENTS.md)。[插件任务](docs/plugins/development.md)只实现插件并使用公开 API；[宿主任务](docs/development/README.md)按模块拆分。结构检查与行为测试：`npm run check`；单插件检查：`npm run plugins:check -- <目录名>`。
+
 ```
 window-hub/
 ├── src/                    # React 前端（岛、Dock、托盘、弹窗）
 ├── src-tauri/              # Rust / Win32 宿主
 │   └── resources/plugins/
+├── plugins/                # 需要编译的插件作者源（如 file-search TSX）
+├── scripts/                # build / dev / maintenance / checks
+├── tests/                  # 自动化验证
+├── docs/development/       # 活跃开发规划与模块地图
 ├── docs/plugins/           # 插件契约与示例
+├── docs/archive/           # 历史排障、恢复副本与旧包
+├── workspace/              # 本地日志、截图、任务记录（不提交）
 └── .cursor/skills/         # 开发约定（岛、插件、托盘等）
 ```
 
 ## 贡献
+
+完整文件归属见 [工作区约定](docs/development/workspace.md)。`src/` 与 `src-tauri/src/` 分别是前端与 Rust 编译单元，保留分离。
 
 欢迎 Issue / PR。改动前建议先阅读对应 `.cursor/skills/` 与 `docs/plugins/`，保持岛栏几何、强调色与插件表面一致。
 

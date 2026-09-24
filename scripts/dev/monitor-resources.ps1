@@ -1,9 +1,12 @@
 # Monitor window-hub CPU/RAM/handles while reproducing hangs.
 # Only tracks window-hub.exe + its child msedgewebview2 (not system-wide Edge).
-# Usage: powershell -File docs/monitor-resources.ps1
-# Log: %TEMP%\window-hub-resource.log
+# Usage: powershell -File scripts/dev/monitor-resources.ps1
+# Log: workspace/logs/resources-<timestamp>.log
 
-$out = Join-Path $env:TEMP "window-hub-resource.log"
+$repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
+$logDir = Join-Path $repoRoot "workspace/logs"
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+$out = Join-Path $logDir ("resources-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 "" | Set-Content $out
 Write-Host "Logging to $out (Ctrl+C to stop). Watching window-hub + child WebViews only."
 

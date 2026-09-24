@@ -1,3 +1,4 @@
+import { useProgressiveGlyphs } from "./features/tray/useProgressiveGlyphs";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -69,6 +70,12 @@ export default function TrayPopupApp() {
   } | null>(null);
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
+  useProgressiveGlyphs(
+    icons.filter(i => !i.icon_png_base64).map(i => i.id),
+    map => {
+      if (glyphCache.ingest(map, icons)) setIcons(prev => glyphCache.merge(prev));
+    },
+  );
   const [entered, setEntered] = useState(false);
   const revealGen = useRef(0);
   const reuseArmedRef = useRef(false);
@@ -93,20 +100,6 @@ export default function TrayPopupApp() {
         setIcons(merged);
         setPinned(prefs.pinned ?? []);
         setBoot({ icons: merged, pinned: prefs.pinned ?? [] });
-        const need = merged
-          .filter((i) => !i.icon_png_base64)
-          .map((i) => i.id)
-          .slice(0, 64);
-        if (need.length > 0) {
-          void invoke<Record<string, string>>("get_tray_icon_glyphs", { ids: need })
-            .then((map) => {
-              if (cancelled) return;
-              if (glyphCache.ingest(map ?? {}, merged)) {
-                setIcons((prev) => glyphCache.merge(prev));
-              }
-            })
-            .catch(() => undefined);
-        }
       } catch {
         if (cancelled) return;
         setEntered(false);

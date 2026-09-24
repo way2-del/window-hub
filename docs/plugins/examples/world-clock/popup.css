@@ -273,3 +273,6 @@ body {
   color: rgba(255, 255, 255, 0.4);
   line-height: 1.4;
 }
+
+.wc-settings { overflow-y: auto; padding-right: 4px; }
+.wc-period { font-size: 12px; margin-left: 5px; white-space: nowrap; }

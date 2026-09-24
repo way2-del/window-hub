@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent scratch, logs, screenshots and task baselines
+/workspace/*
+!/workspace/README.md
+!/workspace/AGENTS.md

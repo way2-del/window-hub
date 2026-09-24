@@ -1,4 +1,5 @@
 mod commands;
+mod lifecycle;
 mod companion_scripts;
 mod db;
 mod dock;
@@ -114,6 +115,7 @@ fn pin_top_bar(window: &tauri::WebviewWindow) {
 /// Calling `window.show()` / `set_always_on_top` from a worker or sync command
 /// deadlocks WebView2 on Windows (click → 未响应).
 fn reassert_window(window: &tauri::WebviewWindow) {
+    if lifecycle::stopping() { return; }
     if island_hidden_for_fullscreen() {
         return;
     }
@@ -212,6 +214,7 @@ fn spawn_watchdog(app: tauri::AppHandle) {
                 // Sparse reassert — every 500ms (window Z / visibility only).
                 // AppBar: SPI-only reclaim if shell dropped inset (no SETPOS thrash).
                 std::thread::sleep(Duration::from_millis(500));
+                if lifecycle::stopping() { break; }
                 if island_hidden_for_fullscreen() {
                     continue;
                 }
@@ -342,13 +345,25 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 boot_log("ambient", "seed emitted (live capture deferred)");
             }
 
+            let mut last_foreground = crate::win32::ambient::foreground_key();
+            let mut last_poll = std::time::Instant::now();
             loop {
                 let ms = if crate::win32::ambient::is_settling() {
                     450
                 } else {
                     1200
                 };
-                std::thread::sleep(Duration::from_millis(ms));
+                // Cheap foreground probe is independent of the capture cadence.
+                std::thread::sleep(Duration::from_millis(80));
+                let foreground = crate::win32::ambient::foreground_key();
+                if let Some(token) = crate::win32::notification_focus::poll(foreground) {
+                    let _ = app.emit_to("main", "tray-notification-viewed", token);
+                }
+                if foreground == last_foreground && last_poll.elapsed() < Duration::from_millis(ms) {
+                    continue;
+                }
+                last_foreground = foreground;
+                last_poll = std::time::Instant::now();
                 let Some(window) = app.get_webview_window("main") else {
                     break;
                 };
@@ -416,8 +431,7 @@ fn spawn_wifi_watcher(app: tauri::AppHandle) {
         .expect("spawn wifi");
 }
 
-/// Boot: hide → tray/ambient seed → one chrome reveal → dock/plugins.
-/// Never show an empty AppBar strip before icons/吸色 are ready.
+/// Boot: start producers → reveal chrome → progressively fill tray / start Dock.
 fn spawn_boot_pipeline(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("boot-pipeline".into())
@@ -475,13 +489,10 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
                         },
                     );
                 }
-                boot_log("tray", "waiting for icons (up to 3s)");
-                let seeded =
-                    crate::win32::tray::wait_for_tray_seed(Duration::from_secs(3));
                 boot_log(
                     "tray",
                     &format!(
-                        "seed done={seeded} total={} clickable={} (+{}ms)",
+                        "streaming total={} clickable={} (+{}ms)",
                         crate::win32::tray::total_icon_count(),
                         crate::win32::tray::clickable_count(),
                         elapsed()
@@ -492,7 +503,7 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
                 boot_log("tray", "DISABLED (WH_DISABLE_TRAY=1)");
             }
 
-            // —— Reveal only after seed attempt (no empty placeholder) ——
+            // Tray discovery must not gate the clock, status controls, or Dock.
             boot_log("reveal", "show main + appbar + glass");
             work_area::end_work_area_quiet();
             crate::win32::tray::flush_publish();
@@ -540,20 +551,24 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
 
             boot_log("dock", "bootstrap starting");
             if let Some(rx) = crate::dock::bootstrap_dock(&app) {
+                lifecycle::require_dock();
                 match rx.recv_timeout(Duration::from_secs(20)) {
                     Ok(Ok(())) => {
                         boot_log("dock", &format!("ready (+{}ms)", elapsed()));
                     }
                     Ok(Err(e)) => {
+                        lifecycle::fail(&format!("Dock 创建失败：{e}"));
                         boot_log("dock", &format!("FAIL {e} (+{}ms)", elapsed()));
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        lifecycle::fail("Dock 创建超过 20 秒仍未完成。");
                         boot_log(
                             "dock",
                             &format!("TIMEOUT — continuing (+{}ms)", elapsed()),
                         );
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        lifecycle::fail("Dock 启动任务异常中断。");
                         boot_log("dock", &format!("DISCONNECTED (+{}ms)", elapsed()));
                     }
                 }
@@ -561,6 +576,7 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
                 boot_log("dock", &format!("disabled (+{}ms)", elapsed()));
             }
             // Dock / taskbar autohide can wipe top rcWork after our first SETPOS.
+            lifecycle::dock_done();
             reclaim_appbar_now(&app);
             kick_ambient_live(&app);
 
@@ -607,7 +623,7 @@ fn reveal_main_chrome(app: &tauri::AppHandle) {
             #[cfg(windows)]
             show_hwnd(hwnd, true);
         }
-        let _ = window.show();
+        if window.show().is_ok() { lifecycle::revealed(); }
         reassert_window(&window);
         boot_log("reveal", "main shown + appbar");
     });
@@ -619,7 +635,9 @@ fn reveal_main_chrome(app: &tauri::AppHandle) {
                 #[cfg(windows)]
                 show_hwnd(hwnd, true);
             }
-            let _ = window.show();
+            // Win32 fallback must not call WebView show() on the boot worker.
+            #[cfg(windows)]
+            if hwnd_of(&window).is_some() { lifecycle::revealed(); }
         }
     }
     // Debounced glass — never sync BitBlt / Composition on the boot worker.
@@ -686,6 +704,7 @@ fn kick_ambient_live(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    lifecycle::supervise_startup();
     tauri::Builder::default()
         .setup(|app| {
             boot_log("setup", "enter");
@@ -725,6 +744,7 @@ pub fn run() {
                 if let Some(hwnd) = hwnd_of(&window) {
                     crate::win32::topmost::set_main_hwnd(hwnd);
                     crate::win32::click_trace::set_main_hwnd(hwnd);
+                    lifecycle::register_main_window(hwnd);
                     crate::win32::click_trace::log(
                         "boot",
                         &format!("main hwnd={hwnd:#x} hang/http/mouse armed"),
@@ -897,7 +917,12 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke: tauri::ipc::Invoke<tauri::Wry>| {
+            let command = invoke.message.command().to_owned();
+            let tracing = !host_boot_ready();
+            if tracing { boot_log("ipc-enter", &command); }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+            lifecycle::startup_surface_ready,
             commands::health,
             commands::debug_click_trace,
             commands::debug_click_trace_path,
@@ -1031,7 +1056,9 @@ pub fn run() {
             db::admin::db_dev_restore,
             commands::invoke_tray_icon,
             commands::clear_tray_attention,
+            win32::notification_focus::watch_tray_notification,
             commands::open_notification_center,
+            commands::open_control_center,
             commands::get_foreground_app,
             commands::set_system_taskbar_visible,
             dock::get_dock_prefs,
@@ -1102,11 +1129,26 @@ pub fn run() {
             commands::hub_fetch,
             plugin_install::preview_plugin_from_path,
             plugin_install::preview_example_plugin,
-        ])
+            ];
+            let handled = handler(invoke);
+            if tracing { boot_log("ipc-leave", &command); }
+            handled
+        })
         .build(tauri::generate_context!())
-        .expect("error while building Window Hub")
+        .unwrap_or_else(|error| {
+            boot_log("failure", &format!("Tauri build/setup: {error}"));
+            rfd::MessageDialog::new()
+                .set_title("Window Hub 启动失败")
+                .set_level(rfd::MessageLevel::Error)
+                .set_description(format!("窗口或数据初始化失败：{error}\n\n日志：{}", std::env::temp_dir().join("window-hub-boot.log").display()))
+                .show();
+            #[cfg(windows)]
+            crate::win32::autostart_svc::signal_user_quit();
+            std::process::exit(1);
+        })
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
+                lifecycle::begin_shutdown(None);
                 // Any GUI teardown (菜单退出 / 进程结束) — tell SCM not to treat as crash.
                 #[cfg(windows)]
                 crate::win32::autostart_svc::signal_user_quit_unless_relaunching();

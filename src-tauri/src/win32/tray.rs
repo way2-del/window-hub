@@ -347,15 +347,9 @@ mod win {
     }
 
     fn clickable_icon_count() -> usize {
-        // Prefer atomic (boot-safe). Fall back to lock only if atomics unset.
-        let n = CLICKABLE_COUNT.load(Ordering::Acquire);
-        if n > 0 || ICON_COUNT.load(Ordering::Acquire) > 0 {
-            return n;
-        }
-        let icons = ICONS.lock();
-        let c = icons.values().filter(|i| is_clickable(i)).count();
-        refresh_icon_counts(&icons);
-        c
+        // Zero is a valid snapshot, including before the first tray seed.
+        // Never wait on ICONS from startup diagnostics.
+        CLICKABLE_COUNT.load(Ordering::Acquire)
     }
 
     pub fn get_prefs() -> TrayPrefs {
@@ -1752,19 +1746,14 @@ mod win {
             }
             *last = Some(std::time::Instant::now());
         }
-        use windows::core::w;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            RegisterWindowMessageW, SendNotifyMessageW, HWND_BROADCAST,
-        };
-        unsafe {
-            let msg = RegisterWindowMessageW(w!("TaskbarCreated"));
-            if msg != 0 {
-                let _ = SendNotifyMessageW(HWND_BROADCAST, msg, None, None);
+        match systray_util::refresh_taskbar_icons() {
+            Ok(()) => {
                 eprintln!(
-                    "[tray] TaskbarCreated broadcast ({})",
+                    "[tray] TaskbarCreated posted to external processes ({})",
                     if force { "force" } else { "normal" }
                 );
             }
+            Err(error) => eprintln!("[tray] refresh request failed: {error}"),
         }
     }
 
@@ -2505,27 +2494,6 @@ mod win {
         }));
     }
 
-    /// Boot waits briefly for spy/hook icons. Lock-free so registry reconcile
-    /// cannot stall chrome reveal (was deadlocking on ICONS).
-    pub fn wait_for_tray_seed(timeout: std::time::Duration) -> bool {
-        if !super::tray_boot_enabled() {
-            return true;
-        }
-        let deadline = std::time::Instant::now() + timeout;
-        while std::time::Instant::now() < deadline {
-            if CLICKABLE_COUNT.load(Ordering::Acquire) > 0
-                || ICON_COUNT.load(Ordering::Acquire) > 0
-            {
-                return true;
-            }
-            if TRAY_FAST_SEED_DONE.load(Ordering::Acquire) {
-                return ICON_COUNT.load(Ordering::Acquire) > 0;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(40));
-        }
-        CLICKABLE_COUNT.load(Ordering::Acquire) > 0 || ICON_COUNT.load(Ordering::Acquire) > 0
-    }
-
     /// Coalesced FE push (boot reveal / after pause).
     pub fn flush_publish() {
         publish();
@@ -2536,13 +2504,22 @@ mod win {
     }
 
     pub fn total_icon_count() -> usize {
-        let n = ICON_COUNT.load(Ordering::Acquire);
-        if n > 0 {
-            return n;
+        ICON_COUNT.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    mod startup_tests {
+        #[test]
+        fn startup_counts_do_not_wait_for_icon_registry() {
+            let _icons = super::ICONS.lock();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let counts = (super::total_icon_count(), super::clickable_count());
+                let _ = tx.send(counts);
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(1))
+                .expect("startup diagnostics must remain available while ICONS is locked");
         }
-        let icons = ICONS.lock();
-        refresh_icon_counts(&icons);
-        icons.len()
     }
 
     fn start_reconcile_loop() {
@@ -3570,13 +3547,9 @@ mod win {
 pub use win::{
     acknowledge_icon_attention, clickable_count, flush_publish, get_prefs, glyphs_for_ids,
     invoke_icon_by_id, list_icons, request_refresh, set_emit_paused, set_prefs, start,
-    total_icon_count, wait_for_tray_seed,
+    total_icon_count,
 };
 
-#[cfg(not(windows))]
-pub fn wait_for_tray_seed(_timeout: std::time::Duration) -> bool {
-    true
-}
 
 #[cfg(not(windows))]
 pub fn flush_publish() {}

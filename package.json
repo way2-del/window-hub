@@ -6,13 +6,19 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:file-search-board": "npx esbuild scripts/file-search-board.tsx --bundle --format=iife --outfile=src-tauri/resources/plugins/file-search/board.js --jsx=automatic --minify --loader:.css=text && node -e \"require('fs').copyFileSync('src-tauri/resources/plugins/file-search/board.js','docs/plugins/examples/file-search/board.js')\"",
+    "build:file-search-board": "npx esbuild plugins/file-search/board.tsx --bundle --format=iife --outfile=src-tauri/resources/plugins/file-search/board.js --jsx=automatic --minify --loader:.css=text && node -e \"require('fs').copyFileSync('src-tauri/resources/plugins/file-search/board.js','docs/plugins/examples/file-search/board.js')\"",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:build": "tauri build",
     "tauri:build:fast": "tauri build --no-bundle -- --profile release-fast",
     "tauri:build:bundle": "tauri build --bundles nsis",
-    "clean:target": "powershell -ExecutionPolicy Bypass -File scripts/clean-rust-target.ps1"
+    "clean:target": "powershell -ExecutionPolicy Bypass -File scripts/maintenance/clean-rust-target.ps1",
+    "check:architecture": "node scripts/checks/architecture.mjs",
+    "test:architecture": "node --test tests/*.test.mjs",
+    "plugins:check": "node scripts/checks/plugin-examples.mjs check",
+    "plugins:sync": "node scripts/checks/plugin-examples.mjs sync",
+    "check": "npm run check:architecture && npm run test:architecture && npm run build",
+    "plugins:scope": "node scripts/checks/plugin-scope.mjs"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",

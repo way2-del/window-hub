@@ -75,6 +75,25 @@ pub fn any_gui_instance_running() -> bool {
 /// Call once from the GUI entry (`main` without `--autostart-svc`).
 /// If another UI instance exists: show a dialog and exit the process.
 pub fn ensure_single_instance_or_exit() {
+    // Never release the old process's mutex early: its cleanup could damage the
+    // new instance's AppBars. Wait for actual process termination instead.
+    if std::env::args().any(|arg| arg == "--wait-for-restart") {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if try_acquire_instance_mutex() {
+                crate::win32::autostart_svc::clear_user_quit();
+                return;
+            }
+            if std::time::Instant::now() >= deadline { break; }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        rfd::MessageDialog::new()
+            .set_title("Window Hub 重启失败")
+            .set_description("等待旧进程退出超时，或另一个实例已经启动。请检查现有 Window Hub 窗口。")
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        std::process::exit(1);
+    }
     if !try_acquire_instance_mutex() {
         show_already_running_dialog();
         std::process::exit(0);

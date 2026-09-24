@@ -24,15 +24,14 @@ use windows::{
       },
       WindowsAndMessaging::{
         DefWindowProcW, GetWindowThreadProcessId, PostMessageW,
-        RegisterWindowMessageW, SendMessageW, SendNotifyMessageW,
-        SetTimer, SetWindowPos, ShowWindow, HWND_BROADCAST, HWND_TOPMOST,
+        SendMessageW,
+        SetTimer, SetWindowPos, ShowWindow, HWND_TOPMOST,
         SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WM_ACTIVATEAPP,
         WM_COMMAND, WM_COPYDATA, WM_TIMER, WM_USER,
       },
     },
   },
 };
-use windows_core::w;
 
 use crate::Util;
 
@@ -421,15 +420,7 @@ impl TraySpy {
       "Refreshing icons by sending `TaskbarCreated` message."
     );
 
-    let msg = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
-
-    if msg == 0 {
-      return Err(windows::core::Error::from_win32().into());
-    }
-
-    unsafe { SendNotifyMessageW(HWND_BROADCAST, msg, None, None) }?;
-
-    Ok(())
+    crate::refresh_taskbar_icons()
   }
 
   pub fn initial_tray_icons(

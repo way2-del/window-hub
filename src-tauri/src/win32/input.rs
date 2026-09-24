@@ -200,9 +200,25 @@ pub fn client_size(_hwnd_raw: isize) -> Result<(i32, i32), String> {
 /// 模拟 Win+N，打开系统通知中心 / 日历面板。
 #[cfg(windows)]
 pub fn open_notification_center() -> Result<(), String> {
+    send_shell_shortcut(windows::Win32::UI::Input::KeyboardAndMouse::VK_N)
+}
+
+/// 模拟 Win+A，切换系统控制中心。
+#[cfg(windows)]
+pub fn open_control_center() -> Result<(), String> {
+    send_shell_shortcut(windows::Win32::UI::Input::KeyboardAndMouse::VK_A)
+}
+
+#[cfg(not(windows))]
+pub fn open_control_center() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
+#[cfg(windows)]
+fn send_shell_shortcut(key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-        VK_LWIN, VK_N,
+        VK_LWIN,
     };
 
     unsafe fn stroke(vk: VIRTUAL_KEY, up: bool) -> INPUT {
@@ -227,13 +243,13 @@ pub fn open_notification_center() -> Result<(), String> {
     unsafe {
         let inputs = [
             stroke(VK_LWIN, false),
-            stroke(VK_N, false),
-            stroke(VK_N, true),
+            stroke(key, false),
+            stroke(key, true),
             stroke(VK_LWIN, true),
         ];
         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         if sent as usize != inputs.len() {
-            return Err(format!("SendInput Win+N failed ({sent}/{})", inputs.len()));
+            return Err(format!("SendInput shell shortcut failed ({sent}/{})", inputs.len()));
         }
     }
     Ok(())

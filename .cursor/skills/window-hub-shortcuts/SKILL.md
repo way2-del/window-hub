@@ -80,17 +80,19 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 或直接用 Host 已注入的 `var(--wh-bar-h)`。
 
-### 垂直对齐（由插件自决）
+### 垂直对齐（常驻入口统一居中）
 
-| 对齐 | CSS 做法（示例） |
-|------|------------------|
-| **居中**（推荐常驻 chip） | `html, body, .bar { display:flex; align-items:center; height:var(--wh-bar-h); }` |
-| **顶对齐** | `align-items: flex-start` 或 `padding-top` |
-| **底对齐** | `align-items: flex-end` 或 `padding-bottom` |
+常驻 chip 的容器、按钮和图标以 `--wh-bar-h` 垂直居中；文字继承 Host 的 `--wh-chrome-font-*`，显式统一行高，SVG 用 `display:block; flex-shrink:0`，避免行内图标基线空隙。
 
-官方窗口组（`manage=custom`）：条内 **manage 图标、chip 文案、绿点、badge、分隔线** 全部垂直居中。
+验收同时比较文字与图标的视觉中心、相邻状态菜单标题的基线。中英文混排在几何居中后仍可能有字形偏差，允许在截图验证后对文字做局部 1px 光学校正；不要移动整个条或用固定 top 猜状态栏位置。高度不得超过 `getBounds().height`。
 
-高度硬顶：内容区不得超过 `getBounds().height`（= `SHORTCUTS_HEIGHT`）。
+### 动态内容宽度（防延迟裁切）
+
+- 用 `id="bar"` 标记实际内容根节点，设置 `width:max-content`；chip 禁止 flex 收缩。Host 自动量测和插件主动上报必须量测同一内容。
+- 宽度取 `Math.ceil(Math.max(bar.scrollWidth, bar.getBoundingClientRect().width))`，包含图标、间隔、padding 和实际字体；不要按城市名字数估算，不要用固定上限截掉日期/星期/AM-PM。
+- 初次渲染、设置切换、定时刷新都走同一测量逻辑；用 `ResizeObserver` 处理 Host 字体注入和字体加载引起的宽度变化。仅宽度变化时调用 `requestSize`，避免重复消息。
+- 不要量测 `width:100%` 的 iframe 视口来当作内容宽度，否则裁切后无法恢复或缩短后无法收回。Host 可用空间不足的裁切与插件错误上报宽度需分别排查。
+- 回归至少覆盖：最长组合 → 等待两次实际刷新 → 短组合 → 长组合、12/24 小时制、字体变化及不同缩放。确认右侧最后字符始终可见、宽度能扩大也能缩回。内置资源与 `docs/plugins/examples` 同步。
 
 ## Hover 开 popup
 

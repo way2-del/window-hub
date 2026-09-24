@@ -1,5 +1,5 @@
 /**
- * Host chrome: Wi‑Fi + clock only.
+ * Host chrome: Wi‑Fi, control center and clock.
  * Independent of tray hook / TrayCluster — stays visible when tray boot is disabled.
  */
 import { useEffect, useRef, useState } from "react";
@@ -9,6 +9,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { hideChromeHoverTip, hostTipPointerProps, installChromeHoverTipGlobalDismiss } from "../chromeHoverTip";
 import { clickTrace } from "../clickTrace";
 import type { WifiState } from "./TrayCluster";
+import ControlCenterButton from "../features/controlCenter/ControlCenterButton";
 
 const FALLBACK_WIFI: WifiState = {
   enabled: true,
@@ -259,6 +260,8 @@ export default function ChromeStatusCluster() {
         >
           <WifiGlyph state={wifi} />
         </button>
+
+        <ControlCenterButton />
 
         <button
           type="button"
