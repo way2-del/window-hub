@@ -170,10 +170,136 @@ mod win {
 
     /// Rate-limit optional cold-start TaskbarCreated (hook path only).
     static LAST_TASKBAR_CREATED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    /// Rate-limit catch-up soft-seed (avoid TaskbarCreated/PNG thrash on chronic mismatch).
+    static LAST_CATCHUP_SEED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    /// After user quit (IconRemove): suppress soft-seed resurrection for a short window.
+    /// Keys: icon id, `proc:{stem}`, `guid:{guid}`.
+    static RECENT_REMOVES: LazyLock<Mutex<HashMap<String, std::time::Instant>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     /// icon id → NotifyIconSettings subkey (enrichment / pin only).
     static REG_KEY_BY_ID: LazyLock<Mutex<HashMap<String, String>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    const REMOVE_SUPPRESS: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn note_icon_removed(info: &TrayIconInfo) {
+        let now = std::time::Instant::now();
+        let mut m = RECENT_REMOVES.lock();
+        m.retain(|_, t| t.elapsed() < REMOVE_SUPPRESS.saturating_mul(2));
+        m.insert(info.id.clone(), now);
+        let proc = info.process.trim().to_ascii_lowercase();
+        if !proc.is_empty() {
+            m.insert(format!("proc:{proc}"), now);
+        }
+        let pk = info.pin_key.trim().to_ascii_lowercase();
+        if !pk.is_empty() {
+            m.insert(format!("pin:{pk}"), now);
+        }
+        if looks_like_guid_id(&info.id) {
+            m.insert(format!("guid:{}", info.id.to_ascii_lowercase()), now);
+        }
+    }
+
+    fn clear_remove_suppress_for(info: &TrayIconInfo) {
+        let mut m = RECENT_REMOVES.lock();
+        m.remove(&info.id);
+        let proc = info.process.trim().to_ascii_lowercase();
+        if !proc.is_empty() {
+            m.remove(&format!("proc:{proc}"));
+        }
+        let pk = info.pin_key.trim().to_ascii_lowercase();
+        if !pk.is_empty() {
+            m.remove(&format!("pin:{pk}"));
+        }
+        if looks_like_guid_id(&info.id) {
+            m.remove(&format!("guid:{}", info.id.to_ascii_lowercase()));
+        }
+    }
+
+    fn recently_removed_reg(item: &crate::win32::tray_registry::RegTrayIcon, stub_id: &str) -> bool {
+        let m = RECENT_REMOVES.lock();
+        let fresh = |t: &std::time::Instant| t.elapsed() < REMOVE_SUPPRESS;
+        if m.get(stub_id).is_some_and(fresh) {
+            return true;
+        }
+        let proc = item.process.trim().to_ascii_lowercase();
+        if !proc.is_empty() && m.get(&format!("proc:{proc}")).is_some_and(fresh) {
+            return true;
+        }
+        if let Some(ref g) = item.icon_guid {
+            let gk = crate::win32::tray_registry::guid_key(g);
+            if m.get(&gk).is_some_and(fresh)
+                || m.get(&format!("guid:{gk}")).is_some_and(fresh)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drop non-clickable stubs that mirror a just-removed / dead tray app.
+    fn drop_stubs_matching(info: &TrayIconInfo) -> bool {
+        let proc = info.process.trim().to_ascii_lowercase();
+        let uid = info.uid;
+        let id = info.id.clone();
+        let mut icons = ICONS.lock();
+        let drop_ids: Vec<String> = icons
+            .iter()
+            .filter(|(sid, s)| {
+                if is_clickable(s) {
+                    return false;
+                }
+                if *sid == &id || s.id == id {
+                    return true;
+                }
+                if looks_like_guid_id(&id) && (s.id == id || s.pin_key == id) {
+                    return true;
+                }
+                if !proc.is_empty()
+                    && s.process.trim().eq_ignore_ascii_case(&proc)
+                    && (uid == 0 || s.uid == 0 || s.uid == uid)
+                {
+                    return true;
+                }
+                false
+            })
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        if drop_ids.is_empty() {
+            return false;
+        }
+        let mut reg_map = REG_KEY_BY_ID.lock();
+        for sid in &drop_ids {
+            icons.remove(sid);
+            reg_map.remove(sid);
+            OS_FINGERPRINT.lock().remove(sid);
+            FP_CHANGES.lock().remove(sid);
+            LAST_HIDDEN.lock().remove(sid);
+            REG_SNAPSHOT_FP.lock().remove(sid);
+        }
+        refresh_icon_counts(&icons);
+        true
+    }
+
+    fn remove_icon_by_id(id: &str) {
+        let prev = {
+            let mut icons = ICONS.lock();
+            icons.remove(id)
+        };
+        OS_FINGERPRINT.lock().remove(id);
+        FP_CHANGES.lock().remove(id);
+        LAST_HIDDEN.lock().remove(id);
+        REG_SNAPSHOT_FP.lock().remove(id);
+        ATTENTION_ACK.lock().remove(id);
+        REG_KEY_BY_ID.lock().remove(id);
+        if let Some(ref info) = prev {
+            note_icon_removed(info);
+            let _ = drop_stubs_matching(info);
+        }
+        let _ = sweep_icons();
+        publish();
+    }
 
     /// True when explorer hook is the list source (spy disabled).
     static HOOK_PRIMARY: AtomicBool = AtomicBool::new(false);
@@ -1257,6 +1383,11 @@ mod win {
         let uid = info.uid;
         let clickable_new = info.hwnd != 0 && info.callback_msg != 0;
 
+        // Real tray re-registered (user relaunched) — allow soft-seed again if needed.
+        if clickable_new {
+            clear_remove_suppress_for(&info);
+        }
+
         // Cache I/O outside ICONS lock — holding both caused publish stutter / 未响应.
         // Skip remember on hot path (disk/hash storms); hydrate empty only.
         hydrate_icon_png(&mut info);
@@ -1954,15 +2085,7 @@ mod win {
             NIM_DELETE => {
                 let id = stable_id_from_slot(slot);
                 eprintln!("[tray] hook IconRemove {id}");
-                ICONS.lock().remove(&id);
-                OS_FINGERPRINT.lock().remove(&id);
-                FP_CHANGES.lock().remove(&id);
-                LAST_HIDDEN.lock().remove(&id);
-                REG_SNAPSHOT_FP.lock().remove(&id);
-                ATTENTION_ACK.lock().remove(&id);
-                REG_KEY_BY_ID.lock().remove(&id);
-                let _ = sweep_icons();
-                publish();
+                remove_icon_by_id(&id);
             }
             _ => {}
         }
@@ -2156,14 +2279,23 @@ mod win {
                         .get(&id)
                         .map(|i| i.icon_png_base64.is_empty() && !item.icon_snapshot.is_empty())
                         .unwrap_or(false);
-                    if needs_png {
+                    // Cap enrich PNG fills — full-pool encode on process wake = hitch.
+                    if needs_png && pending_png.len() < 2 {
                         pending_png.push((id.clone(), String::new())); // placeholder; fill below
                         pending_snap_fp.push((id.clone(), hash_bytes(&item.icon_snapshot)));
                     }
                     // Light field updates applied in second pass.
                     let _ = area;
+                } else if recently_removed_reg(item, &reg_icon_id(item)) {
+                    // User just quit (e.g. PixPin 退出) — do not count as missing / re-seed.
                 } else if seed {
                     missing += 1;
+                    // Cap soft-seed per pass — encoding many IconSnapShot PNGs on
+                    // process-wake (PixPin 启动) previously hung the host.
+                    const MAX_SEED_PER_PASS: usize = 4;
+                    if pending_stubs.len() >= MAX_SEED_PER_PASS {
+                        continue;
+                    }
                     let id = reg_icon_id(item);
                     keep_ids.insert(id.clone());
                     if !icons.contains_key(&id) && match_reg_to_spy(&icons, item).is_none() {
@@ -2211,9 +2343,9 @@ mod win {
                             resident,
                             system_tray,
                         });
-                        if !item.icon_snapshot.is_empty() {
-                            pending_png.push((id, String::new()));
-                        }
+                        // Do NOT queue IconSnapShot→PNG here. Glyphs come from
+                        // get_tray_icon_glyphs / cache; encoding on wake = 未响应.
+                        let _ = id;
                     }
                 } else {
                     missing += 1;
@@ -2302,16 +2434,18 @@ mod win {
                     icons.insert(id, stub);
                     changed = true;
                 }
-                let drop_ids: Vec<String> = icons
-                    .iter()
-                    .filter(|(id, info)| !is_clickable(info) && !keep_ids.contains(*id))
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in &drop_ids {
-                    icons.remove(id);
-                    reg_map.remove(id);
-                    changed = true;
-                }
+            }
+            // Always drop orphan stubs (hwnd=0) not backed by a live registry/process
+            // match — enrich-only path used to leave ghosts after PixPin 退出.
+            let drop_ids: Vec<String> = icons
+                .iter()
+                .filter(|(id, info)| !is_clickable(info) && !keep_ids.contains(*id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &drop_ids {
+                icons.remove(id);
+                reg_map.remove(id);
+                changed = true;
             }
         }
 
@@ -2328,10 +2462,47 @@ mod win {
         (changed, missing)
     }
 
-    /// Periodic reconcile: enrich only — no stub seed / PNG encode storm.
+    /// Periodic reconcile.
+    /// Common path: enrich-only (no PNG). When registry shows a live tray app the
+    /// spy/hook never delivered (late start / 管理员), soft-seed stubs only.
+    ///
+    /// **Never** broadcast `TaskbarCreated` here — that makes every tray app
+    /// re-register at once (PixPin 启动 → 全量 NIM 风暴 → 灵动岛未响应).
     fn reconcile_once() -> bool {
-        let (changed, _) = apply_registry_snapshot(false, true);
-        changed
+        let (changed, missing) = apply_registry_snapshot(false, true);
+        if missing == 0 {
+            return changed;
+        }
+        {
+            let mut last = LAST_CATCHUP_SEED.lock();
+            if let Some(t) = *last {
+                if t.elapsed() < std::time::Duration::from_secs(5) {
+                    return changed;
+                }
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        eprintln!(
+            "[tray] reconcile: {missing} registry icon(s) unmatched — soft-seed only (no TaskbarCreated)"
+        );
+        let (seeded, _) = apply_registry_snapshot(true, true);
+        changed || seeded
+    }
+
+    /// Manual / event-driven refresh. Soft-seed catch-up; TaskbarCreated only if
+    /// the tray list is completely empty (boot recovery).
+    pub fn request_refresh() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            *LAST_CATCHUP_SEED.lock() = None;
+            let empty = clickable_icon_count() == 0 && total_icon_count() == 0;
+            let changed = reconcile_once();
+            if empty {
+                broadcast_taskbar_created_force();
+            }
+            if changed || empty {
+                publish();
+            }
+        }));
     }
 
     /// Boot waits briefly for spy/hook icons. Lock-free so registry reconcile
@@ -2410,13 +2581,38 @@ mod win {
 
                 let started = std::time::Instant::now();
                 let mut slow_pending = true;
+                let mut last_proc_fp =
+                    crate::win32::tray_registry::process_set_fingerprint();
+                // After a process-set change, run a few faster catches then back off.
+                let mut burst_left: u8 = 0;
                 loop {
-                    let interval = if started.elapsed().as_secs() < 30 {
+                    // Idle: 15s. Boot window / process-wake burst: 1–2s.
+                    // Between sleeps, a cheap Toolhelp fingerprint detects new apps
+                    // (PixPin 等) without registry/PNG work on the quiet path.
+                    let idle = if started.elapsed().as_secs() < 30 {
                         std::time::Duration::from_secs(1)
+                    } else if burst_left > 0 {
+                        std::time::Duration::from_secs(2)
                     } else {
                         std::time::Duration::from_secs(15)
                     };
-                    std::thread::sleep(interval);
+                    let slice = std::time::Duration::from_millis(500);
+                    let mut waited = std::time::Duration::ZERO;
+                    let mut proc_woke = false;
+                    while waited < idle {
+                        std::thread::sleep(slice);
+                        waited += slice;
+                        let fp = crate::win32::tray_registry::process_set_fingerprint();
+                        if fp != last_proc_fp {
+                            last_proc_fp = fp;
+                            proc_woke = true;
+                            burst_left = 4;
+                            break;
+                        }
+                    }
+                    if burst_left > 0 && !proc_woke {
+                        burst_left = burst_left.saturating_sub(1);
+                    }
                     // Optional one-shot GetRect enrich only when the list is still thin.
                     // Never run when we already have a usable set — GetRect can hang Explorer.
                     if slow_pending
@@ -2441,6 +2637,9 @@ mod win {
                         }
                     }
                     if !crate::win32::work_area::work_area_quiet() {
+                        if proc_woke {
+                            eprintln!("[tray] reconcile: process set changed — wake catch-up");
+                        }
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             reconcile_once()
                         })) {
@@ -2553,15 +2752,7 @@ mod win {
                         }
                         SystrayEvent::IconRemove(id) => {
                             eprintln!("[tray] IconRemove {id}");
-                            let key = id.to_string();
-                            ICONS.lock().remove(&key);
-                            OS_FINGERPRINT.lock().remove(&key);
-                            FP_CHANGES.lock().remove(&key);
-                            LAST_HIDDEN.lock().remove(&key);
-                            REG_SNAPSHOT_FP.lock().remove(&key);
-                            REG_KEY_BY_ID.lock().remove(&key);
-                            let _ = sweep_icons();
-                            publish();
+                            remove_icon_by_id(&id.to_string());
                         }
                     }
                 }
@@ -3378,8 +3569,8 @@ mod win {
 #[cfg(windows)]
 pub use win::{
     acknowledge_icon_attention, clickable_count, flush_publish, get_prefs, glyphs_for_ids,
-    invoke_icon_by_id, list_icons, set_emit_paused, set_prefs, start, total_icon_count,
-    wait_for_tray_seed,
+    invoke_icon_by_id, list_icons, request_refresh, set_emit_paused, set_prefs, start,
+    total_icon_count, wait_for_tray_seed,
 };
 
 #[cfg(not(windows))]
@@ -3389,6 +3580,9 @@ pub fn wait_for_tray_seed(_timeout: std::time::Duration) -> bool {
 
 #[cfg(not(windows))]
 pub fn flush_publish() {}
+
+#[cfg(not(windows))]
+pub fn request_refresh() {}
 
 #[cfg(not(windows))]
 pub fn clickable_count() -> usize {

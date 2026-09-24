@@ -981,6 +981,7 @@ pub fn run() {
             commands::get_window_material,
             commands::set_window_material,
             commands::list_tray_icons,
+            commands::refresh_tray_icons,
             commands::get_tray_icon_glyphs,
             commands::set_tray_ui_paused,
             commands::is_host_boot_ready,

@@ -103,6 +103,10 @@ pub fn exe_paths_equivalent(a: &str, b: &str) -> bool {
 static REGISTRY_ENUM_LOCK: Mutex<()> = Mutex::new(());
 
 /// All running process image paths (PID-based — catches tray-only / no visible HWND).
+///
+/// Elevated apps (管理员): `OpenProcess` from a medium-IL host often fails (UIPI).
+/// Fall back to Toolhelp `szExeFile` so stem / file-name matching still sees them
+/// (PixPin / other admin trays would otherwise vanish from registry soft-seed).
 fn enum_process_image_paths_unlocked() -> Vec<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -127,6 +131,7 @@ fn enum_process_image_paths_unlocked() -> Vec<String> {
         while ok {
             let pid = entry.th32ProcessID;
             if pid > 4 {
+                let mut got_full = false;
                 if let Ok(proc) =
                     OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
                 {
@@ -143,6 +148,18 @@ fn enum_process_image_paths_unlocked() -> Vec<String> {
                         let path =
                             String::from_utf16_lossy(&buf16[..size as usize]).to_ascii_lowercase();
                         out.push(path);
+                        got_full = true;
+                    }
+                }
+                if !got_full {
+                    // Elevated / protected: keep file name so exe_paths_equivalent / stem match work.
+                    let raw = &entry.szExeFile;
+                    let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+                    if len > 0 {
+                        let name = String::from_utf16_lossy(&raw[..len]).to_ascii_lowercase();
+                        if !name.is_empty() {
+                            out.push(name);
+                        }
                     }
                 }
             }
@@ -151,6 +168,48 @@ fn enum_process_image_paths_unlocked() -> Vec<String> {
         let _ = CloseHandle(snap);
     }
     out
+}
+
+/// Cheap running-set fingerprint (Toolhelp names only — no OpenProcess).
+/// Used to wake tray reconcile when a new process appears (e.g. PixPin just launched).
+pub fn process_set_fingerprint() -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut names: Vec<String> = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return 0;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut ok = Process32FirstW(snap, &mut entry).is_ok();
+        while ok {
+            if entry.th32ProcessID > 4 {
+                let raw = &entry.szExeFile;
+                let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+                if len > 0 {
+                    names.push(String::from_utf16_lossy(&raw[..len]).to_ascii_lowercase());
+                }
+            }
+            ok = Process32NextW(snap, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    names.sort_unstable();
+    let mut h = DefaultHasher::new();
+    names.len().hash(&mut h);
+    for n in &names {
+        n.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// HWND → image path for GetRect(uid) probes. Includes **hidden** top-level windows

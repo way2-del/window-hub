@@ -822,6 +822,11 @@ pub async fn open_tray_popup(
     if !crate::win32::tray::tray_boot_enabled() {
         return Err("tray disabled (hang A/B)".into());
     }
+    // Chevron open: kick light catch-up so late/admin trays (PixPin…) appear without waiting.
+    std::thread::Builder::new()
+        .name("tray-refresh-on-open".into())
+        .spawn(|| crate::win32::tray::request_refresh())
+        .ok();
     crate::win32::click_trace::log("rust", &format!("open_tray_popup enter x={x:.0} y={y:.0}"));
     close_sibling_popups(&app, "tray-popup");
 
@@ -2070,6 +2075,13 @@ fn save_tray_prefs(prefs: &crate::win32::tray::TrayPrefs) -> Result<(), String> 
 #[tauri::command]
 pub fn list_tray_icons() -> Vec<crate::win32::tray::TrayIconInfo> {
     crate::win32::tray::list_icons()
+}
+
+/// Force a light tray catch-up (registry soft-seed + TaskbarCreated when needed).
+/// Safe to call after launching an app whose tray icon did not appear yet.
+#[tauri::command]
+pub fn refresh_tray_icons() {
+    crate::win32::tray::request_refresh();
 }
 
 /// On-demand PNG glyphs (rail / popup). Never push these on every NIM_* emit.
