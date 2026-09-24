@@ -1,8 +1,8 @@
 //! Main island HWND Z-order helpers.
 //!
-//! Collapsed top bar sits in the **AppBar-reserved** strip — no need for permanent
-//! `HWND_TOPMOST` (wallpaper / normal windows already respect `rcWork`).
-//! Expanded 灵动岛 overlays into the work area and **does** need TOPMOST.
+//! The visible main HWND is a shell AppBar. Both collapsed and expanded states
+//! stay TOPMOST so Show Desktop cannot cover the bar before a foreground poll.
+//! Fullscreen hiding is owned by the existing fullscreen watcher.
 //! Tray flyouts briefly call [`yield_for`] to drop TOPMOST while menus show.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
@@ -28,14 +28,35 @@ fn now_ms() -> u64 {
 }
 
 pub fn set_main_hwnd(hwnd: isize) {
-    MAIN_HWND.store(hwnd, Ordering::SeqCst);
+    if MAIN_HWND.swap(hwnd, Ordering::SeqCst) != hwnd && hwnd != 0 {
+        exclude_main_from_peek(hwnd);
+    }
 }
+
+/// Run once for the main HWND, not for settings, Dock or popup windows.
+#[cfg(windows)]
+fn exclude_main_from_peek(raw: isize) {
+    use windows::Win32::Foundation::{BOOL, HWND};
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_EXCLUDED_FROM_PEEK};
+    let enabled = BOOL(1);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            HWND(raw as *mut _),
+            DWMWA_EXCLUDED_FROM_PEEK,
+            &enabled as *const BOOL as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn exclude_main_from_peek(_raw: isize) {}
 
 pub fn overlay_raised() -> bool {
     OVERLAY_RAISED.load(Ordering::SeqCst)
 }
 
-/// Island expanded → TOPMOST; collapsed strip → NOTOPMOST (AppBar owns the slot).
+/// Track overlay geometry; the collapsed shell bar also remains TOPMOST.
 /// Does **not** SetWindowPos when called mid-resize — only stores the flag.
 /// Call [`reassert_main_zorder`] / [`force_topmost`] after geometry settles.
 pub fn set_overlay_raised(raised: bool) {
@@ -72,19 +93,11 @@ pub fn reassert_main_zorder() {
     if hwnd == 0 || is_yielding() {
         return;
     }
-    // Prefer explicit flag; also treat short HWND as collapsed (FE used to skip
-    // settle_overlay on shrink → OVERLAY_RAISED stuck true → forever TOPMOST).
-    // COVER_TOPMOST: ChatGPT maximize clamp failed → keep strip above the app.
-    let raised = COVER_TOPMOST.load(Ordering::SeqCst)
-        || (OVERLAY_RAISED.load(Ordering::SeqCst) && hwnd_looks_expanded(hwnd));
-    if raised {
-        force_topmost(hwnd);
-    } else {
-        if OVERLAY_RAISED.load(Ordering::SeqCst) && !hwnd_looks_expanded(hwnd) {
-            OVERLAY_RAISED.store(false, Ordering::SeqCst);
-        }
-        clear_topmost(hwnd);
+    if OVERLAY_RAISED.load(Ordering::SeqCst) && !hwnd_looks_expanded(hwnd) {
+        OVERLAY_RAISED.store(false, Ordering::SeqCst);
     }
+    // Do not show/activate here: fullscreen and startup own visibility.
+    set_topmost(hwnd, false);
 }
 
 #[cfg(windows)]
@@ -114,7 +127,7 @@ pub fn ensure_main_visible() -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsIconic, IsWindow, IsWindowVisible, ShowWindow, SW_RESTORE, SW_SHOWNOACTIVATE,
+        IsIconic, IsWindow, IsWindowVisible, ShowWindowAsync, SW_SHOWNOACTIVATE,
     };
 
     let raw = MAIN_HWND.load(Ordering::SeqCst);
@@ -135,18 +148,19 @@ pub fn ensure_main_visible() -> bool {
             &mut cloaked as *mut u32 as *mut _,
             std::mem::size_of::<u32>() as u32,
         );
-        if !iconic && visible && cloaked == 0 {
+        // Shell cloaking alone can mean another virtual desktop. ShowWindow
+        // cannot uncloak that and must not pull the user out of their desktop.
+        if !needs_visibility_restore(iconic, visible, cloaked) {
             return false;
         }
-        if iconic {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // SW_RESTORE activates the bar and can cancel Explorer's Show Desktop.
+        // Queue to the owning UI thread; never block the foreground probe.
+        let restored = ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE).as_bool();
         // Visibility restore only — Z-order follows overlay + HWND height.
         if !is_yielding() {
             reassert_main_zorder();
         }
-        true
+        restored
     }
 }
 
@@ -157,6 +171,11 @@ pub fn ensure_main_visible() -> bool {
 
 #[cfg(windows)]
 pub fn force_topmost(hwnd_raw: isize) {
+    set_topmost(hwnd_raw, true);
+}
+
+#[cfg(windows)]
+fn set_topmost(hwnd_raw: isize, show: bool) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
@@ -171,7 +190,8 @@ pub fn force_topmost(hwnd_raw: isize) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                | if show { SWP_SHOWWINDOW } else { Default::default() },
         );
     }
 }
@@ -180,14 +200,16 @@ pub fn force_topmost(hwnd_raw: isize) {
 pub fn clear_topmost(hwnd_raw: isize) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_NOTOPMOST,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
+        GetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_NOTOPMOST,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
     };
 
     let hwnd = HWND(hwnd_raw as *mut _);
     unsafe {
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, ex & !(WS_EX_TOPMOST.0 as i32));
+        if ex & WS_EX_TOPMOST.0 as i32 == 0 {
+            return;
+        }
         let _ = SetWindowPos(
             hwnd,
             HWND_NOTOPMOST,
@@ -195,7 +217,7 @@ pub fn clear_topmost(hwnd_raw: isize) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }
@@ -204,4 +226,35 @@ pub fn clear_topmost(hwnd_raw: isize) {
 pub fn force_topmost(_hwnd_raw: isize) {}
 
 #[cfg(not(windows))]
+fn set_topmost(_hwnd_raw: isize, _show: bool) {}
+
+#[cfg(not(windows))]
 pub fn clear_topmost(_hwnd_raw: isize) {}
+
+/// Cloaking is owned by DWM/Shell (e.g. virtual desktop switches); ShowWindow
+/// only repairs hidden/minimized windows, not a shell-cloaked surface.
+fn needs_visibility_restore(iconic: bool, visible: bool, cloaked: u32) -> bool {
+    cloaked == 0 && (iconic || !visible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_visibility_restore;
+
+    #[test]
+    fn minimized_or_hidden_bar_is_restored_but_occlusion_needs_zorder() {
+        assert!(needs_visibility_restore(true, true, 0));
+        assert!(needs_visibility_restore(false, false, 0));
+        // Show Desktop can cover a visible HWND without minimizing it.
+        assert!(!needs_visibility_restore(false, true, 0));
+    }
+
+    #[test]
+    fn shell_cloaking_does_not_trigger_repeated_show_requests() {
+        for cloak in [1, 2, 4] {
+            assert!(!needs_visibility_restore(false, true, cloak));
+            assert!(!needs_visibility_restore(false, false, cloak));
+            assert!(!needs_visibility_restore(true, true, cloak));
+        }
+    }
+}

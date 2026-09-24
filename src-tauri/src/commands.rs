@@ -503,7 +503,7 @@ pub fn suppress_island_bar_refresh(ms: Option<u64>) -> Result<(), String> {
     Ok(())
 }
 
-/// 岛收回折叠条：取消 TOPMOST（轻量：只改 Z-order，不 ShowWindow，避免收起卡死）。
+/// 岛收回折叠条：恢复当前场景层级（桌面保留 TOPMOST，不激活窗口）。
 #[tauri::command]
 pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
     crate::win32::click_trace::log("rust", "settle_overlay enter");
@@ -515,7 +515,7 @@ pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
     #[cfg(windows)]
     {
         crate::win32::island_bar_glass::suppress_refresh_ms(400);
-        crate::win32::topmost::clear_topmost(raw);
+        crate::win32::topmost::reassert_main_zorder();
     }
     #[cfg(not(windows))]
     {

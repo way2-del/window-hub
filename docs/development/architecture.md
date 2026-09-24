@@ -27,7 +27,7 @@
 | 窗口识别 | `src/app/windowRouting.ts` | `src/main.tsx` 装配、Rust 窗口 label |
 | 设置 | `src/SettingsApp.tsx`、对应 `*Prefs.ts` | SQLite / Tauri 事件契约 |
 | Dock | `src/DockApp.tsx`、`src-tauri/src/dock/` | Dock 专用样式、Win32 定位 |
-| 系统任务栏与顶栏占位 | `src-tauri/src/win32/status_menu.rs`、`appbar.rs`、`dock_appbar.rs` | 已按用户要求恢复 origin/main 91fc9c5；撤回实验记录在 workspace/archive/topbar-reverted/ |
+| 系统任务栏与顶栏占位 | `src-tauri/src/win32/status_menu.rs`、`appbar.rs`、`appbar_window.rs`、`dock_appbar.rs` | 实际 main HWND 注册 AppBar；最小化保护与验证见 [顶栏窗口契约](appbar-window.md) |
 | 托盘 / 网络 / 输入法 | 对应 `*PopupApp.tsx` 与 components | `src-tauri/src/win32/` 对应模块 |
 | 原生 IPC | `src-tauri/src/commands.rs` | `lib.rs` 注册，领域模块实现 |
 | 插件安装与权限 | `src-tauri/src/plugin_install.rs`、`plugin_hub.rs` | manifest schema、前端 bridge、host-api 文档 |

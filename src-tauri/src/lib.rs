@@ -743,6 +743,9 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(hwnd) = hwnd_of(&window) {
                     crate::win32::topmost::set_main_hwnd(hwnd);
+                    #[cfg(windows)]
+                    crate::win32::appbar_window::attach(hwnd)
+                        .map_err(std::io::Error::other)?;
                     crate::win32::click_trace::set_main_hwnd(hwnd);
                     lifecycle::register_main_window(hwnd);
                     crate::win32::click_trace::log(
