@@ -208,9 +208,9 @@ fn spawn_watchdog(app: tauri::AppHandle) {
                 }
             }
 
-            let mut ticks: u32 = 0;
             loop {
-                // Sparse reassert — every 500ms (was 2s; bar-glass watcher handles Z-order).
+                // Sparse reassert — every 500ms (window Z / visibility only).
+                // AppBar: SPI-only reclaim if shell dropped inset (no SETPOS thrash).
                 std::thread::sleep(Duration::from_millis(500));
                 if island_hidden_for_fullscreen() {
                     continue;
@@ -219,9 +219,16 @@ fn spawn_watchdog(app: tauri::AppHandle) {
                     break;
                 };
                 reassert_window(&window);
-                ticks = ticks.wrapping_add(1);
-                if ticks % 5 == 0 && !work_area::work_area_quiet() {
-                    if let Some(hwnd) = hwnd_of(&window) {
+                let self_hwnd = hwnd_of(&window);
+                // ChatGPT 等 Electron：最大化高度按整屏算会高出一条顶栏 → 钳到 rcWork。
+                crate::win32::max_clamp::tick(self_hwnd);
+                // ~every 2.5s: reclaim inset if shell wiped it (maximize / autohide).
+                // apply_pos early-outs when already honored — no thrash.
+                static SPI_TICK: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                let t = SPI_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if t % 5 == 4 && !work_area::work_area_quiet() {
+                    if let Some(hwnd) = self_hwnd {
                         appbar::sync(hwnd);
                     }
                 }
@@ -230,10 +237,10 @@ fn spawn_watchdog(app: tauri::AppHandle) {
         .expect("spawn watchdog");
 }
 
-/// 前台为独占/无边框全屏（游戏）时只藏岛/设置窗 UI；**不** ABM_REMOVE / 重挂 AppBar。
+/// 前台为独占/无边框全屏（游戏）时只藏岛/设置窗 UI；**不** ABM_REMOVE。
 ///
-/// 顶栏 + Dock 各一次 SETPOS 会让最大化窗 resize 两次；quiet 只能砍掉 ABN 互踢，
-/// 无法把两次合成一次。全屏期间保持工作区不变 → 退出时 0 次 work-area 抖动，判定一次成功。
+/// 卸掉 AppBar 后最大化窗会铺满整屏，易被误判成全屏 → 再次 suspend，占位永远回不来。
+/// 全屏游戏本身也不吃工作区；保持占位稳定，只藏 UI。
 fn spawn_fullscreen_watcher(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("fullscreen".into())
@@ -243,7 +250,6 @@ fn spawn_fullscreen_watcher(app: tauri::AppHandle) {
             let mut hide_streak = 0u32;
             let mut show_streak = 0u32;
             let mut restore_grace_until: Option<Instant> = None;
-            // 工作区不再随全屏抖动，2×350ms 即可；grace 防短闪误藏。
             const NEED: u32 = 2;
 
             loop {
@@ -273,7 +279,6 @@ fn spawn_fullscreen_watcher(app: tauri::AppHandle) {
                 }
 
                 if should_hide && hide_streak >= NEED && !hidden {
-                    // Freeze dock AppBar sync so Default 模式藏条时不会 ABM_REMOVE 底边。
                     work_area::set_island_hidden_for_fullscreen(true);
                     if let Some(hwnd) = hwnd_of(&window) {
                         #[cfg(windows)]
@@ -494,6 +499,7 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
             kick_ambient_seed(&app);
             mark_host_boot_ready();
             reveal_main_chrome(&app);
+            // One deferred reclaim after dock/taskbar settle — not a repeating pulse.
             schedule_appbar_reclaim(app.clone());
             let _ = app.emit(
                 "host-boot-ready",
@@ -629,19 +635,15 @@ fn reclaim_appbar_now(app: &tauri::AppHandle) {
     }
 }
 
-/// Dock/taskbar can wipe the top strip after first SETPOS — pulse reclaim.
+/// Dock/taskbar can wipe the top strip once after first SETPOS — single reclaim, then stop.
 fn schedule_appbar_reclaim(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("appbar-reclaim".into())
         .spawn(move || {
-            for (i, ms) in [180u64, 600, 1400].into_iter().enumerate() {
-                std::thread::sleep(Duration::from_millis(ms));
-                reclaim_appbar_now(&app);
-                if i == 1 {
-                    kick_ambient_live(&app);
-                    crate::commands::apply_main_window_material(&app);
-                }
-            }
+            std::thread::sleep(Duration::from_millis(800));
+            reclaim_appbar_now(&app);
+            kick_ambient_live(&app);
+            crate::commands::apply_main_window_material(&app);
         })
         .ok();
 }

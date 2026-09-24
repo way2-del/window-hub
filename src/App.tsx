@@ -626,12 +626,16 @@ async function setBarHeightInner(islandH: number) {
         islandHeight: clipH,
       }).catch(() => undefined);
     } else if (!raised) {
+      // Clear TOPMOST after collapse — previously skipped to avoid HUNG; settle is
+      // now flag+clear_topmost only (no ShowWindow). Without this, expand left
+      // OVERLAY_RAISED stuck and watchdog kept re-TOPMOST-ing the strip.
       clickTrace(
         "fe-island",
         needSize
-          ? "shrink: skip settle+reassert (in-process on resize)"
-          : "bar-height no-op: skip settle",
+          ? "shrink: settle_overlay (clear topmost)"
+          : "bar-height no-op: settle_overlay",
       );
+      void invoke("settle_overlay").catch(() => undefined);
     }
   } catch {
     /* noop */

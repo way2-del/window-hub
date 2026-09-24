@@ -5,15 +5,16 @@
 //! call `SPI_SETWORKAREA`. The visible main window does **not** fight TOPMOST —
 //! the strip is owned by work-area reservation, not Z-order.
 //!
-//! Anti-flicker rules:
-//! - Never poll `SPI_SETWORKAREA`.
-//! - Re-SETPOS only when the strip rect actually changes or shell sends
-//!   `ABN_POSCHANGED`.
+//! Stability rules:
+//! - Claim once at reveal; do **not** periodically re-SETPOS / SPI-rewrite.
+//! - Re-SETPOS only when desired geometry changes (monitor/DPI) or `force_sync`
+//!   (boot/dock settle) / exclusive-fullscreen suspend→restore.
+//! - Never poll `SPI_SETWORKAREA` on the quiet path.
 //! - Helper HWND owns the claim; the visible Tauri window may be taller.
 
 #[cfg(windows)]
 mod win {
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
     use std::sync::mpsc::{self, Sender};
     use std::sync::Mutex;
     use std::thread;
@@ -66,6 +67,15 @@ mod win {
     static LAST_RC: Mutex<Option<RECT>> = Mutex::new(None);
     static STRIP_PX: AtomicI32 = AtomicI32::new(0);
     static SPI_CLEARED: AtomicBool = AtomicBool::new(false);
+    /// Rate-limit hard reclaim (SETPOS + notified SPI) when shell drops the inset.
+    static LAST_HARD_RECLAIM_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
 
     fn dpi_scale(hwnd: HWND) -> f64 {
         unsafe {
@@ -143,9 +153,11 @@ mod win {
     }
 
     /// Win11 + auto-hide taskbar often leaves `rcWork.top` at monitor top even
-    /// after a successful `ABM_SETPOS` (host HWND is placed, work area is not).
-    /// Fall back to a quiet SPI inset — no `SPIF_SENDCHANGE` to avoid double resize.
-    fn apply_spi_top_inset(anchor: HWND, strip_bottom: i32) {
+    /// after a successful `ABM_SETPOS`. Fall back to SPI inset.
+    /// `notify=true` sends `SPIF_SENDCHANGE` so maximized windows re-layout under the strip.
+    fn apply_spi_top_inset(anchor: HWND, strip_bottom: i32, notify: bool) {
+        use windows::Win32::UI::WindowsAndMessaging::SPIF_SENDCHANGE;
+
         let Some(mon) = monitor_rect(anchor) else {
             return;
         };
@@ -169,12 +181,17 @@ mod win {
         if wa.bottom - wa.top < 100 {
             return;
         }
+        let flags = if notify {
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(SPIF_SENDCHANGE.0)
+        } else {
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)
+        };
         let _ = unsafe {
             SystemParametersInfoW(
                 SPI_SETWORKAREA,
                 0,
                 Some(&mut wa as *mut RECT as *mut _),
-                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                flags,
             )
         };
     }
@@ -287,11 +304,25 @@ mod win {
             }
             if let Ok(guard) = LAST_DESIRED.lock() {
                 if let Some(prev) = *guard {
-                    // Desired strip unchanged is not enough — Explorer may have
-                    // cleared rcWork (autohide / dock) while our host still sits
-                    // at 0×28. Re-SETPOS when the shell no longer honors us.
-                    if rect_eq(&prev, &desired) && shell_honors_strip(probe) {
-                        return true;
+                    if rect_eq(&prev, &desired) {
+                        drop(guard);
+                        if shell_honors_strip(probe) {
+                            return true;
+                        }
+                        // Shell dropped the inset (common after maximize / autohide).
+                        // Soft SPI first; rate-limited hard SETPOS+notify so placeholder
+                        // returns without permanent thrash.
+                        apply_spi_top_inset(probe, desired.bottom, true);
+                        if shell_honors_strip(probe) {
+                            return true;
+                        }
+                        let now = now_ms();
+                        let last = LAST_HARD_RECLAIM_MS.load(Ordering::SeqCst);
+                        if now.saturating_sub(last) < 2_500 {
+                            return true;
+                        }
+                        LAST_HARD_RECLAIM_MS.store(now, Ordering::SeqCst);
+                        // Fall through to ABM_SETPOS once.
                     }
                 }
             }
@@ -321,11 +352,10 @@ mod win {
             // to every AppBar (including dock) and amplifies work-area flicker.
         }
 
-        // ABM host may sit at the strip while Explorer never insets rcWork
-        // (common with ABS_AUTOHIDE taskbar). SPI fallback keeps the placeholder.
+        // Prefer SPI inset whenever shell failed to honor ABM.
+        // Force / hard-reclaim path notifies so maximized windows reflow under the strip.
         if !shell_honors_strip(probe) {
-            let bottom = desired.bottom;
-            apply_spi_top_inset(probe, bottom);
+            apply_spi_top_inset(probe, desired.bottom, force);
         }
 
         if let Ok(mut guard) = LAST_DESIRED.lock() {
@@ -338,7 +368,8 @@ mod win {
     }
 
     fn create_and_register(anchor: HWND) -> Option<HWND> {
-        clear_legacy_spi_inset(anchor);
+        // Do NOT clear_legacy_spi_inset here — wiping a working SPI strip before
+        // ABM on Win11 autohide leaves maximized windows with no top inset.
         ensure_class();
         let rc = desired_strip(anchor)?;
         let hwnd = unsafe {
@@ -486,6 +517,8 @@ mod win {
 
     pub fn sync(anchor_hwnd_raw: isize) {
         if !REGISTERED.load(Ordering::SeqCst) {
+            // Not claimed yet — Ensure instead of no-op (boot race).
+            register(anchor_hwnd_raw);
             return;
         }
         send(Cmd::Sync {
@@ -497,6 +530,7 @@ mod win {
     /// settle — they can wipe `rcWork` without changing our desired strip.
     pub fn force_sync(anchor_hwnd_raw: isize) {
         if !REGISTERED.load(Ordering::SeqCst) {
+            register(anchor_hwnd_raw);
             return;
         }
         send(Cmd::ForceSync {

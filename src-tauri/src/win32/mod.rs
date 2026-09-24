@@ -30,6 +30,12 @@ pub mod topmost;
 pub mod tray;
 pub mod work_area;
 #[cfg(windows)]
+pub mod max_clamp;
+#[cfg(not(windows))]
+pub mod max_clamp {
+    pub fn tick(_self_hwnd: Option<isize>) {}
+}
+#[cfg(windows)]
 pub mod tray_hook_ipc;
 #[cfg(windows)]
 pub mod tray_hook_host;

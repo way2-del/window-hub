@@ -100,22 +100,26 @@ mod win {
 
     /// Game-like fullscreen: fills the **physical** monitor (`rcMonitor`).
     ///
-    /// Maximized apps (WPS / browsers / IDEs — often borderless custom chrome) stop at
-    /// `rcWork` under our top AppBar and must NOT hide the island/dock.
-    /// Exclusive games often also set `WS_MAXIMIZE` / `IsZoomed` while covering
-    /// `rcMonitor` without a caption — those still count as game FS.
+    /// **Windowed maximize must NOT match** — even borderless chrome (WPS / Edge /
+    /// Electron) uses `WS_MAXIMIZE` / `IsZoomed` and must keep the AppBar strip.
+    /// Exclusive / borderless games cover `rcMonitor` without the maximize bit.
     fn is_game_fullscreen(hwnd: HWND) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{IsZoomed, WS_MAXIMIZE};
+
         unsafe {
             if !covers_physical_monitor(hwnd) {
                 return false;
             }
             let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
             let has_caption = style & WS_CAPTION.0 != 0;
-            // Titled maximize that reaches rcMonitor (auto-hidden taskbar) — keep chrome.
             if has_caption {
                 return false;
             }
-            // Borderless covering the physical monitor = exclusive / game FS.
+            // Normal / borderless *windowed* maximize — keep top AppBar placeholder.
+            if (style & WS_MAXIMIZE.0) != 0 || IsZoomed(hwnd).as_bool() {
+                return false;
+            }
+            // Borderless covering the physical monitor without maximize = game / exclusive FS.
             true
         }
     }

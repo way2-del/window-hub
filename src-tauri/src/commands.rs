@@ -359,7 +359,7 @@ pub fn dock_set_visual_height(_window: WebviewWindow, _height: i32) -> Result<()
     Ok(())
 }
 
-/// 岛展开 / 拉高：面板伸进工作区，保持 TOPMOST。
+/// 岛展开 / 拉高：面板伸进工作区，需要 TOPMOST 盖住普通窗口。
 ///
 /// **Must stay Win32-only / async** — sync `window.show()` / `set_always_on_top`
 /// from an IPC handler deadlocks WebView2 on Windows (click → 未响应).
@@ -503,7 +503,7 @@ pub fn suppress_island_bar_refresh(ms: Option<u64>) -> Result<(), String> {
     Ok(())
 }
 
-/// 岛收回折叠条：仍保持 TOPMOST（防壁纸软件 / 显示桌面埋掉顶栏）。
+/// 岛收回折叠条：取消 TOPMOST（轻量：只改 Z-order，不 ShowWindow，避免收起卡死）。
 #[tauri::command]
 pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
     crate::win32::click_trace::log("rust", "settle_overlay enter");
@@ -512,17 +512,14 @@ pub async fn settle_overlay(window: WebviewWindow) -> Result<(), String> {
     crate::win32::switcher::exclude_from_switcher(raw);
     crate::win32::topmost::set_main_hwnd(raw);
     crate::win32::topmost::set_overlay_raised(false);
-    // Avoid Moved → bar_comp while we SetWindowPos for z-order.
     #[cfg(windows)]
-    crate::win32::island_bar_glass::suppress_refresh_ms(400);
-    let _ = crate::win32::topmost::ensure_main_visible();
-    crate::win32::topmost::reassert_main_zorder();
+    {
+        crate::win32::island_bar_glass::suppress_refresh_ms(400);
+        crate::win32::topmost::clear_topmost(raw);
+    }
     #[cfg(not(windows))]
     {
-        let _ = window.set_skip_taskbar(true);
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_always_on_top(true);
+        let _ = window.set_always_on_top(false);
     }
     crate::win32::click_trace::log("rust", "settle_overlay leave");
     Ok(())
