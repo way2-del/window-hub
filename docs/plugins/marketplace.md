@@ -5,8 +5,12 @@
 | 阶段 | 状态 |
 |------|------|
 | P0–P4 规范 / 本地运行时 / 官方示例 / `.whpx` | **已落地** |
-| P5 远程市场 / 签名 | 草图，未实现 |
+| P5 远程 WH 市场 / 签名 | 草图，未实现 |
 | P6 CLI create/publish | 草图，未实现 |
+
+## Alt+空格 · 文件搜索
+
+系统热键「打开搜索」（`island.search.toggle`）默认交给带 `everything.search` 的情景插件（官方 **文件搜索** `com.window-hub.file-search`）：展开岛面板并进入 Everything 搜索。
 
 ## 本地安装（当前）
 
@@ -17,14 +21,18 @@
 5. `plugins-changed` → 前端热加载
 6. 开发目录安装：id 自动加 `__dev`
 
-首次启动**不会**自动安装示例。导入：
+首次启动会 `ensure_official_plugins` 种子官方包（天气 / 成语 / 文件搜索等）。手动导入示例：
 
-- `preview_example_plugin` → 确认 → `install_example_plugin("window-groups"|"transfer-station")`
+- `preview_example_plugin` → 确认 → `install_example_plugin("window-groups"|…)`
 
 源：`docs/plugins/examples/{name}` 或打包资源 `src-tauri/resources/plugins/{name}`。  
 `manifest.official` 仅 UI 徽章。
 
 打包：`pack_plugin_directory` → `.whpx`。
+
+## 市场分类
+
+设置 → 插件市场：按快捷区 / 灵动岛等表面浏览已安装与可导入的 **WH 插件**（`.whpx` / 开发目录 / 官方示例）。
 
 ## registry 示意
 
@@ -32,13 +40,13 @@
 {
   "plugins": [
     {
-      "id": "com.window-hub.window-groups",
-      "name": "窗口组",
-      "version": "1.2.4",
+      "id": "com.window-hub.file-search",
+      "name": "文件搜索",
+      "version": "1.0.0",
       "path": "...",
       "enabled": true,
       "isDev": false,
-      "capabilities": ["shortcuts", "storage", "popup", "windows.read", "windows.focus"],
+      "capabilities": ["storage", "everything.search", "island.scenario", "island.panel"],
       "manifest": {}
     }
   ]
@@ -52,10 +60,6 @@
 - zip；根目录必须含 `plugin.json`
 - 无运行时 `node_modules`（构建产物打进包）
 - 禁止未审核原生二进制
-
-## 市场（P5，未实现）
-
-发现 / 下载 / 更新 / ed25519 签名 / kill-switch — 仅规划。
 
 ## Companion 上架注意
 

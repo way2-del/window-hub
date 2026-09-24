@@ -494,6 +494,30 @@ export default function TrayCluster({
         /* noop */
       }
 
+      // After unified chrome reveal, re-pull once (boot may have seeded after first list).
+      try {
+        unsubs.push(
+          await listen("host-boot-ready", () => {
+            void Promise.all([
+              invoke<TrayIconInfo[]>("list_tray_icons"),
+              invoke<TrayPrefs>("get_tray_prefs"),
+            ])
+              .then(([list, prefs]) => {
+                if (cancelled) return;
+                const pin = prefs.pinned ?? [];
+                setPinned(pin);
+                setMenuHeights(prefs.menu_heights ?? {});
+                const merged = mergeGlyphs(list);
+                setIcons(merged);
+                void ensureRailGlyphs(merged, pin);
+              })
+              .catch(() => undefined);
+          }),
+        );
+      } catch {
+        /* noop */
+      }
+
       try {
         const lang = await invoke<InputLangState>("get_input_lang");
         if (!cancelled && lang) {

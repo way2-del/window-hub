@@ -117,6 +117,10 @@ fn reassert_window(window: &tauri::WebviewWindow) {
     if island_hidden_for_fullscreen() {
         return;
     }
+    // Keep HWND hidden until chrome reveal (tray seeded).
+    if !host_boot_ready() {
+        return;
+    }
     let Some(hwnd) = hwnd_of(window) else {
         return;
     };
@@ -141,6 +145,30 @@ fn show_hwnd(hwnd_raw: isize, show: bool) {
 
 fn boot_log(step: &str, detail: &str) {
     eprintln!("[boot] {step}: {detail}");
+    // Also line-buffer to a file so redirected stderr cannot hide hangs.
+    let line = format!("[boot] {step}: {detail}\n");
+    let path = std::env::temp_dir().join("window-hub-boot.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+        let _ = f.flush();
+    }
+}
+
+/// FE chrome gate — true after pipeline reveal (`host-boot-ready`).
+static HOST_BOOT_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn host_boot_ready() -> bool {
+    HOST_BOOT_READY.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn mark_host_boot_ready() {
+    HOST_BOOT_READY.store(true, std::sync::atomic::Ordering::Release);
 }
 
 #[cfg(windows)]
@@ -170,11 +198,14 @@ fn spawn_watchdog(app: tauri::AppHandle) {
                     }
                 }
                 if let Some(hwnd) = hwnd_of(&window) {
-                    appbar::register(hwnd);
-                    boot_log("watchdog", "appbar registered");
+                    // AppBar deferred until reveal — early claim left an empty top gap.
+                    let _ = hwnd;
+                    boot_log("watchdog", "appbar deferred until reveal");
                 }
-                crate::commands::apply_main_window_material(&app);
-                reassert_window(&window);
+                if host_boot_ready() {
+                    crate::commands::apply_main_window_material(&app);
+                    reassert_window(&window);
+                }
             }
 
             let mut ticks: u32 = 0;
@@ -325,6 +356,10 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 if !material_after_quiet && !crate::win32::work_area::work_area_quiet() {
                     material_after_quiet = true;
                     crate::commands::apply_main_window_material(&app);
+                    // Quiet blocked live BitBlt — force one capture so chrome 反色 paints.
+                    crate::win32::ambient::reset_sampling_gate();
+                    let strip = crate::win32::ambient::sample(hwnd_of(&window));
+                    let _ = app.emit("ambient-color", &strip);
                 }
 
                 // BitBlt + bar_comp during AppBar settle → DWM / main-thread 未响应.
@@ -376,27 +411,26 @@ fn spawn_wifi_watcher(app: tauri::AppHandle) {
         .expect("spawn wifi");
 }
 
-/// One coordinator thread: start background services **sequentially** so AppBar /
-/// tray hook / dock / ambient do not stampede the UI thread on cold start.
+/// Boot: hide → tray/ambient seed → one chrome reveal → dock/plugins.
+/// Never show an empty AppBar strip before icons/吸色 are ready.
 fn spawn_boot_pipeline(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("boot-pipeline".into())
         .spawn(move || {
             let t0 = Instant::now();
             let elapsed = || t0.elapsed().as_millis();
-            boot_log("pipeline", "begin (sequential)");
+            boot_log("pipeline", "begin (hide→seed→reveal→rest)");
 
-            // Let WebView2 first paint finish before shell / hook work.
-            std::thread::sleep(Duration::from_millis(400));
+            work_area::mark_work_area_quiet(5_000);
+
+            std::thread::sleep(Duration::from_millis(280));
             boot_log("pipeline", &format!("first-paint wait (+{}ms)", elapsed()));
 
-            // 1) AppBar + topmost — must settle before other Win32 work.
             boot_log("watchdog", "starting");
             spawn_watchdog(app.clone());
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(350));
             boot_log("watchdog", &format!("handed off (+{}ms)", elapsed()));
 
-            // 2) Window enum poller (Dock dots) — defer from setup.
             boot_log("windows-service", "starting");
             if let Some(svc) = app.try_state::<WindowsService>() {
                 svc.start_poller(app.clone());
@@ -404,51 +438,22 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
             } else {
                 boot_log("windows-service", "SKIP (state missing)");
             }
-            std::thread::sleep(Duration::from_millis(250));
 
-            // 3) Fullscreen hide strip (light loop).
             boot_log("fullscreen", "starting");
             spawn_fullscreen_watcher(app.clone());
             boot_log("fullscreen", &format!("ok (+{}ms)", elapsed()));
-            std::thread::sleep(Duration::from_millis(300));
 
-            // 4) Menubar chips (IME / Wi‑Fi) — first poll can block.
+            // Menubar chips + ambient + tray BEFORE reveal.
             boot_log("input-lang", "starting");
             spawn_input_lang_watcher(app.clone());
-            std::thread::sleep(Duration::from_millis(350));
-            boot_log("input-lang", &format!("ok (+{}ms)", elapsed()));
-
             boot_log("wifi", "starting");
             spawn_wifi_watcher(app.clone());
-            std::thread::sleep(Duration::from_millis(350));
-            boot_log("wifi", &format!("ok (+{}ms)", elapsed()));
+            boot_log("ambient", "starting early");
+            spawn_ambient_watcher(app.clone());
+            kick_ambient_seed(&app);
 
-            // 5) Official plugins copy — disk heavy.
-            boot_log("plugins", "ensure/resync starting");
-            {
-                let step = Instant::now();
-                crate::plugin_install::ensure_official_plugins(&app);
-                crate::plugin_install::resync_dev_plugins(&app);
-                boot_log(
-                    "plugins",
-                    &format!(
-                        "ok step={}ms total={}ms",
-                        step.elapsed().as_millis(),
-                        elapsed()
-                    ),
-                );
-            }
-            std::thread::sleep(Duration::from_millis(350));
-
-            // 6) Companion launchers.
-            boot_log("companion", "starting");
-            crate::companion_scripts::start_hub_associated_launchers();
-            boot_log("companion", &format!("ok (+{}ms)", elapsed()));
-            std::thread::sleep(Duration::from_millis(350));
-
-            // 7) Tray hook + registry seed — before dock WebViews (EnumWindows vs WebView2).
             if crate::win32::tray::tray_boot_enabled() {
-                boot_log("tray", "starting");
+                boot_log("tray", "starting (early)");
                 {
                     let app_icons = app.clone();
                     let app_attn = app.clone();
@@ -465,9 +470,9 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
                         },
                     );
                 }
-                boot_log("tray", "waiting for spy/hook icons");
-                // Short wait — do not block dock for long; spy fills async.
-                let seeded = crate::win32::tray::wait_for_tray_seed(Duration::from_secs(1));
+                boot_log("tray", "waiting for icons (up to 3s)");
+                let seeded =
+                    crate::win32::tray::wait_for_tray_seed(Duration::from_secs(3));
                 boot_log(
                     "tray",
                     &format!(
@@ -477,30 +482,56 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
                         elapsed()
                     ),
                 );
-
-                if crate::win32::tray::clickable_count() == 0 && seeded {
-                    boot_log(
-                        "tray",
-                        &format!(
-                            "WARN no clickable yet total={} — UI may show empty chevron (+{}ms)",
-                            crate::win32::tray::total_icon_count(),
-                            elapsed()
-                        ),
-                    );
-                }
-
-                // Do NOT create tray-popup / extra WebViews here — blocks UI pump
-                // for 10s+ and leaves the island bar transparent (glass never applied).
-                boot_log("tray", &format!("handed off (+{}ms)", elapsed()));
-                std::thread::sleep(Duration::from_millis(200));
+                crate::win32::tray::flush_publish();
             } else {
-                boot_log(
-                    "tray",
-                    "DISABLED — set WH_ENABLE_TRAY=1 for spy-only; WH_TRAY_HOOK=1 / WH_TRAY_SOFT_SEED=1 opt-in",
-                );
+                boot_log("tray", "DISABLED (WH_DISABLE_TRAY=1)");
             }
 
-            // 8) Dock dual-WebView — block until icons HWND exists (ambient/hotkeys after).
+            // —— Reveal only after seed attempt (no empty placeholder) ——
+            boot_log("reveal", "show main + appbar + glass");
+            work_area::end_work_area_quiet();
+            crate::win32::tray::flush_publish();
+            kick_ambient_seed(&app);
+            mark_host_boot_ready();
+            reveal_main_chrome(&app);
+            schedule_appbar_reclaim(app.clone());
+            let _ = app.emit(
+                "host-boot-ready",
+                serde_json::json!({
+                    "elapsedMs": elapsed(),
+                    "phase": "ready",
+                    "trayTotal": crate::win32::tray::total_icon_count(),
+                    "trayClickable": crate::win32::tray::clickable_count(),
+                }),
+            );
+            boot_log(
+                "reveal",
+                &format!(
+                    "done (+{}ms) tray_clickable={}",
+                    elapsed(),
+                    crate::win32::tray::clickable_count()
+                ),
+            );
+
+            // Rest must not gate the top bar.
+            boot_log("plugins", "ensure/resync starting");
+            {
+                let step = Instant::now();
+                crate::plugin_install::ensure_official_plugins(&app);
+                crate::plugin_install::resync_dev_plugins(&app);
+                boot_log(
+                    "plugins",
+                    &format!(
+                        "ok step={}ms total={}ms",
+                        step.elapsed().as_millis(),
+                        elapsed()
+                    ),
+                );
+            }
+            boot_log("companion", "starting");
+            crate::companion_scripts::start_hub_associated_launchers();
+            boot_log("companion", &format!("ok (+{}ms)", elapsed()));
+
             boot_log("dock", "bootstrap starting");
             if let Some(rx) = crate::dock::bootstrap_dock(&app) {
                 match rx.recv_timeout(Duration::from_secs(20)) {
@@ -523,40 +554,132 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
             } else {
                 boot_log("dock", &format!("disabled (+{}ms)", elapsed()));
             }
-            std::thread::sleep(Duration::from_millis(300));
+            // Dock / taskbar autohide can wipe top rcWork after our first SETPOS.
+            reclaim_appbar_now(&app);
+            kick_ambient_live(&app);
 
-            // 9) Global hotkeys.
             #[cfg(windows)]
             {
                 boot_log("hotkeys", "starting");
                 crate::win32::hotkey_registry::spawn(app.clone());
                 boot_log("hotkeys", &format!("ok (+{}ms)", elapsed()));
-                std::thread::sleep(Duration::from_millis(200));
             }
 
-            // 10) Ambient sampling — BitBlt last so DWM is calm.
-            boot_log("ambient", "starting");
-            spawn_ambient_watcher(app.clone());
-            boot_log("ambient", &format!("ok (+{}ms)", elapsed()));
-            std::thread::sleep(Duration::from_millis(200));
-
-            // 11) Dock hover previews — PrintWindow; keep last.
             boot_log("dock-preview", "starting");
             crate::dock::spawn_dock_preview_refresher(app.clone());
             boot_log("dock-preview", &format!("ok (+{}ms)", elapsed()));
 
+            crate::commands::apply_main_window_material(&app);
+            crate::win32::tray::flush_publish();
+
             boot_log(
                 "pipeline",
                 &format!(
-                    "READY total={}ms tray_clickable={} — UI should stay responsive",
+                    "READY total={}ms tray_clickable={}",
                     elapsed(),
                     crate::win32::tray::clickable_count()
                 ),
             );
-            // Do NOT prewarm WebViews from a background thread — click-trace proved
-            // hang at ensure_status_menu_popup_window build (Responding=False / 穿透).
         })
         .expect("spawn boot-pipeline");
+}
+
+/// Show main HWND + AppBar. Glass is scheduled (not sync Composition on first paint).
+fn reveal_main_chrome(app: &tauri::AppHandle) {
+    let Some(main) = app.get_webview_window("main") else {
+        boot_log("reveal", "FAIL no main window");
+        return;
+    };
+    let app_ui = app.clone();
+    let app_fb = app.clone();
+    let ok = main.run_on_main_thread(move || {
+        let Some(window) = app_ui.get_webview_window("main") else {
+            return;
+        };
+        if let Some(hwnd) = hwnd_of(&window) {
+            appbar::register(hwnd);
+            #[cfg(windows)]
+            show_hwnd(hwnd, true);
+        }
+        let _ = window.show();
+        reassert_window(&window);
+        boot_log("reveal", "main shown + appbar");
+    });
+    if ok.is_err() {
+        boot_log("reveal", "FAIL run_on_main_thread — Win32 fallback");
+        if let Some(window) = app_fb.get_webview_window("main") {
+            if let Some(hwnd) = hwnd_of(&window) {
+                appbar::register(hwnd);
+                #[cfg(windows)]
+                show_hwnd(hwnd, true);
+            }
+            let _ = window.show();
+        }
+    }
+    // Debounced glass — never sync BitBlt / Composition on the boot worker.
+    crate::commands::apply_main_window_material(app);
+}
+
+fn reclaim_appbar_now(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Some(hwnd) = hwnd_of(&window) {
+            appbar::force_sync(hwnd);
+            boot_log("appbar", "force_sync reclaim");
+        }
+    }
+}
+
+/// Dock/taskbar can wipe the top strip after first SETPOS — pulse reclaim.
+fn schedule_appbar_reclaim(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("appbar-reclaim".into())
+        .spawn(move || {
+            for (i, ms) in [180u64, 600, 1400].into_iter().enumerate() {
+                std::thread::sleep(Duration::from_millis(ms));
+                reclaim_appbar_now(&app);
+                if i == 1 {
+                    kick_ambient_live(&app);
+                    crate::commands::apply_main_window_material(&app);
+                }
+            }
+        })
+        .ok();
+}
+
+/// Wallpaper / cached ambient only — never BitBlt on the boot thread.
+fn kick_ambient_seed(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let hwnd = hwnd_of(&window);
+    let strip = crate::win32::ambient::sample_nonblocking(hwnd);
+    let _ = app.emit("ambient-color", &strip);
+    boot_log(
+        "ambient",
+        &format!(
+            "seed rgb=({},{},{}) hwnd={}",
+            strip.r, strip.g, strip.b, strip.hwnd
+        ),
+    );
+}
+
+/// Live capture on the ambient path (BitBlt OK off the UI thread) so chrome 反色
+/// catches up after work-area quiet / AppBar reclaim.
+fn kick_ambient_live(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let hwnd = hwnd_of(&window);
+    crate::win32::ambient::reset_sampling_gate();
+    let strip = crate::win32::ambient::sample(hwnd);
+    let _ = app.emit("ambient-color", &strip);
+    boot_log(
+        "ambient",
+        &format!(
+            "live rgb=({},{},{}) hwnd={}",
+            strip.r, strip.g, strip.b, strip.hwnd
+        ),
+    );
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -564,6 +687,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             boot_log("setup", "enter");
+            let _ = std::fs::remove_file(std::env::temp_dir().join("window-hub-boot.log"));
             crate::win32::click_trace::clear();
             crate::win32::click_trace::log("boot", "setup enter");
             let db = crate::db::init().map_err(|e| {
@@ -592,28 +716,29 @@ pub fn run() {
                 commands::get_island_prefs().ignore_ambient_apps,
             );
 
-            // Startup: kill AppBar ABN thrash while top + taskbar + dock bottom settle.
-            // Maximized windows otherwise resize many times on first launch.
+            // Startup: short quiet for AppBar. HWND hidden until tray/ambient reveal.
             work_area::mark_work_area_quiet(5_000);
 
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(hwnd) = hwnd_of(&window) {
                     crate::win32::topmost::set_main_hwnd(hwnd);
-                    // Hang watchdog + HTTP FE sink + native click hook.
                     crate::win32::click_trace::set_main_hwnd(hwnd);
                     crate::win32::click_trace::log(
                         "boot",
                         &format!("main hwnd={hwnd:#x} hang/http/mouse armed"),
                     );
+                    #[cfg(windows)]
+                    show_hwnd(hwnd, false);
+                    #[cfg(not(windows))]
+                    {
+                        let _ = window.hide();
+                    }
                 }
-                reassert_window(&window);
-                // Defer bar_comp attach until work-area quiet ends (~5s) — attaching
-                // Composition during WebView2 first paint deadlocks the main thread.
                 #[cfg(windows)]
                 if let Some(main) = app.get_webview_window("main") {
                     let _ = crate::win32::material::clear(&main);
                 }
-                boot_log("setup", "main hwnd + material (deferred bar-comp)");
+                boot_log("setup", "main hwnd hidden until chrome reveal");
             }
 
             // Everything else: one sequential pipeline (logs: [boot] …).
@@ -858,6 +983,7 @@ pub fn run() {
             commands::list_tray_icons,
             commands::get_tray_icon_glyphs,
             commands::set_tray_ui_paused,
+            commands::is_host_boot_ready,
             commands::get_tray_prefs,
             commands::set_tray_prefs,
             commands::get_input_lang,

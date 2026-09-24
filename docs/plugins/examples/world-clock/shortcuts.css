@@ -1,0 +1,106 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+html,
+body {
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+  display: flex;
+  align-items: center;
+  color: var(--wh-chrome-fg, rgba(255, 255, 255, 0.94));
+  text-shadow: var(--wh-chrome-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
+  font-family: var(
+    --wh-chrome-font-family,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif
+  );
+  font-size: var(--wh-chrome-font-size, 12px);
+  font-weight: var(--wh-chrome-font-weight, 700);
+  line-height: 1;
+  user-select: none;
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+button,
+.wc-chip {
+  font: inherit;
+  color: inherit;
+  text-shadow: inherit;
+  line-height: inherit;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  cursor: pointer;
+}
+
+.wc-strip {
+  display: flex;
+  align-items: center;
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  overflow: visible;
+  background: transparent !important;
+}
+
+.wc-chip {
+  flex-shrink: 0;
+  height: var(--wh-bar-h, 28px);
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  letter-spacing: 0.04em;
+  opacity: 0.95;
+  transition: opacity 140ms ease;
+}
+
+.wc-chip:hover {
+  opacity: 0.78;
+}
+
+.wc-label {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1;
+  opacity: 0.78;
+}
+
+.wc-time {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.95;
+}

@@ -45,6 +45,8 @@ const ALLOWED_CMDS = new Set([
   "hub_everything_open",
   "hub_everything_reveal",
   "hub_sysmon_snapshot",
+  "list_installed_plugins",
+  "open_settings_window",
 ]);
 
 export function isAllowedPanelHubCmd(cmd: string): boolean {
@@ -211,6 +213,17 @@ export function panelHubBootstrapScript(pluginId: string): string {
           var i = leaveCbs.indexOf(cb);
           if (i >= 0) leaveCbs.splice(i, 1);
         };
+      }
+    },
+    plugins: {
+      listInstalled: function () { return invoke("list_installed_plugins", {}); }
+    },
+    host: {
+      openSettings: function (opts) {
+        return invoke("open_settings_window", {
+          pluginId: (opts && opts.pluginId) || null,
+          focusNav: (opts && opts.focusNav) || null
+        });
       }
     }
   };

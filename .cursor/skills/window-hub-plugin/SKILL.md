@@ -179,7 +179,7 @@ my-plugin/
 
 `plugin.json` → `settings[]`（`boolean|string|number|select|radio|multiSelect|hotkey`）
 
-- **`hotkey`**：全局组合键字符串（如 `Alt+Space`）；空=禁用。可选 `action`（Host `hotkey-action` 派发 id）。`action: "island.search.toggle"` 与系统岛栏搜索共用同一 chord。统一管理：设置 → **快捷键**（系统 / 插件两栏，冲突检测）；插件详情同源录制。  
+- **`hotkey`**：全局组合键字符串（如 `Alt+Space`）；空=禁用。可选 `action`（Host `hotkey-action` 派发 id）。`action: "island.search.toggle"` 与系统「打开搜索」共用同一 chord。统一管理：设置 → **快捷键**（系统 / 插件两栏，冲突检测）；插件详情同源录制。  
 值：`plugin_kv.__settings`，运行时 `hub.settings.*`（需 `storage`）。  
 Host 设置页自动渲染；中转站：`panelWidth` / `panelHeight`；快捷区弹窗：`popupWidth` / `popupHeight`（成语等）。
 

@@ -107,6 +107,18 @@ button {
   --island-panel-radius: var(--island-shell-radius);
 }
 
+/* Boot: hide chrome until Rust host-boot-ready (tray seeded). */
+.shell.is-booting {
+  opacity: 0;
+  pointer-events: none !important;
+  transition: none;
+}
+
+.shell:not(.is-booting) {
+  opacity: 1;
+  transition: opacity 280ms ease;
+}
+
 .shell > * {
   /* Default: children receive hits. Passthrough shells (e.g. .island-notify-stack)
      must set pointer-events: none !important to pierce this. */

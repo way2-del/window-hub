@@ -117,13 +117,26 @@ function injectClassicScript(doc: Document, code: string, label: string): void {
   }
 }
 
-function injectPanelScripts(doc: Document, pending: PendingPanelScripts): void {
+function injectPanelScripts(
+  doc: Document,
+  pending: PendingPanelScripts,
+  pluginId: string,
+): void {
   if (doc.documentElement.dataset.whPanelScripts === pending.token) return;
   doc.documentElement.dataset.whPanelScripts = pending.token;
 
   const win = doc.defaultView as
-    | (Window & { FileSearchBoard?: unknown; __whBoardErr?: string })
+    | (Window & { FileSearchBoard?: unknown; __whBoardErr?: string; hub?: unknown })
     | null;
+
+  // Always (re)inject hub bootstrap before panel.js — srcdoc head scripts can
+  // race or fail silently in WebView2; panel boot must never see missing hub.
+  if (!win?.hub || (win as Window & { __WH_PLUGIN_ID__?: string }).__WH_PLUGIN_ID__ !== pluginId) {
+    injectClassicScript(doc, panelHubBootstrapScript(pluginId), "hub-boot");
+  }
+  if (win && !win.hub) {
+    throw new Error("window.hub still missing after hub-boot inject");
+  }
 
   if (pending.boardJs) {
     injectClassicScript(doc, pending.boardJs, "board.js");
@@ -218,17 +231,23 @@ export default function IslandPanelHost({
         id?: string;
         cmd?: string;
         args?: Record<string, unknown>;
+        action?: string;
+        query?: string;
+        pluginId?: string;
+        kind?: string;
       } | null;
-      if (!d || d.channel !== WH_PANEL_HUB) return;
+      if (!d) return;
+
+      if (d.channel !== WH_PANEL_HUB) return;
       const source = ev.source as Window | null;
       if (!source) return;
       const pid = pluginIdRef.current;
-      if (!pid) return;
 
       if (d.cmd === "panel.close") {
         onPanelClose?.();
         return;
       }
+      if (!pid) return;
       if (!d.cmd || !d.id || !isAllowedPanelHubCmd(d.cmd)) {
         source.postMessage(
           {
@@ -242,7 +261,14 @@ export default function IslandPanelHost({
       }
       void (async () => {
         try {
-          const args = { pluginId: pid, ...(d.args || {}) };
+          // Host-global cmds: do not force caller pluginId
+          const globalCmds = new Set([
+            "list_installed_plugins",
+            "open_settings_window",
+          ]);
+          const args = globalCmds.has(d.cmd!)
+            ? { ...(d.args || {}) }
+            : { pluginId: pid, ...(d.args || {}) };
           const result = await invoke(d.cmd!, args);
           source.postMessage(
             { channel: WH_PANEL_HUB_RES, id: d.id, result },
@@ -275,10 +301,10 @@ export default function IslandPanelHost({
     void (async () => {
       try {
         const runtime = pluginRegistry.get(pluginId);
+        const panel = runtime?.manifest.entry?.panel ?? "panel.html";
         if ((runtime?.manifest.capabilities ?? []).includes("media.camera")) {
           await invoke("hub_camera_prepare", { pluginId }).catch(() => undefined);
         }
-        const panel = runtime?.manifest.entry?.panel ?? "panel.html";
         const html = await invoke<string>("hub_plugin_read_text", {
           pluginId,
           relativePath: panel,
@@ -439,15 +465,10 @@ export default function IslandPanelHost({
       iframeRef.current?.contentWindow?.postMessage(payload, "*");
     };
     post();
-    const t1 = window.setTimeout(post, 120);
-    const t2 = window.setTimeout(post, 400);
-    const t3 = window.setTimeout(post, 900);
-    const t4 = window.setTimeout(post, 1600);
+    // 仅一次短延迟：iframe 刚注入时可能丢消息；避免 5 次连发导致卡顿
+    const t1 = window.setTimeout(post, 80);
     return () => {
       window.clearTimeout(t1);
-      window.clearTimeout(t2);
-      window.clearTimeout(t3);
-      window.clearTimeout(t4);
     };
   }, [pluginId, enabled, searchSubmit]);
 
@@ -458,7 +479,7 @@ export default function IslandPanelHost({
     const doc = iframe.contentDocument;
     if (!doc || doc.readyState === "loading") return;
     try {
-      injectPanelScripts(doc, pending);
+      injectPanelScripts(doc, pending, pluginId);
       postPanelLifecycle(iframe.contentWindow, pluginId, activeRef.current);
     } catch (e) {
       console.error("[IslandPanelHost] inject failed", e);
@@ -532,13 +553,15 @@ export default function IslandPanelHost({
   return (
     <iframe
       ref={iframeRef}
-      key={pluginId}
+      key={String(pluginId)}
       className="panel-plugin-frame"
       title={`plugin-panel-${pluginId}`}
       srcDoc={srcdoc}
-      sandbox="allow-scripts allow-same-origin"
-      allow="camera"
-      onLoad={() => tryInjectAndEnter()}
+      sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
+      allow="camera; clipboard-read; clipboard-write"
+      onLoad={() => {
+        tryInjectAndEnter();
+      }}
     />
   );
 }

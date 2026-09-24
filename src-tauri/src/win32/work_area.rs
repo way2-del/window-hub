@@ -22,6 +22,11 @@ pub fn mark_work_area_quiet(ms: u64) {
     let _ = QUIET_UNTIL_MS.fetch_max(until, Ordering::SeqCst);
 }
 
+/// End quiet early (boot reveal) so bar glass / ambient can attach.
+pub fn end_work_area_quiet() {
+    QUIET_UNTIL_MS.store(0, Ordering::SeqCst);
+}
+
 pub fn work_area_quiet() -> bool {
     now_ms() < QUIET_UNTIL_MS.load(Ordering::SeqCst)
 }

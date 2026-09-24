@@ -1,4 +1,4 @@
-﻿/** Built-in example plugins surfaced as the local “plugin market”. */
+/** Built-in example plugins surfaced as the local “plugin market”. */
 
 export type MarketCategoryId = "shortcuts" | "island";
 
@@ -67,10 +67,10 @@ export const MARKET_PLUGINS: MarketPlugin[] = [
     exampleId: "file-search",
     pluginId: "com.window-hub.file-search",
     name: "文件搜索",
-    version: "1.3.0",
+    version: "1.5.10",
     description:
-      "情景临时：Alt+空格搜索。空态为可自定义卡片组网格；有关键字则 Everything 结果。",
-    summary: "情景临时 · Alt+空格搜索",
+      "Alt+空格唤起的本地文件搜索。空态为可自定义卡片组网格；有关键字则 Everything 结果。",
+    summary: "情景临时 · Everything 本地搜索",
     categoryId: "island",
     tint: "#7bd88f",
     letter: "搜",
@@ -98,6 +98,18 @@ export const MARKET_PLUGINS: MarketPlugin[] = [
     categoryId: "shortcuts",
     tint: "#64d2ff",
     letter: "监",
+  },
+  {
+    exampleId: "world-clock",
+    pluginId: "com.window-hub.world-clock",
+    name: "世界时钟",
+    version: "1.0.0",
+    description:
+      "快捷区显示另一时区时间（不重复顶栏本机时钟）；点击弹窗并排双时区；弹窗内可设置城市。",
+    summary: "快捷区双时区世界时钟",
+    categoryId: "shortcuts",
+    tint: "#bf5af2",
+    letter: "时",
   },
   {
     exampleId: "excalidraw",

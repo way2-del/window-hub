@@ -26,10 +26,11 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, LoadCursorW, MoveWindow,
         PeekMessageW, RegisterClassW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-        TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, MSG,
-        PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
-        WM_CREATE, WM_DESTROY, WM_QUIT, WM_USER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+        SystemParametersInfoW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, IDC_ARROW,
+        LWA_ALPHA, MSG, PM_REMOVE, SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_CREATE, WM_DESTROY,
+        WM_QUIT, WM_USER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TRANSPARENT, WS_POPUP,
     };
 
     /// Logical Dock chrome height (= `dock::DOCK_H`).
@@ -96,6 +97,34 @@ mod win {
         })
     }
 
+    fn work_area_bottom_inset(anchor: HWND) -> Option<i32> {
+        let mon = monitor_rect(anchor)?;
+        let mut wa = RECT::default();
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut wa as *mut RECT as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
+        if ok.is_err() {
+            return None;
+        }
+        Some(mon.bottom - wa.bottom)
+    }
+
+    fn shell_honors_strip(anchor: HWND) -> bool {
+        let h = STRIP_PX
+            .load(Ordering::SeqCst)
+            .max(STRIP_LOGICAL_H)
+            .max(1);
+        match work_area_bottom_inset(anchor) {
+            Some(inset) => inset >= h.saturating_sub(4) && inset <= h + 20,
+            None => false,
+        }
+    }
+
     unsafe extern "system" fn host_wnd_proc(
         hwnd: HWND,
         msg: u32,
@@ -160,7 +189,7 @@ mod win {
             }
             if let Ok(guard) = LAST_DESIRED.lock() {
                 if let Some(prev) = *guard {
-                    if rect_eq(&prev, &desired) {
+                    if rect_eq(&prev, &desired) && shell_honors_strip(probe) {
                         return true;
                     }
                 }

@@ -108,7 +108,7 @@ export default function HotkeysSettingsPanel() {
       <section className="settings-card">
         <h2>系统快捷键</h2>
         <p className="card-desc">
-          主机内置全局热键。岛栏搜索热键在下方「文件搜索」插件中配置。留空表示禁用。
+          主机内置全局热键。留空表示禁用。
         </p>
         {system.length === 0 ? (
           <p className="card-desc">暂无其它系统热键。</p>
@@ -148,7 +148,7 @@ export default function HotkeysSettingsPanel() {
                     <span className="pref-row-label">{b.label}</span>
                     <span className="pref-row-desc">
                       {b.aliasesSystemSearch
-                        ? "岛栏搜索（系统动作 island.search.toggle）"
+                        ? "文件搜索（系统动作 island.search.toggle）"
                         : b.action}
                     </span>
                   </span>

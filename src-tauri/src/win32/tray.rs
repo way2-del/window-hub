@@ -5,14 +5,14 @@
 //! - Emit paused while island morphs (`set_tray_ui_paused`)
 //! - No SQLite write on publish; mild cold-start recover only
 //!
-//! Force off: `WH_DISABLE_TRAY=1`. Force on: `WH_ENABLE_TRAY=1`.
+//! Tray boots **on by default**. Emergency off: `WH_DISABLE_TRAY=1`.
+//! Opt-in riskier paths: `WH_TRAY_HOOK=1`, `WH_TRAY_SOFT_SEED=1`.
 
 use serde::{Deserialize, Serialize};
 
-/// Default OFF — enable with `WH_ENABLE_TRAY=1`.
-/// Safe path is **spy only** (no explorer WH_CALLWNDPROC, no registry soft-seed).
+/// Production default: tray is always on (spy-safe path).
 /// Opt-in: `WH_TRAY_HOOK=1` (explorer hook), `WH_TRAY_SOFT_SEED=1` (registry stubs).
-pub const TRAY_BOOT_ENABLED_DEFAULT: bool = false;
+pub const TRAY_BOOT_ENABLED_DEFAULT: bool = true;
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
@@ -24,9 +24,6 @@ fn env_flag(name: &str) -> bool {
 pub fn tray_boot_enabled() -> bool {
     if env_flag("WH_DISABLE_TRAY") {
         return false;
-    }
-    if env_flag("WH_ENABLE_TRAY") {
-        return true;
     }
     TRAY_BOOT_ENABLED_DEFAULT
 }
@@ -125,7 +122,7 @@ mod win {
     use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{LazyLock, OnceLock};
     use systray_util::{ImageFormat, Systray, SystrayEvent, SystrayIcon};
 
@@ -134,6 +131,9 @@ mod win {
 
     static ICONS: LazyLock<Mutex<HashMap<String, TrayIconInfo>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
+    /// Lock-free count for boot wait — never block on ICONS during seed.
+    static ICON_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static CLICKABLE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     /// Last OS-level fingerprint per icon (`hash` / `__blank__` / png).
     /// Used so blank flash frames still arm `flashing` even when we retain
@@ -212,8 +212,24 @@ mod win {
         true
     }
 
+    fn refresh_icon_counts(icons: &HashMap<String, TrayIconInfo>) {
+        ICON_COUNT.store(icons.len(), Ordering::Release);
+        CLICKABLE_COUNT.store(
+            icons.values().filter(|i| is_clickable(i)).count(),
+            Ordering::Release,
+        );
+    }
+
     fn clickable_icon_count() -> usize {
-        ICONS.lock().values().filter(|i| is_clickable(i)).count()
+        // Prefer atomic (boot-safe). Fall back to lock only if atomics unset.
+        let n = CLICKABLE_COUNT.load(Ordering::Acquire);
+        if n > 0 || ICON_COUNT.load(Ordering::Acquire) > 0 {
+            return n;
+        }
+        let icons = ICONS.lock();
+        let c = icons.values().filter(|i| is_clickable(i)).count();
+        refresh_icon_counts(&icons);
+        c
     }
 
     pub fn get_prefs() -> TrayPrefs {
@@ -1341,8 +1357,14 @@ mod win {
                 });
             }
             icons.insert(id, info);
+            refresh_icon_counts(&icons);
         }
         let _ = sweep_icons();
+        // sweep may have removed dead icons
+        {
+            let icons = ICONS.lock();
+            refresh_icon_counts(&icons);
+        }
         publish();
         if let Some(att) = armed_attention {
             if let Some(emit) = ATTENTION.get() {
@@ -2312,19 +2334,30 @@ mod win {
         changed
     }
 
-    /// Boot waits for hook icons OR reconcile fast-seed — never blocks on registry EnumWindows.
+    /// Boot waits briefly for spy/hook icons. Lock-free so registry reconcile
+    /// cannot stall chrome reveal (was deadlocking on ICONS).
     pub fn wait_for_tray_seed(timeout: std::time::Duration) -> bool {
         if !super::tray_boot_enabled() {
             return true;
         }
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
-            if TRAY_FAST_SEED_DONE.load(Ordering::Acquire) || clickable_icon_count() > 0 {
+            if CLICKABLE_COUNT.load(Ordering::Acquire) > 0
+                || ICON_COUNT.load(Ordering::Acquire) > 0
+            {
                 return true;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            if TRAY_FAST_SEED_DONE.load(Ordering::Acquire) {
+                return ICON_COUNT.load(Ordering::Acquire) > 0;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
         }
-        TRAY_FAST_SEED_DONE.load(Ordering::Acquire) || clickable_icon_count() > 0
+        CLICKABLE_COUNT.load(Ordering::Acquire) > 0 || ICON_COUNT.load(Ordering::Acquire) > 0
+    }
+
+    /// Coalesced FE push (boot reveal / after pause).
+    pub fn flush_publish() {
+        publish();
     }
 
     pub fn clickable_count() -> usize {
@@ -2332,7 +2365,13 @@ mod win {
     }
 
     pub fn total_icon_count() -> usize {
-        ICONS.lock().len()
+        let n = ICON_COUNT.load(Ordering::Acquire);
+        if n > 0 {
+            return n;
+        }
+        let icons = ICONS.lock();
+        refresh_icon_counts(&icons);
+        icons.len()
     }
 
     fn start_reconcile_loop() {
@@ -2340,17 +2379,18 @@ mod win {
             .name("tray-reconcile".into())
             .spawn(|| {
                 eprintln!("[tray] reconcile thread started");
-                // Let hook deliver NIM_ADD burst first (icons arrive in ~300ms).
-                std::thread::sleep(std::time::Duration::from_millis(600));
+                // Let hook/spy deliver first burst (~300–500ms) before stub seed.
+                std::thread::sleep(std::time::Duration::from_millis(350));
 
                 let clickable = clickable_icon_count();
                 let total = ICONS.lock().len();
+                // Enrich-only by default — soft stub PNG encode storms hung cold start.
+                let seed_stubs = super::tray_soft_seed_enabled() && clickable == 0;
                 eprintln!(
-                    "[tray] reconcile: enrich-only begin (total={total} clickable={clickable}) — no soft-seed PNG storm"
+                    "[tray] reconcile: begin (total={total} clickable={clickable} seed_stubs={seed_stubs})"
                 );
                 let seed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // false = never soft-seed / encode IconSnapShot on this thread.
-                    apply_registry_snapshot(false, true)
+                    apply_registry_snapshot(seed_stubs, true)
                 }));
                 match seed {
                     Ok((changed, missing)) => {
@@ -2473,17 +2513,30 @@ mod win {
         std::thread::Builder::new()
             .name("tray-spy".into())
             .spawn(|| {
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::thread::sleep(std::time::Duration::from_millis(150));
                 let mut systray = match Systray::new() {
                     Ok(s) => s,
                     Err(err) => {
                         eprintln!("[tray] Systray::new failed: {err:?}");
+                        // Mark seed done so boot wait does not hang; optional soft-seed is async.
+                        TRAY_FAST_SEED_DONE.store(true, Ordering::Release);
+                        if super::tray_soft_seed_enabled() {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let (changed, missing) = apply_registry_snapshot(true, true);
+                                eprintln!(
+                                    "[tray] spy-fail soft-seed changed={changed} missing={missing}"
+                                );
+                                if changed {
+                                    publish();
+                                }
+                            }));
+                        }
                         return;
                     }
                 };
                 eprintln!("[tray] spy online (fallback)");
-                // Delay TaskbarCreated — immediate force + hook was hanging cold start.
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                // Short settle then TaskbarCreated — was 1s and raced boot's 1s seed wait.
+                std::thread::sleep(std::time::Duration::from_millis(350));
                 broadcast_taskbar_created();
 
                 while let Some(event) = systray.events_blocking() {
@@ -2517,8 +2570,8 @@ mod win {
     }
 
     /// Start tray tracking.
-    /// Default when `WH_ENABLE_TRAY=1`: **spy only** — no explorer hook, no soft-seed.
-    /// Those two were hanging the whole process before any icon appeared.
+    /// Default **on**: spy-only (no explorer hook, no registry soft-seed).
+    /// Opt-in: `WH_TRAY_HOOK=1`, `WH_TRAY_SOFT_SEED=1`. Off: `WH_DISABLE_TRAY=1`.
     pub fn start<F, A, P>(on_change: F, on_attention: A, on_prefs: P)
     where
         F: Fn(Vec<TrayIconInfo>) + Send + Sync + 'static,
@@ -2526,9 +2579,7 @@ mod win {
         P: Fn(TrayPrefs) + Send + Sync + 'static,
     {
         if !super::tray_boot_enabled() {
-            eprintln!(
-                "[tray] BOOT DISABLED — set WH_ENABLE_TRAY=1 for spy-only tray"
-            );
+            eprintln!("[tray] BOOT DISABLED (WH_DISABLE_TRAY=1)");
             let _ = EMIT.set(Box::new(on_change));
             let _ = ATTENTION.set(Box::new(on_attention));
             let _ = PREFS_EMIT.set(Box::new(on_prefs));
@@ -2560,15 +2611,13 @@ mod win {
             start_spy_fallback();
         }
 
-        if use_soft {
-            start_reconcile_loop();
-        }
-
-        // One delayed TaskbarCreated for spy/hook refill — no soft-seed storm.
+        // Enrich AFTER first TaskbarCreated — running it during boot wait hung on
+        // registry enum and could stall ICONS readers.
+        // Soft-seed only when WH_TRAY_SOFT_SEED=1.
         std::thread::Builder::new()
             .name("tray-cold-start".into())
             .spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                std::thread::sleep(std::time::Duration::from_millis(900));
                 if use_hook {
                     let _ = crate::win32::tray_hook_host::ensure_hook();
                 }
@@ -2578,7 +2627,7 @@ mod win {
                     clickable_icon_count(),
                     total_icon_count()
                 );
-                // Soft-seed only if explicitly requested — never by default.
+                start_reconcile_loop();
                 if use_soft {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let (changed, missing) = apply_registry_snapshot(true, true);
@@ -3328,14 +3377,18 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    acknowledge_icon_attention, clickable_count, get_prefs, glyphs_for_ids, invoke_icon_by_id,
-    list_icons, set_emit_paused, set_prefs, start, total_icon_count, wait_for_tray_seed,
+    acknowledge_icon_attention, clickable_count, flush_publish, get_prefs, glyphs_for_ids,
+    invoke_icon_by_id, list_icons, set_emit_paused, set_prefs, start, total_icon_count,
+    wait_for_tray_seed,
 };
 
 #[cfg(not(windows))]
 pub fn wait_for_tray_seed(_timeout: std::time::Duration) -> bool {
     true
 }
+
+#[cfg(not(windows))]
+pub fn flush_publish() {}
 
 #[cfg(not(windows))]
 pub fn clickable_count() -> usize {

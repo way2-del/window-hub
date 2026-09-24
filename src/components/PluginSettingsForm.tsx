@@ -238,7 +238,7 @@ export default function PluginSettingsForm({ pluginId, fields, description }: Pr
                 <span className="pref-row-label">{field.label}</span>
                 <span className="pref-row-desc">
                   {aliasesSearch
-                    ? "与系统「打开岛栏搜索」同步"
+                    ? "与系统「打开文件搜索」同步"
                     : desc || field.action || field.key}
                 </span>
               </span>

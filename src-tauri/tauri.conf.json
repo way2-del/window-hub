@@ -25,8 +25,8 @@
         "skipTaskbar": true,
         "center": false,
         "fullscreen": false,
-        "focus": true,
-        "visible": true
+        "focus": false,
+        "visible": false
       }
     ],
     "security": {
@@ -62,7 +62,8 @@
       "resources/plugins/file-search",
       "resources/plugins/sysmon",
       "resources/plugins/excalidraw",
-      "resources/plugins/now-playing"
+      "resources/plugins/now-playing",
+      "resources/plugins/world-clock"
     ]
   }
 }

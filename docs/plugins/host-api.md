@@ -55,7 +55,7 @@ Host 面板尺寸：settings → `defaultSize` → 380×220。
 
 - 存规范化 chord（`Ctrl+Alt+D`）；空字符串禁用。
 - 可选 `action`：命中后 Host emit `hotkey-action` `{ pluginId, action, chord }`（缺省用 settings `key`）。
-- `action: "island.search.toggle"`：与系统「打开岛栏搜索」别名，不重复 `RegisterHotKey`。
+- `action: "island.search.toggle"`：与系统「打开搜索」别名，不重复 `RegisterHotKey`。
 - 统一页：设置 → **快捷键**（系统 / 插件）；冲突时拒绝保存。
 
 ## `hub.staging.*`

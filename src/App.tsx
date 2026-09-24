@@ -54,6 +54,7 @@ import {
   measureIslandBarLabelWidth,
   resolveIslandBarAdaptive,
   resolveIslandDropPluginId,
+  resolveIslandFileSearchPluginId,
   resolveIslandSearchPluginId,
   resolvePluginPanelShellSize,
   type IslandBarState,
@@ -654,6 +655,8 @@ function App() {
   const [expanded, setExpanded] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  /** Hidden until Rust host-boot-ready (tray seeded + chrome reveal). */
+  const [bootReady, setBootReady] = useState(false);
   const [material, setMaterial] = useState<Material>("mica-alt");
   const [ambient, setAmbient] = useState<Ambient>({ r: 32, g: 32, b: 34, hwnd: 0 });
   const [barGlassDark, setBarGlassDark] = useState(true);
@@ -827,6 +830,7 @@ function App() {
   const openFavoritesHotkeyRef = useRef<(() => void | Promise<void>) | null>(
     null,
   );
+  const handoffFileSearchRef = useRef<(query: string) => void>(() => undefined);
   /** Esc 退出过渡：先播动画再卸 DOM */
   const [searchLeaving, setSearchLeaving] = useState(false);
   const searchLeavingRef = useRef(false);
@@ -2190,6 +2194,46 @@ function App() {
     };
   }, [sizePluginId]);
 
+  // Unified boot gate: HWND hidden until reveal; FE opacity as backup.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    const reveal = () => {
+      if (cancelled) return;
+      setBootReady(true);
+      void invoke<Ambient>("sample_ambient_color")
+        .then((a) => {
+          if (!cancelled && a) setAmbient(a);
+        })
+        .catch(() => undefined);
+    };
+    void invoke<boolean>("is_host_boot_ready")
+      .then((ready) => {
+        if (!cancelled && ready) reveal();
+      })
+      .catch(() => undefined);
+    void listen<{ trayTotal?: number; trayClickable?: number; elapsedMs?: number }>(
+      "host-boot-ready",
+      (ev) => {
+        if (cancelled) return;
+        console.info("[boot] host-boot-ready", ev.payload);
+        reveal();
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    const safety = window.setTimeout(() => {
+      if (cancelled) return;
+      console.warn("[boot] host-boot-ready timeout — revealing chrome");
+      reveal();
+    }, 8_000);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      window.clearTimeout(safety);
+    };
+  }, []);
+
   useEffect(() => {
     void hydrateIslandPrefs().then((prefs) => {
       setIslandPrefsState(prefs);
@@ -2720,7 +2764,8 @@ function App() {
     (sessionOverrideActive ? panelOverride : null) ||
     "";
   const panelHostPluginId =
-    parsePluginPanelId(effectivePullContent || panelOverride || "") ?? "none";
+    parsePluginPanelId(effectivePullContent || panelOverride || "") ||
+    "none";
   /**
    * 主岛已被临时占用时，通知不得盖住栏内内容，改为下方独立胶囊：
    * Alt+空格搜索 / 情景临时（正在播放等）/ 下拉展开。
@@ -3046,7 +3091,7 @@ function App() {
   }
 
   /**
-   * 退出岛栏搜索 chrome。
+   * 退出 Alt+空格搜索 chrome。
    * animated：搜索框上滑淡出、常驻摘要回弹（Esc / Alt+空格折叠态）。
    */
   function exitIslandSearchChrome(opts?: { animated?: boolean }) {
@@ -3103,8 +3148,15 @@ function App() {
 
     if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
 
+    // 热键路径：先置顶/取消点击穿透并抢焦点，再 expand（避免「要先摸一下顶栏才出来」）
+    try {
+      await getCurrentWindow().setIgnoreCursorEvents(false);
+    } catch {
+      /* noop */
+    }
+    void focusIslandSearchInput();
+
     bumpIslandActivity();
-    // float/activate 在 focusIslandSearchInput 内异步完成（勿在此同步 setFocus）
     searchModeRef.current = true;
     setSearchMode(true);
     immersedRef.current = false;
@@ -3116,7 +3168,6 @@ function App() {
     scenarioOwnerRef.current = pluginId;
     setScenarioOwner(pluginId);
     setScenarioPull(`plugin:${pluginId}`);
-    // 搜索态由 Host chrome 画输入框，不再用 setBar 文案占位
     setScenarioBar({
       pluginId,
       text: " ",
@@ -3129,14 +3180,11 @@ function App() {
     }
     armPluginSession(pluginId);
 
-    // 仅激活折叠搜索栏；若当前已展开则收起但保留搜索态
-    if (expandedRef.current) {
-      retainSearchModeRef.current = true;
-      void collapse();
-    } else {
-      syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
-      void focusIslandSearchInput();
+    // 立刻展开；顶栏仍用原 Host 搜索框（panel 只画最近使用网格）
+    if (!expandedRef.current) {
+      await expand({ force: true });
     }
+    void focusIslandSearchInput();
   }
 
   async function toggleIslandSearchMode() {
@@ -3179,13 +3227,26 @@ function App() {
   };
 
   async function openFileSearchFavorites() {
-    const pluginId = resolveIslandSearchPluginId();
+    const pluginId =
+      resolveIslandFileSearchPluginId() || resolveIslandSearchPluginId();
     if (!pluginId) return;
     if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
     bumpIslandActivity();
-    await enterIslandSearchMode();
-    // enter may no-op if plugin became unavailable mid-flight
-    if (!searchModeRef.current && scenarioOwnerRef.current !== pluginId) return;
+    // Favorites always targets file-search
+    clearSearchLeaveTimer();
+    searchLeavingRef.current = false;
+    setSearchLeaving(false);
+    searchModeRef.current = true;
+    setSearchMode(true);
+    setSearchDraft("");
+    scenarioOwnerRef.current = pluginId;
+    setScenarioOwner(pluginId);
+    setScenarioPull(`plugin:${pluginId}`);
+    try {
+      await invoke("hub_island_claim_scenario", { pluginId });
+    } catch (err) {
+      console.warn("[island-search] claimScenario favorites", err);
+    }
     armPluginSession(pluginId);
     const fire = () =>
       setSearchSubmit({
@@ -3202,6 +3263,38 @@ function App() {
     void openFileSearchFavorites();
   };
 
+  /** Launcher → 文件搜索（可选带 query） */
+  async function handoffIslandFileSearch(query: string) {
+    const pluginId = resolveIslandFileSearchPluginId();
+    if (!pluginId) return;
+    if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
+    bumpIslandActivity();
+    searchModeRef.current = true;
+    setSearchMode(true);
+    const q = String(query || "").trim();
+    setSearchDraft(q);
+    scenarioOwnerRef.current = pluginId;
+    setScenarioOwner(pluginId);
+    setScenarioPull(`plugin:${pluginId}`);
+    try {
+      await invoke("hub_island_claim_scenario", { pluginId });
+    } catch (err) {
+      console.warn("[island-search] handoff claim", err);
+    }
+    armPluginSession(pluginId);
+    if (!expandedRef.current) {
+      await expand({ force: true });
+    }
+    setSearchSubmit({
+      nonce: Date.now(),
+      query: q,
+      action: q ? "submit" : "openFavorites",
+    });
+  }
+  handoffFileSearchRef.current = (query: string) => {
+    void handoffIslandFileSearch(query);
+  };
+
   function submitIslandSearch() {
     const pluginId = resolveIslandSearchPluginId();
     const q = searchDraft.trim();
@@ -3214,15 +3307,20 @@ function App() {
       }
       setScenarioPull(`plugin:${pluginId}`);
     }
-    // 有无关键字均可：回车唤醒下拉；空 → 首页双卡片，有字 → 结果
+    const fire = () =>
+      setSearchSubmit({
+        nonce: Date.now(),
+        query: q,
+        action: "submit",
+      });
     if (!expandedRef.current) {
       void expand({ force: true }).then(() => {
-        setSearchSubmit({ nonce: Date.now(), query: q });
+        fire();
         queueMicrotask(() => searchInputRef.current?.focus());
       });
       return;
     }
-    setSearchSubmit({ nonce: Date.now(), query: q });
+    fire();
   }
 
   async function ingestDrop(dt: DataTransfer | null) {
@@ -3547,7 +3645,7 @@ function App() {
 
   return (
     <div
-      className={`shell${shellExpanded ? " is-expanded" : ""}${barGlassOn ? " has-bar-glass" : ""}${ambientFromWindow ? " has-ambient" : ""}${barGlassOn && !ambientFromWindow ? " is-desktop-glass" : ""}`}
+      className={`shell${!bootReady ? " is-booting" : ""}${shellExpanded ? " is-expanded" : ""}${barGlassOn ? " has-bar-glass" : ""}${ambientFromWindow ? " has-ambient" : ""}${barGlassOn && !ambientFromWindow ? " is-desktop-glass" : ""}`}
       style={ambientCss}
       data-material={material}
       data-chrome-left={chromeLeft.scheme}
@@ -3827,7 +3925,7 @@ function App() {
                 ) : null}
               </div>
               {showSearchChrome ? (
-                <div
+                  <div
                   className={`bar-search${searchLeaving ? " is-exiting" : ""}`}
                   key="island-search"
                 >
@@ -3860,7 +3958,10 @@ function App() {
                     spellCheck={false}
                     placeholder="全局搜索，一搜全有"
                     value={searchDraft}
-                    onChange={(e) => setSearchDraft(e.target.value)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setSearchDraft(v);
+                    }}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}
                     onKeyDown={(e) => {

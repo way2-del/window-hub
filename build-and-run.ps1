@@ -55,7 +55,8 @@ if (-not (Test-Path -LiteralPath $exe)) {
 }
 
 Write-Host ""
-Write-Host "=== Starting release-fast ==="
+Write-Host "=== Starting release-fast (tray on by default) ==="
 Write-Host "  $exe"
+Write-Host "  Emergency off: `$env:WH_DISABLE_TRAY='1'` before launch"
 Start-Process -FilePath $exe
 exit 0

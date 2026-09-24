@@ -18,6 +18,7 @@ const NOW_PLAYING_EXAMPLE_ID: &str = "com.window-hub.now-playing";
 const FILE_SEARCH_EXAMPLE_ID: &str = "com.window-hub.file-search";
 const SYSMON_EXAMPLE_ID: &str = "com.window-hub.sysmon";
 const EXCALIDRAW_EXAMPLE_ID: &str = "com.window-hub.excalidraw";
+const WORLD_CLOCK_EXAMPLE_ID: &str = "com.window-hub.world-clock";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,6 +232,7 @@ pub fn ensure_official_plugins(app: &AppHandle) {
         ("idiom", IDIOM_EXAMPLE_ID),
         ("now-playing", NOW_PLAYING_EXAMPLE_ID),
         ("file-search", FILE_SEARCH_EXAMPLE_ID),
+        ("world-clock", WORLD_CLOCK_EXAMPLE_ID),
     ] {
         let reg = load_registry();
         let bundled = match resolve_example_plugin_dir(app, folder) {
@@ -545,6 +547,8 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("sysmon")
     } else if id == "excalidraw" || id == EXCALIDRAW_EXAMPLE_ID {
         Ok("excalidraw")
+    } else if id == "world-clock" || id == WORLD_CLOCK_EXAMPLE_ID {
+        Ok("world-clock")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

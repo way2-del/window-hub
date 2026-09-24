@@ -5,7 +5,7 @@
   "version": "1.5.10",
   "official": true,
   "logo": "icon.svg",
-  "description": "情景临时：全局热键搜索（默认同系统岛栏搜索）。空态为可自定义卡片组网格；有关键字则 Everything 结果。需本机已运行 Everything。",
+  "description": "本地文件搜索。空态为可自定义卡片组网格；有关键字则 Everything 结果。需本机已运行 Everything。",
   "entry": {
     "panel": "panel.html"
   },
@@ -27,7 +27,7 @@
       "key": "openSearch",
       "type": "hotkey",
       "label": "打开搜索",
-      "description": "与系统「打开岛栏搜索」同步，可在设置 → 快捷键中统一修改",
+      "description": "与系统「打开搜索」同步，可在设置 → 快捷键中统一修改",
       "default": "Alt+Space",
       "action": "island.search.toggle",
       "maxLength": 64

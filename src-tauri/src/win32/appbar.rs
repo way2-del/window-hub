@@ -51,6 +51,8 @@ mod win {
         /// Anchor HWND used to pick monitor / DPI.
         Ensure { anchor: isize },
         Sync { anchor: isize },
+        /// Re-SETPOS even when LAST_DESIRED matches (post-dock / taskbar wipe reclaim).
+        ForceSync { anchor: isize },
         /// Temporarily drop AppBar claim (e.g. exclusive fullscreen game) without killing worker.
         Suspend,
         Shutdown,
@@ -107,6 +109,74 @@ mod win {
             right: mon.right,
             bottom: mon.top + h,
         })
+    }
+
+    /// `SPI_GETWORKAREA` top inset for `anchor`'s monitor (physical px).
+    fn work_area_top_inset(anchor: HWND) -> Option<i32> {
+        let mon = monitor_rect(anchor)?;
+        let mut wa = RECT::default();
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut wa as *mut RECT as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
+        if ok.is_err() {
+            return None;
+        }
+        Some(wa.top - mon.top)
+    }
+
+    /// True when Explorer actually reserved our strip (taskbar autohide / dock
+    /// can wipe rcWork after a successful SETPOS while LAST_DESIRED still matches).
+    fn shell_honors_strip(anchor: HWND) -> bool {
+        let h = STRIP_PX
+            .load(Ordering::SeqCst)
+            .max(STRIP_LOGICAL_H)
+            .max(1);
+        match work_area_top_inset(anchor) {
+            Some(inset) => inset >= h.saturating_sub(4) && inset <= h + 20,
+            None => false,
+        }
+    }
+
+    /// Win11 + auto-hide taskbar often leaves `rcWork.top` at monitor top even
+    /// after a successful `ABM_SETPOS` (host HWND is placed, work area is not).
+    /// Fall back to a quiet SPI inset — no `SPIF_SENDCHANGE` to avoid double resize.
+    fn apply_spi_top_inset(anchor: HWND, strip_bottom: i32) {
+        let Some(mon) = monitor_rect(anchor) else {
+            return;
+        };
+        let mut wa = RECT::default();
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut wa as *mut RECT as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
+        if ok.is_err() {
+            return;
+        }
+        let target_top = strip_bottom.clamp(mon.top + 1, mon.bottom - 100);
+        if (wa.top - target_top).abs() <= 2 {
+            return;
+        }
+        wa.top = target_top;
+        if wa.bottom - wa.top < 100 {
+            return;
+        }
+        let _ = unsafe {
+            SystemParametersInfoW(
+                SPI_SETWORKAREA,
+                0,
+                Some(&mut wa as *mut RECT as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
     }
 
     /// One-shot: undo leftover SPI top inset from older builds.
@@ -217,7 +287,10 @@ mod win {
             }
             if let Ok(guard) = LAST_DESIRED.lock() {
                 if let Some(prev) = *guard {
-                    if rect_eq(&prev, &desired) {
+                    // Desired strip unchanged is not enough — Explorer may have
+                    // cleared rcWork (autohide / dock) while our host still sits
+                    // at 0×28. Re-SETPOS when the shell no longer honors us.
+                    if rect_eq(&prev, &desired) && shell_honors_strip(probe) {
                         return true;
                     }
                 }
@@ -246,6 +319,13 @@ mod win {
             );
             // Do NOT call ABM_WINDOWPOSCHANGED here — it re-broadcasts ABN_POSCHANGED
             // to every AppBar (including dock) and amplifies work-area flicker.
+        }
+
+        // ABM host may sit at the strip while Explorer never insets rcWork
+        // (common with ABS_AUTOHIDE taskbar). SPI fallback keeps the placeholder.
+        if !shell_honors_strip(probe) {
+            let bottom = desired.bottom;
+            apply_spi_top_inset(probe, bottom);
         }
 
         if let Ok(mut guard) = LAST_DESIRED.lock() {
@@ -355,6 +435,11 @@ mod win {
                         let _ = apply_pos(h, Some(HWND(anchor as *mut _)), false);
                     }
                 }
+                Ok(Cmd::ForceSync { anchor }) => {
+                    if let Some(h) = host {
+                        let _ = apply_pos(h, Some(HWND(anchor as *mut _)), true);
+                    }
+                }
                 Ok(Cmd::Suspend) => {
                     if let Some(h) = host.take() {
                         remove_host(h);
@@ -404,6 +489,17 @@ mod win {
             return;
         }
         send(Cmd::Sync {
+            anchor: anchor_hwnd_raw,
+        });
+    }
+
+    /// Force re-SETPOS (ignores LAST_DESIRED early-out). Use after dock/taskbar
+    /// settle — they can wipe `rcWork` without changing our desired strip.
+    pub fn force_sync(anchor_hwnd_raw: isize) {
+        if !REGISTERED.load(Ordering::SeqCst) {
+            return;
+        }
+        send(Cmd::ForceSync {
             anchor: anchor_hwnd_raw,
         });
     }
@@ -458,6 +554,9 @@ pub fn set_visual_height_logical(_hwnd_raw: isize, _logical_h: i32) {}
 
 #[cfg(not(windows))]
 pub fn sync(_hwnd_raw: isize) {}
+
+#[cfg(not(windows))]
+pub fn force_sync(_hwnd_raw: isize) {}
 
 #[cfg(not(windows))]
 pub fn suspend() {}

@@ -1,0 +1,275 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: #f4f4f5;
+  font-family: "SF Pro Display", "SF Pro Text", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+}
+
+.wc-shell {
+  box-sizing: border-box;
+  height: 100vh;
+  padding: var(--wh-popup-pad-top, 12px) var(--wh-popup-pad-x, 14px)
+    var(--wh-popup-pad-bottom, 14px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.wc-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+}
+
+.wc-gear {
+  appearance: none;
+  border: 0;
+  background: color-mix(in srgb, #fff 8%, transparent);
+  color: #c8c8d0;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wc-gear:hover {
+  background: color-mix(in srgb, #fff 14%, transparent);
+  color: #fff;
+}
+
+.wc-gear.is-on {
+  color: #fff;
+  background: color-mix(in srgb, #fff 18%, transparent);
+}
+
+.wc-gear svg {
+  width: 15px;
+  height: 15px;
+}
+
+.wc-dual {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+  align-items: center;
+  padding-right: 28px;
+}
+
+.wc-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.wc-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.55);
+  letter-spacing: 0.02em;
+}
+
+/* —— 表盘 —— */
+.wc-dial {
+  width: min(112px, 42vw);
+  aspect-ratio: 1;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 6px 18px rgba(0, 0, 0, 0.22);
+}
+
+.wc-dial-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.wc-face {
+  stroke: none;
+}
+
+.wc-dial.is-day .wc-face {
+  fill: #f7f7f8;
+}
+
+.wc-dial.is-night .wc-face {
+  fill: #1c1c1e;
+}
+
+.wc-tick {
+  stroke-linecap: round;
+  stroke-width: 0.55;
+}
+
+.wc-tick.is-hour {
+  stroke-width: 1.15;
+}
+
+.wc-dial.is-day .wc-tick {
+  stroke: rgba(0, 0, 0, 0.28);
+}
+
+.wc-dial.is-day .wc-tick.is-hour {
+  stroke: rgba(0, 0, 0, 0.78);
+}
+
+.wc-dial.is-night .wc-tick {
+  stroke: rgba(255, 255, 255, 0.28);
+}
+
+.wc-dial.is-night .wc-tick.is-hour {
+  stroke: rgba(255, 255, 255, 0.82);
+}
+
+.wc-num {
+  font-family: "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 7.2px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.wc-dial.is-day .wc-num {
+  fill: rgba(0, 0, 0, 0.82);
+}
+
+.wc-dial.is-night .wc-num {
+  fill: rgba(255, 255, 255, 0.9);
+}
+
+.wc-hand line {
+  stroke-linecap: round;
+}
+
+.wc-hand-h line {
+  stroke-width: 2.6;
+}
+
+.wc-hand-m line {
+  stroke-width: 2.2;
+}
+
+.wc-dial.is-day .wc-hand-h line,
+.wc-dial.is-day .wc-hand-m line {
+  stroke: #111;
+}
+
+.wc-dial.is-night .wc-hand-h line,
+.wc-dial.is-night .wc-hand-m line {
+  stroke: #f2f2f7;
+}
+
+.wc-hand-s line {
+  stroke: #5b9cff;
+  stroke-width: 0.9;
+}
+
+.wc-hub-ring {
+  fill: #5b9cff;
+}
+
+.wc-hub {
+  fill: #5b9cff;
+}
+
+.wc-dial.is-day .wc-hub {
+  fill: #1a1a1a;
+}
+
+.wc-dial.is-night .wc-hub {
+  fill: #f2f2f7;
+}
+
+.wc-big {
+  font-size: 36px;
+  font-weight: 200;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.wc-date {
+  font-size: 11px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.wc-settings {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  padding-top: 8px;
+}
+
+.wc-settings.is-open {
+  display: flex;
+}
+
+.wc-dual.is-hidden {
+  display: none;
+}
+
+.wc-settings-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.wc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wc-field label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.wc-field select {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+  color: #f4f4f5;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+}
+
+.wc-field select:focus {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.wc-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  line-height: 1.4;
+}

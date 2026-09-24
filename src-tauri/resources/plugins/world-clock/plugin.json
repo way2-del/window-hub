@@ -1,0 +1,105 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.world-clock",
+  "name": "世界时钟",
+  "version": "1.0.0",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "快捷区显示另一时区时间（不重复顶栏本机时间）；点击弹窗并排查看两个时区；弹窗内可设置城市。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "popup": "popup.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "世界时钟",
+      "order": 12,
+      "action": "popup.open",
+      "manage": "none"
+    }
+  },
+  "settings": [
+    {
+      "key": "zoneA",
+      "type": "select",
+      "label": "时区一",
+      "description": "默认为本机系统时区",
+      "default": "__local__",
+      "options": [
+        { "value": "__local__", "label": "本机时区（自动）" },
+        { "value": "Asia/Shanghai", "label": "中国标准时间" },
+        { "value": "Asia/Hong_Kong", "label": "香港" },
+        { "value": "Asia/Taipei", "label": "台北" },
+        { "value": "Asia/Tokyo", "label": "东京" },
+        { "value": "Asia/Seoul", "label": "首尔" },
+        { "value": "Asia/Singapore", "label": "新加坡" },
+        { "value": "Asia/Bangkok", "label": "曼谷" },
+        { "value": "Asia/Dubai", "label": "迪拜" },
+        { "value": "Asia/Kolkata", "label": "新德里" },
+        { "value": "Europe/London", "label": "伦敦" },
+        { "value": "Europe/Paris", "label": "巴黎" },
+        { "value": "Europe/Berlin", "label": "柏林" },
+        { "value": "Europe/Moscow", "label": "莫斯科" },
+        { "value": "America/New_York", "label": "纽约" },
+        { "value": "America/Chicago", "label": "芝加哥" },
+        { "value": "America/Denver", "label": "丹佛" },
+        { "value": "America/Los_Angeles", "label": "洛杉矶" },
+        { "value": "America/Sao_Paulo", "label": "圣保罗" },
+        { "value": "Australia/Sydney", "label": "悉尼" },
+        { "value": "Pacific/Auckland", "label": "奥克兰" }
+      ]
+    },
+    {
+      "key": "zoneB",
+      "type": "select",
+      "label": "时区二",
+      "description": "快捷区默认展示此时区的时间（避免与顶栏本机时钟重复）",
+      "default": "Europe/London",
+      "options": [
+        { "value": "__local__", "label": "本机时区（自动）" },
+        { "value": "Asia/Shanghai", "label": "中国标准时间" },
+        { "value": "Asia/Hong_Kong", "label": "香港" },
+        { "value": "Asia/Taipei", "label": "台北" },
+        { "value": "Asia/Tokyo", "label": "东京" },
+        { "value": "Asia/Seoul", "label": "首尔" },
+        { "value": "Asia/Singapore", "label": "新加坡" },
+        { "value": "Asia/Bangkok", "label": "曼谷" },
+        { "value": "Asia/Dubai", "label": "迪拜" },
+        { "value": "Asia/Kolkata", "label": "新德里" },
+        { "value": "Europe/London", "label": "伦敦" },
+        { "value": "Europe/Paris", "label": "巴黎" },
+        { "value": "Europe/Berlin", "label": "柏林" },
+        { "value": "Europe/Moscow", "label": "莫斯科" },
+        { "value": "America/New_York", "label": "纽约" },
+        { "value": "America/Chicago", "label": "芝加哥" },
+        { "value": "America/Denver", "label": "丹佛" },
+        { "value": "America/Los_Angeles", "label": "洛杉矶" },
+        { "value": "America/Sao_Paulo", "label": "圣保罗" },
+        { "value": "Australia/Sydney", "label": "悉尼" },
+        { "value": "Pacific/Auckland", "label": "奥克兰" }
+      ]
+    },
+    {
+      "key": "popupWidth",
+      "type": "number",
+      "label": "弹窗宽度",
+      "default": 420,
+      "min": 320,
+      "max": 560,
+      "step": 10,
+      "unit": "px"
+    },
+    {
+      "key": "popupHeight",
+      "type": "number",
+      "label": "弹窗高度",
+      "default": 300,
+      "min": 240,
+      "max": 400,
+      "step": 10,
+      "unit": "px"
+    }
+  ],
+  "capabilities": ["shortcuts", "storage", "popup"]
+}

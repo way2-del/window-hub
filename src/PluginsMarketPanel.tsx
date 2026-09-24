@@ -431,7 +431,7 @@ export default function PluginsMarketPanel({
                 <span>内置示例插件 · 也可安装 .whpx / 开发目录</span>
               </div>
             </div>
-            <h3 className="pm-section-title">插件分类</h3>
+<h3 className="pm-section-title">插件分类</h3>
             <div className="pm-category-grid">
               {MARKET_CATEGORIES.map((c) => {
                 const count = marketPluginsInCategory(c.id).length;
@@ -485,7 +485,11 @@ export default function PluginsMarketPanel({
             <strong>{category.blurb}</strong>
           </div>
         </div>
-        <div className="pm-plugin-grid">{categoryPlugins.map(renderPluginCard)}</div>
+        {categoryPlugins.length > 0 ? (
+          <div className="pm-plugin-grid">{categoryPlugins.map(renderPluginCard)}</div>
+        ) : (
+          <p className="pm-empty">该分类暂无插件</p>
+        )}
       </section>
     );
   }

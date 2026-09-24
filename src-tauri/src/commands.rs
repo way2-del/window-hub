@@ -2086,6 +2086,12 @@ pub fn set_tray_ui_paused(paused: bool) {
     crate::win32::tray::set_emit_paused(paused);
 }
 
+/// True after boot pipeline reveals chrome (`host-boot-ready`).
+#[tauri::command]
+pub fn is_host_boot_ready() -> bool {
+    crate::host_boot_ready()
+}
+
 #[tauri::command]
 pub fn get_tray_prefs() -> crate::win32::tray::TrayPrefs {
     crate::win32::tray::get_prefs()

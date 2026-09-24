@@ -244,6 +244,74 @@ pub fn focus_window(hwnd: isize) -> Result<(), String> {
     }
 }
 
+/// Call from the **RegisterHotKey message thread** right when WM_HOTKEY fires.
+/// That thread briefly has foreground rights; FE/IPC activate later is often denied,
+/// which feels like "hotkey only works after I hover/click the island".
+#[cfg(windows)]
+pub fn activate_for_hotkey(hwnd: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow, GetWindowLongW,
+        GetWindowThreadProcessId, IsIconic, IsWindow, SetForegroundWindow, SetWindowLongW,
+        SetWindowPos, ShowWindow, ASFW_ANY, GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WS_EX_TRANSPARENT,
+    };
+
+    unsafe {
+        let h = HWND(hwnd as *mut _);
+        if hwnd == 0 || !IsWindow(h).as_bool() {
+            return;
+        }
+
+        // Hotkey path must receive clicks/keys — clear OS click-through if set.
+        let ex = WINDOW_EX_STYLE(GetWindowLongW(h, GWL_EXSTYLE) as u32);
+        if ex.contains(WS_EX_TRANSPARENT) {
+            let cleared = WINDOW_EX_STYLE(ex.0 & !WS_EX_TRANSPARENT.0);
+            SetWindowLongW(h, GWL_EXSTYLE, cleared.0 as i32);
+            let _ = SetWindowPos(
+                h,
+                HWND::default(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(h, SW_SHOW);
+        }
+
+        let fg = GetForegroundWindow();
+        let our_tid = GetCurrentThreadId();
+        let mut fg_pid = 0u32;
+        let fg_tid = if !fg.is_invalid() {
+            GetWindowThreadProcessId(fg, Some(&mut fg_pid))
+        } else {
+            0
+        };
+        let attached = fg_tid != 0 && fg_tid != our_tid && AttachThreadInput(our_tid, fg_tid, true).as_bool();
+
+        let _ = BringWindowToTop(h);
+        let ok = SetForegroundWindow(h).as_bool();
+        if attached {
+            let _ = AttachThreadInput(our_tid, fg_tid, false);
+        }
+        if !ok {
+            // Last resort: keybd event trick is avoided (side effects); soft log only.
+            eprintln!("[hotkey] SetForegroundWindow soft-fail hwnd={hwnd:#x}");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn activate_for_hotkey(_hwnd: isize) {}
+
 /// Ask a top-level window to close (WM_CLOSE). Does not force-kill.
 #[cfg(windows)]
 pub fn close_window(hwnd: isize) -> Result<(), String> {

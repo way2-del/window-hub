@@ -13,6 +13,55 @@ function orderOf(manifest: PluginManifest, slot: "island.bar" | "island.drop"): 
   return manifest.slots?.[slot]?.order ?? 100;
 }
 
+function sortScenarioPlugins<T extends { pluginId: string; manifest: PluginManifest }>(
+  list: T[],
+): T[] {
+  return [...list].sort((a, b) => {
+    const aDev = a.pluginId.endsWith("__dev") ? 1 : 0;
+    const bDev = b.pluginId.endsWith("__dev") ? 1 : 0;
+    if (aDev !== bDev) return aDev - bDev;
+    const ao = a.manifest.slots?.["island.scenario"]?.order ?? 100;
+    const bo = b.manifest.slots?.["island.scenario"]?.order ?? 100;
+    return ao - bo;
+  });
+}
+
+function hasIslandSearchSlots(p: {
+  enabled: boolean;
+  manifest: PluginManifest;
+}): boolean {
+  return (
+    p.enabled &&
+    (p.manifest.capabilities ?? []).includes("island.panel") &&
+    (p.manifest.capabilities ?? []).includes("island.bar") &&
+    Boolean(p.manifest.slots?.["island.scenario"]) &&
+    Boolean(p.manifest.slots?.["island.panel"]) &&
+    Boolean(p.manifest.slots?.["island.bar"])
+  );
+}
+
+/** Enabled Everything 搜索情景（文件搜索等）。 */
+export function resolveIslandFileSearchPluginId(): string | null {
+  const FALLBACK = ISLAND_SEARCH_PLUGIN_ID;
+  const list = sortScenarioPlugins(
+    pluginRegistry.listAll().filter(
+      (p) =>
+        hasIslandSearchSlots(p) &&
+        (p.manifest.capabilities ?? []).includes("everything.search"),
+    ),
+  );
+  if (list[0]?.pluginId) return list[0].pluginId;
+  const fb = pluginRegistry.get(FALLBACK);
+  if (fb) return fb.enabled ? FALLBACK : null;
+  if (!arePluginsReady()) return FALLBACK;
+  return null;
+}
+
+/** Alt+空格入口：Everything 文件搜索情景插件。 */
+export function resolveIslandSearchPluginId(): string | null {
+  return resolveIslandFileSearchPluginId();
+}
+
 /** Enabled plugins declaring island.drop (+ staging recommended for transfer UX). */
 export function listIslandDropPlugins() {
   return pluginRegistry
@@ -33,36 +82,6 @@ export function listIslandDropPlugins() {
 /** Single drop target (lowest order). */
 export function resolveIslandDropPluginId(): string | null {
   return listIslandDropPlugins()[0]?.pluginId ?? null;
-}
-
-/** Enabled Everything 搜索情景：everything.search + island.scenario + panel + bar. */
-export function resolveIslandSearchPluginId(): string | null {
-  const FALLBACK = ISLAND_SEARCH_PLUGIN_ID;
-  const list = pluginRegistry.listAll().filter(
-    (p) =>
-      p.enabled &&
-      (p.manifest.capabilities ?? []).includes("everything.search") &&
-      (p.manifest.capabilities ?? []).includes("island.panel") &&
-      (p.manifest.capabilities ?? []).includes("island.bar") &&
-      Boolean(p.manifest.slots?.["island.scenario"]) &&
-      Boolean(p.manifest.slots?.["island.panel"]) &&
-      Boolean(p.manifest.slots?.["island.bar"]),
-  );
-  list.sort((a, b) => {
-    const aDev = a.pluginId.endsWith("__dev") ? 1 : 0;
-    const bDev = b.pluginId.endsWith("__dev") ? 1 : 0;
-    if (aDev !== bDev) return aDev - bDev;
-    const ao = a.manifest.slots?.["island.scenario"]?.order ?? 100;
-    const bo = b.manifest.slots?.["island.scenario"]?.order ?? 100;
-    return ao - bo;
-  });
-  if (list[0]?.pluginId) return list[0].pluginId;
-  // 官方 id 兜底：即使 slots 尚未升级也能先亮搜索栏；已入库且禁用则绝不打开
-  const fb = pluginRegistry.get(FALLBACK);
-  if (fb) return fb.enabled ? FALLBACK : null;
-  // 插件列表尚在 bootstrap 且尚未入库：乐观使用内置文件搜索 id
-  if (!arePluginsReady()) return FALLBACK;
-  return null;
 }
 
 /** Host 搜索情景是否可 claim（bootstrap 中对官方插件放宽 manifest 检查） */
