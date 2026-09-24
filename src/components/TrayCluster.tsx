@@ -828,11 +828,14 @@ export default function TrayCluster({
     await openLangMenu();
   }
 
+  const pressedPopupOpen = useRef<boolean | null>(null);
   async function togglePopup() {
+    const beforePress = pressedPopupOpen.current;
+    pressedPopupOpen.current = null;
     clickTrace("fe-tray", "togglePopup click");
     void hideChromeHoverTip();
     try {
-      if (open) {
+      if (beforePress ?? open) {
         clickTrace("fe-tray", "before close_tray_popup (local open)");
         await invoke("close_tray_popup");
         clickTrace("fe-tray", "after close");
@@ -1023,6 +1026,8 @@ export default function TrayCluster({
           className={`tray-chevron${open ? " is-open" : ""}`}
           aria-label={open ? "收起托盘" : "展开托盘"}
           aria-expanded={open}
+          onPointerDown={() => { pressedPopupOpen.current = open; }}
+          onPointerCancel={() => { pressedPopupOpen.current = null; }}
           onMouseDown={(e) => {
             e.preventDefault();
           }}

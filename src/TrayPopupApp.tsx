@@ -169,25 +169,14 @@ export default function TrayPopupApp() {
 
     // No 2s list_tray_icons poll — full PNG hydrate + merge was freezing the popup.
 
-    let unFocus: (() => void) | undefined;
-    getCurrentWindow()
-      .onFocusChanged((ev) => {
-        // Ignore blur until slide reveal finished — intermediate show/focus
-        // handoff must not close the popup.
-        if (!ev.payload && reuseArmedRef.current && enteredRef.current) {
-          void invoke("close_tray_popup").catch(() => undefined);
-        }
-      })
-      .then((fn) => {
-        unFocus = fn;
-      });
+    // Native focus handling owns dismissal and rechecks the foreground window.
+    // A delayed WebView blur event must not close an already reopened popup.
 
     return () => {
       cancelled = true;
       window.clearTimeout(retryA);
       window.clearTimeout(retryB);
       unsubs.forEach((fn) => fn());
-      unFocus?.();
     };
   }, []);
 

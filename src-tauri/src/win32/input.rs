@@ -215,7 +215,7 @@ pub fn open_control_center() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn send_shell_shortcut(key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> Result<(), String> {
+pub(crate) fn send_shell_shortcut(key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
         VK_LWIN,

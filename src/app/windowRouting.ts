@@ -7,6 +7,7 @@ export type WindowFlags = Partial<Record<
   | "__WH_IS_DOCK__"
   | "__WH_IS_PLUGIN_POPUP__"
   | "__WH_IS_WIFI_AUTH_POPUP__"
+  | "__WH_IS_CONTROL_CENTER__"
   | "__WH_IS_WIFI_POPUP__"
   | "__WH_IS_CHROME_HOVER_TIP__"
   | "__WH_IS_INPUT_LANG_POPUP__"
@@ -21,6 +22,7 @@ export type WindowKind =
   | "status-menu"
   | "input-lang"
   | "chrome-tip"
+  | "control-center"
   | "wifi"
   | "wifi-auth"
   | "plugin-popup"
@@ -40,6 +42,7 @@ export function resolveWindowKind(
   if (flags.__WH_IS_DOCK__ === true) return "dock";
   if (flags.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
   if (flags.__WH_IS_WIFI_AUTH_POPUP__ === true) return "wifi-auth";
+  if (flags.__WH_IS_CONTROL_CENTER__ === true) return "control-center";
   if (flags.__WH_IS_WIFI_POPUP__ === true) return "wifi";
   if (flags.__WH_IS_CHROME_HOVER_TIP__ === true) return "chrome-tip";
   if (flags.__WH_IS_INPUT_LANG_POPUP__ === true) return "input-lang";
@@ -54,6 +57,7 @@ export function resolveWindowKind(
     if (label === "dock") return "dock";
     if (label === "plugin-popup" || label === "plugin-window") return "plugin-popup";
     if (label === "wifi-auth-popup") return "wifi-auth";
+    if (label === "control-center-popup") return "control-center";
     if (label === "wifi-popup") return "wifi";
     if (label === "chrome-hover-tip") return "chrome-tip";
     if (label === "input-lang-popup") return "input-lang";
@@ -70,6 +74,7 @@ export function resolveWindowKind(
   if (q === "dock") return "dock";
   if (q === "plugin-popup" || q === "plugin-window") return "plugin-popup";
   if (q === "wifi-auth") return "wifi-auth";
+  if (q === "control-center") return "control-center";
   if (q === "wifi") return "wifi";
   if (q === "chrome-tip") return "chrome-tip";
   if (q === "input-lang") return "input-lang";

@@ -1923,7 +1923,9 @@ mod win {
             prev.as_ref().map(|p| p.callback_msg).unwrap_or(0)
         };
 
-        let version = if slot.version > 0 {
+        // The NOTIFYICONDATA union can contain a balloon timeout on ordinary
+        // updates. Never interpret that value as a callback protocol version.
+        let version = if (1..=4).contains(&slot.version) {
             slot.version
         } else {
             prev.as_ref().map(|p| p.version).unwrap_or(0)
@@ -2630,7 +2632,10 @@ mod win {
             .expect("spawn tray-reconcile");
     }
 
+    static HOOK_LOOP_STARTED: AtomicBool = AtomicBool::new(false);
+
     fn start_hook_loop() -> bool {
+        if HOOK_LOOP_STARTED.swap(true, Ordering::SeqCst) { return false; }
         // Never block the boot pipeline on Shell_TrayWnd (was up to 45s + SetWindowsHookEx).
         std::thread::Builder::new()
             .name("tray-hook-install".into())
@@ -2642,19 +2647,24 @@ mod win {
                     Ok(true) => {}
                     Ok(false) => {
                         eprintln!("[tray] hook host returned false");
+                        HOOK_LOOP_STARTED.store(false, Ordering::SeqCst);
                         start_spy_fallback();
                         return;
                     }
                     Err(err) => {
                         eprintln!("[tray] hook install failed: {err}");
+                        HOOK_LOOP_STARTED.store(false, Ordering::SeqCst);
                         start_spy_fallback();
                         return;
                     }
                 }
                 HOOK_PRIMARY.store(true, Ordering::SeqCst);
+                crate::win32::click_trace::log("tray", "callback recovery hook ready");
 
                 std::thread::sleep(std::time::Duration::from_millis(400));
-                broadcast_taskbar_created();
+                // This observer missed the earlier spy broadcast. Request one
+                // fresh registration after installation, independent of its timer.
+                let _ = systray_util::refresh_taskbar_icons();
 
                 let mut buf = Vec::with_capacity(16);
                 loop {
@@ -3264,6 +3274,13 @@ mod win {
         version: u32,
         click: TrayClick,
     ) -> Result<(), String> {
+        invoke_icon_with_recovery(id, hwnd, callback_msg, uid, version, click, true)
+    }
+
+    fn invoke_icon_with_recovery(
+        id: Option<String>, hwnd: isize, callback_msg: u32, uid: u32,
+        version: u32, click: TrayClick, recover: bool,
+    ) -> Result<(), String> {
         // Resolve from cache when frontend passes an id (registry stubs have hwnd=0).
         // Use meta_of — never clone PNG on the click path (was freezing workers).
         let resolved = {
@@ -3285,6 +3302,9 @@ mod win {
         let mut uid = uid;
         let mut version = version;
         let mut icon_id = id.clone();
+        // Publishing a live icon can remove its registry placeholder. Retain
+        // identity hints so the original click can follow that replacement.
+        let recovery_hint = resolved.as_ref().map(meta_of);
 
         let mut process = String::new();
         let mut tip = String::new();
@@ -3367,6 +3387,27 @@ mod win {
             );
         }
 
+        // Registry placeholders may outlive a missed NIM_ADD (e.g. after Hub
+        // restarts while apps keep running). The spy cannot reconstruct their
+        // callback address from a GUID. On an actual click, activate the existing
+        // Explorer observer and wait on this blocking worker for fresh metadata.
+        // Never guess a callback or block the WebView/UI thread.
+        if let Some(recovery_id) = icon_id.as_deref().filter(|_| recover) {
+            crate::win32::click_trace::log("tray", "missing callback: bounded recovery");
+            if !start_hook_loop() { broadcast_taskbar_created_force(); }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1800);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let cached = { ICONS.lock().get(recovery_id).map(meta_of) }
+                    .or_else(|| recovery_hint.clone());
+                if let Some(info) = cached {
+                    let target = if is_clickable(&info) { Some(info) } else { find_clickable_twin(&info) };
+                    if let Some(live) = target {
+                        return invoke_icon_with_recovery(Some(live.id), live.hwnd, live.callback_msg, live.uid, live.version, click, false);
+                    }
+                }
+            }
+        }
         Err(format!(
             "托盘点击失败：缺少 hwnd/callback（id={:?}）— 仅转发 Shell_NotifyIcon 回调，不走 UIA/demote",
             icon_id

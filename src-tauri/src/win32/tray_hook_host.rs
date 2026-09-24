@@ -96,15 +96,12 @@ pub fn resolve_dll_path() -> Option<PathBuf> {
 
 fn find_explorer_tray() -> Option<(HWND, u32)> {
     unsafe {
-        let hwnd = FindWindowW(w!("Shell_TrayWnd"), None).ok()?;
-        if hwnd.0.is_null() {
-            return None;
-        }
-        // Prefer the real tray (has TrayNotifyWnd child), not a spy popup.
-        let notify = FindWindowExW(hwnd, HWND::default(), w!("TrayNotifyWnd"), None).ok();
-        if notify.map(|h| h.0.is_null()).unwrap_or(true) {
-            // Shell_TrayWnd exists but tray notify subtree not ready yet.
-            return None;
+        let mut hwnd = FindWindowW(w!("Shell_TrayWnd"), None).ok()?;
+        // The spy can precede Explorer in Z-order. Keep enumerating instead of
+        // treating the first matching class as the real taskbar.
+        loop {
+            if FindWindowExW(hwnd, HWND::default(), w!("TrayNotifyWnd"), None).is_ok() { break; }
+            hwnd = FindWindowExW(HWND::default(), hwnd, w!("Shell_TrayWnd"), None).ok()?;
         }
         let mut pid = 0u32;
         let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));

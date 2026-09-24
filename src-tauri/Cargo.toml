@@ -39,6 +39,8 @@ windows-core = { version = "0.58" }
 windows = { version = "0.58", features = [
   "implement",
   "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
   "Win32_Storage_FileSystem",

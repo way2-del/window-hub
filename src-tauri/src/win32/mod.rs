@@ -94,3 +94,6 @@ pub mod hotkey_registry {
         Ok(raw.trim().to_string())
     }
 }
+
+#[cfg(windows)]
+pub mod control_center;

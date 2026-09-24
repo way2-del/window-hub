@@ -9,6 +9,7 @@ import TrayPopupApp from "./TrayPopupApp";
 import StatusMenuPopupApp from "./StatusMenuPopupApp";
 import InputLangPopupApp from "./InputLangPopupApp";
 import ChromeHoverTipApp from "./ChromeHoverTipApp";
+import ControlCenterPopup from "./features/controlCenter/ControlCenterPopup";
 import WifiPopupApp from "./WifiPopupApp";
 import WifiAuthPopupApp from "./WifiAuthPopupApp";
 import PluginPopupHost from "./components/PluginPopupHost";
@@ -21,7 +22,7 @@ import "./settings.css";
 
 const kind = resolveWindowKind(window, () => getCurrentWindow().label, window.location.search);
 document.documentElement.style.background = "transparent";
-const bodyClass =
+const bodyClass = kind === "control-center" ? "is-control-center-popup" :
   kind === "settings"
     ? "is-settings"
     : kind === "tray"
@@ -49,7 +50,7 @@ if (Array.isArray(bodyClass)) {
   document.body.classList.add(bodyClass);
 }
 document.body.style.background = "transparent";
-document.title =
+document.title = kind === "control-center" ? "控制中心" :
   kind === "settings"
     ? "灵动岛设置"
     : kind === "tray"
@@ -90,6 +91,7 @@ if (
   kind === "island-bar-glass" ||
   kind === "chrome-tip" ||
   kind === "input-lang" ||
+  kind === "control-center" ||
   kind === "wifi" ||
   kind === "wifi-auth"
 ) {
@@ -109,6 +111,8 @@ ReactDOM.createRoot(root).render(
       <InputLangPopupApp />
     ) : kind === "chrome-tip" ? (
       <ChromeHoverTipApp />
+    ) : kind === "control-center" ? (
+      <ControlCenterPopup />
     ) : kind === "wifi" ? (
       <WifiPopupApp />
     ) : kind === "wifi-auth" ? (

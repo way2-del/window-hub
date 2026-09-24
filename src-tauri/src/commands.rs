@@ -35,6 +35,7 @@ const REUSABLE_CHROME_POPUPS: &[&str] = &[
     "tray-popup",
     "status-menu-popup",
     "input-lang-popup",
+    "control-center-popup",
     "wifi-popup",
     "wifi-auth-popup",
 ];
@@ -45,6 +46,7 @@ use std::sync::Mutex as StdMutex;
 static TRAY_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
 static STATUS_MENU_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
 static INPUT_LANG_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+static CONTROL_CENTER_VISIBLE: AtomicBool = AtomicBool::new(false);
 static WIFI_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
 static WIFI_AUTH_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
 static PLUGIN_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
@@ -54,7 +56,7 @@ static WEBVIEW_CREATE_LOCK: StdMutex<()> = StdMutex::new(());
 #[allow(dead_code)]
 static TIP_PREWARM_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-struct WebviewCreateGuard {
+pub(crate) struct WebviewCreateGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
     label: &'static str,
 }
@@ -66,7 +68,7 @@ impl Drop for WebviewCreateGuard {
 }
 
 /// Acquire create lock with wait/hold timing in the click-trace log.
-fn lock_webview_create(label: &'static str) -> WebviewCreateGuard {
+pub(crate) fn lock_webview_create(label: &'static str) -> WebviewCreateGuard {
     crate::win32::click_trace::log_lock_wait(label);
     let t0 = std::time::Instant::now();
     let guard = WEBVIEW_CREATE_LOCK
@@ -79,11 +81,12 @@ fn lock_webview_create(label: &'static str) -> WebviewCreateGuard {
     }
 }
 
-fn mark_popup_visible(label: &str, visible: bool) {
+pub(crate) fn mark_popup_visible(label: &str, visible: bool) {
     let flag = match label {
         "tray-popup" => &TRAY_POPUP_VISIBLE,
         "status-menu-popup" => &STATUS_MENU_POPUP_VISIBLE,
         "input-lang-popup" => &INPUT_LANG_POPUP_VISIBLE,
+        "control-center-popup" => &CONTROL_CENTER_VISIBLE,
         "wifi-popup" => &WIFI_POPUP_VISIBLE,
         "wifi-auth-popup" => &WIFI_AUTH_POPUP_VISIBLE,
         "plugin-popup" | "plugin-window" => &PLUGIN_POPUP_VISIBLE,
@@ -92,11 +95,12 @@ fn mark_popup_visible(label: &str, visible: bool) {
     flag.store(visible, Ordering::SeqCst);
 }
 
-fn popup_visible(label: &str) -> bool {
+pub(crate) fn popup_visible(label: &str) -> bool {
     match label {
         "tray-popup" => TRAY_POPUP_VISIBLE.load(Ordering::SeqCst),
         "status-menu-popup" => STATUS_MENU_POPUP_VISIBLE.load(Ordering::SeqCst),
         "input-lang-popup" => INPUT_LANG_POPUP_VISIBLE.load(Ordering::SeqCst),
+        "control-center-popup" => CONTROL_CENTER_VISIBLE.load(Ordering::SeqCst),
         "wifi-popup" => WIFI_POPUP_VISIBLE.load(Ordering::SeqCst),
         "wifi-auth-popup" => WIFI_AUTH_POPUP_VISIBLE.load(Ordering::SeqCst),
         "plugin-popup" | "plugin-window" => PLUGIN_POPUP_VISIBLE.load(Ordering::SeqCst),
@@ -120,6 +124,7 @@ fn emit_chrome_popup_closed(app: &AppHandle, label: &str) {
         "input-lang-popup" => {
             let _ = app.emit("input-lang-popup-closed", ());
         }
+        "control-center-popup" => { let _ = app.emit("control-center-popup-closed", ()); }
         "wifi-popup" => {
             let _ = app.emit("wifi-popup-closed", ());
         }
@@ -132,6 +137,7 @@ fn emit_chrome_popup_closed(app: &AppHandle, label: &str) {
 
 /// Hide (do not destroy) a reusable chrome popup and emit its closed event.
 pub fn hide_chrome_popup(app: &AppHandle, label: &str) {
+    crate::win32::click_trace::log("popup", &format!("hide {label}"));
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.hide();
     }
@@ -141,6 +147,7 @@ pub fn hide_chrome_popup(app: &AppHandle, label: &str) {
 /// Win32 hide from a worker / focus-loss thread — avoids Tauri `hide()`/`close()`
 /// on a non-UI thread while still keeping the HWND for reuse.
 pub fn hide_chrome_popup_hwnd(app: &AppHandle, label: &str, hwnd_raw: Option<isize>) {
+    crate::win32::click_trace::log("popup", &format!("blur hide {label}"));
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::HWND;
@@ -166,14 +173,14 @@ pub fn hide_chrome_popup_hwnd(app: &AppHandle, label: &str, hwnd_raw: Option<isi
 /// Yield the async command past the sync IPC reply path before WebView create.
 /// Never use bare `std::thread` + `WebviewWindowBuilder::build` (click-trace hung
 /// at chrome-prewarm status-menu build → Responding=False / 穿透).
-async fn async_delay_ms(ms: u64) {
+pub(crate) async fn async_delay_ms(ms: u64) {
     let _ = tauri::async_runtime::spawn_blocking(move || {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     })
     .await;
 }
 
-fn create_watchdog(label: &'static str) -> Arc<AtomicBool> {
+pub(crate) fn create_watchdog(label: &'static str) -> Arc<AtomicBool> {
     crate::win32::click_trace::mark_create_in_progress(true);
     let done = Arc::new(AtomicBool::new(false));
     let flag = done.clone();
@@ -195,7 +202,7 @@ fn create_watchdog(label: &'static str) -> Arc<AtomicBool> {
     done
 }
 
-fn finish_watchdog(done: &Arc<AtomicBool>) {
+pub(crate) fn finish_watchdog(done: &Arc<AtomicBool>) {
     done.store(true, Ordering::SeqCst);
     crate::win32::click_trace::mark_create_in_progress(false);
 }
@@ -1726,6 +1733,7 @@ fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::M
         "plugin-window",
         "status-menu-popup",
         "input-lang-popup",
+        "control-center-popup",
         "wifi-popup",
         "wifi-auth-popup",
         "chrome-hover-tip",
@@ -1921,7 +1929,7 @@ pub fn apply_window_effect(
     // (and any later invoke from a settings button could re-enter the same path).
     if matches!(
         window.label(),
-        "settings" | "dock-icon-editor" | "plugin-window" | "tray-popup" | "status-menu-popup" | "wifi-popup" | "wifi-auth-popup" | "input-lang-popup"
+        "settings" | "dock-icon-editor" | "plugin-window" | "tray-popup" | "status-menu-popup" | "control-center-popup" | "wifi-popup" | "wifi-auth-popup" | "input-lang-popup"
     ) {
         let _ = crate::win32::material::reassert_prefs(&window, &prefs);
         return Ok(prefs.kind.as_str().to_string());
@@ -2995,12 +3003,13 @@ const WIFI_POPUP_H: f64 = 320.0;
 const WIFI_AUTH_W: f64 = 420.0;
 const WIFI_AUTH_H: f64 = 220.0;
 
-fn close_sibling_popups(app: &AppHandle, except: &str) {
+pub(crate) fn close_sibling_popups(app: &AppHandle, except: &str) {
     for label in [
         "tray-popup",
         "plugin-popup",
         "status-menu-popup",
         "input-lang-popup",
+        "control-center-popup",
         "wifi-popup",
         "wifi-auth-popup",
     ] {
@@ -3259,6 +3268,7 @@ pub fn is_wifi_auth_popup_open(_app: AppHandle) -> bool {
 
 #[tauri::command]
 pub async fn invoke_tray_icon(
+    app: AppHandle,
     hwnd: isize,
     callback_msg: u32,
     uid: u32,
@@ -3266,16 +3276,17 @@ pub async fn invoke_tray_icon(
     action: Option<String>,
     id: Option<String>,
 ) -> Result<(), String> {
+    crate::win32::click_trace::log("tray", &format!("invoke action={action:?} hwnd={hwnd:#x} callback={callback_msg:#x} uid={uid} version={version:?}"));
     let click = crate::win32::tray::TrayClick::parse(action.as_deref().unwrap_or("left"));
     let version = version.unwrap_or(0);
     // Fire-and-forget — awaiting yield_for/SetWindowPos on the invoke path hung
     // the FE (右键 1.8s yield + left 40ms) and made the whole process 未响应.
+    if matches!(click, crate::win32::tray::TrayClick::Right) {
+        hide_chrome_popup(&app, "control-center-popup");
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(e) =
-            crate::win32::tray::invoke_icon_by_id(id, hwnd, callback_msg, uid, version, click)
-        {
-            eprintln!("[tray] invoke_icon: {e}");
-        }
+        let result = crate::win32::tray::invoke_icon_by_id(id, hwnd, callback_msg, uid, version, click);
+        crate::win32::click_trace::log("tray", &format!("dispatch result={result:?}"));
     });
     Ok(())
 }
@@ -3297,10 +3308,7 @@ pub fn open_notification_center() -> Result<(), String> {
     crate::win32::input::open_notification_center()
 }
 
-#[tauri::command]
-pub fn open_control_center() -> Result<(), String> {
-    crate::win32::input::open_control_center()
-}
+
 
 /// 当前前台窗口短标签（状态菜单左侧 chip）。
 #[tauri::command]
@@ -4125,7 +4133,7 @@ pub fn detach_plugin_from_island_prefs(app: &AppHandle, plugin_id: &str) {
 }
 
 #[cfg(windows)]
-fn send_media_virtual_key(vk: u16) -> Result<(), String> {
+pub(crate) fn send_media_virtual_key(vk: u16) -> Result<(), String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         keybd_event, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
     };
@@ -4137,7 +4145,7 @@ fn send_media_virtual_key(vk: u16) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn send_media_virtual_key(_vk: u16) -> Result<(), String> {
+pub(crate) fn send_media_virtual_key(_vk: u16) -> Result<(), String> {
     Err("media.keys only available on Windows".into())
 }
 

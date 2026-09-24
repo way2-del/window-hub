@@ -1,4 +1,5 @@
 mod commands;
+mod control_center;
 mod lifecycle;
 mod companion_scripts;
 mod db;
@@ -837,6 +838,7 @@ pub fn run() {
                         || window.label() == "plugin-popup"
                         || window.label() == "status-menu-popup"
                         || window.label() == "input-lang-popup"
+                        || window.label() == "control-center-popup"
                         || window.label() == "wifi-popup"
                         || window.label() == "wifi-auth-popup")
                         && !*focused
@@ -846,6 +848,20 @@ pub fn run() {
                         let popup_hwnd = window.hwnd().ok().map(|h| h.0 as isize);
                         std::thread::spawn(move || {
                             std::thread::sleep(Duration::from_millis(60));
+                            #[cfg(windows)]
+                            if label != "plugin-popup" {
+                                let ui_app = app.clone();
+                                let _ = app.run_on_main_thread(move || {
+                                    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                                    // Check and hide on the HWND's owning thread. A cross-thread
+                                    // ShowWindow can be queued behind a newer show/focus request.
+                                    if popup_hwnd == Some(unsafe { GetForegroundWindow().0 as isize }) {
+                                        return;
+                                    }
+                                    commands::hide_chrome_popup_hwnd(&ui_app, &label, popup_hwnd);
+                                });
+                                return;
+                            }
                             #[cfg(windows)]
                             {
                                 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -898,6 +914,9 @@ pub fn run() {
                     }
                     if window.label() == "input-lang-popup" {
                         let _ = window.app_handle().emit("input-lang-popup-closed", ());
+                    }
+                    if window.label() == "control-center-popup" {
+                        let _ = window.app_handle().emit("control-center-popup-closed", ());
                     }
                     if window.label() == "wifi-popup" {
                         let _ = window.app_handle().emit("wifi-popup-closed", ());
@@ -1061,7 +1080,13 @@ pub fn run() {
             commands::clear_tray_attention,
             win32::notification_focus::watch_tray_notification,
             commands::open_notification_center,
-            commands::open_control_center,
+            control_center::control_center_audio,
+            control_center::control_center_brightness,
+            control_center::control_center_action,
+            control_center::toggle_control_center,
+            control_center::open_control_center,
+            control_center::close_control_center,
+            control_center::is_control_center_open,
             commands::get_foreground_app,
             commands::set_system_taskbar_visible,
             dock::get_dock_prefs,

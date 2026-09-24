@@ -13,6 +13,7 @@ test('native window labels and query aliases retain their routes', () => {
     ['settings', 'settings', 'settings'], ['tray-popup', 'tray', 'tray'],
     ['status-menu-popup', 'status-menu', 'status-menu'], ['input-lang-popup', 'input-lang', 'input-lang'],
     ['chrome-hover-tip', 'chrome-tip', 'chrome-tip'], ['wifi-popup', 'wifi', 'wifi'],
+    ['control-center-popup', 'control-center', 'control-center'],
     ['wifi-auth-popup', 'wifi-auth', 'wifi-auth'], ['plugin-popup', 'plugin-popup', 'plugin-popup'],
     ['plugin-window', 'plugin-window', 'plugin-popup'], ['dock', 'dock', 'dock'],
     ['dock-glass', 'dock-glass', 'dock-glass'], ['island-bar-glass', 'island-bar-glass', 'island-bar-glass'],
@@ -29,7 +30,7 @@ test('injected flags outrank native/query routes without touching Tauri', () => 
   const flags = [
     ['DOCK_ICON_EDITOR', 'dock-icon-editor'], ['DOCK_GLASS', 'dock-glass'],
     ['ISLAND_BAR_GLASS', 'island-bar-glass'], ['DOCK', 'dock'], ['PLUGIN_POPUP', 'plugin-popup'],
-    ['WIFI_AUTH_POPUP', 'wifi-auth'], ['WIFI_POPUP', 'wifi'], ['CHROME_HOVER_TIP', 'chrome-tip'],
+    ['WIFI_AUTH_POPUP', 'wifi-auth'], ['CONTROL_CENTER', 'control-center'], ['WIFI_POPUP', 'wifi'], ['CHROME_HOVER_TIP', 'chrome-tip'],
     ['INPUT_LANG_POPUP', 'input-lang'], ['STATUS_MENU_POPUP', 'status-menu'],
     ['TRAY_POPUP', 'tray'], ['SETTINGS', 'settings'],
   ];
