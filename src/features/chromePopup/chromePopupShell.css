@@ -50,7 +50,8 @@ body.is-input-lang-popup #root {
 }
 
 .wh-chrome-popup-shell.is-scrollable {
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .wh-chrome-popup-shell.is-scrollable::-webkit-scrollbar {
@@ -68,13 +69,16 @@ body.is-input-lang-popup #root {
   pointer-events: none;
 }
 
-.wh-chrome-popup-shell.is-revealing {
+.wh-chrome-popup-shell.is-revealing:not(.is-entered) {
   pointer-events: none;
   overflow: hidden;
 }
 
-.wh-chrome-popup-shell.is-entered.is-scrollable {
-  overflow: auto;
+/* Must beat `.is-revealing` so React-owned `is-scrollable` actually scrolls. */
+.wh-chrome-popup-shell.is-entered.is-scrollable,
+.wh-chrome-popup-shell.is-scrollable {
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 html[data-theme="light"] body.is-wifi-popup,

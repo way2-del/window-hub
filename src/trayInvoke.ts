@@ -15,10 +15,12 @@ export type TrayClickAction = "left" | "left-double" | "right";
  * Double-click cancels the pending single and sends only WM_LBUTTONDBLCLK —
  * so single-click apps stay single-fire, double-click-only apps get a clean dblclk.
  */
-const TRAY_SINGLE_DELAY_MS = 280;
+const TRAY_SINGLE_DELAY_MS = 220;
 
 let pendingLeftTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingLeftIcon: TrayInvokeIcon | null = null;
+/** Physical screen point captured at pointer-down (VERSION_4 packing). */
+let pendingLeftCursor: { x: number; y: number } | null = null;
 
 function clearPendingLeft() {
   if (pendingLeftTimer != null) {
@@ -26,11 +28,22 @@ function clearPendingLeft() {
     pendingLeftTimer = null;
   }
   pendingLeftIcon = null;
+  pendingLeftCursor = null;
+}
+
+async function captureCursor(): Promise<{ x: number; y: number } | null> {
+  try {
+    const [x, y] = await invoke<[number, number]>("tray_cursor_pos");
+    return { x, y };
+  } catch {
+    return null;
+  }
 }
 
 export async function invokeTrayIcon(
   icon: TrayInvokeIcon,
   action: TrayClickAction,
+  cursor?: { x: number; y: number } | null,
 ): Promise<void> {
   await invoke("invoke_tray_icon", {
     id: icon.id,
@@ -39,6 +52,8 @@ export async function invokeTrayIcon(
     uid: icon.uid,
     version: icon.version ?? 0,
     action,
+    cursorX: cursor?.x ?? null,
+    cursorY: cursor?.y ?? null,
   });
 }
 
@@ -46,19 +61,28 @@ export async function invokeTrayIcon(
 export function armTrayLeftClick(icon: TrayInvokeIcon): void {
   clearPendingLeft();
   pendingLeftIcon = icon;
+  // Capture press-time cursor immediately (don't wait for the 220ms timer).
+  void captureCursor().then((pos) => {
+    if (pendingLeftIcon?.id === icon.id) {
+      pendingLeftCursor = pos;
+    }
+  });
   pendingLeftTimer = setTimeout(() => {
     const target = pendingLeftIcon;
+    const cursor = pendingLeftCursor;
     pendingLeftTimer = null;
     pendingLeftIcon = null;
+    pendingLeftCursor = null;
     if (!target) return;
-    void invokeTrayIcon(target, "left").catch((e) => console.error(e));
+    void invokeTrayIcon(target, "left", cursor).catch((e) => console.error(e));
   }, TRAY_SINGLE_DELAY_MS);
 }
 
 /** Native dblclick — cancel pending single, send left-double only. */
 export function fireTrayLeftDouble(icon: TrayInvokeIcon): void {
+  const cursor = pendingLeftCursor;
   clearPendingLeft();
-  void invokeTrayIcon(icon, "left-double").catch((e) => console.error(e));
+  void invokeTrayIcon(icon, "left-double", cursor).catch((e) => console.error(e));
 }
 
 /** @deprecated Prefer armTrayLeftClick + fireTrayLeftDouble from pointer handlers. */
@@ -68,5 +92,6 @@ export async function invokeTrayLeftClick(icon: TrayInvokeIcon): Promise<void> {
 
 export async function invokeTrayRightClick(icon: TrayInvokeIcon): Promise<void> {
   clearPendingLeft();
-  await invokeTrayIcon(icon, "right");
+  const cursor = await captureCursor();
+  await invokeTrayIcon(icon, "right", cursor);
 }

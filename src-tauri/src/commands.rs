@@ -3275,20 +3275,43 @@ pub async fn invoke_tray_icon(
     version: Option<u32>,
     action: Option<String>,
     id: Option<String>,
+    cursor_x: Option<i32>,
+    cursor_y: Option<i32>,
 ) -> Result<(), String> {
-    crate::win32::click_trace::log("tray", &format!("invoke action={action:?} hwnd={hwnd:#x} callback={callback_msg:#x} uid={uid} version={version:?}"));
+    crate::win32::click_trace::log("tray", &format!("invoke action={action:?} hwnd={hwnd:#x} callback={callback_msg:#x} uid={uid} version={version:?} cursor={cursor_x:?},{cursor_y:?}"));
     let click = crate::win32::tray::TrayClick::parse(action.as_deref().unwrap_or("left"));
     let version = version.unwrap_or(0);
-    // Fire-and-forget — awaiting yield_for/SetWindowPos on the invoke path hung
-    // the FE (右键 1.8s yield + left 40ms) and made the whole process 未响应.
+    let cursor = match (cursor_x, cursor_y) {
+        (Some(x), Some(y)) => Some((x, y)),
+        _ => None,
+    };
+    // Await the worker, never execute Win32/UIA on the UI/runtime thread.
+    // Return dispatch failures to the caller instead of acknowledging a no-op.
     if matches!(click, crate::win32::tray::TrayClick::Right) {
         hide_chrome_popup(&app, "control-center-popup");
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let result = crate::win32::tray::invoke_icon_by_id(id, hwnd, callback_msg, uid, version, click);
+        let result = crate::win32::tray::invoke_icon_by_id(
+            id, hwnd, callback_msg, uid, version, click, cursor,
+        );
         crate::win32::click_trace::log("tray", &format!("dispatch result={result:?}"));
-    });
-    Ok(())
+        result
+    })
+    .await
+    .map_err(|e| format!("托盘点击任务失败：{e}"))?
+}
+
+/// Physical screen cursor — capture at pointer-down so deferred left-clicks
+/// still pack VERSION_4 coords from the press point (not 280ms later).
+#[tauri::command]
+pub fn tray_cursor_pos() -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    (pt.x, pt.y)
 }
 
 /// 点开岛通知 / 确认托盘注意力：flashing → 0，下次新消息可再弹。
@@ -3617,6 +3640,7 @@ pub fn hub_island_open_bound_tray(plugin_id: String) -> Result<(), String> {
         icon.uid,
         icon.version,
         crate::win32::tray::TrayClick::Left,
+        None,
     )
 }
 

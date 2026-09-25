@@ -272,6 +272,9 @@ mod win {
     }
 
     fn hide_taskbars_once() {
+        if TRAY_INTERACTIONS.load(Ordering::SeqCst) != 0 {
+            return;
+        }
         use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
         for_each_taskbar(|hwnd| unsafe {
             // Only hide when visible — avoids needless Show/Hide churn.
@@ -279,6 +282,31 @@ mod win {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
         });
+    }
+
+    // Only tray_native uses this lease. Preserve the configured taskbar policy
+    // while Explorer temporarily exposes accessible notification-area buttons.
+    static TRAY_INTERACTIONS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    pub struct TrayInteractionGuard;
+    impl Drop for TrayInteractionGuard {
+        fn drop(&mut self) {
+            TRAY_INTERACTIONS.fetch_sub(1, Ordering::SeqCst);
+            if TASKBAR_KEEP_HIDDEN.load(Ordering::SeqCst) {
+                hide_taskbars_once();
+            }
+        }
+    }
+
+    pub fn hold_taskbar_for_tray() -> TrayInteractionGuard {
+        TRAY_INTERACTIONS.fetch_add(1, Ordering::SeqCst);
+        // Actually reveal bars — the keep-hidden loop only skips SW_HIDE while
+        // the counter is non-zero; without ShowWindow, UIA sees an empty tray.
+        for_each_taskbar(|hwnd| unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNA);
+        });
+        TrayInteractionGuard
     }
 
     fn start_keep_hidden() {
@@ -290,6 +318,10 @@ mod win {
         }
         std::thread::spawn(|| {
             while TASKBAR_KEEP_HIDDEN.load(Ordering::SeqCst) {
+                if TRAY_INTERACTIONS.load(Ordering::SeqCst) != 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
                 hide_taskbars_once();
                 // Re-assert auto-hide so Explorer keeps the work-area gap gone.
                 if let Some(primary) = shell_tray_hwnd() {
@@ -377,7 +409,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{foreground_app, set_taskbar_visible, show_desktop};
+pub use win::{foreground_app, hold_taskbar_for_tray, set_taskbar_visible, show_desktop};
 
 #[cfg(not(windows))]
 pub fn foreground_app(_self_hwnd: Option<isize>) -> ForegroundApp {

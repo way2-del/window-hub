@@ -1077,6 +1077,7 @@ pub fn run() {
             db::admin::db_dev_pick_restore_file,
             db::admin::db_dev_restore,
             commands::invoke_tray_icon,
+            commands::tray_cursor_pos,
             commands::clear_tray_attention,
             win32::notification_focus::watch_tray_notification,
             commands::open_notification_center,

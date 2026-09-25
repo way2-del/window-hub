@@ -44,11 +44,42 @@ export async function resolvePopupMaxHeight(
   return Math.max(160, Math.floor(avail * fraction));
 }
 
-/** Effective max: caller cap ∩ screen fraction. */
-export async function effectivePopupMaxHeight(explicit?: number): Promise<number> {
+/** Effective max: caller cap ∩ screen fraction ∩ space left on the monitor. */
+export async function effectivePopupMaxHeight(
+  explicit?: number,
+  opts?: Pick<PopupFitOptions, "pinBottom">,
+): Promise<number> {
   const screenCap = await resolvePopupMaxHeight();
-  if (explicit == null || !Number.isFinite(explicit)) return screenCap;
-  return Math.min(explicit, screenCap);
+  let cap =
+    explicit == null || !Number.isFinite(explicit)
+      ? screenCap
+      : Math.min(explicit, screenCap);
+
+  // Clamp to remaining work area so a tall list under the island scrolls
+  // instead of growing past the bottom edge with overflow:hidden.
+  try {
+    const win = getCurrentWindow();
+    const [monitor, factor, pos] = await Promise.all([
+      currentMonitor(),
+      win.scaleFactor(),
+      win.outerPosition(),
+    ]);
+    if (monitor) {
+      const monTop = monitor.position.y / factor;
+      const monBottom = monTop + monitor.size.height / factor;
+      const margin = 10;
+      const space =
+        opts?.pinBottom != null && Number.isFinite(opts.pinBottom)
+          ? Math.floor(opts.pinBottom - monTop - margin)
+          : Math.floor(monBottom - pos.y / factor - margin);
+      if (space > 80) {
+        cap = Math.min(cap, space);
+      }
+    }
+  } catch {
+    /* keep screenCap */
+  }
+  return cap;
 }
 
 export type PopupMeasure = {
@@ -104,8 +135,8 @@ function syncShellScrollable(selector: string, scrollable: boolean) {
 /** Measure natural content height and resize the current popup window to fit. */
 export async function fitPopupToContent(
   opts: PopupFitOptions,
-): Promise<{ width: number; height: number }> {
-  const maxHeight = await effectivePopupMaxHeight(opts.maxHeight);
+): Promise<{ width: number; height: number; scrollable: boolean }> {
+  const maxHeight = await effectivePopupMaxHeight(opts.maxHeight, opts);
   const { width, height, scrollable } = measurePopupContent({ ...opts, maxHeight });
   syncShellScrollable(opts.selector, scrollable);
   // Short menus: slight slack + overflow:hidden (via CSS). Capped menus keep exact max.
@@ -120,7 +151,7 @@ export async function fitPopupToContent(
     await win.setPosition(new LogicalPosition(x, y));
   }
 
-  return { width, height: sizeH };
+  return { width, height: sizeH, scrollable };
 }
 
 /**
@@ -129,8 +160,8 @@ export async function fitPopupToContent(
  */
 export async function slideRevealPopup(
   opts: PopupFitOptions & { direction: "down" | "up" },
-): Promise<{ width: number; height: number }> {
-  const maxHeight = await effectivePopupMaxHeight(opts.maxHeight);
+): Promise<{ width: number; height: number; scrollable: boolean }> {
+  const maxHeight = await effectivePopupMaxHeight(opts.maxHeight, opts);
   const { width, height, scrollable } = measurePopupContent({ ...opts, maxHeight });
   syncShellScrollable(opts.selector, scrollable);
   const sizeH = scrollable ? height : height + FIT_HEIGHT_SLACK;
@@ -174,7 +205,7 @@ export async function slideRevealPopup(
     await win.setPosition(new LogicalPosition(x, topY));
   }
   await win.setFocus();
-  return { width, height: sizeH };
+  return { width, height: sizeH, scrollable };
 }
 
 /** Run fit on next frames so layout/fonts settle. */

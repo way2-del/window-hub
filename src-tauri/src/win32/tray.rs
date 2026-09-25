@@ -6,18 +6,26 @@
 //! - No SQLite write on publish; mild cold-start recover only
 //!
 //! Tray boots **on by default**. Emergency off: `WH_DISABLE_TRAY=1`.
-//! Opt-in riskier paths: `WH_TRAY_HOOK=1`, `WH_TRAY_SOFT_SEED=1`.
+//! Explorer hook is **on by default** (live hwnd/callback for every icon).
+//! Opt-out: `WH_DISABLE_TRAY_HOOK=1` or `WH_TRAY_HOOK=0`. Soft stubs: `WH_TRAY_SOFT_SEED=1`.
 
 use serde::{Deserialize, Serialize};
 
-/// Production default: tray is always on (spy-safe path).
-/// Opt-in: `WH_TRAY_HOOK=1` (explorer hook), `WH_TRAY_SOFT_SEED=1` (registry stubs).
+/// Production default: tray is always on.
 pub const TRAY_BOOT_ENABLED_DEFAULT: bool = true;
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn env_flag_or(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
+        Ok(_) | Err(_) => default,
+    }
 }
 
 /// Runtime gate used by boot + commands.
@@ -28,8 +36,14 @@ pub fn tray_boot_enabled() -> bool {
     TRAY_BOOT_ENABLED_DEFAULT
 }
 
+/// Default **on**: inject `window_hub_trayhook.dll` so every NIM_ADD carries
+/// real hwnd+callback — the only stable way to synthesize left/right clicks.
+/// Off: `WH_DISABLE_TRAY_HOOK=1` or `WH_TRAY_HOOK=0`.
 fn tray_hook_enabled() -> bool {
-    env_flag("WH_TRAY_HOOK")
+    if env_flag("WH_DISABLE_TRAY_HOOK") {
+        return false;
+    }
+    env_flag_or("WH_TRAY_HOOK", true)
 }
 
 fn tray_soft_seed_enabled() -> bool {
@@ -1371,6 +1385,94 @@ mod win {
         changed
     }
 
+    /// Upgrade soft-seed stubs by reading Explorer ToolbarWindow32 (hwnd/callback).
+    /// Returns how many clickable icons were upserted from the scan.
+    fn sync_from_explorer_toolbar() -> usize {
+        let icons = match crate::win32::tray_toolbar::enumerate_live_icons() {
+            Ok(v) => v,
+            Err(e) => {
+                crate::win32::click_trace::log(
+                    "tray",
+                    &format!("toolbar-sync fail={e}"),
+                );
+                eprintln!("[tray] toolbar-sync failed: {e}");
+                return 0;
+            }
+        };
+        let mut upgraded = 0usize;
+        for tb in icons {
+            let hwnd = tb.hwnd;
+            let uid = tb.uid;
+            let callback_msg = tb.callback_msg;
+            if hwnd == 0 || callback_msg == 0 {
+                continue;
+            }
+            let guid = tb.guid.as_deref();
+            let id = if let Some(g) = guid.filter(|g| looks_like_guid_id(g)) {
+                g.to_string()
+            } else {
+                format!("{hwnd}:{uid}")
+            };
+            let process = {
+                let from_exe = std::path::Path::new(&tb.exe_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if from_exe.is_empty() {
+                    process_label(hwnd)
+                } else {
+                    from_exe
+                }
+            };
+            let tooltip = resolve_label(&id, &tb.tooltip, &process, hwnd);
+            let pin_key = compute_pin_key(guid, hwnd, uid, &process);
+            let area = if tb.is_visible {
+                "taskbar".to_string()
+            } else {
+                "overflow".to_string()
+            };
+            let resident = is_language_ime_icon(&id, &process, &tooltip);
+            let system_tray = is_shell_system_tray(&id, &process, &tooltip);
+            let prev = find_prev_icon(&id, hwnd, uid);
+            let icon_png_base64 = prev
+                .as_ref()
+                .map(|p| p.icon_png_base64.clone())
+                .unwrap_or_default();
+            let flashing = prev.as_ref().map(|p| p.flashing).unwrap_or(false) && !system_tray;
+            let info = TrayIconInfo {
+                id,
+                pin_key,
+                tooltip,
+                process,
+                uid,
+                hwnd,
+                callback_msg,
+                version: tb.version,
+                icon_png_base64,
+                area,
+                flashing,
+                resident,
+                system_tray,
+            };
+            upsert_icon(info);
+            upgraded += 1;
+        }
+        crate::win32::click_trace::log(
+            "tray",
+            &format!("toolbar-sync upgraded={upgraded}"),
+        );
+        if upgraded > 0 {
+            publish();
+        }
+        upgraded
+    }
+
+    /// Public entry for boot / click recovery.
+    pub fn sync_toolbar_icons() -> usize {
+        sync_from_explorer_toolbar()
+    }
+
     fn upsert_icon(mut info: TrayIconInfo) {
         let proc = info.process.trim().to_ascii_lowercase();
         let id = info.id.clone();
@@ -2490,7 +2592,8 @@ mod win {
             if empty {
                 broadcast_taskbar_created_force();
             }
-            if changed || empty {
+            let upgraded = sync_toolbar_icons();
+            if changed || empty || upgraded > 0 {
                 publish();
             }
         }));
@@ -2724,6 +2827,10 @@ mod win {
                 // Short settle then TaskbarCreated — was 1s and raced boot's 1s seed wait.
                 std::thread::sleep(std::time::Duration::from_millis(350));
                 broadcast_taskbar_created();
+                // Upgrade soft-seed stubs with live hwnd/callback from Explorer toolbars.
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let n = sync_from_explorer_toolbar();
+                eprintln!("[tray] boot toolbar-sync upgraded={n}");
 
                 while let Some(event) = systray.events_blocking() {
                     match event {
@@ -2748,8 +2855,9 @@ mod win {
     }
 
     /// Start tray tracking.
-    /// Default **on**: spy-only (no explorer hook, no registry soft-seed).
-    /// Opt-in: `WH_TRAY_HOOK=1`, `WH_TRAY_SOFT_SEED=1`. Off: `WH_DISABLE_TRAY=1`.
+    /// Default **on**: Explorer hook for live hwnd/callback + TaskbarCreated refresh.
+    /// Soft stubs: `WH_TRAY_SOFT_SEED=1`. Off: `WH_DISABLE_TRAY=1`.
+    /// Disable hook: `WH_DISABLE_TRAY_HOOK=1` (falls back to spy).
     pub fn start<F, A, P>(on_change: F, on_attention: A, on_prefs: P)
     where
         F: Fn(Vec<TrayIconInfo>) + Send + Sync + 'static,
@@ -2778,12 +2886,12 @@ mod win {
         let use_hook = super::tray_hook_enabled();
         let use_soft = super::tray_soft_seed_enabled();
         eprintln!(
-            "[tray] starting safe mode: hook={} soft_seed={} (spy always on unless hook-only)",
+            "[tray] starting: hook={} soft_seed={} (hook default on → live hwnd/callback)",
             use_hook, use_soft
         );
 
         if use_hook {
-            // Explorer injection — opt-in only; can freeze the shell if hook misbehaves.
+            // Explorer WH_CALLWNDPROC — captures every Shell_NotifyIcon register.
             let _ = start_hook_loop();
         } else {
             start_spy_fallback();
@@ -2817,6 +2925,10 @@ mod win {
                         }
                     }));
                 }
+                // After soft-seed, upgrade stubs from Explorer toolbars.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let n = sync_from_explorer_toolbar();
+                eprintln!("[tray] cold-start toolbar-sync upgraded={n}");
             })
             .expect("spawn tray-cold-start");
     }
@@ -3181,7 +3293,7 @@ mod win {
         cursor: (i32, i32),
     ) -> Result<(), String> {
         use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SendNotifyMessageW};
 
         // NOTIFYICON_VERSION_4+: wParam = cursor, lParam = MAKEWPARAM(msg, uid)
         // older: wParam = uid, lParam = MAKEWPARAM(msg, 0)
@@ -3198,20 +3310,88 @@ mod win {
             )
         };
 
-        // PostMessage matches AHK / explorer-style tray synthesis better than SendNotify.
+        let h = HWND(hwnd as *mut _);
+        // Prefer SendNotifyMessage — matches Explorer / systray-util. Fall back to
+        // PostMessage if the target queue rejects notify (rare UIPI / hung cases).
         unsafe {
-            PostMessageW(HWND(hwnd as *mut _), callback, wparam, lparam)
-                .map_err(|e| e.to_string())?;
+            if SendNotifyMessageW(h, callback, wparam, lparam).is_ok() {
+                return Ok(());
+            }
+            PostMessageW(h, callback, wparam, lparam).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
+    /// Button messages (DOWN/UP): trust cached version when known.
+    /// Version 0 is usually "spy never saw SETVERSION" — keep classic packing so
+    /// PixPin-like handlers that key off LOWORD(lParam) don't double-fire from a
+    /// dual-pack. Tencent still forces v4 so wParam carries screen coords.
+    fn notify_button(
+        hwnd: isize,
+        callback: u32,
+        uid: u32,
+        version: u32,
+        tencent: bool,
+        message: u32,
+        cursor: (i32, i32),
+    ) -> Result<(), String> {
+        let pack = if version > 0 {
+            version
+        } else if tencent {
+            4
+        } else {
+            0
+        };
+        notify_icon_at(hwnd, callback, uid, pack, message, cursor)
+    }
+
+    /// NIN_SELECT / WM_CONTEXTMENU: Explorer sends these for NOTIFYICON_VERSION ≥ 3.
+    /// Cache often stays at 0 — dual-pack only when unknown so LOWORD-only handlers
+    /// don't get two NIN_SELECT. Known version uses that pack alone (no max(4) footgun).
+    fn notify_v3_action(
+        hwnd: isize,
+        callback: u32,
+        uid: u32,
+        version: u32,
+        tencent: bool,
+        message: u32,
+        cursor: (i32, i32),
+    ) {
+        if version > 3 {
+            let _ = notify_icon_at(hwnd, callback, uid, version, message, cursor);
+        } else if version >= 3 {
+            let _ = notify_icon_at(hwnd, callback, uid, version, message, cursor);
+        } else if tencent {
+            let _ = notify_icon_at(hwnd, callback, uid, 4, message, cursor);
+        } else {
+            let _ = notify_icon_at(hwnd, callback, uid, 0, message, cursor);
+            let _ = notify_icon_at(hwnd, callback, uid, 4, message, cursor);
+        }
+    }
+
     /// Double-click apps often register VERSION_4 while our cache still has 0 (or vice versa).
-    fn notify_icon_dblclk(hwnd: isize, callback: u32, uid: u32, version: u32, cursor: (i32, i32)) {
-        use windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDBLCLK;
-        let _ = notify_icon_at(hwnd, callback, uid, version, WM_LBUTTONDBLCLK, cursor);
-        let alt = if version > 3 { 0 } else { 4 };
-        let _ = notify_icon_at(hwnd, callback, uid, alt, WM_LBUTTONDBLCLK, cursor);
+    fn notify_icon_dblclk(
+        hwnd: isize,
+        callback: u32,
+        uid: u32,
+        version: u32,
+        tencent: bool,
+        cursor: (i32, i32),
+    ) {
+        use windows::Win32::UI::WindowsAndMessaging::{WM_LBUTTONDBLCLK, WM_USER};
+        const NIN_SELECT: u32 = WM_USER + 0;
+        if version > 0 {
+            let _ = notify_icon_at(hwnd, callback, uid, version, WM_LBUTTONDBLCLK, cursor);
+            let alt = if version > 3 { 0 } else { 4 };
+            let _ = notify_icon_at(hwnd, callback, uid, alt, WM_LBUTTONDBLCLK, cursor);
+        } else if tencent {
+            let _ = notify_icon_at(hwnd, callback, uid, 4, WM_LBUTTONDBLCLK, cursor);
+        } else {
+            let _ = notify_icon_at(hwnd, callback, uid, 0, WM_LBUTTONDBLCLK, cursor);
+            let _ = notify_icon_at(hwnd, callback, uid, 4, WM_LBUTTONDBLCLK, cursor);
+        }
+        // Mirror Explorer / systray-util: v3+ also gets NIN_SELECT on double-click.
+        notify_v3_action(hwnd, callback, uid, version, tencent, NIN_SELECT, cursor);
     }
 
     fn find_clickable_twin(info: &TrayIconInfo) -> Option<TrayIconInfo> {
@@ -3273,13 +3453,7 @@ mod win {
         uid: u32,
         version: u32,
         click: TrayClick,
-    ) -> Result<(), String> {
-        invoke_icon_with_recovery(id, hwnd, callback_msg, uid, version, click, true)
-    }
-
-    fn invoke_icon_with_recovery(
-        id: Option<String>, hwnd: isize, callback_msg: u32, uid: u32,
-        version: u32, click: TrayClick, recover: bool,
+        cursor: Option<(i32, i32)>,
     ) -> Result<(), String> {
         // Resolve from cache when frontend passes an id (registry stubs have hwnd=0).
         // Use meta_of — never clone PNG on the click path (was freezing workers).
@@ -3302,8 +3476,8 @@ mod win {
         let mut uid = uid;
         let mut version = version;
         let mut icon_id = id.clone();
-        // Publishing a live icon can remove its registry placeholder. Retain
-        // identity hints so the original click can follow that replacement.
+        // Retain the cached tooltip/Windows area for native fallback when the
+        // icon has no callback metadata (registry placeholders after a restart).
         let recovery_hint = resolved.as_ref().map(meta_of);
 
         let mut process = String::new();
@@ -3362,20 +3536,48 @@ mod win {
             process = process_label(hwnd);
         }
 
-        if hwnd != 0 && callback_msg != 0 {
-            crate::win32::fullscreen::note_tray_interaction();
-            let id_str = icon_id.clone().unwrap_or_default();
-            // 点开即复位 flashing→0（先于回调），下次新消息才能再弹岛通知
-            clear_flashing(
-                if id_str.is_empty() {
-                    None
-                } else {
-                    Some(id_str.as_str())
-                },
-                hwnd,
-                uid,
+        let id_str = icon_id.clone().unwrap_or_default();
+
+        crate::win32::fullscreen::note_tray_interaction();
+        clear_flashing(
+            if id_str.is_empty() {
+                None
+            } else {
+                Some(id_str.as_str())
+            },
+            hwnd,
+            uid,
+        );
+
+        let stub_hint = recovery_hint.clone().or_else(|| {
+            if tip.is_empty() && process.is_empty() && id_str.is_empty() {
+                None
+            } else {
+                Some(TrayIconInfo {
+                    id: id_str.clone(),
+                    pin_key: String::new(),
+                    tooltip: tip.clone(),
+                    process: process.clone(),
+                    uid,
+                    hwnd,
+                    callback_msg,
+                    version,
+                    icon_png_base64: String::new(),
+                    area: "overflow".into(),
+                    flashing: false,
+                    resident: false,
+                    system_tray: false,
+                })
+            }
+        });
+
+        // —— Path A: live hwnd+callback → notify only ——
+        if hwnd_alive(hwnd) && callback_msg != 0 {
+            crate::win32::click_trace::log(
+                "tray",
+                &format!("notify-first id={id_str} hwnd={hwnd:#x} cb={callback_msg:#x}"),
             );
-            return invoke_via_notify(
+            if invoke_via_notify(
                 hwnd,
                 callback_msg,
                 uid,
@@ -3384,34 +3586,273 @@ mod win {
                 &process,
                 &tip,
                 &id_str,
-            );
+                cursor,
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
         }
 
-        // Registry placeholders may outlive a missed NIM_ADD (e.g. after Hub
-        // restarts while apps keep running). The spy cannot reconstruct their
-        // callback address from a GUID. On an actual click, activate the existing
-        // Explorer observer and wait on this blocking worker for fresh metadata.
-        // Never guess a callback or block the WebView/UI thread.
-        if let Some(recovery_id) = icon_id.as_deref().filter(|_| recover) {
-            crate::win32::click_trace::log("tray", "missing callback: bounded recovery");
-            if !start_hook_loop() { broadcast_taskbar_created_force(); }
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1800);
-            while std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                let cached = { ICONS.lock().get(recovery_id).map(meta_of) }
-                    .or_else(|| recovery_hint.clone());
-                if let Some(info) = cached {
-                    let target = if is_clickable(&info) { Some(info) } else { find_clickable_twin(&info) };
-                    if let Some(live) = target {
-                        return invoke_icon_with_recovery(Some(live.id), live.hwnd, live.callback_msg, live.uid, live.version, click, false);
+        // —— Path B: stub → toolbar sync (Win10 TbButton; often empty on Win11) ——
+        if let Some(ref hint) = stub_hint {
+            if !hwnd_alive(hwnd) || callback_msg == 0 {
+                crate::win32::click_trace::log(
+                    "tray",
+                    &format!("still-stub id={} tip={:?} → toolbar-sync", hint.id, hint.tooltip),
+                );
+                let _ = sync_from_explorer_toolbar();
+                if let Some(live) = resolve_clickable_after_sync(hint) {
+                    crate::win32::click_trace::log(
+                        "tray",
+                        &format!(
+                            "toolbar upgraded → notify id={} hwnd={:#x} cb={:#x}",
+                            live.id, live.hwnd, live.callback_msg
+                        ),
+                    );
+                    clear_flashing(Some(&live.id), live.hwnd, live.uid);
+                    if invoke_via_notify(
+                        live.hwnd,
+                        live.callback_msg,
+                        live.uid,
+                        live.version,
+                        click,
+                        &live.process,
+                        &live.tooltip,
+                        &live.id,
+                        cursor,
+                    )
+                    .is_ok()
+                    {
+                        return Ok(());
+                    }
+                    // Prefer shell-rect with the upgraded hwnd even if notify failed.
+                    hwnd = live.hwnd;
+                    uid = live.uid;
+                    icon_id = Some(live.id.clone());
+                } else {
+                    // Short TaskbarCreated + one more toolbar pass.
+                    crate::win32::click_trace::log("tray", "stub → TaskbarCreated + toolbar-sync retry");
+                    if let Some(live) = recover_stub_clickable(hint) {
+                        crate::win32::click_trace::log(
+                            "tray",
+                            &format!(
+                                "stub recovered → notify id={} hwnd={:#x} cb={:#x}",
+                                live.id, live.hwnd, live.callback_msg
+                            ),
+                        );
+                        clear_flashing(Some(&live.id), live.hwnd, live.uid);
+                        if invoke_via_notify(
+                            live.hwnd,
+                            live.callback_msg,
+                            live.uid,
+                            live.version,
+                            click,
+                            &live.process,
+                            &live.tooltip,
+                            &live.id,
+                            cursor,
+                        )
+                        .is_ok()
+                        {
+                            return Ok(());
+                        }
+                        hwnd = live.hwnd;
+                        uid = live.uid;
+                        icon_id = Some(live.id.clone());
                     }
                 }
             }
         }
+
+        // —— Path C: Shell_NotifyIconGetRect + SendInput (real Explorer instance) ——
+        // Works without callback when we have GUID and/or hwnd+uid (+ reg key to promote).
+        if let Some(ref hint) = stub_hint {
+            let id_for_rect = icon_id.clone().unwrap_or_else(|| hint.id.clone());
+            let guid = if looks_like_guid_id(&id_for_rect) {
+                Some(id_for_rect.clone())
+            } else if looks_like_guid_id(&hint.id) {
+                Some(hint.id.clone())
+            } else if looks_like_guid_id(&hint.pin_key) {
+                Some(hint.pin_key.clone())
+            } else {
+                None
+            };
+            let reg_key = {
+                let map = REG_KEY_BY_ID.lock();
+                map.get(&id_for_rect)
+                    .cloned()
+                    .or_else(|| map.get(&hint.id).cloned())
+                    .or_else(|| {
+                        id_for_rect
+                            .strip_prefix("reg:")
+                            .map(|k| k.to_string())
+                            .or_else(|| hint.id.strip_prefix("reg:").map(|k| k.to_string()))
+                    })
+            };
+            let right = matches!(click, TrayClick::Right);
+            let double = matches!(click, TrayClick::LeftDouble);
+            let use_hwnd = if hwnd_alive(hwnd) { hwnd } else { hint.hwnd };
+            let use_uid = if uid != 0 { uid } else { hint.uid };
+
+            if guid.is_some() || use_hwnd != 0 || reg_key.is_some() {
+                crate::win32::click_trace::log(
+                    "tray",
+                    &format!(
+                        "shell-rect try id={} guid={:?} hwnd={:#x} uid={} reg={:?}",
+                        id_for_rect, guid, use_hwnd, use_uid, reg_key
+                    ),
+                );
+                let hold = crate::win32::status_menu::hold_taskbar_for_tray();
+                let shell = crate::win32::tray_shell_click::invoke(
+                    guid.as_deref(),
+                    use_hwnd,
+                    use_uid,
+                    reg_key.as_deref(),
+                    right,
+                    double,
+                );
+                if shell.is_ok() {
+                    if right {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1_500));
+                            drop(hold);
+                        });
+                    } else {
+                        drop(hold);
+                    }
+                    crate::win32::click_trace::log("tray", "shell-rect Ok");
+                    return Ok(());
+                }
+                drop(hold);
+                crate::win32::click_trace::log("tray", &format!("shell-rect fail={shell:?}"));
+            }
+        }
+
+        // —— Path D (last resort): UIA after showing the shell tray ——
+        if let Some(ref info) = stub_hint {
+            let right = matches!(click, TrayClick::Right);
+            let hold = crate::win32::status_menu::hold_taskbar_for_tray();
+            let mut names: Vec<String> = Vec::new();
+            for candidate in [info.tooltip.as_str(), info.process.as_str()] {
+                let t = candidate.trim();
+                if !t.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(t)) {
+                    names.push(t.to_string());
+                }
+            }
+            for name in &names {
+                crate::win32::click_trace::log(
+                    "tray",
+                    &format!("uia-last overflow-by-name try={name:?}"),
+                );
+                if crate::win32::tray_uia::invoke_overflow_by_name(name, right).is_ok() {
+                    if right {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1_500));
+                            drop(hold);
+                        });
+                    }
+                    return Ok(());
+                }
+            }
+            crate::win32::click_trace::log(
+                "tray",
+                &format!("uia-last native id={} tip={:?}", info.id, info.tooltip),
+            );
+            let result = crate::win32::tray_native::invoke(info, click);
+            if result.is_ok() && right {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1_500));
+                    drop(hold);
+                });
+            } else {
+                drop(hold);
+            }
+            if result.is_ok() {
+                return result;
+            }
+            crate::win32::click_trace::log("tray", &format!("uia-last fail={result:?}"));
+            return result;
+        }
+
         Err(format!(
-            "托盘点击失败：缺少 hwnd/callback（id={:?}）— 仅转发 Shell_NotifyIcon 回调，不走 UIA/demote",
+            "托盘图标不可点击（无回调且 shell-rect/工具栏未解析到）id={:?}",
             icon_id
         ))
+    }
+
+    fn resolve_clickable_after_sync(hint: &TrayIconInfo) -> Option<TrayIconInfo> {
+        let icons = ICONS.lock();
+        if let Some(live) = icons.get(&hint.id).filter(|i| is_clickable(i)).map(meta_of) {
+            return Some(live);
+        }
+        let pin = pin_key_of(hint);
+        if !pin.is_empty() {
+            if let Some(live) = icons
+                .values()
+                .find(|i| is_clickable(i) && pin_key_of(i) == pin)
+                .map(meta_of)
+            {
+                return Some(live);
+            }
+        }
+        drop(icons);
+        find_clickable_twin(hint)
+    }
+
+    /// TaskbarCreated + toolbar re-scan + short wait for live hwnd/callback.
+    fn recover_stub_clickable(hint: &TrayIconInfo) -> Option<TrayIconInfo> {
+        broadcast_taskbar_created_force();
+        let _ = sync_from_explorer_toolbar();
+        if let Some(live) = resolve_clickable_after_sync(hint) {
+            return Some(live);
+        }
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(900);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = sync_from_explorer_toolbar();
+            if let Some(live) = resolve_clickable_after_sync(hint) {
+                return Some(live);
+            }
+        }
+        None
+    }
+
+    fn force_foreground(hwnd: isize, owner_pid: u32) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow,
+            GetWindowThreadProcessId, SetForegroundWindow, ASFW_ANY,
+        };
+        let h = HWND(hwnd as *mut _);
+        unsafe {
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
+            if owner_pid != 0 {
+                let _ = AllowSetForegroundWindow(owner_pid);
+            }
+            let fg = GetForegroundWindow();
+            let mut fg_pid = 0u32;
+            let fg_tid = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+            let our_tid = GetCurrentThreadId();
+            let mut target_pid = 0u32;
+            let target_tid = GetWindowThreadProcessId(h, Some(&mut target_pid));
+            let attached_fg =
+                fg_tid != 0 && fg_tid != our_tid && AttachThreadInput(our_tid, fg_tid, true).as_bool();
+            let attached_tg = target_tid != 0
+                && target_tid != our_tid
+                && target_tid != fg_tid
+                && AttachThreadInput(our_tid, target_tid, true).as_bool();
+            let _ = BringWindowToTop(h);
+            let _ = SetForegroundWindow(h);
+            if attached_tg {
+                let _ = AttachThreadInput(our_tid, target_tid, false);
+            }
+            if attached_fg {
+                let _ = AttachThreadInput(our_tid, fg_tid, false);
+            }
+        }
     }
 
     fn invoke_via_notify(
@@ -3423,11 +3864,12 @@ mod win {
         process: &str,
         tip: &str,
         icon_id: &str,
+        cursor_hint: Option<(i32, i32)>,
     ) -> Result<(), String> {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            AllowSetForegroundWindow, GetWindowThreadProcessId, IsWindow, WM_CONTEXTMENU,
-            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER,
+            IsWindow, WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
+            WM_USER,
         };
         const NIN_SELECT: u32 = WM_USER + 0;
 
@@ -3437,20 +3879,22 @@ mod win {
             if !IsWindow(h).as_bool() {
                 return Err("tray owner window gone".into());
             }
-
-            GetWindowThreadProcessId(h, Some(&mut owner_pid));
-            if owner_pid != 0 {
-                let _ = AllowSetForegroundWindow(owner_pid);
-            }
+            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                h,
+                Some(&mut owner_pid),
+            );
         }
 
-        // Right-click menus need topmost yield; left/dblclk must fire immediately —
-        // never SetWindowPos the main strip on the left-click hot path (hung pump).
+        // Capture / apply cursor BEFORE yield so left-click (after FE debounce)
+        // and right-click still use the press-time screen point for VERSION_4.
+        let click_pt = cursor_hint.unwrap_or_else(cursor_pos);
+
+        // Right-click menus need topmost yield; left/dblclk must fire immediately.
         if matches!(click, TrayClick::Right) {
             crate::win32::topmost::yield_for(1_800);
         }
+        force_foreground(hwnd, owner_pid);
 
-        let click_pt = cursor_pos();
         let adapt_menu = matches!(click, TrayClick::Right);
         let tencent = is_tencent_im(process, tip);
         let pin_key = {
@@ -3479,6 +3923,7 @@ mod win {
             (click_pt.1 + 4).max(strip_top)
         };
         let place_x = click_pt.0;
+        let cursor = (msg_x, msg_y);
 
         let menus_before = if adapt_menu {
             snapshot_popup_menus()
@@ -3486,61 +3931,39 @@ mod win {
             Vec::new()
         };
 
-        // Tencent: always pack as VERSION_4 so wParam carries screen coords.
-        let pack_ver = if adapt_menu && tencent {
-            version.max(4)
-        } else {
-            version
-        };
-
         match click {
-            // AHK-style: double-click is ONLY WM_LBUTTONDBLCLK (both pack styles).
             TrayClick::LeftDouble => {
-                notify_icon_dblclk(hwnd, callback_msg, uid, pack_ver, (msg_x, msg_y));
+                notify_icon_dblclk(hwnd, callback_msg, uid, version, tencent, cursor);
             }
             TrayClick::Left => {
                 for &msg in &[WM_LBUTTONDOWN, WM_LBUTTONUP] {
-                    notify_icon_at(
-                        hwnd,
-                        callback_msg,
-                        uid,
-                        pack_ver,
-                        msg,
-                        (msg_x, msg_y),
-                    )?;
+                    notify_button(hwnd, callback_msg, uid, version, tencent, msg, cursor)?;
                 }
-                if pack_ver >= 3 || tencent {
-                    notify_icon_at(
-                        hwnd,
-                        callback_msg,
-                        uid,
-                        pack_ver.max(4),
-                        NIN_SELECT,
-                        (msg_x, msg_y),
-                    )?;
-                }
+                // Always send NIN_SELECT — version cache is often 0 while the app is v3+.
+                notify_v3_action(
+                    hwnd,
+                    callback_msg,
+                    uid,
+                    version,
+                    tencent,
+                    NIN_SELECT,
+                    cursor,
+                );
             }
             TrayClick::Right => {
                 for &msg in &[WM_RBUTTONDOWN, WM_RBUTTONUP] {
-                    notify_icon_at(
-                        hwnd,
-                        callback_msg,
-                        uid,
-                        pack_ver,
-                        msg,
-                        (msg_x, msg_y),
-                    )?;
+                    notify_button(hwnd, callback_msg, uid, version, tencent, msg, cursor)?;
                 }
-                if pack_ver >= 3 || tencent {
-                    notify_icon_at(
-                        hwnd,
-                        callback_msg,
-                        uid,
-                        pack_ver.max(4),
-                        WM_CONTEXTMENU,
-                        (msg_x, msg_y),
-                    )?;
-                }
+                // Always send WM_CONTEXTMENU (Explorer does for v3+; dual-pack if unknown).
+                notify_v3_action(
+                    hwnd,
+                    callback_msg,
+                    uid,
+                    version,
+                    tencent,
+                    WM_CONTEXTMENU,
+                    cursor,
+                );
             }
         }
 
@@ -3588,7 +4011,7 @@ mod win {
 pub use win::{
     acknowledge_icon_attention, clickable_count, flush_publish, get_prefs, glyphs_for_ids,
     invoke_icon_by_id, list_icons, request_refresh, set_emit_paused, set_prefs, start,
-    total_icon_count,
+    sync_toolbar_icons, total_icon_count,
 };
 
 
@@ -3637,6 +4060,7 @@ pub fn invoke_icon_by_id(
     _uid: u32,
     _version: u32,
     _click: TrayClick,
+    _cursor: Option<(i32, i32)>,
 ) -> Result<(), String> {
     Err("tray only on Windows".into())
 }

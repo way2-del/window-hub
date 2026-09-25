@@ -13,13 +13,18 @@ import {
   type TrayPrefs,
 } from "./components/TrayCluster";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
-import { fitPopupToContent } from "./popupFit";
+import { fitPopupToContent, schedulePopupFit } from "./popupFit";
 import { armTrayLeftClick, fireTrayLeftDouble, invokeTrayRightClick } from "./trayInvoke";
 import ChromePopupShell, {
   CHROME_POPUP_SHELL_SELECTOR,
 } from "./features/chromePopup/ChromePopupShell";
 
 const POPUP_W = 280;
+const TRAY_FIT = {
+  width: POPUP_W,
+  selector: CHROME_POPUP_SHELL_SELECTOR,
+  minHeight: 72,
+} as const;
 const glyphCache = createTrayGlyphCache();
 
 function TrayGlyph({ icon }: { icon: TrayIconInfo }) {
@@ -66,6 +71,12 @@ async function syncGlass() {
   await invoke("apply_window_effect", {}).catch(() => undefined);
 }
 
+function shellOverflows(): boolean {
+  const el = document.querySelector(CHROME_POPUP_SHELL_SELECTOR);
+  if (!el) return false;
+  return el.scrollHeight > el.clientHeight + 1 || el.classList.contains("is-scrollable");
+}
+
 export default function TrayPopupApp() {
   const [boot, setBoot] = useState<{
     icons: TrayIconInfo[];
@@ -74,16 +85,44 @@ export default function TrayPopupApp() {
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
   useProgressiveGlyphs(
-    icons.filter(i => !i.icon_png_base64).map(i => i.id),
-    map => {
-      if (glyphCache.ingest(map, icons)) setIcons(prev => glyphCache.merge(prev));
+    icons.filter((i) => !i.icon_png_base64).map((i) => i.id),
+    (map) => {
+      if (glyphCache.ingest(map, icons)) setIcons((prev) => glyphCache.merge(prev));
     },
   );
   const [entered, setEntered] = useState(false);
+  /** React-owned — DOM `classList.toggle("is-scrollable")` is wiped on re-render. */
+  const [scrollable, setScrollable] = useState(false);
   const revealGen = useRef(0);
   const reuseArmedRef = useRef(false);
-  const enteredRef = useRef(false);
-  enteredRef.current = entered;
+
+  const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
+  const liveTrayKeys = useMemo(
+    () => icons.map((i) => trayPinKey(i)).filter(Boolean),
+    [icons],
+  );
+  const pinnedIcons = useMemo(() => {
+    const list = icons.filter(
+      (i) => isTrayResident(i) || isTrayPinned(i, pinnedSet, liveTrayKeys),
+    );
+    return [
+      ...list.filter((i) => !isTrayResident(i)),
+      ...list.filter((i) => isTrayResident(i)),
+    ];
+  }, [icons, pinnedSet, liveTrayKeys]);
+  const overflowIcons = useMemo(
+    () =>
+      icons.filter(
+        (i) => !isTrayResident(i) && !isTrayPinned(i, pinnedSet, liveTrayKeys),
+      ),
+    [icons, pinnedSet, liveTrayKeys],
+  );
+
+  const refit = () => {
+    schedulePopupFit(TRAY_FIT, [0, 40, 120]);
+    window.setTimeout(() => setScrollable(shellOverflows()), 50);
+    window.setTimeout(() => setScrollable(shellOverflows()), 160);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -100,12 +139,14 @@ export default function TrayPopupApp() {
         if (cancelled) return;
         const merged = glyphCache.merge(list);
         setEntered(false);
+        setScrollable(false);
         setIcons(merged);
         setPinned(prefs.pinned ?? []);
         setBoot({ icons: merged, pinned: prefs.pinned ?? [] });
       } catch {
         if (cancelled) return;
         setEntered(false);
+        setScrollable(false);
         setIcons([]);
         setPinned([]);
         setBoot({ icons: [], pinned: [] });
@@ -170,11 +211,6 @@ export default function TrayPopupApp() {
       else fn();
     });
 
-    // No 2s list_tray_icons poll — full PNG hydrate + merge was freezing the popup.
-
-    // Native focus handling owns dismissal and rechecks the foreground window.
-    // A delayed WebView blur event must not close an already reopened popup.
-
     return () => {
       cancelled = true;
       window.clearTimeout(retryA);
@@ -189,18 +225,16 @@ export default function TrayPopupApp() {
     const gen = ++revealGen.current;
     void (async () => {
       try {
-        // One setSize + show — never 15-frame slideReveal (SetWindowPos storm → 未响应).
-        await fitPopupToContent({
-          width: POPUP_W,
-          selector: CHROME_POPUP_SHELL_SELECTOR,
-          minHeight: 72,
-        });
+        const fitted = await fitPopupToContent(TRAY_FIT);
         if (cancelled || gen !== revealGen.current) return;
+        setScrollable(fitted.scrollable || shellOverflows());
         const win = getCurrentWindow();
         await win.show();
         await win.setFocus();
         reuseArmedRef.current = true;
         setEntered(true);
+        // Re-fit after enter — list may still be settling; keeps React `is-scrollable`.
+        if (!cancelled && gen === revealGen.current) refit();
       } catch (e) {
         console.error("[TrayPopup]", e);
         try {
@@ -217,27 +251,11 @@ export default function TrayPopupApp() {
     };
   }, [boot]);
 
-  const pinnedSet = useMemo(() => new Set(pinned), [pinned]);
-  const liveTrayKeys = useMemo(
-    () => icons.map((i) => trayPinKey(i)).filter(Boolean),
-    [icons],
-  );
-  const pinnedIcons = useMemo(() => {
-    const list = icons.filter(
-      (i) => isTrayResident(i) || isTrayPinned(i, pinnedSet, liveTrayKeys),
-    );
-    return [
-      ...list.filter((i) => !isTrayResident(i)),
-      ...list.filter((i) => isTrayResident(i)),
-    ];
-  }, [icons, pinnedSet, liveTrayKeys]);
-  const overflowIcons = useMemo(
-    () =>
-      icons.filter(
-        (i) => !isTrayResident(i) && !isTrayPinned(i, pinnedSet, liveTrayKeys),
-      ),
-    [icons, pinnedSet, liveTrayKeys],
-  );
+  // List grew while open → resize / enable scroll (otherwise bottom stays clipped).
+  useLayoutEffect(() => {
+    if (!boot || !entered) return;
+    refit();
+  }, [boot, entered, icons.length, pinnedIcons.length, overflowIcons.length]);
 
   if (!boot) {
     return <ChromePopupShell className="is-booting" aria-hidden role="presentation" />;
@@ -246,6 +264,7 @@ export default function TrayPopupApp() {
   const shellClass = [
     "is-origin-down",
     entered ? "is-entered" : "is-revealing",
+    scrollable ? "is-scrollable" : null,
   ]
     .filter(Boolean)
     .join(" ");

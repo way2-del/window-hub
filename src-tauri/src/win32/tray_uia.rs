@@ -214,7 +214,7 @@ pub fn scan_overflow_names() -> Vec<String> {
 
 static TRAY_CREATION_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 
-fn open_chevron_via_uia() -> Result<bool, String> {
+pub fn open_chevron_via_uia() -> Result<bool, String> {
     with_com(|| unsafe {
         let Some(tray_hwnd) = shell_tray_hwnd() else {
             return Err("real Shell_TrayWnd (explorer) not found".into());
@@ -385,8 +385,11 @@ pub fn invoke_overflow_by_name(name: &str, right_click: bool) -> Result<(), Stri
         }
 
         std::thread::sleep(std::time::Duration::from_millis(60));
-        unsafe {
-            let _ = ShowWindow(overflow, SW_HIDE);
+        // Hiding immediately cancels TrackPopupMenu / context menus.
+        if !right_click {
+            unsafe {
+                let _ = ShowWindow(overflow, SW_HIDE);
+            }
         }
         Ok(())
     });

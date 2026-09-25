@@ -48,6 +48,12 @@ pub mod tray_registry;
 pub mod tray_icon_cache;
 #[cfg(windows)]
 pub mod tray_uia;
+#[cfg(windows)]
+mod tray_native;
+#[cfg(windows)]
+pub mod tray_shell_click;
+#[cfg(windows)]
+pub mod tray_toolbar;
 pub mod input_lang;
 pub mod wifi;
 #[cfg(windows)]
