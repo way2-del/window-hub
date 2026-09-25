@@ -17,15 +17,15 @@ impl Drop for ToggleGuard {
     }
 }
 
-/// One IPC handles visibility and anchoring. Do not round-trip through several
-/// UI-thread window getters before a click can dismiss or reopen the popup.
+/// One IPC handles visibility and anchoring. Position uses the same logical
+/// coords as Wi‑Fi / tray popups (caller right-aligns to the chip).
 #[tauri::command]
 pub async fn toggle_control_center(
     app: AppHandle,
     state: State<'_, MaterialState>,
     window: tauri::WebviewWindow,
-    right: f64,
-    bottom: f64,
+    x: f64,
+    y: f64,
 ) -> Result<(), String> {
     if TOGGLING.swap(true, Ordering::SeqCst) {
         return Ok(());
@@ -42,7 +42,7 @@ pub async fn toggle_control_center(
             return Ok(());
         }
     }
-    let (x, y) = popup_anchor(&window, right, bottom)?;
+    let (x, y) = clamp_popup_origin(&window, x, y, CONTROL_CENTER_W)?;
     let result = open_control_center(app, state, x, y).await;
     crate::win32::click_trace::log(
         "control",
@@ -55,26 +55,26 @@ pub async fn toggle_control_center(
     result
 }
 
-fn popup_anchor(
+const CONTROL_CENTER_W: f64 = 374.0;
+
+fn clamp_popup_origin(
     window: &tauri::WebviewWindow,
-    right: f64,
-    bottom: f64,
+    x: f64,
+    y: f64,
+    width: f64,
 ) -> Result<(f64, f64), String> {
     use windows::Win32::{
-        Foundation::RECT,
         Graphics::Gdi::{
             GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         },
-        UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::GetWindowRect},
+        UI::HiDpi::GetDpiForWindow,
     };
-    if !right.is_finite() || !bottom.is_finite() {
+    if !x.is_finite() || !y.is_finite() {
         return Err("Invalid popup anchor".into());
     }
     let hwnd =
         windows::Win32::Foundation::HWND(window.hwnd().map_err(|e| e.to_string())?.0 as *mut _);
     unsafe {
-        let mut rect = RECT::default();
-        GetWindowRect(hwnd, &mut rect).map_err(|e| e.to_string())?;
         let scale = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
         let mut monitor = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -87,11 +87,9 @@ fn popup_anchor(
         .ok()
         .map_err(|e| e.to_string())?;
         let left = monitor.rcMonitor.left as f64 / scale + 8.0;
-        let limit = (monitor.rcMonitor.right as f64 / scale - 382.0).max(left);
-        Ok((
-            (rect.left as f64 / scale + right - 374.0).clamp(left, limit),
-            rect.top as f64 / scale + bottom + 8.0,
-        ))
+        let right_limit = (monitor.rcMonitor.right as f64 / scale - width - 8.0).max(left);
+        let top = monitor.rcMonitor.top as f64 / scale + 8.0;
+        Ok((x.clamp(left, right_limit), y.max(top)))
     }
 }
 
@@ -136,7 +134,7 @@ pub async fn open_control_center(
         WebviewUrl::App("index.html?window=control-center".into()),
     )
     .title("控制中心")
-    .inner_size(374.0, 464.0)
+    .inner_size(CONTROL_CENTER_W, 464.0)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
@@ -215,6 +213,86 @@ pub async fn control_center_action(
             windows::Win32::UI::Input::KeyboardAndMouse::VK_K,
         ),
         page => crate::win32::control_center::open_settings(page),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn control_center_sound_mixer(
+    window: tauri::WebviewWindow,
+) -> Result<crate::win32::audio_mixer::SoundMixerState, String> {
+    require_control_center(&window)?;
+    tauri::async_runtime::spawn_blocking(crate::win32::audio_mixer::sound_mixer_state)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn control_center_set_output_device(
+    window: tauri::WebviewWindow,
+    device_id: String,
+) -> Result<(), String> {
+    require_control_center(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::win32::audio_mixer::set_default_output_device(&device_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn control_center_set_app_volume(
+    window: tauri::WebviewWindow,
+    app_key: String,
+    process_id: u32,
+    is_system: bool,
+    volume: u8,
+) -> Result<(), String> {
+    require_control_center(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::win32::audio_mixer::set_app_volume(&app_key, process_id, is_system, volume)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn control_center_set_app_device(
+    window: tauri::WebviewWindow,
+    app_key: String,
+    process_id: u32,
+    is_system: bool,
+    device_id: String,
+) -> Result<(), String> {
+    require_control_center(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::win32::audio_mixer::set_app_output_device(
+            &app_key, process_id, is_system, &device_id,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn control_center_bluetooth(
+    window: tauri::WebviewWindow,
+) -> Result<crate::win32::bluetooth::BluetoothState, String> {
+    require_control_center(&window)?;
+    tauri::async_runtime::spawn_blocking(crate::win32::bluetooth::bluetooth_state)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn control_center_set_bluetooth(
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> Result<crate::win32::bluetooth::BluetoothState, String> {
+    require_control_center(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::win32::bluetooth::set_bluetooth_enabled(enabled)
     })
     .await
     .map_err(|e| e.to_string())?

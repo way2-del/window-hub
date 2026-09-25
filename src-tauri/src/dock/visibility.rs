@@ -288,7 +288,11 @@ impl DockVisibility {
 
         let mut should_place: Option<(bool, bool, String)> = None;
         let mut emit: Option<DockVisibilityState> = None;
+        let mut leave_timer_started = None;
+        let mut leave_timer_fired = false;
 
+        // State only while locked. HWND getters dispatch to the UI thread,
+        // which can be waiting here in set_preview_tip_keep (chrome clicks).
         if let Ok(mut g) = self.inner.lock() {
             if near_raw {
                 g.near_streak = g.near_streak.saturating_add(1);
@@ -352,23 +356,16 @@ impl DockVisibility {
                                 .shown_at
                                 .map(|t| t.elapsed().as_millis())
                                 .unwrap_or(0);
-                            let dock_area = dock_area_rect_px(app, g.bottom_offset_px);
-                            eprintln!(
-                                "[dock-vis] leave-timer start linger={}ms shown_for={}ms cursor={:?} dock_area={:?} reason={}",
+                            leave_timer_started = Some((
                                 g.hide_linger_ms,
                                 shown_ms,
-                                cursor_pos_px(),
-                                dock_area,
-                                reason
-                            );
+                                g.bottom_offset_px,
+                            ));
                         }
                         Some(deadline) if Instant::now() >= deadline => {
                             g.desired = false;
                             g.hide_deadline = None;
-                            eprintln!(
-                                "[dock-vis] leave-timer fired → hide cursor={:?}",
-                                cursor_pos_px()
-                            );
+                            leave_timer_fired = true;
                         }
                         Some(_) => {
                             g.desired = true;
@@ -400,6 +397,25 @@ impl DockVisibility {
                     reason: reason.clone(),
                 });
             }
+        }
+
+        // Diagnostics must not hold inner across native/Tauri calls or I/O.
+        if let Some((linger_ms, shown_ms, bottom_offset_px)) = leave_timer_started {
+            let dock_area = dock_area_rect_px(app, bottom_offset_px);
+            eprintln!(
+                "[dock-vis] leave-timer start linger={}ms shown_for={}ms cursor={:?} dock_area={:?} reason={}",
+                linger_ms,
+                shown_ms,
+                cursor_pos_px(),
+                dock_area,
+                reason
+            );
+        }
+        if leave_timer_fired {
+            eprintln!(
+                "[dock-vis] leave-timer fired → hide cursor={:?}",
+                cursor_pos_px()
+            );
         }
 
         if let Some((target, animate, why)) = should_place {

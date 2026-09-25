@@ -35,6 +35,9 @@ fn ring() -> &'static Mutex<VecDeque<String>> {
 }
 
 fn log_path() -> PathBuf {
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("window-hub-click-trace-test-{}.log", std::process::id()));
+    #[cfg(not(test))]
     std::env::temp_dir().join("window-hub-click-trace.log")
 }
 
@@ -143,9 +146,13 @@ fn dump_hung(reason: &str) {
         "HUNG",
         &format!("{reason} hwnd={hwnd:#x} CREATE_IN_PROGRESS={create}"),
     );
-    if let Ok(g) = ring().lock() {
-        log("HUNG", &format!("--- ring dump ({} lines) ---", g.len()));
-        for line in g.iter() {
+    // log() also acquires ring(). Keep only a snapshot here: retaining the
+    // guard while logging deadlocks the watchdog and every subsequent caller,
+    // including the UI thread, turning a temporary stall into a permanent hang.
+    let snapshot = ring().lock().ok().map(|g| g.clone());
+    if let Some(lines) = snapshot {
+        log("HUNG", &format!("--- ring dump ({} lines) ---", lines.len()));
+        for line in &lines {
             let _ = append_raw(&format!("HUNG-RING\t{line}"));
         }
         log("HUNG", "--- end ring dump ---");
@@ -451,4 +458,21 @@ macro_rules! click_trace {
     ($origin:expr, $($arg:tt)*) => {{
         $crate::win32::click_trace::log($origin, &format!($($arg)*));
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hang_dump_returns_and_keeps_logging_available() {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            super::log("test", "before hang dump");
+            super::dump_hung("regression test");
+            super::log("test", "after hang dump");
+            let _ = done.send(());
+        });
+        result
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("hang reporting must not deadlock its own logger");
+    }
 }

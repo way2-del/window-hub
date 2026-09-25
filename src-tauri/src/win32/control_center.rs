@@ -114,6 +114,7 @@ pub fn open_settings(page: &str) -> Result<(), String> {
         "hotspot" => "ms-settings:network-mobilehotspot",
         "display" => "ms-settings:display",
         "sound" => "ms-settings:sound",
+        "apps-volume" => "ms-settings:apps-volume",
         _ => return Err("Unknown control center destination".into()),
     };
     let uri: Vec<u16> = uri.encode_utf16().chain(Some(0)).collect();

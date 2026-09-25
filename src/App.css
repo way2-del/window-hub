@@ -46,16 +46,6 @@ body.is-settings #root {
   background: transparent !important;
 }
 
-body.is-tray-popup,
-body.is-tray-popup #root {
-  background: transparent !important;
-  color: var(--glass-fg, #f4f4f5);
-  overflow: hidden;
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-}
-
 body.is-status-menu-popup,
 body.is-status-menu-popup #root {
   background: transparent !important;
@@ -1556,47 +1546,7 @@ button {
   -webkit-backdrop-filter: blur(40px) saturate(1.5);
 }
 
-/* 独立托盘弹窗：浅色云母反色（深色字） */
-.tray-popup-shell {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  padding: 12px 10px;
-  box-sizing: border-box;
-  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
-  /* Match plugin popup: no CSS border/radius — DWM owns the single outer edge. */
-  border: none;
-  border-radius: 0;
-  color: var(--glass-fg, #f4f4f5);
-  user-select: none;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  justify-content: flex-start;
-  display: flex;
-  flex-direction: column;
-  opacity: 1;
-}
-
-.tray-popup-shell.is-booting {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.tray-popup-shell.is-revealing {
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.tray-popup-shell.is-entered {
-  overflow: auto;
-}
-
-.tray-popup-shell::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;
-}
-
+/* 独立托盘弹窗内容（壳：ChromePopupShell） */
 .tray-empty {
   padding: 12px 8px;
   font-size: 12px;
@@ -1652,8 +1602,7 @@ button {
 
 /* 浅色云母：托盘弹窗反色（深色字） */
 html[data-theme="light"] body.is-tray-popup,
-html[data-theme="light"] body.is-tray-popup #root,
-html[data-theme="light"] .tray-popup-shell {
+html[data-theme="light"] body.is-tray-popup #root {
   color: #1c1c1e;
 }
 
@@ -1690,33 +1639,7 @@ html[data-theme="light"] body.is-status-menu-popup #root {
   color: #1c1c1e;
 }
 
-/* Self-drawn input-language / IME popup (figure-2) */
-body.is-input-lang-popup,
-body.is-input-lang-popup #root {
-  background: transparent !important;
-  color: var(--glass-fg, #f4f4f5);
-  overflow: hidden;
-  width: 100%;
-  height: auto;
-  min-height: 0;
-}
-
-.ilang-popup-shell {
-  box-sizing: border-box;
-  width: 100%;
-  height: auto;
-  min-height: 0;
-  padding: 10px 8px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  overflow: hidden;
-  background: var(--glass-panel-bg, rgba(28, 28, 30, 0.72));
-  color: var(--glass-fg, #f4f4f5);
-  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  user-select: none;
-}
-
+/* Self-drawn input-language / IME popup content（壳：ChromePopupShell） */
 .ilang-section {
   display: flex;
   flex-direction: column;
@@ -1793,8 +1716,7 @@ body.is-input-lang-popup #root {
 }
 
 html[data-theme="light"] body.is-input-lang-popup,
-html[data-theme="light"] body.is-input-lang-popup #root,
-html[data-theme="light"] .ilang-popup-shell {
+html[data-theme="light"] body.is-input-lang-popup #root {
   color: #1c1c1e;
 }
 
@@ -1807,32 +1729,9 @@ html[data-theme="light"] .ilang-row.is-active {
   background: rgba(0, 0, 0, 0.06);
 }
 
-/* Self-drawn WLAN popup — matches system-style Wi‑Fi menu */
-body.is-wifi-popup,
-body.is-wifi-popup #root {
-  background: transparent !important;
-  color: var(--glass-fg, #f4f4f5);
-  overflow: hidden;
-  width: 100%;
-  height: auto;
-  min-height: 0;
-}
-
-.wifi-popup-shell {
+/* Self-drawn WLAN popup content（壳：ChromePopupShell） */
+.wifi-popup-body {
   --wifi-accent: var(--sys-accent, #34c759);
-  box-sizing: border-box;
-  width: 100%;
-  height: auto;
-  min-height: 0;
-  padding: 14px 12px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow: hidden;
-  background: var(--glass-panel-bg, rgba(36, 36, 38, 0.78));
-  color: var(--glass-fg, #f5f5f7);
-  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  user-select: none;
 }
 
 .wifi-head {
@@ -2144,7 +2043,7 @@ body.is-wifi-popup #root {
 
 html[data-theme="light"] body.is-wifi-popup,
 html[data-theme="light"] body.is-wifi-popup #root,
-html[data-theme="light"] .wifi-popup-shell {
+html[data-theme="light"] .wifi-popup-body {
   color: #1c1c1e;
   --wifi-accent: var(--sys-accent-press, #30d158);
 }

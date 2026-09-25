@@ -5,6 +5,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
 import { schedulePopupFit } from "./popupFit";
 import type { InputLangState } from "./components/TrayCluster";
+import ChromePopupShell, {
+  CHROME_POPUP_SHELL_SELECTOR,
+} from "./features/chromePopup/ChromePopupShell";
 
 export type InputLayoutItem = {
   id: string;
@@ -38,9 +41,8 @@ async function closeSelf() {
 function fitImePopup() {
   schedulePopupFit({
     width: POPUP_W,
-    selector: ".ilang-popup-shell",
+    selector: CHROME_POPUP_SHELL_SELECTOR,
     minHeight: 72,
-    maxHeight: 480,
   });
 }
 
@@ -163,7 +165,7 @@ export default function InputLangPopupApp() {
   }
 
   return (
-    <div className="ilang-popup-shell" role="menu">
+    <ChromePopupShell density="compact" role="menu" aria-label="输入法">
       <div className="ilang-section">
         {layouts.length === 0 ? (
           <div className="ilang-empty">未检测到输入法</div>
@@ -209,6 +211,6 @@ export default function InputLangPopupApp() {
           <span className="ilang-label">键盘偏好设置</span>
         </button>
       </div>
-    </div>
+    </ChromePopupShell>
   );
 }

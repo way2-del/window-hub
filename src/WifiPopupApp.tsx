@@ -5,6 +5,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
 import { schedulePopupFit } from "./popupFit";
 import type { WifiNetwork, WifiState } from "./components/TrayCluster";
+import ChromePopupShell, {
+  CHROME_POPUP_SHELL_SELECTOR,
+} from "./features/chromePopup/ChromePopupShell";
 
 const POPUP_W = 280;
 
@@ -39,9 +42,8 @@ async function closeSelf() {
 function fitWifiPopup() {
   schedulePopupFit({
     width: POPUP_W,
-    selector: ".wifi-popup-shell",
+    selector: CHROME_POPUP_SHELL_SELECTOR,
     minHeight: 120,
-    maxHeight: 720,
   });
 }
 
@@ -412,7 +414,7 @@ export default function WifiPopupApp() {
   const ethMac = (state.ethernetMac || "").trim();
 
   return (
-    <div className="wifi-popup-shell" role="dialog" aria-label="网络">
+    <ChromePopupShell role="dialog" aria-label="网络" className="wifi-popup-body">
       {ethConnected ? (
         <>
           <div className="wifi-head">
@@ -620,6 +622,6 @@ export default function WifiPopupApp() {
           {ethConnected ? "Wi‑Fi 已关闭（当前使用有线）" : "Wi‑Fi 已关闭"}
         </div>
       )}
-    </div>
+    </ChromePopupShell>
   );
 }

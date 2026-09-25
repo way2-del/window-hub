@@ -1,0 +1,90 @@
+/**
+ * Shared host chrome popup shell (Wi‑Fi contract).
+ * DWM draws the single outer round edge — never add CSS border-radius here.
+ */
+
+body.is-wifi-popup,
+body.is-wifi-popup #root,
+body.is-tray-popup,
+body.is-tray-popup #root,
+body.is-control-center-popup,
+body.is-control-center-popup #root,
+body.is-input-lang-popup,
+body.is-input-lang-popup #root {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent !important;
+  border: none;
+  border-radius: 0;
+  color: var(--glass-fg, #f4f4f5);
+}
+
+.wh-chrome-popup-shell {
+  --chrome-popup-accent: var(--sys-accent, #34c759);
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 14px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Short menus must not show a scrollbar — only when fitPopup caps at 2/3 screen. */
+  overflow: hidden;
+  background: var(--glass-panel-bg, rgba(36, 36, 38, 0.78));
+  color: var(--glass-fg, #f5f5f7);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+  scrollbar-width: thin;
+}
+
+.wh-chrome-popup-shell.is-compact {
+  padding: 10px 8px 12px;
+  gap: 4px;
+}
+
+.wh-chrome-popup-shell.is-scrollable {
+  overflow: auto;
+}
+
+.wh-chrome-popup-shell.is-scrollable::-webkit-scrollbar {
+  width: 6px;
+}
+
+.wh-chrome-popup-shell.is-scrollable::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 0.18);
+  border-radius: 3px;
+}
+
+/* Tray open choreography — modifiers only; keep shell fill identical. */
+.wh-chrome-popup-shell.is-booting {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wh-chrome-popup-shell.is-revealing {
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.wh-chrome-popup-shell.is-entered.is-scrollable {
+  overflow: auto;
+}
+
+html[data-theme="light"] body.is-wifi-popup,
+html[data-theme="light"] body.is-wifi-popup #root,
+html[data-theme="light"] body.is-tray-popup,
+html[data-theme="light"] body.is-tray-popup #root,
+html[data-theme="light"] body.is-control-center-popup,
+html[data-theme="light"] body.is-control-center-popup #root,
+html[data-theme="light"] body.is-input-lang-popup,
+html[data-theme="light"] body.is-input-lang-popup #root,
+html[data-theme="light"] .wh-chrome-popup-shell {
+  color: #1c1c1e;
+}

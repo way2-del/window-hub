@@ -15,6 +15,9 @@ import {
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
 import { fitPopupToContent } from "./popupFit";
 import { armTrayLeftClick, fireTrayLeftDouble, invokeTrayRightClick } from "./trayInvoke";
+import ChromePopupShell, {
+  CHROME_POPUP_SHELL_SELECTOR,
+} from "./features/chromePopup/ChromePopupShell";
 
 const POPUP_W = 280;
 const glyphCache = createTrayGlyphCache();
@@ -189,9 +192,8 @@ export default function TrayPopupApp() {
         // One setSize + show — never 15-frame slideReveal (SetWindowPos storm → 未响应).
         await fitPopupToContent({
           width: POPUP_W,
-          selector: ".tray-popup-shell",
+          selector: CHROME_POPUP_SHELL_SELECTOR,
           minHeight: 72,
-          maxHeight: 520,
         });
         if (cancelled || gen !== revealGen.current) return;
         const win = getCurrentWindow();
@@ -238,11 +240,10 @@ export default function TrayPopupApp() {
   );
 
   if (!boot) {
-    return <div className="tray-popup-shell is-booting" aria-hidden />;
+    return <ChromePopupShell className="is-booting" aria-hidden role="presentation" />;
   }
 
   const shellClass = [
-    "tray-popup-shell",
     "is-origin-down",
     entered ? "is-entered" : "is-revealing",
   ]
@@ -250,7 +251,7 @@ export default function TrayPopupApp() {
     .join(" ");
 
   return (
-    <div className={shellClass} role="menu">
+    <ChromePopupShell className={shellClass} role="menu" aria-label="托盘">
       {icons.length === 0 ? (
         <div className="tray-empty">暂无系统托盘图标</div>
       ) : (
@@ -313,6 +314,6 @@ export default function TrayPopupApp() {
           )}
         </>
       )}
-    </div>
+    </ChromePopupShell>
   );
 }

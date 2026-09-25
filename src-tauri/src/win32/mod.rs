@@ -96,4 +96,8 @@ pub mod hotkey_registry {
 }
 
 #[cfg(windows)]
+pub mod audio_mixer;
+#[cfg(windows)]
+pub mod bluetooth;
+#[cfg(windows)]
 pub mod control_center;

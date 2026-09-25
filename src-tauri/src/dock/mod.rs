@@ -1,7 +1,7 @@
 //! Host bottom dock — MyDockFinder-style icons, visibility modes, ini import.
 
 mod file_drop;
-mod icon;
+pub(crate) mod icon;
 mod ini;
 mod launch;
 mod visibility;
