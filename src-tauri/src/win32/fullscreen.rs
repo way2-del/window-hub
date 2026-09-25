@@ -1,4 +1,5 @@
-//! Detect exclusive / borderless fullscreen (games) so the island can hide.
+//! Detect exclusive / borderless fullscreen (games, browser F11 / page fullscreen)
+//! so the island and dock can hide.
 
 #[cfg(windows)]
 mod win {
@@ -98,14 +99,17 @@ mod win {
         }
     }
 
-    /// Game-like fullscreen: fills the **physical** monitor (`rcMonitor`).
+    /// Exclusive / borderless fullscreen: fills the **physical** monitor (`rcMonitor`).
     ///
-    /// **Windowed maximize must NOT match** — even borderless chrome (WPS / Edge /
-    /// Electron) uses `WS_MAXIMIZE` / `IsZoomed` and must keep the AppBar strip.
-    /// Exclusive / borderless games cover `rcMonitor` without the maximize bit.
+    /// Matches:
+    /// - Games (exclusive / borderless FS)
+    /// - Browser F11 / HTML page fullscreen (Chrome/Edge often set `WS_MAXIMIZE`
+    ///   while still covering `rcMonitor` with no caption)
+    ///
+    /// Does **not** match normal maximize: those stop at the shell work area
+    /// (`rcWork`, below our AppBar) so `covers_physical_monitor` fails. Caption
+    /// windows are also rejected even if oversized.
     fn is_game_fullscreen(hwnd: HWND) -> bool {
-        use windows::Win32::UI::WindowsAndMessaging::{IsZoomed, WS_MAXIMIZE};
-
         unsafe {
             if !covers_physical_monitor(hwnd) {
                 return false;
@@ -115,11 +119,7 @@ mod win {
             if has_caption {
                 return false;
             }
-            // Normal / borderless *windowed* maximize — keep top AppBar placeholder.
-            if (style & WS_MAXIMIZE.0) != 0 || IsZoomed(hwnd).as_bool() {
-                return false;
-            }
-            // Borderless covering the physical monitor without maximize = game / exclusive FS.
+            // Borderless + covers physical monitor = exclusive FS (game or browser).
             true
         }
     }
@@ -152,7 +152,8 @@ mod win {
         now_ms() < TRAY_CLICK_GRACE_UNTIL_MS.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Foreground window is game-like fullscreen on the same monitor as our strip.
+    /// Foreground window is exclusive / borderless fullscreen on the same monitor as our strip
+    /// (games, browser F11 / page fullscreen).
     pub fn should_hide_strip(self_hwnd: Option<isize>) -> bool {
         if in_tray_click_grace() {
             return false;
