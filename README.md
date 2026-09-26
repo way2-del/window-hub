@@ -16,6 +16,58 @@ Window Hub 不是又一个启动器，而是一层贴合 Windows 的 **宿主壳
 
 旧版「窗口马赛克停靠 / 离屏捕获」能力仍在代码库中，但当前产品主轴是 **岛 + Dock + chrome + 插件**。
 
+## 界面一览
+
+顶栏三段 + 底部 Dock：左侧快捷区（前台应用 / 世界时钟等插件）、中间灵动岛、右侧托盘与系统指示器。
+
+### 总览
+
+<p align="center">
+  <img src="docs/media/overview.png" alt="顶栏与 Dock 总览" width="900" />
+</p>
+
+| 区域 | 展示内容 |
+|------|----------|
+| 左侧快捷区 | 前台应用名、世界时钟、窗口组等插件条 |
+| 中间灵动岛 | 天气摘要、媒体歌词、通知横幅等情景占位 |
+| 右侧托盘 | 常显图标、WLAN / 电池 / 音量、输入法「中」、系统时钟 |
+| 底部 Dock | 应用图标坞（分组、磁化放大、垃圾桶等） |
+
+### 灵动岛
+
+| 天气面板 | 媒体摘要 |
+|:--------:|:--------:|
+| <img src="docs/media/weather-panel.png" alt="天气面板" width="420" /> | <img src="docs/media/island-media.png" alt="媒体歌词" width="420" /> |
+| 点击天气摘要展开详情（温度、湿度、风力） | 播放中时岛栏显示歌词 / 曲目摘要 |
+
+| 消息通知 | 媒体 + 通知共存 |
+|:--------:|:--------------:|
+| <img src="docs/media/island-message.png" alt="消息通知" width="420" /> | <img src="docs/media/island-notify.png" alt="媒体与通知" width="420" /> |
+| 通知横幅：「收到一条消息」等 Attention 槽位 | 媒体胶囊与绿色消息气泡可同时出现 |
+
+<p align="center">
+  <img src="docs/media/now-playing.png" alt="正在播放弹窗" width="720" />
+  <br />
+  <sub>正在播放：封面、进度与播放控制（插件弹窗）</sub>
+</p>
+
+### 右侧系统面板
+
+| 控制中心 | WLAN |
+|:--------:|:----:|
+| <img src="docs/media/control-center.png" alt="控制中心" width="420" /> | <img src="docs/media/wlan.png" alt="WLAN 菜单" width="420" /> |
+| Wi‑Fi / 蓝牙 / 热点、专注助手、亮度与音量、媒体快捷控制 | 开关、已连网络详情、扫描列表与偏好设置入口 |
+
+### Dock 与设置
+
+<p align="center">
+  <img src="docs/media/settings-plugins.png" alt="设置与插件市场" width="720" />
+  <br />
+  <sub>设置窗：全局 / 主题 / Dock / 快捷区 / 托盘 / 插件市场（如世界时钟双时区）</sub>
+</p>
+
+Dock 常驻底部（可配置显示模式），图标按使用习惯分组；与顶栏 AppBar 一起占位工作区，普通最大化窗口不会盖住壳层。
+
 ## 功能亮点
 
 | 能力 | 说明 |
@@ -88,6 +140,7 @@ window-hub/
 ├── tests/                  # 自动化验证
 ├── docs/development/       # 活跃开发规划与模块地图
 ├── docs/plugins/           # 插件契约与示例
+├── docs/media/             # README 界面截图
 ├── docs/archive/           # 历史排障、恢复副本与旧包
 ├── workspace/              # 本地日志、截图、任务记录（不提交）
 └── .cursor/skills/         # 开发约定（岛、插件、托盘等）
@@ -110,6 +163,8 @@ window-hub/
 ## English
 
 **Window Hub** is a Windows-only desktop shell built around a Dynamic Island, Dock, and system-tray chrome.
+
+Screenshots of the top bar and Dock live under [`docs/media/`](docs/media/) (see the Chinese **界面一览** section above).
 
 ### Highlights
 
