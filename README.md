@@ -1,26 +1,39 @@
-# Window Hub
+# Window Hub · 灵动桌面
 
-**Windows 顶栏壳** — 灵动岛、Dock 与系统 chrome，把日常窗口与快捷操作收进一层贴合桌面的宿主。
+**Windows 桌面软件** — 用顶栏和底部 Dock 重新组织日常操作；中间是可定制的灵动岛，旁边是可插拔的快捷区。产品名也叫 **灵动桌面**。
 
-> Windows 10+ · v0.2 · [Tauri 2](https://tauri.app/) + React 19 + Rust / Win32  
+> Windows 11（主要适配）· Windows 10 待测试 · v0.2 · [Tauri 2](https://tauri.app/) + React 19 + Rust / Win32  
 > [English](#english)
 
 ## 这是什么
 
-Window Hub 不是启动器或壁纸工具，而是 **Windows 桌面壳**：
+灵动桌面是一层贴在 Windows 上的 **桌面壳**：顶部的顶栏、底部的 Dock，都可以代替系统原本的任务栏（占位工作区、聚合托盘与快捷入口）。
+
+布局上认同 **macOS 那套「窄顶栏 + Dock」**：顶栏常驻、占高很小，日常切换不抢屏；Dock 管启动与切换。Windows 自带任务栏偏厚、偏「一栏扛所有」，把快捷、状态、通知都塞在一起。把壳拆成 **窄顶栏常驻 + 底部 Dock**，顶栏就留给插件发挥——天气、时钟、窗口组、成语、正在播放……都有地方挂，也不用再挤一块粗任务栏。
+
+最开始想做的是 **灵动岛**——顶栏中间那颗可展开、可通知、可拖放的胶囊。但只有一颗黑岛常挂在屏幕上，闲下来也会抢眼，体验并不舒服。于是做成了完整顶栏，并加上 **自动沉浸**：闲置后岛壳透底、跟环境反色，需要时再醒过来。岛仍然是主角，顶栏是让它能安静待着的壳。
+
+顶栏上两块最值得自己玩的是：
+
+- **快捷区**（左侧）— 插件条；可按 **当前前台进程 / 应用** 决定显示哪几个快捷插件（例如只在某 IDE 前台时出现对应工具条），也可以设成任意前台都显示  
+- **灵动岛**（中间）— 天气、正在播放、消息横幅、中转站摘要……插件也可以直接往岛上发通知
+
+右侧是系统托盘与 WLAN / 输入法 / 控制中心等 chrome；底下是 Dock。
 
 | 表面 | 做什么 |
 |------|--------|
-| **顶栏** | 左侧快捷区（插件条）· 中间灵动岛 · 右侧托盘与系统指示器 |
-| **Dock** | 底部应用坞：显示模式、磁化放大、图标编辑、悬停预览 |
+| **顶栏** | 窄条常驻：快捷区 · 灵动岛 · 托盘与系统指示器；可沉浸，可代替任务栏占位 |
+| **Dock** | 底部应用坞，可代替任务栏；显示模式、磁化放大、图标编辑 |
 | **系统面板** | 控制中心、WLAN / 以太网、输入法菜单 |
-| **插件** | 静态包（`.whpx`）+ CapGate（`hub.*`）；设置内本地安装 / 导入示例 |
+| **插件** | 静态包（`.whpx`）+ CapGate（`hub.*`）；设置里本地安装 / 导入示例 |
+
+技术上故意把插件面做薄：**一段简单的 HTML / JS，声明 capability，就能做出想玩的桌面小功能**——也方便用 AI 直接写插件，再推到快捷区或灵动岛上。这是灵动桌面最想坚持的一点。
 
 窗口最大化时停在工作区边缘（AppBar 占位）；游戏与浏览器 F11 / 网页全屏时壳层会按策略隐藏。
 
 ## 界面一览
 
-顶栏三段 + 底部 Dock：左侧快捷区（前台应用 / 世界时钟等插件）、中间灵动岛、右侧托盘与系统指示器。
+顶栏三段 + 底部 Dock：左侧快捷区（可按前台应用切换插件）、中间灵动岛、右侧托盘与系统指示器。
 
 ### 总览
 
@@ -30,7 +43,7 @@ Window Hub 不是启动器或壁纸工具，而是 **Windows 桌面壳**：
 
 | 区域 | 展示内容 |
 |------|----------|
-| 左侧快捷区 | 前台应用名、世界时钟、窗口组等插件条 |
+| 左侧快捷区 | 可按前台应用切换显示的插件条（世界时钟、窗口组等） |
 | 中间灵动岛 | 天气摘要、媒体歌词、通知横幅等情景占位 |
 | 右侧托盘 | 常显图标、WLAN / 电池 / 音量、输入法「中」、系统时钟 |
 | 底部 Dock | 应用图标坞（分组、磁化放大、垃圾桶等） |
@@ -74,16 +87,18 @@ Dock 常驻底部（可配置显示模式），图标按使用习惯分组；与
 
 | 能力 | 说明 |
 |------|------|
-| 灵动岛 | 折叠摘要、下拉面板、拖放中转、通知槽位；可选「自动沉浸」闲置透底 |
+| 布局 | 认同 macOS「窄顶栏 + Dock」；顶栏常驻给插件留位，Dock 管启动与切换 |
+| 灵动岛 | 最初的核心：折叠摘要、下拉面板、拖放中转、通知槽位；闲置可「自动沉浸」透底 |
+| 快捷区 | 可按前台进程 / 应用显示对应快捷插件，也可设为全局常显 |
 | Dock | 多种显示模式、热键呼出、图标编辑与悬停预览 |
 | 控制中心 | Wi‑Fi / 蓝牙 / 热点、亮度与音量、媒体快捷入口 |
 | 网络 | WLAN 扫描与连接；**有线优先**（插网线显示以太网） |
 | 输入法 | 语言 / IME 芯片与切换菜单 |
 | 托盘 | 原生钩子、常显钉选、闪烁可上岛通知 |
 | 主题 | 玻璃材质、最大化窗口吸色（ambient） |
-| 插件 | 快捷区 / 岛面板 / 托管弹窗；设置内本地安装 `.whpx` 或导入示例（非远程商店） |
+| 插件 | 快捷区 / 岛面板 / 托管弹窗；本地安装 `.whpx` 或导入示例；可用 `hub.notify` 等往灵动岛发消息 |
 
-内置 / 可导入示例：天气、世界时钟、正在播放、中转站、文件搜索、窗口组、应用库、系统监控、成语、镜子、Excalidraw 等（见 `docs/plugins/examples/`）。
+内置 / 可导入示例：天气、世界时钟、正在播放、中转站、文件搜索、窗口组、应用库、系统监控、成语、镜子、Excalidraw 等（见 `docs/plugins/examples/`）。想自己玩：读 [插件规范](docs/plugins/README.md)，用 AI 写一页 HTML 也能挂上顶栏。
 
 ## 技术栈
 
@@ -93,10 +108,11 @@ Dock 常驻底部（可配置显示模式），图标按使用习惯分组；与
 
 ## 环境要求
 
-- Windows 10 或更高
+- **Windows 11**（当前主要适配与验收环境）
+- Windows 10：理论上可运行，**尚未系统测试**
 - [Rust](https://rustup.rs/)（MSVC toolchain）
 - [Node.js](https://nodejs.org/) + npm
-- WebView2（Win10/11 通常已预装）
+- WebView2（Win11 通常已预装）
 
 ## 快速开始
 
@@ -130,7 +146,7 @@ npm run tauri -- dev
 | [docs/plugins/plugin.schema.json](docs/plugins/plugin.schema.json) | `plugin.json` Schema |
 | `docs/plugins/examples/` | 官方示例源 |
 
-原则：**插件 = 静态包**；只使用宿主已声明的 capability；能力不足写在插件文档里，不要为做插件去改宿主。
+原则：**插件 = 静态包**；只使用宿主已声明的 capability；能力不足写在插件文档里，不要为做插件去改宿主。宿主把 `hub.*` 暴露清楚，就是为了让「简单 HTML + AI」也能做出能上岛、上快捷区的小功能。
 
 ## 项目结构
 
@@ -166,16 +182,19 @@ window-hub/
 
 ## English
 
-**Window Hub** is a Windows-only desktop shell: Dynamic Island, Dock, and system chrome (tray, WLAN/Ethernet, IME, Control Center), plus local static plugins (`.whpx` / CapGate).
+**Window Hub** (also **灵动桌面**) is a Windows desktop shell inspired by macOS’s efficient **narrow menu bar + Dock**: a thin always-on top bar gives plugins room to live, while the Dock handles launch and switching. Both can replace the Windows taskbar.
+
+The product started as a Dynamic Island; the full top bar and auto-immerse exist so the island can fade into the chrome instead of sitting as a permanent black pill. The **shortcuts** strip can show different plugins depending on the **foreground app/process**.
 
 Screenshots: see **界面一览** above / [`docs/media/`](docs/media/).
 
 ### Highlights
 
-- Island — compact bar, panels, staging, notifications, optional auto-immerse
-- Dock — display modes, magnification, icon editor, hover previews
-- Chrome — shortcuts strip, tray hooks, wired-preferred network, IME, Control Center
-- Plugins — local install / import examples (not a remote store yet)
+- Layout — macOS-style narrow top bar + Dock; top bar reserved for plugins
+- Shortcuts — per-foreground-app plugin visibility (or always-on)
+- Island — panels, staging, notifications; plugins can push attention via `hub.notify`; optional auto-immerse
+- Dock — taskbar alternative; display modes, magnification, icon editor
+- Plugins — thin HTML/JS packages (`.whpx` / CapGate); easy for humans or AI to author
 
 ### Develop
 
@@ -186,7 +205,7 @@ npm run check
 npm run tauri:build:bundle   # NSIS
 ```
 
-Requires Windows 10+, Rust (MSVC), Node.js, and WebView2.
+Requires **Windows 11** (primary). Windows 10 is untested. Also needs Rust (MSVC), Node.js, and WebView2.
 
 ### License
 
