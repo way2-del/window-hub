@@ -34,6 +34,7 @@ fn set_dock_preview_tip_keep(app: &AppHandle, keep: bool) {
 const REUSABLE_CHROME_POPUPS: &[&str] = &[
     "tray-popup",
     "status-menu-popup",
+    "dock-add-icon-popup",
     "input-lang-popup",
     "control-center-popup",
     "wifi-popup",
@@ -45,6 +46,7 @@ use std::sync::Mutex as StdMutex;
 
 static TRAY_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
 static STATUS_MENU_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
+static DOCK_ADD_ICON_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
 static INPUT_LANG_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
 static CONTROL_CENTER_VISIBLE: AtomicBool = AtomicBool::new(false);
 static WIFI_POPUP_VISIBLE: AtomicBool = AtomicBool::new(false);
@@ -85,6 +87,7 @@ pub(crate) fn mark_popup_visible(label: &str, visible: bool) {
     let flag = match label {
         "tray-popup" => &TRAY_POPUP_VISIBLE,
         "status-menu-popup" => &STATUS_MENU_POPUP_VISIBLE,
+        "dock-add-icon-popup" => &DOCK_ADD_ICON_POPUP_VISIBLE,
         "input-lang-popup" => &INPUT_LANG_POPUP_VISIBLE,
         "control-center-popup" => &CONTROL_CENTER_VISIBLE,
         "wifi-popup" => &WIFI_POPUP_VISIBLE,
@@ -99,6 +102,7 @@ pub(crate) fn popup_visible(label: &str) -> bool {
     match label {
         "tray-popup" => TRAY_POPUP_VISIBLE.load(Ordering::SeqCst),
         "status-menu-popup" => STATUS_MENU_POPUP_VISIBLE.load(Ordering::SeqCst),
+        "dock-add-icon-popup" => DOCK_ADD_ICON_POPUP_VISIBLE.load(Ordering::SeqCst),
         "input-lang-popup" => INPUT_LANG_POPUP_VISIBLE.load(Ordering::SeqCst),
         "control-center-popup" => CONTROL_CENTER_VISIBLE.load(Ordering::SeqCst),
         "wifi-popup" => WIFI_POPUP_VISIBLE.load(Ordering::SeqCst),
@@ -118,8 +122,15 @@ fn emit_chrome_popup_closed(app: &AppHandle, label: &str) {
             let _ = app.emit("plugin-popup-closed", ());
         }
         "status-menu-popup" => {
-            set_dock_menu_hold(app, false);
+            // Add-icon picker may take over — keep AutoHide hold in that case.
+            if !popup_visible("dock-add-icon-popup") {
+                set_dock_menu_hold(app, false);
+            }
             let _ = app.emit("status-menu-popup-closed", ());
+        }
+        "dock-add-icon-popup" => {
+            set_dock_menu_hold(app, false);
+            let _ = app.emit("dock-add-icon-popup-closed", ());
         }
         "input-lang-popup" => {
             let _ = app.emit("input-lang-popup-closed", ());
@@ -1083,6 +1094,163 @@ pub fn is_status_menu_popup_open(_app: AppHandle) -> bool {
     popup_visible("status-menu-popup")
 }
 
+const DOCK_ADD_ICON_POPUP_W: f64 = 280.0;
+/// Placeholder only — frontend `fitPopupToContent` resizes to content.
+const DOCK_ADD_ICON_POPUP_H: f64 = 120.0;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DockAddIconOpenPayload {
+    after_item_id: Option<String>,
+    pin_bottom: Option<f64>,
+}
+
+fn dock_add_icon_init_script(payload: &DockAddIconOpenPayload) -> String {
+    let after_item_id = payload
+        .after_item_id
+        .as_ref()
+        .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
+    let pin_bottom = payload
+        .pin_bottom
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "null".into());
+    format!(
+        r#"
+      window.__WH_IS_DOCK_ADD_ICON_POPUP__ = true;
+      window.__WH_DOCK_ADD_ICON_AFTER_ITEM_ID__ = {after_item_id};
+      window.__WH_DOCK_ADD_ICON_PIN_BOTTOM__ = {pin_bottom};
+      document.addEventListener('keydown', function (e) {{
+        if (e.key === 'Escape') {{
+          try {{ window.__TAURI__.core.invoke('close_dock_add_icon_popup'); }} catch (_) {{}}
+        }}
+      }});
+    "#
+    )
+}
+
+fn apply_dock_add_icon_payload(win: &WebviewWindow, payload: &DockAddIconOpenPayload) {
+    let after_item_id = payload
+        .after_item_id
+        .as_ref()
+        .map(|id| serde_json::to_string(id).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
+    let pin_bottom = payload
+        .pin_bottom
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "null".into());
+    let _ = win.eval(&format!(
+        "window.__WH_DOCK_ADD_ICON_AFTER_ITEM_ID__ = {after_item_id}; window.__WH_DOCK_ADD_ICON_PIN_BOTTOM__ = {pin_bottom};"
+    ));
+}
+
+fn ensure_dock_add_icon_popup_window(
+    app: &AppHandle,
+    state: &MaterialState,
+    payload: &DockAddIconOpenPayload,
+) -> Result<WebviewWindow, String> {
+    if let Some(existing) = app.get_webview_window("dock-add-icon-popup") {
+        return Ok(existing);
+    }
+    let _guard = lock_webview_create("dock-add-icon-popup");
+    if let Some(existing) = app.get_webview_window("dock-add-icon-popup") {
+        return Ok(existing);
+    }
+    let wd = create_watchdog("dock-add-icon-popup");
+    let built = WebviewWindowBuilder::new(
+        app,
+        "dock-add-icon-popup",
+        WebviewUrl::App("index.html?window=dock-add-icon".into()),
+    )
+    .title("")
+    .inner_size(DOCK_ADD_ICON_POPUP_W, DOCK_ADD_ICON_POPUP_H)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(true)
+    .visible(false)
+    .initialization_script(dock_add_icon_init_script(payload))
+    .build();
+    finish_watchdog(&wd);
+    let win = built.map_err(|e| format!("dock-add-icon create failed: {e}"))?;
+    apply_saved_material(&win, state);
+    if let Ok(hwnd) = win.hwnd() {
+        crate::win32::switcher::exclude_from_switcher(hwnd.0 as isize);
+        #[cfg(windows)]
+        crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
+    }
+    Ok(win)
+}
+
+/// Dock blank-space “添加图标” picker — same MicaAlt chrome shell as Wi‑Fi / IME.
+#[tauri::command]
+pub async fn open_dock_add_icon_popup(
+    app: AppHandle,
+    state: State<'_, MaterialState>,
+    x: f64,
+    y: f64,
+    after_item_id: Option<String>,
+    pin_bottom: Option<f64>,
+) -> Result<(), String> {
+    set_dock_menu_hold(&app, true);
+    // Mark early so status-menu close (sibling) does not drop AutoHide hold.
+    mark_popup_visible("dock-add-icon-popup", true);
+
+    close_sibling_popups(&app, "dock-add-icon-popup");
+    #[cfg(windows)]
+    crate::win32::blur_glass::strip_dock_windows(&app);
+
+    let payload = DockAddIconOpenPayload {
+        after_item_id: after_item_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        pin_bottom,
+    };
+
+    if let Some(existing) = app.get_webview_window("dock-add-icon-popup") {
+        apply_saved_material(&existing, &state);
+        let _ = existing.hide();
+        let _ = existing.set_size(LogicalSize::new(DOCK_ADD_ICON_POPUP_W, DOCK_ADD_ICON_POPUP_H));
+        let _ = existing.set_position(LogicalPosition::new(x, y));
+        let _ = existing.unminimize();
+        #[cfg(windows)]
+        if let Ok(hwnd) = existing.hwnd() {
+            crate::win32::blur_glass::strip_frameless_popup_titlebar(hwnd.0 as isize);
+        }
+        apply_dock_add_icon_payload(&existing, &payload);
+        mark_popup_visible("dock-add-icon-popup", true);
+        let _ = app.emit("dock-add-icon-popup-opened", &payload);
+        return Ok(());
+    }
+
+    async_delay_ms(100).await;
+    let win = ensure_dock_add_icon_popup_window(&app, &state, &payload)?;
+    let _ = win.set_position(LogicalPosition::new(x, y));
+    let _ = win.set_size(LogicalSize::new(DOCK_ADD_ICON_POPUP_W, DOCK_ADD_ICON_POPUP_H));
+    apply_dock_add_icon_payload(&win, &payload);
+    mark_popup_visible("dock-add-icon-popup", true);
+    let _ = app.emit("dock-add-icon-popup-opened", &payload);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_dock_add_icon_popup(app: AppHandle) -> Result<(), String> {
+    hide_chrome_popup(&app, "dock-add-icon-popup");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_dock_add_icon_popup_open(_app: AppHandle) -> bool {
+    popup_visible("dock-add-icon-popup")
+}
+
 const PLUGIN_POPUP_W: f64 = 320.0;
 const PLUGIN_POPUP_H: f64 = 480.0;
 const PLUGIN_POPUP_W_MIN: f64 = 280.0;
@@ -1929,7 +2097,7 @@ pub fn apply_window_effect(
     // (and any later invoke from a settings button could re-enter the same path).
     if matches!(
         window.label(),
-        "settings" | "dock-icon-editor" | "plugin-window" | "tray-popup" | "status-menu-popup" | "control-center-popup" | "wifi-popup" | "wifi-auth-popup" | "input-lang-popup"
+        "settings" | "dock-icon-editor" | "plugin-window" | "tray-popup" | "status-menu-popup" | "dock-add-icon-popup" | "control-center-popup" | "wifi-popup" | "wifi-auth-popup" | "input-lang-popup"
     ) {
         let _ = crate::win32::material::reassert_prefs(&window, &prefs);
         return Ok(prefs.kind.as_str().to_string());
@@ -3008,6 +3176,7 @@ pub(crate) fn close_sibling_popups(app: &AppHandle, except: &str) {
         "tray-popup",
         "plugin-popup",
         "status-menu-popup",
+        "dock-add-icon-popup",
         "input-lang-popup",
         "control-center-popup",
         "wifi-popup",

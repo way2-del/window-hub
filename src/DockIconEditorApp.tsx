@@ -10,6 +10,7 @@ import {
 import {
   DockStartIcon,
   DockTrashIcon,
+  DockTrashFullIcon,
   DOCK_AUTO_PLATE_BG,
   DOCK_START_BG,
   DOCK_TRASH_BG,
@@ -27,8 +28,11 @@ type DockItem = {
   realPath: string;
   virtualPath: string;
   iconPath: string;
+  iconPathFull?: string;
   uwp: boolean;
   iconPng?: string | null;
+  iconPngFull?: string | null;
+  trashFull?: boolean;
   iconScale?: number;
   iconOffsetX?: number;
   iconOffsetY?: number;
@@ -88,9 +92,21 @@ function resolveStaticPlateBg(item: DockItem, draftBg?: string): string | null {
   return null; // auto → sample from PNG
 }
 
-function ItemGlyph({ item }: { item: DockItem }) {
+function trashGlyphPng(item: DockItem, full: boolean): string | null {
+  if (full) return (item.iconPngFull || "").trim() || null;
+  return (item.iconPng || "").trim() || null;
+}
+
+function ItemGlyph({ item, forceTrashFull }: { item: DockItem; forceTrashFull?: boolean }) {
   if (item.kind === "startmenu" && !item.iconPng) return <DockStartIcon />;
-  if (item.kind === "trash" && !item.iconPng) return <DockTrashIcon />;
+  if (item.kind === "trash") {
+    const full = forceTrashFull ?? !!item.trashFull;
+    const png = trashGlyphPng(item, full);
+    if (png) {
+      return <img src={`data:image/png;base64,${png}`} alt="" draggable={false} />;
+    }
+    return full ? <DockTrashFullIcon /> : <DockTrashIcon />;
+  }
   if (item.iconPng) {
     return <img src={`data:image/png;base64,${item.iconPng}`} alt="" draggable={false} />;
   }
@@ -325,11 +341,13 @@ function DockIconEditorInner() {
         ? {
             ...it,
             iconPath: "",
+            iconPathFull: "",
             iconScale: 0.9,
             iconOffsetX: 0,
             iconOffsetY: 0,
             iconBg: "",
             iconPng: null,
+            iconPngFull: null,
           }
         : it,
     );
@@ -340,34 +358,48 @@ function DockIconEditorInner() {
     await persist(next);
   }
 
-  async function onPick() {
+  async function onPick(variant: "empty" | "full" = "empty") {
     if (!prefs || !selected) return;
     try {
       const path = await invoke<string | null>("pick_dock_icon_file");
       if (!path) return;
       setBusy(true);
       setMsg(null);
+      const cacheId =
+        selected.kind === "trash" && variant === "full"
+          ? `${selected.id}-full`
+          : selected.id;
       // Materialize into `%APPDATA%\window-hub\dock-icons\{id}.png`.
       const cached = await invoke<string>("dock_cache_icon", {
-        itemId: selected.id,
+        itemId: cacheId,
         sourcePath: path,
       });
-      const nextItems = prefs.items.map((it) =>
-        it.id === selected.id ? { ...it, iconPath: cached, iconPng: null } : it,
-      );
+      const nextItems = prefs.items.map((it) => {
+        if (it.id !== selected.id) return it;
+        if (selected.kind === "trash" && variant === "full") {
+          return { ...it, iconPathFull: cached, iconPngFull: null };
+        }
+        return { ...it, iconPath: cached, iconPng: null };
+      });
       const saved = await invoke<DockPrefs>("set_dock_prefs", {
         prefs: { ...prefs, items: nextItems },
       });
       // Prefer host-resolved PNG so the left list updates immediately.
       let withPng = saved;
       const hit = saved.items.find((it) => it.id === selected.id);
-      if (hit && !hit.iconPng) {
+      const wantPng =
+        selected.kind === "trash" && variant === "full" ? hit?.iconPngFull : hit?.iconPng;
+      if (hit && !wantPng) {
         withPng = await invoke<DockPrefs>("get_dock_prefs");
       }
       const fresh = withPng.items.find((it) => it.id === selected.id);
+      const freshPng =
+        selected.kind === "trash" && variant === "full"
+          ? fresh?.iconPngFull
+          : fresh?.iconPng;
       // Auto plate = island-notify dominant color (keep iconBg empty = 自动).
-      if (fresh?.iconPng) {
-        await plateColorFromPngBase64(fresh.iconPng);
+      if (freshPng) {
+        await plateColorFromPngBase64(freshPng);
       }
       setPrefs(withPng);
       setDraftBg("");
@@ -378,6 +410,18 @@ function DockIconEditorInner() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function onClearTrashIcon(variant: "empty" | "full") {
+    if (!prefs || !selected || selected.kind !== "trash") return;
+    const next = prefs.items.map((it) => {
+      if (it.id !== selected.id) return it;
+      if (variant === "full") {
+        return { ...it, iconPathFull: "", iconPngFull: null };
+      }
+      return { ...it, iconPath: "", iconPng: null };
+    });
+    await persist(next);
   }
 
   async function onConfirm() {
@@ -490,38 +534,132 @@ function DockIconEditorInner() {
 
             <div className="die-body">
               <section className="die-preview" aria-label="图标预览">
-                <div className="die-preview-plate" style={{ background: plateBg }}>
-                  <div
-                    className="die-preview-glyph"
-                    style={{
-                      transform: `translate(${draftOx * 2}px, ${draftOy * 2}px) scale(${previewScale})`,
-                    }}
-                  >
-                    <ItemGlyph item={selected} />
+                {selected.kind === "trash" ? (
+                  <div className="die-preview-pair">
+                    <div className="die-preview-slot">
+                      <div className="die-preview-plate" style={{ background: plateBg }}>
+                        <div
+                          className="die-preview-glyph"
+                          style={{
+                            transform: `translate(${draftOx * 2}px, ${draftOy * 2}px) scale(${previewScale})`,
+                          }}
+                        >
+                          <ItemGlyph item={selected} forceTrashFull={false} />
+                        </div>
+                      </div>
+                      <span className="die-preview-cap">空</span>
+                    </div>
+                    <div className="die-preview-slot">
+                      <div className="die-preview-plate" style={{ background: plateBg }}>
+                        <div
+                          className="die-preview-glyph"
+                          style={{
+                            transform: `translate(${draftOx * 2}px, ${draftOy * 2}px) scale(${previewScale})`,
+                          }}
+                        >
+                          <ItemGlyph item={selected} forceTrashFull />
+                        </div>
+                      </div>
+                      <span className="die-preview-cap">满</span>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="die-preview-plate" style={{ background: plateBg }}>
+                    <div
+                      className="die-preview-glyph"
+                      style={{
+                        transform: `translate(${draftOx * 2}px, ${draftOy * 2}px) scale(${previewScale})`,
+                      }}
+                    >
+                      <ItemGlyph item={selected} />
+                    </div>
+                  </div>
+                )}
               </section>
 
               <section className="die-panel">
                 <h2>图标</h2>
-                <div className="die-actions">
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={busy}
-                    onClick={() => void onRestore()}
-                  >
-                    还原
-                  </button>
-                  <button
-                    type="button"
-                    className="settings-secondary-btn"
-                    disabled={busy}
-                    onClick={() => void onPick()}
-                  >
-                    选择图片
-                  </button>
-                </div>
+                {selected.kind === "trash" ? (
+                  <div className="die-trash-icons">
+                    <div className="die-trash-row">
+                      <div className="die-trash-row-text">
+                        <strong>空状态</strong>
+                        <span>回收站无文件时显示</span>
+                      </div>
+                      <div className="die-actions">
+                        <button
+                          type="button"
+                          className="settings-secondary-btn"
+                          disabled={busy}
+                          onClick={() => void onClearTrashIcon("empty")}
+                        >
+                          清除
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-secondary-btn"
+                          disabled={busy}
+                          onClick={() => void onPick("empty")}
+                        >
+                          选择图片
+                        </button>
+                      </div>
+                    </div>
+                    <div className="die-trash-row">
+                      <div className="die-trash-row-text">
+                        <strong>满状态</strong>
+                        <span>回收站有文件时显示</span>
+                      </div>
+                      <div className="die-actions">
+                        <button
+                          type="button"
+                          className="settings-secondary-btn"
+                          disabled={busy}
+                          onClick={() => void onClearTrashIcon("full")}
+                        >
+                          清除
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-secondary-btn"
+                          disabled={busy}
+                          onClick={() => void onPick("full")}
+                        >
+                          选择图片
+                        </button>
+                      </div>
+                    </div>
+                    <div className="die-actions">
+                      <button
+                        type="button"
+                        className="settings-secondary-btn"
+                        disabled={busy}
+                        onClick={() => void onRestore()}
+                      >
+                        全部还原
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="die-actions">
+                    <button
+                      type="button"
+                      className="settings-secondary-btn"
+                      disabled={busy}
+                      onClick={() => void onRestore()}
+                    >
+                      还原
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-secondary-btn"
+                      disabled={busy}
+                      onClick={() => void onPick("empty")}
+                    >
+                      选择图片
+                    </button>
+                  </div>
+                )}
 
                 <div className="die-bg-block">
                   <strong>背景色</strong>

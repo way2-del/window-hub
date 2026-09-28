@@ -17,6 +17,60 @@ declare global {
 }
 
 const POPUP_W = 200;
+const POPUP_W_WINX = 220;
+
+type WinxAction =
+  | "apps"
+  | "mobility"
+  | "power"
+  | "eventvwr"
+  | "system"
+  | "devmgmt"
+  | "network"
+  | "diskmgmt"
+  | "compmgmt"
+  | "terminal"
+  | "terminal-admin"
+  | "taskmgr"
+  | "settings"
+  | "explorer"
+  | "search"
+  | "run"
+  | "desktop"
+  | "sign-out"
+  | "sleep"
+  | "hibernate"
+  | "shutdown"
+  | "restart";
+
+const WINX_MAIN: Array<{ id: WinxAction; label: string } | "sep"> = [
+  { id: "apps", label: "安装的应用" },
+  { id: "mobility", label: "移动中心" },
+  { id: "power", label: "电源选项" },
+  { id: "eventvwr", label: "事件查看器" },
+  { id: "system", label: "系统" },
+  { id: "devmgmt", label: "设备管理器" },
+  { id: "network", label: "网络连接" },
+  { id: "diskmgmt", label: "磁盘管理" },
+  { id: "compmgmt", label: "计算机管理" },
+  { id: "terminal", label: "终端" },
+  { id: "terminal-admin", label: "终端(管理员)" },
+  "sep",
+  { id: "taskmgr", label: "任务管理器" },
+  { id: "settings", label: "设置" },
+  { id: "explorer", label: "文件资源管理器" },
+  { id: "search", label: "搜索" },
+  { id: "run", label: "运行" },
+  "sep",
+];
+
+const WINX_POWER: Array<{ id: WinxAction; label: string }> = [
+  { id: "sign-out", label: "注销" },
+  { id: "sleep", label: "睡眠" },
+  { id: "hibernate", label: "休眠" },
+  { id: "shutdown", label: "关机" },
+  { id: "restart", label: "重启" },
+];
 
 type OpenPayload = {
   fromDock?: boolean;
@@ -183,14 +237,17 @@ async function syncGlass() {
 }
 
 /** Fit to content then show — no 2px slide (that left a light window-frame strip). */
-async function revealFitted(_direction: "up" | "down") {
+async function revealFitted(
+  _direction: "up" | "down",
+  opts?: { width?: number; maxHeight?: number },
+) {
   const pinBottom = readPinBottom();
   await fitPopupToContent({
-    width: POPUP_W,
+    width: opts?.width ?? POPUP_W,
     selector: ".status-menu-shell",
     // Wrap content tightly — do not floor at 72 (leaves a hollow top on 1-item menus).
     minHeight: 36,
-    maxHeight: 480,
+    maxHeight: opts?.maxHeight ?? 480,
     pinBottom,
   });
   const win = getCurrentWindow();
@@ -212,6 +269,7 @@ export default function StatusMenuPopupApp() {
     windowCount: number;
   } | null>(null);
   const [entered, setEntered] = useState(false);
+  const [powerSubmenu, setPowerSubmenu] = useState(false);
   const revealGen = useRef(0);
   /** After first reveal, `status-menu-popup-opened` means HWND reuse (not initial emit). */
   const reuseArmedRef = useRef(false);
@@ -252,6 +310,7 @@ export default function StatusMenuPopupApp() {
       }
       if (cancelled) return;
       setEntered(false);
+      setPowerSubmenu(false);
       openingEditorRef.current = false;
       setBoot({
         hiddenCount: n,
@@ -327,14 +386,20 @@ export default function StatusMenuPopupApp() {
     };
   }, []);
 
+  const isStartMenu = boot?.fromDock && boot.dockItemKind === "startmenu";
+
   useLayoutEffect(() => {
     if (!boot) return;
     let cancelled = false;
     const gen = ++revealGen.current;
     const direction = boot.origin;
+    const tall = boot.fromDock && boot.dockItemKind === "startmenu";
     void (async () => {
       try {
-        await revealFitted(direction);
+        await revealFitted(direction, {
+          width: tall ? POPUP_W_WINX : POPUP_W,
+          maxHeight: tall ? 720 : 480,
+        });
         if (cancelled || gen !== revealGen.current) return;
         reuseArmedRef.current = true;
         setEntered(true);
@@ -352,7 +417,7 @@ export default function StatusMenuPopupApp() {
     return () => {
       cancelled = true;
     };
-  }, [boot]);
+  }, [boot, powerSubmenu]);
 
   if (!boot) {
     return <div className="status-menu-shell is-booting" aria-hidden />;
@@ -382,9 +447,121 @@ export default function StatusMenuPopupApp() {
     .filter(Boolean)
     .join(" ");
 
+  const runWinx = (action: WinxAction) =>
+    void run(async () => {
+      await invoke("dock_winx_action", { action });
+    });
+
+  const openIconEditor = () => {
+    if (openingEditorRef.current) return;
+    openingEditorRef.current = true;
+    void (async () => {
+      try {
+        await invoke("open_dock_icon_editor", {
+          itemId: dockItemId || null,
+        });
+      } catch (e) {
+        console.error("[StatusMenuPopup] open editor", e);
+        openingEditorRef.current = false;
+        return;
+      }
+      await closeSelf();
+    })();
+  };
+
   return (
     <div className={shellClass} role="menu">
-      {itemMenu ? (
+      {itemMenu && isStartMenu ? (
+        <>
+          {powerSubmenu ? (
+            <>
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() => setPowerSubmenu(false)}
+              >
+                <span className="status-menu-item-label">返回</span>
+              </button>
+              <div className="status-menu-sep" role="separator" />
+              {WINX_POWER.map((it) => (
+                <button
+                  key={it.id}
+                  type="button"
+                  className={`status-menu-item${
+                    it.id === "shutdown" || it.id === "sign-out" ? " is-danger" : ""
+                  }`}
+                  role="menuitem"
+                  onClick={() => runWinx(it.id)}
+                >
+                  <span className="status-menu-item-label">{it.label}</span>
+                </button>
+              ))}
+            </>
+          ) : (
+            <>
+              {WINX_MAIN.map((it, idx) =>
+                it === "sep" ? (
+                  <div key={`sep-${idx}`} className="status-menu-sep" role="separator" />
+                ) : (
+                  <button
+                    key={it.id}
+                    type="button"
+                    className="status-menu-item"
+                    role="menuitem"
+                    onClick={() => runWinx(it.id)}
+                  >
+                    <span className="status-menu-item-label">{it.label}</span>
+                  </button>
+                ),
+              )}
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() => setPowerSubmenu(true)}
+              >
+                <span className="status-menu-item-label">关机或注销</span>
+                <span className="status-menu-item-chevron" aria-hidden>
+                  ›
+                </span>
+              </button>
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() => runWinx("desktop")}
+              >
+                <span className="status-menu-item-label">桌面</span>
+              </button>
+              <div className="status-menu-sep" role="separator" />
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                disabled={openingEditorRef.current}
+                onClick={openIconEditor}
+              >
+                <span className="status-menu-item-label">修改图标</span>
+              </button>
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() =>
+                  void run(async () => {
+                    await invoke("dock_unpin_item", { itemId: dockItemId });
+                  })
+                }
+              >
+                <span className="status-menu-item-label">从 Dock 移除</span>
+              </button>
+            </>
+          )}
+        </>
+      ) : null}
+
+      {itemMenu && !isStartMenu ? (
         <>
           {isRunningTile ? (
             <button
@@ -414,28 +591,26 @@ export default function StatusMenuPopupApp() {
             </button>
           ) : (
             <>
+              {dockItemKind === "trash" ? (
+                <button
+                  type="button"
+                  className="status-menu-item is-danger"
+                  role="menuitem"
+                  onClick={() =>
+                    void run(async () => {
+                      await invoke("dock_empty_recycle_bin");
+                    })
+                  }
+                >
+                  清空废纸篓
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="status-menu-item"
                 role="menuitem"
                 disabled={openingEditorRef.current}
-                onClick={() => {
-                  if (openingEditorRef.current) return;
-                  openingEditorRef.current = true;
-                  void (async () => {
-                    try {
-                      // Open editor first — closing this HWND first aborts the invoke.
-                      await invoke("open_dock_icon_editor", {
-                        itemId: dockItemId || null,
-                      });
-                    } catch (e) {
-                      console.error("[StatusMenuPopup] open editor", e);
-                      openingEditorRef.current = false;
-                      return;
-                    }
-                    await closeSelf();
-                  })();
-                }}
+                onClick={openIconEditor}
               >
                 修改图标
               </button>
@@ -453,7 +628,7 @@ export default function StatusMenuPopupApp() {
               >
                 在右侧添加分割线
               </button>
-              {dockItemKind === "app" ? (
+              {dockItemKind === "app" || dockItemKind === "trash" ? (
                 <button
                   type="button"
                   className="status-menu-item"
@@ -494,6 +669,38 @@ export default function StatusMenuPopupApp() {
         <>
           {fromDock ? (
             <>
+              <button
+                type="button"
+                className="status-menu-item"
+                role="menuitem"
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      const win = getCurrentWindow();
+                      const [pos, factor] = await Promise.all([
+                        win.outerPosition(),
+                        win.scaleFactor(),
+                      ]);
+                      const x = pos.x / factor;
+                      const y = pos.y / factor;
+                      const pinBottom = readPinBottom();
+                      // Open picker first — closing this HWND first can abort the invoke.
+                      await invoke("open_dock_add_icon_popup", {
+                        x,
+                        y,
+                        afterItemId: afterItemId || null,
+                        pinBottom,
+                      });
+                    } catch (e) {
+                      console.error("[StatusMenuPopup] open add-icon", e);
+                      return;
+                    }
+                    await closeSelf();
+                  })();
+                }}
+              >
+                添加图标
+              </button>
               <button
                 type="button"
                 className="status-menu-item"

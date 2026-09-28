@@ -35,7 +35,14 @@ import {
   isInteractiveChromeHoverTipLive,
   clearDockPreviewSoftCache,
 } from "./chromeHoverTip";
-import { DockStartIcon, DockTrashIcon, DOCK_START_BG, DOCK_TRASH_BG, DOCK_AUTO_PLATE_BG } from "./dockIcons";
+import {
+  DockStartIcon,
+  DockTrashIcon,
+  DockTrashFullIcon,
+  DOCK_START_BG,
+  DOCK_TRASH_BG,
+  DOCK_AUTO_PLATE_BG,
+} from "./dockIcons";
 import { useDockIconPlate } from "./dockIconPlate";
 import { plateColorFromPngBase64, peekCachedPlateColor } from "./dockIconBg";
 import "./DockApp.css";
@@ -49,8 +56,14 @@ type DockItem = {
   realPath: string;
   virtualPath: string;
   iconPath: string;
+  /** Trash only: custom icon when Recycle Bin has items. */
+  iconPathFull?: string;
   uwp: boolean;
   iconPng?: string | null;
+  /** Trash only: runtime PNG for the full state. */
+  iconPngFull?: string | null;
+  /** Trash only: Recycle Bin currently has items. */
+  trashFull?: boolean;
   iconScale?: number;
   iconOffsetX?: number;
   iconOffsetY?: number;
@@ -80,7 +93,8 @@ type HubWindow = {
   exeName?: string | null;
 };
 
-const STATUS_MENU_W = 200;
+/** Clamp for open position — Start Win+X menu is 220 wide. */
+const STATUS_MENU_W = 220;
 const STATUS_MENU_H = 340;
 const STATUS_MENU_GAP = 8;
 const STATUS_MENU_MARGIN = 8;
@@ -386,9 +400,16 @@ function DockItemGlyph({
   const ox = item.iconOffsetX ?? 0;
   const oy = item.iconOffsetY ?? 0;
   const bgRaw = (item.iconBg ?? "").trim();
-  const src = item.iconPng ? `data:image/png;base64,${item.iconPng}` : null;
+  const trashFull = item.kind === "trash" && !!item.trashFull;
+  const activePng = (() => {
+    if (item.kind !== "trash") return (item.iconPng || "").trim() || null;
+    // Prefer the state-specific custom icon; otherwise Host SVG for that state.
+    if (trashFull) return (item.iconPngFull || "").trim() || null;
+    return (item.iconPng || "").trim() || null;
+  })();
+  const src = activePng ? `data:image/png;base64,${activePng}` : null;
   const autoPlate = useDockIconPlate(src);
-  const autoColor = useAutoPlateColor(bgRaw ? null : item.iconPng);
+  const autoColor = useAutoPlateColor(bgRaw ? null : activePng);
 
   let plateClass = "dock-icon-tile";
   let plateBg: string | undefined;
@@ -398,10 +419,10 @@ function DockItemGlyph({
   } else if (bgRaw) {
     plateClass += " has-custom-bg";
     plateBg = bgRaw;
-  } else if (item.kind === "startmenu" && !item.iconPng) {
+  } else if (item.kind === "startmenu" && !activePng) {
     plateClass += " has-custom-bg";
     plateBg = DOCK_START_BG;
-  } else if (item.kind === "trash" && !item.iconPng) {
+  } else if (item.kind === "trash" && !activePng) {
     plateClass += " has-custom-bg";
     plateBg = DOCK_TRASH_BG;
   } else if (src && autoPlate) {
@@ -415,10 +436,10 @@ function DockItemGlyph({
   }
 
   const glyph =
-    item.kind === "startmenu" && !item.iconPng ? (
+    item.kind === "startmenu" && !activePng ? (
       <DockStartIcon />
-    ) : item.kind === "trash" && !item.iconPng ? (
-      <DockTrashIcon />
+    ) : item.kind === "trash" && !activePng ? (
+      trashFull ? <DockTrashFullIcon /> : <DockTrashIcon />
     ) : src ? (
       <DockRasterGlyph src={src} />
     ) : (
@@ -1121,6 +1142,21 @@ export default function DockApp() {
         clearDockPreviewSoftCache();
       }
       setPrefs(e.payload);
+      void refreshDisplay();
+    }).then((u) => unsubs.push(u));
+    // Trash empty/full flips — patch tiles even if a prefs emit was skipped.
+    void listen<{ full?: boolean }>("dock-trash-state", (e) => {
+      if (cancelled || dndActiveRef.current) return;
+      const full = !!e.payload?.full;
+      setDisplayItems((prev) => {
+        let changed = false;
+        const next = prev.map((it) => {
+          if (it.kind !== "trash" || !!it.trashFull === full) return it;
+          changed = true;
+          return { ...it, trashFull: full };
+        });
+        return changed ? next : prev;
+      });
       void refreshDisplay();
     }).then((u) => unsubs.push(u));
     void listen<{ windows: HubWindow[] }>("hub-windows-changed", (e) => {

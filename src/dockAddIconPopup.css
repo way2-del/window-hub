@@ -1,0 +1,185 @@
+/* Dock “添加图标” picker — rows inside ChromePopupShell. */
+
+.wh-chrome-popup-shell.dai-shell {
+  gap: 8px;
+}
+
+.wh-chrome-popup-shell.dai-shell.is-drop-hover {
+  outline: 1px dashed color-mix(in srgb, var(--sys-accent, #34c759) 70%, transparent);
+  outline-offset: -6px;
+}
+
+.dai-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.dai-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  background: rgb(255 255 255 / 0.08);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0.88;
+}
+
+.dai-icon-btn:hover:not(:disabled) {
+  opacity: 1;
+  background: rgb(255 255 255 / 0.14);
+}
+
+.dai-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.dai-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px 4px;
+  text-align: center;
+}
+
+.dai-hero-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  opacity: 0.78;
+}
+
+.dai-hero-hint {
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0.55;
+}
+
+.dai-section-label {
+  padding: 2px 8px 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  opacity: 0.55;
+}
+
+.dai-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dai-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.dai-row:hover:not(:disabled) {
+  background: var(--glass-btn, rgb(255 255 255 / 0.1));
+}
+
+.dai-row.is-disabled,
+.dai-row:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.dai-glyph {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgb(255 255 255 / 0.08);
+}
+
+.dai-glyph .dock-glyph,
+.dai-glyph svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.dai-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dai-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.65;
+}
+
+.dai-mask {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 2px 0 0;
+  padding: 4px 8px;
+  font-size: 12px;
+  opacity: 0.85;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dai-mask input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--sys-accent, #34c759);
+  cursor: pointer;
+}
+
+.dai-drop-hint {
+  padding: 2px 8px 2px;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+html[data-theme="light"] .dai-icon-btn {
+  background: rgb(0 0 0 / 0.06);
+}
+
+html[data-theme="light"] .dai-icon-btn:hover:not(:disabled) {
+  background: rgb(0 0 0 / 0.1);
+}
+
+html[data-theme="light"] .dai-row:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+html[data-theme="light"] .dai-glyph {
+  background: rgba(0, 0, 0, 0.06);
+}

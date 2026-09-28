@@ -16,6 +16,7 @@ import PluginPopupHost from "./components/PluginPopupHost";
 import DockApp from "./DockApp";
 import DockGlassApp from "./DockGlassApp";
 import DockIconEditorApp from "./DockIconEditorApp";
+import DockAddIconPopupApp from "./DockAddIconPopupApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
@@ -39,6 +40,8 @@ const bodyClass = kind === "control-center" ? "is-control-center-popup" :
                 ? "is-wifi-auth-popup"
                 : kind === "plugin-popup"
                   ? "is-plugin-popup"
+                  : kind === "dock-add-icon"
+                    ? "is-dock-add-icon-popup"
                   : kind === "dock-icon-editor"
                     ? ["is-dock-icon-editor", "is-settings"]
                     : kind === "dock" || kind === "dock-glass" || kind === "island-bar-glass"
@@ -71,6 +74,8 @@ document.title = kind === "control-center" ? "控制中心" :
                     ? "Dock Glass"
                     : kind === "island-bar-glass"
                       ? "Island Bar Glass"
+                      : kind === "dock-add-icon"
+                        ? "添加图标"
                       : kind === "dock-icon-editor"
                         ? "修改图标"
                     : kind === "dock"
@@ -93,7 +98,8 @@ if (
   kind === "input-lang" ||
   kind === "control-center" ||
   kind === "wifi" ||
-  kind === "wifi-auth"
+  kind === "wifi-auth" ||
+  kind === "dock-add-icon"
 ) {
   applyGlassCss({ kind: "mica-alt", dark: true, acrylicAlpha: 125 });
 }
@@ -119,6 +125,8 @@ ReactDOM.createRoot(root).render(
       <WifiAuthPopupApp />
     ) : kind === "plugin-popup" ? (
       <PluginPopupHost />
+    ) : kind === "dock-add-icon" ? (
+      <DockAddIconPopupApp />
     ) : kind === "dock-icon-editor" ? (
       <DockIconEditorApp />
     ) : kind === "dock" ? (

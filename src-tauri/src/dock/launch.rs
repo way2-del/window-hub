@@ -132,6 +132,37 @@ fn open_trash() -> Result<(), String> {
     shell_open("shell:RecycleBinFolder", None)
 }
 
+/// Empty the system Recycle Bin (shows the OS confirmation UI).
+pub fn empty_recycle_bin() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Shell::SHEmptyRecycleBinW;
+
+        // Flags 0 → keep Windows confirmation / progress / sound.
+        match unsafe { SHEmptyRecycleBinW(HWND::default(), PCWSTR::null(), 0) } {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let code = err.code().0;
+                // HRESULT_FROM_WIN32(ERROR_CANCELLED) — user dismissed the prompt.
+                if code == -2147023673 || code == 1223 {
+                    return Ok(());
+                }
+                // Already empty / nothing to delete.
+                if code == 0 || code == 1 {
+                    return Ok(());
+                }
+                Err(format!("清空回收站失败 (0x{:08X})", code as u32))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Err("仅支持 Windows".into())
+    }
+}
+
 fn launch_app(item: &DockItem) -> Result<(), String> {
     if item.uwp && !item.virtual_path.is_empty() {
         let uri = format!("shell:AppsFolder\\{}", item.virtual_path);
@@ -148,7 +179,15 @@ fn launch_app(item: &DockItem) -> Result<(), String> {
     shell_open(path, None)
 }
 
-fn shell_open(file: &str, params: Option<&str>) -> Result<(), String> {
+pub(crate) fn shell_open(file: &str, params: Option<&str>) -> Result<(), String> {
+    shell_execute(file, params, "open")
+}
+
+pub(crate) fn shell_runas(file: &str, params: Option<&str>) -> Result<(), String> {
+    shell_execute(file, params, "runas")
+}
+
+fn shell_execute(file: &str, params: Option<&str>, verb: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -167,7 +206,7 @@ fn shell_open(file: &str, params: Option<&str>) -> Result<(), String> {
                 .chain(std::iter::once(0))
                 .collect()
         });
-        let op: Vec<u16> = std::ffi::OsStr::new("open")
+        let op: Vec<u16> = std::ffi::OsStr::new(verb)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -186,14 +225,17 @@ fn shell_open(file: &str, params: Option<&str>) -> Result<(), String> {
             );
             // HINSTANCE > 32 means success
             if ret.0 as isize <= 32 {
-                return Err(format!("ShellExecute failed for {file} (code {})", ret.0 as isize));
+                return Err(format!(
+                    "ShellExecute({verb}) failed for {file} (code {})",
+                    ret.0 as isize
+                ));
             }
         }
         Ok(())
     }
     #[cfg(not(windows))]
     {
-        let _ = (file, params);
+        let _ = (file, params, verb);
         Err("launch only on Windows".into())
     }
 }

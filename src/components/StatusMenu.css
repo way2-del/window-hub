@@ -92,8 +92,28 @@
   pointer-events: none;
 }
 
+/* Tall Win+X Start menu: allow scroll when fitPopup caps at screen fraction. */
+.status-menu-shell.is-scrollable {
+  overflow-x: hidden;
+  overflow-y: auto;
+  justify-content: flex-start;
+  scrollbar-width: thin;
+}
+
+.status-menu-shell.is-scrollable::-webkit-scrollbar {
+  width: 6px;
+}
+
+.status-menu-shell.is-scrollable::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 0.18);
+  border-radius: 3px;
+}
+
 .status-menu-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   width: 100%;
   flex: 0 0 auto;
   padding: var(--sm-item-pad-y) var(--sm-item-pad-x);
@@ -111,6 +131,18 @@
 
 .status-menu-item:hover {
   background: var(--glass-btn, rgba(255, 255, 255, 0.1));
+}
+
+.status-menu-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.status-menu-item-chevron {
+  flex: 0 0 auto;
+  opacity: 0.55;
+  font-size: 12px;
+  line-height: 1;
 }
 
 .status-menu-item.is-danger {

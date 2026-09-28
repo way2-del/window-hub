@@ -121,8 +121,25 @@ pub fn ensure_item_icon_cached(item: &mut super::DockItem) {
     if item.kind == "separator" {
         return;
     }
-    // Builtin Start / Trash keep empty icon_path → Host SVG.
-    if (item.kind == "startmenu" || item.kind == "trash") && item.icon_path.trim().is_empty() {
+    // Builtin Start / Trash keep empty icon_path → Host SVG (until user picks).
+    if item.kind == "startmenu" && item.icon_path.trim().is_empty() {
+        return;
+    }
+    if item.kind == "trash" {
+        if !item.icon_path.trim().is_empty() && !is_cached_icon_path(&item.icon_path) {
+            if let Ok(Some(path)) = materialize_item_icon(&item.id, &item.icon_path, "") {
+                item.icon_path = path;
+            }
+        }
+        if !item.icon_path_full.trim().is_empty() && !is_cached_icon_path(&item.icon_path_full) {
+            let full_id = format!("{}-full", item.id);
+            if let Ok(Some(path)) = materialize_item_icon(&full_id, &item.icon_path_full, "") {
+                item.icon_path_full = path;
+            }
+        }
+        return;
+    }
+    if item.icon_path.trim().is_empty() {
         return;
     }
     if is_cached_icon_path(&item.icon_path) {

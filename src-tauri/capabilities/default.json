@@ -9,6 +9,7 @@
     "plugin-popup",
     "plugin-window",
     "status-menu-popup",
+    "dock-add-icon-popup",
     "input-lang-popup",
     "chrome-hover-tip",
     "control-center-popup",

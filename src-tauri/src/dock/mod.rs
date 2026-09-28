@@ -4,7 +4,9 @@ mod file_drop;
 pub(crate) mod icon;
 mod ini;
 mod launch;
+mod recycle;
 mod visibility;
+mod winx;
 
 pub use ini::parse_dockico_ini;
 pub use launch::launch_or_focus;
@@ -71,10 +73,21 @@ pub struct DockItem {
     pub launch_path: String,
     pub real_path: String,
     pub virtual_path: String,
+    /// Custom icon path. For trash: **empty** Recycle Bin glyph.
     pub icon_path: String,
+    /// Trash only: custom icon when the Recycle Bin has items.
+    #[serde(default)]
+    pub icon_path_full: String,
     pub uwp: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_png: Option<String>,
+    /// Runtime PNG for trash-full custom icon (not persisted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_png_full: Option<String>,
+    /// Runtime: Recycle Bin currently has items.
+    /// Must serialize to the WebView (was `skip_serializing`, which hid it from FE).
+    #[serde(default)]
+    pub trash_full: bool,
     /// Custom icon draw scale (1.0 = 100%). Applied in Dock UI only.
     #[serde(default = "default_icon_scale")]
     pub icon_scale: f64,
@@ -412,14 +425,32 @@ fn commit_dock_item_prefs(app: &AppHandle, mut prefs: DockPrefs) -> Result<DockP
     Ok(out)
 }
 
-fn with_icons(mut prefs: DockPrefs) -> DockPrefs {
+pub(crate) fn with_icons(mut prefs: DockPrefs) -> DockPrefs {
+    // Cached only — live SHQueryRecycleBin must stay off the sync IPC / UI path.
+    let trash_full = recycle::last_known_full();
     for item in &mut prefs.items {
+        item.icon_png_full = None;
+        item.trash_full = false;
         if item.kind == "separator" {
             item.icon_png = None;
             continue;
         }
-        // Builtin Start / Trash: Host draws SVG unless the user picked a custom icon_path.
-        if (item.kind == "startmenu" || item.kind == "trash") && item.icon_path.trim().is_empty() {
+        if item.kind == "trash" {
+            item.trash_full = trash_full;
+            item.icon_png = if item.icon_path.trim().is_empty() {
+                None
+            } else {
+                icon::resolve_item_icon_png(&item.icon_path, "")
+            };
+            item.icon_png_full = if item.icon_path_full.trim().is_empty() {
+                None
+            } else {
+                icon::resolve_item_icon_png(&item.icon_path_full, "")
+            };
+            continue;
+        }
+        // Builtin Start: Host draws SVG unless the user picked a custom icon_path.
+        if item.kind == "startmenu" && item.icon_path.trim().is_empty() {
             item.icon_png = None;
             continue;
         }
@@ -485,10 +516,11 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
     let items = &prefs.items;
     let windows = crate::windows_service::cached_windows();
     let key = format!(
-        "{}::{}::{}",
+        "{}::{}::{}::t{}",
         pinned_layout_sig(items),
         hidden_sig(&prefs.hidden_item_ids),
-        windows_exe_sig(&windows)
+        windows_exe_sig(&windows),
+        if recycle::last_known_full() { 1 } else { 0 }
     );
     {
         let guard = merge_cache().lock();
@@ -580,8 +612,11 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
             real_path: exe.to_string(),
             virtual_path: String::new(),
             icon_path: exe.to_string(),
+            icon_path_full: String::new(),
             uwp: false,
             icon_png,
+            icon_png_full: None,
+            trash_full: false,
             icon_scale: 0.9,
             icon_offset_x: 0.0,
             icon_offset_y: 0.0,
@@ -605,8 +640,11 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
                 real_path: String::new(),
                 virtual_path: String::new(),
                 icon_path: String::new(),
+                icon_path_full: String::new(),
                 uwp: false,
                 icon_png: None,
+                icon_png_full: None,
+                trash_full: false,
                 icon_scale: 0.9,
                 icon_offset_x: 0.0,
                 icon_offset_y: 0.0,
@@ -641,6 +679,11 @@ fn merge_cache() -> &'static parking_lot::Mutex<Option<MergeCache>> {
 
 fn invalidate_dock_layout_cache() {
     icon::clear_icon_cache();
+    *merge_cache().lock() = None;
+}
+
+/// Drop merge layout only — keep hot icon rasters (trash empty/full flips).
+pub(crate) fn invalidate_dock_merge_cache() {
     *merge_cache().lock() = None;
 }
 
@@ -2381,6 +2424,23 @@ pub fn pick_dock_icon_file() -> Result<Option<String>, String> {
     Ok(file.map(|p| p.to_string_lossy().to_string()))
 }
 
+/// Browse for `.exe` / `.lnk` (etc.) to pin from the “添加图标” picker.
+#[tauri::command]
+pub fn pick_dock_pin_files() -> Result<Vec<String>, String> {
+    let files = rfd::FileDialog::new()
+        .add_filter(
+            "程序 / 快捷方式",
+            &["exe", "lnk", "url", "msc", "bat", "cmd", "com"],
+        )
+        .set_title("添加到 Dock")
+        .pick_files();
+    Ok(files
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect())
+}
+
 /// Copy a picked / dropped icon into the owned `dock-icons` store for `item_id`.
 #[tauri::command]
 pub fn dock_cache_icon(item_id: String, source_path: String) -> Result<String, String> {
@@ -2507,8 +2567,11 @@ fn dock_item_from_path(path_raw: &str) -> Result<DockItem, String> {
         virtual_path: String::new(),
         // Prefer shell icon from shortcut / exe; materialize writes owned PNG.
         icon_path: launch,
+        icon_path_full: String::new(),
         uwp: false,
         icon_png: None,
+        icon_png_full: None,
+        trash_full: false,
         icon_scale: 0.9,
         icon_offset_x: 0.0,
         icon_offset_y: 0.0,
@@ -2541,14 +2604,34 @@ fn insert_pin_before_trash(items: &mut Vec<DockItem>, item: DockItem) {
 }
 
 /// Drop `.exe` / `.lnk` (and similar) onto the dock to pin them.
+///
+/// `after_item_id` anchors insert position (blank-space picker).
+/// `use_icon_mask`: `Some(false)` → transparent plate; otherwise auto plate.
 #[tauri::command(async)]
-pub fn dock_pin_paths(app: AppHandle, paths: Vec<String>) -> Result<DockPrefs, String> {
+pub fn dock_pin_paths(
+    app: AppHandle,
+    paths: Vec<String>,
+    after_item_id: Option<String>,
+    use_icon_mask: Option<bool>,
+) -> Result<DockPrefs, String> {
     let mut prefs = load_dock_prefs();
     let mut added = 0usize;
+    let mask = use_icon_mask.unwrap_or(true);
+    let after = after_item_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     for raw in paths {
         match dock_item_from_path(&raw) {
-            Ok(item) => {
-                insert_pin_before_trash(&mut prefs.items, item);
+            Ok(mut item) => {
+                if !mask {
+                    item.icon_bg = "transparent".into();
+                }
+                if after.is_some() {
+                    insert_pin_after(&mut prefs.items, after, item);
+                } else {
+                    insert_pin_before_trash(&mut prefs.items, item);
+                }
                 added += 1;
             }
             Err(e) => {
@@ -2579,8 +2662,11 @@ fn new_dock_separator() -> DockItem {
         real_path: String::new(),
         virtual_path: String::new(),
         icon_path: String::new(),
+        icon_path_full: String::new(),
         uwp: false,
         icon_png: None,
+        icon_png_full: None,
+        trash_full: false,
         icon_scale: 0.9,
         icon_offset_x: 0.0,
         icon_offset_y: 0.0,
@@ -2623,6 +2709,205 @@ pub fn dock_add_separator(
 ) -> Result<DockPrefs, String> {
     let mut prefs = load_dock_prefs();
     insert_separator_after(&mut prefs.items, after_item_id.as_deref());
+    commit_dock_item_prefs(&app, prefs)
+}
+
+/// Preset system tiles for the dock “添加图标” picker.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockSystemIconPreset {
+    pub id: String,
+    pub label: String,
+    pub present: bool,
+}
+
+fn windows_dir() -> std::path::PathBuf {
+    std::env::var_os("WINDIR")
+        .or_else(|| std::env::var_os("SystemRoot"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+}
+
+fn system32_dir() -> std::path::PathBuf {
+    windows_dir().join("System32")
+}
+
+fn new_builtin_dock_item(kind: &str, label: &str) -> DockItem {
+    DockItem {
+        id: kind.to_string(),
+        kind: kind.to_string(),
+        label: label.to_string(),
+        match_exe: String::new(),
+        launch_path: String::new(),
+        real_path: String::new(),
+        virtual_path: String::new(),
+        icon_path: String::new(),
+        icon_path_full: String::new(),
+        uwp: false,
+        icon_png: None,
+        icon_png_full: None,
+        trash_full: false,
+        icon_scale: 0.9,
+        icon_offset_x: 0.0,
+        icon_offset_y: 0.0,
+        icon_bg: String::new(),
+    }
+}
+
+fn dock_item_from_system_preset(preset: &str) -> Result<DockItem, String> {
+    match preset.trim().to_ascii_lowercase().as_str() {
+        "explorer" | "file-explorer" | "资源管理器" => {
+            let path = windows_dir().join("explorer.exe");
+            if !path.is_file() {
+                return Err("找不到资源管理器 (explorer.exe)".into());
+            }
+            let mut item = dock_item_from_path(&path.to_string_lossy())?;
+            item.label = "资源管理器".into();
+            Ok(item)
+        }
+        "startmenu" | "start" | "开始菜单" => Ok(new_builtin_dock_item("startmenu", "开始菜单")),
+        "trash" | "recycle" | "recyclebin" | "废纸篓" | "回收站" => {
+            Ok(new_builtin_dock_item("trash", "废纸篓"))
+        }
+        "controlpanel" | "control-panel" | "control" | "控制面板" => {
+            let path = system32_dir().join("control.exe");
+            if !path.is_file() {
+                return Err("找不到控制面板 (control.exe)".into());
+            }
+            let mut item = dock_item_from_path(&path.to_string_lossy())?;
+            item.label = "控制面板".into();
+            Ok(item)
+        }
+        other => Err(format!("未知系统图标预设: {other}")),
+    }
+}
+
+fn remove_duplicate_pin(items: &mut Vec<DockItem>, item: &DockItem) {
+    if item.kind == "startmenu" || item.kind == "trash" {
+        let kind = item.kind.clone();
+        items.retain(|it| it.kind != kind);
+        return;
+    }
+    let launch_key = item.launch_path.trim().to_ascii_lowercase();
+    let real_key = item.real_path.trim().to_ascii_lowercase();
+    let match_key = item.match_exe.trim().to_ascii_lowercase();
+    items.retain(|it| {
+        if it.kind != "app" {
+            return true;
+        }
+        let l = it.launch_path.trim().to_ascii_lowercase();
+        let r = it.real_path.trim().to_ascii_lowercase();
+        let m = it.match_exe.trim().to_ascii_lowercase();
+        !(l == launch_key
+            || (!real_key.is_empty() && (r == real_key || l == real_key))
+            || (!match_key.is_empty() && m == match_key && !m.is_empty()))
+    });
+}
+
+fn insert_pin_after(items: &mut Vec<DockItem>, after_item_id: Option<&str>, item: DockItem) {
+    remove_duplicate_pin(items, &item);
+    if let Some(aid) = after_item_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if !aid.starts_with("running:") && aid != "running-sep" {
+            if let Some(idx) = items.iter().position(|it| it.id == aid) {
+                if items[idx].kind == "trash" {
+                    items.insert(idx, item);
+                } else {
+                    items.insert((idx + 1).min(items.len()), item);
+                }
+                return;
+            }
+        }
+    }
+    match item.kind.as_str() {
+        "startmenu" => items.insert(0, item),
+        "trash" => items.push(item),
+        _ => {
+            if let Some(idx) = items.iter().position(|it| it.kind == "trash") {
+                items.insert(idx, item);
+            } else {
+                items.push(item);
+            }
+        }
+    }
+}
+
+fn system_preset_present(items: &[DockItem], preset_id: &str) -> bool {
+    match preset_id {
+        "startmenu" => items.iter().any(|it| it.kind == "startmenu"),
+        "trash" => items.iter().any(|it| it.kind == "trash"),
+        "explorer" => {
+            let want = "explorer.exe";
+            items.iter().any(|it| {
+                it.kind == "app"
+                    && (it.match_exe.eq_ignore_ascii_case(want)
+                        || it
+                            .launch_path
+                            .to_ascii_lowercase()
+                            .ends_with("\\explorer.exe")
+                        || it.real_path.to_ascii_lowercase().ends_with("\\explorer.exe"))
+            })
+        }
+        "controlpanel" => {
+            let want = "control.exe";
+            items.iter().any(|it| {
+                it.kind == "app"
+                    && (it.match_exe.eq_ignore_ascii_case(want)
+                        || it
+                            .launch_path
+                            .to_ascii_lowercase()
+                            .ends_with("\\control.exe")
+                        || it.real_path.to_ascii_lowercase().ends_with("\\control.exe"))
+            })
+        }
+        _ => false,
+    }
+}
+
+#[tauri::command]
+pub fn list_dock_system_icon_presets() -> Vec<DockSystemIconPreset> {
+    let prefs = load_dock_prefs();
+    [
+        ("explorer", "资源管理器"),
+        ("startmenu", "开始菜单"),
+        ("trash", "废纸篓"),
+        ("controlpanel", "控制面板"),
+    ]
+    .into_iter()
+    .map(|(id, label)| DockSystemIconPreset {
+        id: id.into(),
+        label: label.into(),
+        present: system_preset_present(&prefs.items, id),
+    })
+    .collect()
+}
+
+fn preset_id_for_item(item: &DockItem) -> &'static str {
+    match item.kind.as_str() {
+        "startmenu" => "startmenu",
+        "trash" => "trash",
+        "app" if item.match_exe.eq_ignore_ascii_case("explorer.exe") => "explorer",
+        "app" if item.match_exe.eq_ignore_ascii_case("control.exe") => "controlpanel",
+        _ => "",
+    }
+}
+
+/// Pin a built-in system shortcut after `after_item_id` (blank-space / gap anchor).
+#[tauri::command(async)]
+pub fn dock_add_system_icon(
+    app: AppHandle,
+    preset: String,
+    after_item_id: Option<String>,
+) -> Result<DockPrefs, String> {
+    let item = dock_item_from_system_preset(&preset)?;
+    let mut prefs = load_dock_prefs();
+    let preset_id = preset_id_for_item(&item);
+    if !preset_id.is_empty()
+        && system_preset_present(&prefs.items, preset_id)
+        && (item.kind == "startmenu" || item.kind == "trash")
+    {
+        return Err(format!("{}已在 Dock 中", item.label));
+    }
+    insert_pin_after(&mut prefs.items, after_item_id.as_deref(), item);
     commit_dock_item_prefs(&app, prefs)
 }
 
@@ -2715,7 +3000,8 @@ pub fn dock_pin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, Strin
     }
 }
 
-/// Remove a pinned dock item (not Start / Trash / ephemeral running tiles).
+/// Remove a pinned dock item (not ephemeral running tiles).
+/// Start / Trash may be removed and re-added via the system-icon picker.
 #[tauri::command(async)]
 pub fn dock_unpin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, String> {
     let id = item_id.trim().to_string();
@@ -2726,11 +3012,8 @@ pub fn dock_unpin_item(app: AppHandle, item_id: String) -> Result<DockPrefs, Str
         return Err("运行中图标未固定，无需移除".into());
     }
     let mut prefs = load_dock_prefs();
-    let Some(item) = prefs.items.iter().find(|it| it.id == id).cloned() else {
+    if !prefs.items.iter().any(|it| it.id == id) {
         return Err(format!("dock item not found: {id}"));
-    };
-    if item.kind == "startmenu" || item.kind == "trash" {
-        return Err("开始菜单 / 回收站不可移除".into());
     }
     prefs.items.retain(|it| it.id != id);
     prefs.hidden_item_ids.retain(|h| h != &id);
@@ -2844,6 +3127,20 @@ pub fn dock_launch_item(item_id: String) -> Result<(), String> {
         .ok_or_else(|| format!("dock item not found: {item_id}"))?
         .clone();
     launch_or_focus(&item)
+}
+
+/// Win+X-style power-user shortcuts from the Start dock tile context menu.
+#[tauri::command(async)]
+pub fn dock_winx_action(action: String) -> Result<(), String> {
+    winx::run_action(&action)
+}
+
+/// Empty the system Recycle Bin (OS confirmation dialog).
+#[tauri::command(async)]
+pub fn dock_empty_recycle_bin(app: AppHandle) -> Result<(), String> {
+    launch::empty_recycle_bin()?;
+    recycle::notify_trash_changed(&app);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3318,6 +3615,7 @@ async fn ensure_dock_window_inner(
 ) -> Result<(), String> {
     vis.apply_prefs(prefs);
     vis.start(app.clone());
+    recycle::spawn_trash_watcher(app.clone());
 
     let layout = dock_layout_items(prefs);
     let width = dock_window_width(

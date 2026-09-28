@@ -904,13 +904,24 @@ pub fn run() {
                         let _ = window.app_handle().emit("plugin-popup-closed", ());
                     }
                     if window.label() == "status-menu-popup" {
+                        if !crate::commands::popup_visible("dock-add-icon-popup") {
+                            if let Some(vis) = window
+                                .app_handle()
+                                .try_state::<std::sync::Arc<crate::dock::DockVisibility>>()
+                            {
+                                vis.set_interaction_hold(false);
+                            }
+                        }
+                        let _ = window.app_handle().emit("status-menu-popup-closed", ());
+                    }
+                    if window.label() == "dock-add-icon-popup" {
                         if let Some(vis) = window
                             .app_handle()
                             .try_state::<std::sync::Arc<crate::dock::DockVisibility>>()
                         {
                             vis.set_interaction_hold(false);
                         }
-                        let _ = window.app_handle().emit("status-menu-popup-closed", ());
+                        let _ = window.app_handle().emit("dock-add-icon-popup-closed", ());
                     }
                     if window.label() == "input-lang-popup" {
                         let _ = window.app_handle().emit("input-lang-popup-closed", ());
@@ -975,6 +986,9 @@ pub fn run() {
             commands::open_status_menu_popup,
             commands::close_status_menu_popup,
             commands::is_status_menu_popup_open,
+            commands::open_dock_add_icon_popup,
+            commands::close_dock_add_icon_popup,
+            commands::is_dock_add_icon_popup_open,
             commands::open_plugin_popup,
             commands::schedule_plugin_popup_as_window,
             commands::close_plugin_popup,
@@ -1103,15 +1117,20 @@ pub fn run() {
             dock::import_dockico_ini,
             dock::pick_dockico_file,
             dock::pick_dock_icon_file,
+            dock::pick_dock_pin_files,
             dock::dock_cache_icon,
             dock::dock_pin_paths,
             dock::dock_pin_item,
             dock::dock_add_separator,
+            dock::list_dock_system_icon_presets,
+            dock::dock_add_system_icon,
             dock::dock_reorder_items,
             dock::dock_unpin_item,
             dock::open_dock_icon_editor,
             dock::close_dock_icon_editor,
             dock::dock_launch_item,
+            dock::dock_winx_action,
+            dock::dock_empty_recycle_bin,
             dock::dock_capture_window_preview,
             dock::dock_item_window_count,
             dock::dock_close_item_windows,

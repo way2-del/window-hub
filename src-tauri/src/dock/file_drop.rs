@@ -153,7 +153,7 @@ fn pin_paths(paths: Vec<PathBuf>) {
     let count = list.len();
     eprintln!("[dock] file-drop: pinning {count} path(s)");
     tauri::async_runtime::spawn(async move {
-        match super::dock_pin_paths(app.clone(), list) {
+        match super::dock_pin_paths(app.clone(), list, None, None) {
             Ok(prefs) => {
                 let _ = app.emit("dock-prefs", &prefs);
                 emit_phase("drop", count);

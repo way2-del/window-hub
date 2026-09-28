@@ -201,6 +201,67 @@ body.is-dock-icon-editor #root {
   overflow: hidden;
 }
 
+.die-preview-pair {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 28px;
+  padding: 12px;
+}
+
+.die-preview-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.die-preview-slot .die-preview-plate {
+  width: 96px;
+  height: 96px;
+  border-radius: 22px;
+}
+
+.die-preview-cap {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--glass-fg-muted, #a1a1aa);
+}
+
+.die-trash-icons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.die-trash-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 0.04);
+}
+
+.die-trash-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.die-trash-row-text strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.die-trash-row-text span {
+  font-size: 11px;
+  color: var(--glass-fg-muted, #a1a1aa);
+}
+
 /* Plate fixed; glyph layer moves with scale/offset */
 .die-preview-plate {
   width: 128px;

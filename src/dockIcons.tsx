@@ -24,7 +24,7 @@ export function DockStartIcon({ className }: DockGlyphProps) {
   );
 }
 
-/** Recycle-bin glyph. */
+/** Recycle-bin glyph (empty). */
 export function DockTrashIcon({ className }: DockGlyphProps) {
   return (
     <svg
@@ -53,6 +53,40 @@ export function DockTrashIcon({ className }: DockGlyphProps) {
         strokeWidth="1.7"
         strokeLinecap="round"
         opacity="0.85"
+      />
+    </svg>
+  );
+}
+
+/** Recycle-bin glyph when the bin has items. */
+export function DockTrashFullIcon({ className }: DockGlyphProps) {
+  return (
+    <svg
+      className={`dock-glyph is-trash is-full ${className ?? ""}`.trim()}
+      viewBox="0 0 32 32"
+      width="100%"
+      height="100%"
+      aria-hidden
+    >
+      <g
+        fill="none"
+        stroke="#F5F5F7"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M10.5 12.2h11" />
+        <path d="M13.2 12.2V10.6c0-.7.5-1.2 1.2-1.2h3.2c.7 0 1.2.5 1.2 1.2v1.6" />
+        <path d="M12.2 12.2l.7 11.2c.05.7.6 1.2 1.3 1.2h3.6c.7 0 1.25-.5 1.3-1.2l.7-11.2" />
+        <path d="M14.2 15.4h3.6M14.2 18.2h3.6M14.2 21h2.4" />
+      </g>
+      <path
+        d="M10.5 12.2h11"
+        fill="none"
+        stroke="#FF9F0A"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        opacity="0.9"
       />
     </svg>
   );

@@ -2,6 +2,7 @@
 // Keep native label lookup lazy: injected flags must work before Tauri is ready.
 export type WindowFlags = Partial<Record<
   | "__WH_IS_DOCK_ICON_EDITOR__"
+  | "__WH_IS_DOCK_ADD_ICON_POPUP__"
   | "__WH_IS_DOCK_GLASS__"
   | "__WH_IS_ISLAND_BAR_GLASS__"
   | "__WH_IS_DOCK__"
@@ -29,7 +30,8 @@ export type WindowKind =
   | "dock"
   | "dock-glass"
   | "island-bar-glass"
-  | "dock-icon-editor";
+  | "dock-icon-editor"
+  | "dock-add-icon";
 
 export function resolveWindowKind(
   flags: WindowFlags,
@@ -37,6 +39,7 @@ export function resolveWindowKind(
   search: string,
 ): WindowKind {
   if (flags.__WH_IS_DOCK_ICON_EDITOR__ === true) return "dock-icon-editor";
+  if (flags.__WH_IS_DOCK_ADD_ICON_POPUP__ === true) return "dock-add-icon";
   if (flags.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
   if (flags.__WH_IS_ISLAND_BAR_GLASS__ === true) return "island-bar-glass";
   if (flags.__WH_IS_DOCK__ === true) return "dock";
@@ -52,6 +55,7 @@ export function resolveWindowKind(
   try {
     const label = getLabel();
     if (label === "dock-icon-editor") return "dock-icon-editor";
+    if (label === "dock-add-icon-popup") return "dock-add-icon";
     if (label === "dock-glass") return "dock-glass";
     if (label === "island-bar-glass") return "island-bar-glass";
     if (label === "dock") return "dock";
@@ -69,6 +73,7 @@ export function resolveWindowKind(
   }
   const q = new URLSearchParams(search).get("window");
   if (q === "dock-icon-editor") return "dock-icon-editor";
+  if (q === "dock-add-icon") return "dock-add-icon";
   if (q === "dock-glass") return "dock-glass";
   if (q === "island-bar-glass") return "island-bar-glass";
   if (q === "dock") return "dock";
