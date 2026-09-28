@@ -1,10 +1,23 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { subscribeSystemDark, syncGlassCss, type GlassPrefs } from "./glassPrefs";
 import { fitPopupToContent } from "./popupFit";
 import { bootstrapPlugins } from "./plugins/bootstrap";
+import {
+  clearShortcutsFoldMenuItems,
+  getShortcutsFoldMenuItems,
+  type ShortcutsFoldMenuItem,
+  SHORTCUTS_FOLD_PICK_EVENT,
+  SHORTCUTS_FOLD_REORDER_EVENT,
+} from "./features/chrome/shortcutsFoldMenuBus";
+import { emit } from "@tauri-apps/api/event";
+import {
+  moveIdInOrder,
+  pickDropTargetY,
+  sameOrder,
+} from "./chromeReorder";
 import "./components/StatusMenu.css";
 
 declare global {
@@ -13,6 +26,9 @@ declare global {
     __WH_STATUS_MENU_ITEM_ID__?: string | null;
     __WH_STATUS_MENU_AFTER_ITEM_ID__?: string | null;
     __WH_STATUS_MENU_PIN_BOTTOM__?: number | null;
+    __WH_STATUS_MENU_FOLD_ITEMS__?: ShortcutsFoldMenuItem[] | null;
+    __WH_STATUS_MENU_FOLD_SIDE__?: "left" | "right" | string | null;
+    __WH_STATUS_MENU_FOLD_DUAL__?: boolean;
   }
 }
 
@@ -77,6 +93,9 @@ type OpenPayload = {
   itemId?: string | null;
   afterItemId?: string | null;
   pinBottom?: number | null;
+  foldItems?: ShortcutsFoldMenuItem[] | null;
+  foldSide?: "left" | "right" | string | null;
+  foldDual?: boolean;
 };
 
 /** Captured once per open (dock menus open upward). */
@@ -84,8 +103,12 @@ let pinBottomCached: number | null | undefined;
 let fromDockCached: boolean | undefined;
 let dockItemIdCached: string | null | undefined;
 let afterItemIdCached: string | null | undefined;
+let foldItemsCached: ShortcutsFoldMenuItem[] | undefined;
+let foldSideCached: "left" | "right" | null | undefined;
+let foldDualCached: boolean | undefined;
 
 async function closeSelf() {
+  clearShortcutsFoldMenuItems();
   try {
     await invoke("close_status_menu_popup");
   } catch {
@@ -112,6 +135,9 @@ function resetOpenCaches() {
   fromDockCached = undefined;
   dockItemIdCached = undefined;
   afterItemIdCached = undefined;
+  foldItemsCached = undefined;
+  foldSideCached = undefined;
+  foldDualCached = undefined;
 }
 
 function applyPayload(payload?: OpenPayload | null) {
@@ -135,6 +161,69 @@ function applyPayload(payload?: OpenPayload | null) {
     pinBottomCached = typeof n === "number" && Number.isFinite(n) ? n : null;
     window.__WH_STATUS_MENU_PIN_BOTTOM__ = pinBottomCached;
   }
+  if (payload.foldItems !== undefined) {
+    const items = Array.isArray(payload.foldItems)
+      ? payload.foldItems.filter(
+          (it) =>
+            it &&
+            typeof it.pluginId === "string" &&
+            it.pluginId.trim() &&
+            typeof it.label === "string" &&
+            it.label.trim(),
+        )
+      : [];
+    foldItemsCached = items;
+    window.__WH_STATUS_MENU_FOLD_ITEMS__ = items;
+  }
+  if (payload.foldSide !== undefined) {
+    const s = payload.foldSide;
+    foldSideCached = s === "left" || s === "right" ? s : null;
+    window.__WH_STATUS_MENU_FOLD_SIDE__ = foldSideCached;
+  }
+  if (payload.foldDual !== undefined) {
+    foldDualCached = !!payload.foldDual;
+    window.__WH_STATUS_MENU_FOLD_DUAL__ = foldDualCached;
+  }
+}
+
+function readFoldItems(): ShortcutsFoldMenuItem[] {
+  if (foldItemsCached !== undefined) return foldItemsCached;
+  const fromWin = window.__WH_STATUS_MENU_FOLD_ITEMS__;
+  if (Array.isArray(fromWin)) {
+    foldItemsCached = fromWin.filter(
+      (it) =>
+        it &&
+        typeof it.pluginId === "string" &&
+        it.pluginId.trim() &&
+        typeof it.label === "string" &&
+        it.label.trim(),
+    );
+    return foldItemsCached;
+  }
+  // Same-window fallback (dev / tests); production status-menu is a separate HWND.
+  foldItemsCached = getShortcutsFoldMenuItems();
+  return foldItemsCached;
+}
+
+function readFoldSide(): "left" | "right" | null {
+  if (foldSideCached !== undefined) return foldSideCached;
+  const fromWin = window.__WH_STATUS_MENU_FOLD_SIDE__;
+  if (fromWin === "left" || fromWin === "right") {
+    foldSideCached = fromWin;
+    return fromWin;
+  }
+  foldSideCached = null;
+  return null;
+}
+
+function readFoldDual(): boolean {
+  if (foldDualCached !== undefined) return foldDualCached;
+  if (typeof window.__WH_STATUS_MENU_FOLD_DUAL__ === "boolean") {
+    foldDualCached = window.__WH_STATUS_MENU_FOLD_DUAL__;
+    return foldDualCached;
+  }
+  foldDualCached = false;
+  return false;
 }
 
 function readPinBottom(): number | null {
@@ -267,13 +356,34 @@ export default function StatusMenuPopupApp() {
     dockItemKind: string | null;
     afterItemId: string | null;
     windowCount: number;
+    foldItems: ShortcutsFoldMenuItem[];
+    foldSide: "left" | "right" | null;
+    foldDual: boolean;
   } | null>(null);
   const [entered, setEntered] = useState(false);
   const [powerSubmenu, setPowerSubmenu] = useState(false);
+  const [foldList, setFoldList] = useState<ShortcutsFoldMenuItem[]>([]);
+  const [foldDragId, setFoldDragId] = useState<string | null>(null);
+  const [foldDropHint, setFoldDropHint] = useState<{
+    toId: string;
+    place: "before" | "after";
+  } | null>(null);
+  const [foldSideHover, setFoldSideHover] = useState(false);
   const revealGen = useRef(0);
   /** After first reveal, `status-menu-popup-opened` means HWND reuse (not initial emit). */
   const reuseArmedRef = useRef(false);
   const openingEditorRef = useRef(false);
+  const foldListRef = useRef<ShortcutsFoldMenuItem[]>([]);
+  const foldDragIdRef = useRef<string | null>(null);
+  const foldDropHintRef = useRef<{ toId: string; place: "before" | "after" } | null>(
+    null,
+  );
+  const foldDragMovedRef = useRef(false);
+  const foldSideHoverRef = useRef(false);
+  foldListRef.current = foldList;
+  foldDragIdRef.current = foldDragId;
+  foldDropHintRef.current = foldDropHint;
+  foldSideHoverRef.current = foldSideHover;
 
   useEffect(() => {
     let cancelled = false;
@@ -320,7 +430,14 @@ export default function StatusMenuPopupApp() {
         dockItemKind,
         afterItemId,
         windowCount,
+        foldItems: readFoldItems(),
+        foldSide: readFoldSide(),
+        foldDual: readFoldDual(),
       });
+      setFoldList(readFoldItems());
+      setFoldDragId(null);
+      setFoldDropHint(null);
+      setFoldSideHover(false);
     };
 
     void start();
@@ -431,21 +548,181 @@ export default function StatusMenuPopupApp() {
     dockItemKind,
     afterItemId,
     windowCount,
+    foldSide,
+    foldDual,
   } = boot;
+  const isFoldMenu = foldList.length > 0;
+  const otherFoldSide: "left" | "right" =
+    foldSide === "right" ? "left" : "right";
+  const canFoldSideSwitch = foldDual && !!foldSide;
+  const canFoldDrag = foldList.length >= 2 || canFoldSideSwitch;
   const isRunningTile = !!dockItemId?.startsWith("running:");
   const isSeparator = dockItemKind === "separator";
   /** Dock 图标/分割线：仅应用相关项。空 Dock / 岛标题：系统设置菜单。 */
-  const itemMenu = fromDock && !!dockItemId;
-  const systemMenu = !itemMenu;
+  const itemMenu = !isFoldMenu && fromDock && !!dockItemId;
+  const systemMenu = !isFoldMenu && !itemMenu;
   const canCloseWindows =
     itemMenu && !isSeparator && windowCount > 0 && (isRunningTile || dockItemKind === "app");
   const shellClass = [
     "status-menu-shell",
     origin === "up" ? "is-origin-up" : "is-origin-down",
     entered ? "is-entered" : "is-revealing",
+    isFoldMenu ? "is-fold-menu" : "",
+    foldDragId ? "is-fold-dragging" : "",
+    foldSideHover ? "is-fold-side-hot" : "",
   ]
     .filter(Boolean)
     .join(" ");
+
+  const persistFoldReorder = (orderedIds: string[]) => {
+    const side = foldSide === "right" ? "right" : "left";
+    void emit(SHORTCUTS_FOLD_REORDER_EVENT, { side, orderedIds }).catch(
+      () => undefined,
+    );
+  };
+
+  const persistFoldSideSwitch = (pluginId: string) => {
+    const side = foldSide === "right" ? "right" : "left";
+    void emit(SHORTCUTS_FOLD_REORDER_EVENT, {
+      side,
+      orderedIds: foldListRef.current
+        .map((it) => it.pluginId)
+        .filter((id) => id !== pluginId),
+      movePluginId: pluginId,
+      moveToSide: otherFoldSide,
+    }).catch(() => undefined);
+  };
+
+  const onFoldPointerDown = (
+    pluginId: string,
+    e: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    if (e.button !== 0 || !canFoldDrag) return;
+    e.preventDefault();
+    e.stopPropagation();
+    foldDragMovedRef.current = false;
+    const startY = e.clientY;
+    const startX = e.clientX;
+    setFoldDragId(pluginId);
+    setFoldDropHint(null);
+    setFoldSideHover(false);
+    foldDragIdRef.current = pluginId;
+    foldDropHintRef.current = null;
+    foldSideHoverRef.current = false;
+
+    const onMove = (ev: PointerEvent) => {
+      if (!foldDragIdRef.current) return;
+      if (
+        !foldDragMovedRef.current &&
+        Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5
+      ) {
+        return;
+      }
+      foldDragMovedRef.current = true;
+      const switchEl = document.querySelector<HTMLElement>(
+        "[data-fold-side-switch]",
+      );
+      if (switchEl && canFoldSideSwitch) {
+        const r = switchEl.getBoundingClientRect();
+        const over =
+          ev.clientX >= r.left &&
+          ev.clientX <= r.right &&
+          ev.clientY >= r.top &&
+          ev.clientY <= r.bottom;
+        foldSideHoverRef.current = over;
+        setFoldSideHover(over);
+        if (over) {
+          foldDropHintRef.current = null;
+          setFoldDropHint(null);
+          return;
+        }
+      } else {
+        foldSideHoverRef.current = false;
+        setFoldSideHover(false);
+      }
+      if (foldListRef.current.length < 2) {
+        foldDropHintRef.current = null;
+        setFoldDropHint(null);
+        return;
+      }
+      const root = document.querySelector(".status-menu-shell.is-fold-menu");
+      if (!root) return;
+      const units = Array.from(
+        root.querySelectorAll<HTMLElement>("[data-fold-plugin-id]"),
+      )
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            id: el.dataset.foldPluginId || "",
+            top: r.top,
+            height: r.height,
+          };
+        })
+        .filter((u) => u.id);
+      const hint = pickDropTargetY(ev.clientY, units, foldDragIdRef.current);
+      foldDropHintRef.current = hint;
+      setFoldDropHint(hint);
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      const fromId = foldDragIdRef.current;
+      const hint = foldDropHintRef.current;
+      const moved = foldDragMovedRef.current;
+      const sideSwitch = foldSideHoverRef.current;
+      setFoldDragId(null);
+      setFoldDropHint(null);
+      setFoldSideHover(false);
+      foldDragIdRef.current = null;
+      foldDropHintRef.current = null;
+      foldDragMovedRef.current = false;
+      foldSideHoverRef.current = false;
+
+      if (!fromId) return;
+      if (!moved) {
+        void (async () => {
+          await emit(SHORTCUTS_FOLD_PICK_EVENT, { pluginId: fromId }).catch(
+            () => undefined,
+          );
+          clearShortcutsFoldMenuItems();
+          await closeSelf();
+        })();
+        return;
+      }
+      if (sideSwitch && canFoldSideSwitch) {
+        persistFoldSideSwitch(fromId);
+        const nextList = foldListRef.current.filter(
+          (it) => it.pluginId !== fromId,
+        );
+        setFoldList(nextList);
+        foldItemsCached = nextList;
+        window.__WH_STATUS_MENU_FOLD_ITEMS__ = nextList;
+        if (nextList.length === 0) {
+          clearShortcutsFoldMenuItems();
+          void closeSelf();
+        }
+        return;
+      }
+      if (!hint || foldListRef.current.length < 2) return;
+      const ids = foldListRef.current.map((it) => it.pluginId);
+      const nextIds = moveIdInOrder(ids, fromId, hint.toId, hint.place);
+      if (sameOrder(ids, nextIds)) return;
+      const byId = new Map(foldListRef.current.map((it) => [it.pluginId, it]));
+      const nextList = nextIds
+        .map((id) => byId.get(id))
+        .filter((it): it is ShortcutsFoldMenuItem => !!it);
+      setFoldList(nextList);
+      foldItemsCached = nextList;
+      window.__WH_STATUS_MENU_FOLD_ITEMS__ = nextList;
+      persistFoldReorder(nextIds);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
 
   const runWinx = (action: WinxAction) =>
     void run(async () => {
@@ -470,8 +747,65 @@ export default function StatusMenuPopupApp() {
   };
 
   return (
-    <div className={shellClass} role="menu">
-      {itemMenu && isStartMenu ? (
+    <div className={shellClass} role="menu" aria-label={isFoldMenu ? "折叠快捷" : undefined}>
+      {isFoldMenu ? (
+        <>
+          {foldList.map((it) => {
+            const unitClass = [
+              "status-menu-item",
+              "is-fold-item",
+              foldDragId === it.pluginId ? "is-dragging" : "",
+              foldDropHint?.toId === it.pluginId
+                ? `is-drop-${foldDropHint.place}`
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <button
+                key={it.pluginId}
+                type="button"
+                className={unitClass}
+                role="menuitem"
+                data-fold-plugin-id={it.pluginId}
+                title={
+                  canFoldSideSwitch
+                    ? "拖拽可调顺序或切换左右；点击打开"
+                    : "拖拽可调整顺序；点击打开"
+                }
+                onPointerDown={(e) => onFoldPointerDown(it.pluginId, e)}
+                onClick={(e) => {
+                  // Handled on pointerup (click vs drag).
+                  e.preventDefault();
+                }}
+              >
+                <span className="status-menu-item-label">{it.label}</span>
+              </button>
+            );
+          })}
+          {canFoldSideSwitch ? (
+            <>
+              <div className="status-menu-sep" role="separator" />
+              <div
+                className={`status-menu-fold-side-switch${
+                  foldSideHover ? " is-hot" : ""
+                }${foldDragId ? " is-ready" : ""}`}
+                data-fold-side-switch=""
+                aria-label={`拖到此处切换到${otherFoldSide === "right" ? "右侧" : "左侧"}`}
+              >
+                <span className="status-menu-fold-side-switch-mark" aria-hidden>
+                  ⇄
+                </span>
+                <span className="status-menu-fold-side-switch-label">
+                  {foldDragId
+                    ? `放到此处 → ${otherFoldSide === "right" ? "右侧" : "左侧"}`
+                    : `拖到此处切换到${otherFoldSide === "right" ? "右侧" : "左侧"}`}
+                </span>
+              </div>
+            </>
+          ) : null}
+        </>
+      ) : itemMenu && isStartMenu ? (
         <>
           {powerSubmenu ? (
             <>

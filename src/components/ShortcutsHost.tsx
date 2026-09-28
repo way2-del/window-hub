@@ -9,23 +9,45 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   hideChromeHoverTip,
   hostTipPointerProps,
   showChromeHoverTip,
 } from "../chromeHoverTip";
+import { anchorPopupBelowElement } from "../popupAnchor";
 import {
   moveIdInOrder,
   pickDropTarget,
   sameOrder,
   sortByOrderKey,
+  spliceOverflowOrder,
 } from "../chromeReorder";
 import {
   SHORTCUTS_HEIGHT,
+  SHORTCUTS_ISLAND_CLEARANCE,
+  SHORTCUTS_CHROME_STRIP_GAP,
+  SHORTCUTS_RIGHT_INSET,
   computeShortcutsBounds,
+  computeShortcutsBoundsRight,
   type ShortcutsBounds,
 } from "../plugins/shortcutsGeometry";
+import {
+  planShortcutsFold,
+  SHORTCUTS_FOLD_CHIP_W,
+  SHORTCUTS_FOLD_GAP,
+} from "../features/chrome/shortcutsFold";
+import {
+  getLiveIslandWidth,
+  subscribeLiveIslandWidth,
+} from "../features/chrome/liveIslandGeometry";
+import { requestIslandCollapseIfExpanded } from "../features/chrome/islandCollapseRequest";
+import {
+  clearShortcutsFoldMenuItems,
+  setShortcutsFoldMenuItems,
+  SHORTCUTS_FOLD_PICK_EVENT,
+  SHORTCUTS_FOLD_REORDER_EVENT,
+  type ShortcutsFoldReorderPayload,
+} from "../features/chrome/shortcutsFoldMenuBus";
 import { pluginRegistry } from "../plugins/registry";
 import type { ShortcutsPluginRuntime } from "../plugins/types";
 import ShortcutsPluginStrip, {
@@ -33,9 +55,13 @@ import ShortcutsPluginStrip, {
 } from "./ShortcutsPluginStrip";
 import { WH_SHORTCUTS_EVT } from "../plugins/shortcutsHubBridge";
 import {
+  getPluginSide,
+  parsePluginSides,
   parseScopes,
   shortcutsScopeVisible,
+  upsertPluginSide,
   type ShortcutsPluginScope,
+  type ShortcutsSide,
 } from "../shortcutsPrefs";
 import "./ShortcutsHost.css";
 
@@ -48,6 +74,12 @@ const MIN_STRIP_W = 28;
 type Props = {
   settingsRef: RefObject<HTMLElement | null>;
   islandWidth: number;
+  /** Which island wing this host owns. Default left. */
+  side?: ShortcutsSide;
+  /** Right shortcuts wing active (dual or hybrid tier). */
+  dualMode?: boolean;
+  /** Tier1: width of far-right system chip strip (logical px). */
+  chromeStripW?: number;
 };
 
 function truncate(s: string, n: number) {
@@ -77,13 +109,7 @@ function PluginIcon({ icon }: { icon?: string }) {
 }
 
 async function popupAnchor(el: HTMLElement) {
-  const win = getCurrentWindow();
-  const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
-  const rect = el.getBoundingClientRect();
-  return {
-    x: Math.max(8, outer.x / factor + rect.left),
-    y: outer.y / factor + rect.bottom + POPUP_GAP,
-  };
+  return anchorPopupBelowElement(el, undefined, undefined, POPUP_GAP);
 }
 
 function hasShortcutsEntry(p: ShortcutsPluginRuntime): string | null {
@@ -133,8 +159,15 @@ function ManageIcon() {
 /**
  * Host 快捷区壳：并排挂插件 iframe 条（entry.shortcuts）；
  * 无网页入口时回退为入口 chip。固定项由插件网页自画，不用 setPins。
+ * dualMode 时左侧/右侧各挂一个实例；跨侧 Ctrl+拖更新 pluginSides。
  */
-export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
+export default function ShortcutsHost({
+  settingsRef,
+  islandWidth,
+  side = "left",
+  dualMode = false,
+  chromeStripW = 0,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const anchorRefs = useRef<Map<string, HTMLElement>>(new Map());
   const openingRef = useRef(false);
@@ -152,6 +185,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   const [, setRegistryVersion] = useState(0);
   const [exclusivePluginId, setExclusivePluginId] = useState<string | null>(null);
   const [pluginOrder, setPluginOrder] = useState<string[]>([]);
+  const [pluginSides, setPluginSides] = useState<Record<string, ShortcutsSide>>({});
   const [scopes, setScopes] = useState<Record<string, ShortcutsPluginScope>>({});
   const [fgExe, setFgExe] = useState<{
     exe?: string | null;
@@ -164,11 +198,20 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   );
   const [stripWidths, setStripWidths] = useState<Record<string, number>>({});
   const [hoverTip, setHoverTip] = useState<ShortcutsHoverTip | null>(null);
+  const [foldOpen, setFoldOpen] = useState(false);
+  /** Live beam width (paintDom morph); prop can lag behind rAF. */
+  const [liveIslandW, setLiveIslandW] = useState(() =>
+    Math.max(islandWidth, getLiveIslandWidth()),
+  );
+  const foldBtnRef = useRef<HTMLButtonElement | null>(null);
   const dragIdRef = useRef<string | null>(null);
   const dropHintRef = useRef<{ toId: string; place: "before" | "after" } | null>(null);
+  const lastPointerXRef = useRef(0);
   const pluginOrderRef = useRef<string[]>([]);
+  const pluginSidesRef = useRef<Record<string, ShortcutsSide>>({});
   const exclusiveRef = useRef<string | null>(null);
   pluginOrderRef.current = pluginOrder;
+  pluginSidesRef.current = pluginSides;
   exclusiveRef.current = exclusivePluginId;
   dragIdRef.current = dragId;
   dropHintRef.current = dropHint;
@@ -187,19 +230,77 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
   };
 
   const recomputeBounds = useCallback(() => {
-    const settingsEl = settingsRef.current;
     const shell = hostRef.current?.offsetParent as HTMLElement | null;
-    if (!settingsEl || !shell) return;
+    if (!shell) return;
     const shellRect = shell.getBoundingClientRect();
+    const iw = Math.max(islandWidth, liveIslandW, getLiveIslandWidth());
+    const islandLeft = shellRect.width / 2 - iw / 2;
+    const islandRight = islandLeft + iw;
+    if (side === "right") {
+      setBounds(
+        computeShortcutsBoundsRight(
+          islandRight,
+          shellRect.width,
+          SHORTCUTS_ISLAND_CLEARANCE,
+          chromeStripW,
+          SHORTCUTS_CHROME_STRIP_GAP,
+        ),
+      );
+      return;
+    }
+    const settingsEl = settingsRef.current;
+    if (!settingsEl) return;
     const settingsRect = settingsEl.getBoundingClientRect();
     const settingsRight = settingsRect.right - shellRect.left;
-    const islandLeft = shellRect.width / 2 - islandWidth / 2;
-    setBounds(computeShortcutsBounds(settingsRight, islandLeft));
-  }, [settingsRef, islandWidth]);
+    setBounds(
+      computeShortcutsBounds(
+        settingsRight,
+        islandLeft,
+        SHORTCUTS_ISLAND_CLEARANCE,
+      ),
+    );
+  }, [settingsRef, islandWidth, liveIslandW, side, chromeStripW]);
+
+  useLayoutEffect(() => {
+    setLiveIslandW((prev) => {
+      const next = Math.max(islandWidth, getLiveIslandWidth());
+      return Math.abs(prev - next) < 1 ? prev : next;
+    });
+  }, [islandWidth]);
+
+  useEffect(() => {
+    return subscribeLiveIslandWidth((w) => {
+      setLiveIslandW((prev) => (Math.abs(prev - w) < 0.5 ? prev : w));
+    });
+  }, []);
+
+  useEffect(() => {
+    const beam = document.querySelector(".island-beam") as HTMLElement | null;
+    if (!beam || typeof ResizeObserver === "undefined") return;
+    const sync = () => {
+      const w = beam.getBoundingClientRect().width;
+      if (!Number.isFinite(w) || w < 8) return;
+      setLiveIslandW((prev) => (Math.abs(prev - w) < 0.5 ? prev : w));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(beam);
+    return () => ro.disconnect();
+  }, []);
 
   useLayoutEffect(() => {
     recomputeBounds();
-  }, [recomputeBounds, exclusivePluginId, popupOpen, stripWidths, scopes, fgExe]);
+  }, [
+    recomputeBounds,
+    exclusivePluginId,
+    popupOpen,
+    stripWidths,
+    scopes,
+    fgExe,
+    dualMode,
+    chromeStripW,
+    liveIslandW,
+  ]);
 
   useEffect(() => {
     const onResize = () => recomputeBounds();
@@ -208,12 +309,12 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       settingsRef.current && typeof ResizeObserver !== "undefined"
         ? new ResizeObserver(onResize)
         : null;
-    if (settingsRef.current && ro) ro.observe(settingsRef.current);
+    if (side === "left" && settingsRef.current && ro) ro.observe(settingsRef.current);
     return () => {
       window.removeEventListener("resize", onResize);
       ro?.disconnect();
     };
-  }, [recomputeBounds, settingsRef]);
+  }, [recomputeBounds, settingsRef, side]);
 
   useEffect(() => pluginRegistry.subscribe(() => setRegistryVersion((n) => n + 1)), []);
 
@@ -223,15 +324,25 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       exclusivePluginId?: string | null;
       pluginOrder?: string[] | null;
       scopes?: Record<string, ShortcutsPluginScope> | null;
+      pluginSides?: Record<string, ShortcutsSide> | null;
+    };
+    const applyPrefs = (prefs: Prefs | null | undefined) => {
+      if (!prefs) return;
+      setExclusivePluginId(prefs.exclusivePluginId ?? null);
+      if (Array.isArray(prefs.pluginOrder)) {
+        setPluginOrder(prefs.pluginOrder);
+      }
+      if (prefs.scopes !== undefined) {
+        setScopes(parseScopes(prefs.scopes));
+      }
+      if (prefs.pluginSides !== undefined) {
+        setPluginSides(parsePluginSides(prefs.pluginSides));
+      }
     };
     void (async () => {
       try {
         const prefs = await invoke<Prefs>("get_shortcuts_prefs");
-        if (!cancelled) {
-          setExclusivePluginId(prefs.exclusivePluginId ?? null);
-          setPluginOrder(Array.isArray(prefs.pluginOrder) ? prefs.pluginOrder : []);
-          setScopes(parseScopes(prefs.scopes));
-        }
+        if (!cancelled) applyPrefs(prefs);
       } catch {
         /* noop */
       }
@@ -239,13 +350,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     let un: (() => void) | undefined;
     void listen<Prefs>("shortcuts-prefs", (ev) => {
       if (cancelled) return;
-      setExclusivePluginId(ev.payload?.exclusivePluginId ?? null);
-      if (Array.isArray(ev.payload?.pluginOrder)) {
-        setPluginOrder(ev.payload.pluginOrder);
-      }
-      if (ev.payload?.scopes !== undefined) {
-        setScopes(parseScopes(ev.payload.scopes));
-      }
+      applyPrefs(ev.payload);
     }).then((fn) => {
       if (cancelled) fn();
       else un = fn;
@@ -495,19 +600,26 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     });
   }, []);
 
-  const persistPluginOrder = useCallback(async (nextOrder: string[]) => {
-    setPluginOrder(nextOrder);
-    try {
-      await invoke("set_shortcuts_prefs", {
-        prefs: {
-          exclusivePluginId: exclusiveRef.current,
-          pluginOrder: nextOrder,
-        },
-      });
-    } catch (err) {
-      console.error("[ShortcutsHost] persist order", err);
-    }
-  }, []);
+  const persistLayout = useCallback(
+    async (nextOrder: string[], nextSides?: Record<string, ShortcutsSide>) => {
+      setPluginOrder(nextOrder);
+      if (nextSides) setPluginSides(nextSides);
+      try {
+        await invoke("set_shortcuts_prefs", {
+          prefs: {
+            exclusivePluginId: exclusiveRef.current,
+            pluginOrder: nextOrder,
+            ...(nextSides
+              ? { pluginSides: nextSides }
+              : {}),
+          },
+        });
+      } catch (err) {
+        console.error("[ShortcutsHost] persist layout", err);
+      }
+    },
+    [],
+  );
 
   const finishReorder = useCallback(
     (fromId: string, hint: { toId: string; place: "before" | "after" } | null) => {
@@ -515,24 +627,68 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       setDropHint(null);
       dropHintRef.current = null;
       dragIdRef.current = null;
-      if (!hint) return;
+      const pointerX = lastPointerXRef.current;
+      let targetSide: ShortcutsSide = side;
+      if (dualMode) {
+        const hosts = Array.from(
+          document.querySelectorAll<HTMLElement>(".shortcuts-host[data-side]"),
+        );
+        const under = hosts.find((h) => {
+          const r = h.getBoundingClientRect();
+          return pointerX >= r.left && pointerX <= r.right && r.width > 0;
+        });
+        const ds = under?.dataset.side;
+        if (ds === "left" || ds === "right") targetSide = ds;
+      }
+
+      const fromSide = getPluginSide(pluginSidesRef.current, fromId);
+      const sideChanged = dualMode && fromSide !== targetSide;
+
+      if (!hint && !sideChanged) return;
+
+      const targetHost = document.querySelector<HTMLElement>(
+        `.shortcuts-host[data-side="${targetSide}"]`,
+      );
       const visible = Array.from(
-        hostRef.current?.querySelectorAll<HTMLElement>("[data-plugin-id]:not([data-bar-worker])") ?? [],
+        targetHost?.querySelectorAll<HTMLElement>("[data-plugin-id]:not([data-bar-worker])") ??
+          [],
       )
         .map((el) => el.dataset.pluginId || "")
-        .filter(Boolean);
+        .filter(Boolean)
+        .filter((id) => id !== fromId);
+
       const base =
         pluginOrderRef.current.length > 0
           ? [...pluginOrderRef.current]
-          : [...visible];
+          : [...visible, fromId];
       for (const id of visible) {
         if (!base.includes(id)) base.push(id);
       }
-      const next = moveIdInOrder(base, fromId, hint.toId, hint.place);
-      if (sameOrder(base, next)) return;
-      void persistPluginOrder(next);
+      if (!base.includes(fromId)) base.push(fromId);
+
+      let nextOrder = base;
+      if (hint && visible.includes(hint.toId)) {
+        nextOrder = moveIdInOrder(base, fromId, hint.toId, hint.place);
+      } else if (sideChanged) {
+        // Append to end of target side's visible set within global order.
+        const without = base.filter((id) => id !== fromId);
+        const lastVisible = visible[visible.length - 1];
+        if (lastVisible) {
+          nextOrder = moveIdInOrder(without, fromId, lastVisible, "after");
+        } else {
+          nextOrder = [...without, fromId];
+        }
+      }
+
+      let nextSides: Record<string, ShortcutsSide> | undefined;
+      if (sideChanged) {
+        nextSides = upsertPluginSide(pluginSidesRef.current, fromId, targetSide);
+      }
+
+      if (!sideChanged && sameOrder(base, nextOrder)) return;
+      void persistLayout(nextOrder, nextSides);
     },
-    [persistPluginOrder],
+    [persistLayout, side, dualMode],
   );
 
   const onReorderPointerDown = useCallback(
@@ -547,10 +703,23 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       setDropHint(null);
       dropHintRef.current = null;
       dragIdRef.current = pluginId;
+      lastPointerXRef.current = e.clientX;
 
       const onMove = (ev: PointerEvent) => {
         if (!dragIdRef.current) return;
-        const root = hostRef.current?.querySelector(".shortcuts-collapsed");
+        lastPointerXRef.current = ev.clientX;
+        let root: Element | null | undefined =
+          hostRef.current?.querySelector(".shortcuts-collapsed");
+        if (dualMode) {
+          const hosts = Array.from(
+            document.querySelectorAll<HTMLElement>(".shortcuts-host[data-side]"),
+          );
+          const under = hosts.find((h) => {
+            const r = h.getBoundingClientRect();
+            return ev.clientX >= r.left && ev.clientX <= r.right;
+          });
+          if (under) root = under.querySelector(".shortcuts-collapsed");
+        }
         if (!root) return;
         const units = Array.from(
           root.querySelectorAll<HTMLElement>("[data-plugin-id]:not([data-bar-worker])"),
@@ -577,7 +746,7 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
       window.addEventListener("pointercancel", onUp);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [finishReorder],
+    [finishReorder, dualMode],
   );
 
   const onHoverTipSafe = useCallback(
@@ -603,42 +772,289 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
     : pluginsAll;
 
   const plugins = pluginsExclusive.filter((p) => {
-    if (isIslandBarWorker(p)) return true;
+    const worker = isIslandBarWorker(p);
+    // Bar workers always stay on the left wing.
+    if (worker) return side === "left";
+    const pluginSide = getPluginSide(pluginSides, p.pluginId);
+    const effectiveSide: ShortcutsSide =
+      dualMode && pluginSide === "right" ? "right" : "left";
+    if (effectiveSide !== side) return false;
     return shortcutsScopeVisible(scopes, p.pluginId, fgExe);
   });
 
   const pluginsSorted = sortByOrderKey(plugins, pluginOrder, (p) => p.pluginId);
+  const workers = pluginsSorted.filter((p) => isIslandBarWorker(p));
+  const stripPlugins = pluginsSorted.filter((p) => !isIslandBarWorker(p));
+  const foldWidths: Record<string, number> = {};
+  for (const p of stripPlugins) {
+    const strip = Math.max(
+      MIN_STRIP_W,
+      Math.round(stripWidths[p.pluginId] ?? DEFAULT_STRIP_W),
+    );
+    const manage = shouldShowHostSettingsChip(p) ? MIN_STRIP_W : 0;
+    foldWidths[p.pluginId] = strip + manage;
+  }
+  const foldPlan = planShortcutsFold(
+    stripPlugins.map((p) => p.pluginId),
+    foldWidths,
+    bounds.maxExpandWidth,
+    side,
+    SHORTCUTS_FOLD_CHIP_W,
+    SHORTCUTS_FOLD_GAP,
+  );
+  const overflowPlugins = stripPlugins.filter((p) =>
+    foldPlan.overflowIds.includes(p.pluginId),
+  );
+  const hasFold = overflowPlugins.length > 0;
+  /** Visible rail width (safe zone); overflow stays in DOM under soft mask. */
+  let railPackW = 0;
+  for (const id of foldPlan.visibleIds) {
+    railPackW += foldWidths[id] ?? MIN_STRIP_W;
+  }
+  if (foldPlan.visibleIds.length > 1) {
+    railPackW += SHORTCUTS_FOLD_GAP * (foldPlan.visibleIds.length - 1);
+  }
+  const renderPlugins = [
+    ...workers,
+    // Keep all strips so the leading edge can soft-mask instead of hard-cut.
+    ...stripPlugins,
+  ];
+  const allowEmptyDrop = dualMode && bounds.maxExpandWidth >= 48;
+  /** No strip chips (workers-only counts as empty for cross-side drop). */
+  const stripEmpty = stripPlugins.length === 0;
+  const showEmptyDrop = allowEmptyDrop && stripEmpty;
+  const reorderMode = ctrlHeld || dragId != null;
+  const rightPin =
+    SHORTCUTS_RIGHT_INSET +
+    Math.max(0, chromeStripW) +
+    (chromeStripW > 0 ? SHORTCUTS_CHROME_STRIP_GAP : 0);
 
-  if (bounds.maxExpandWidth < 48 || plugins.length === 0) {
+  /**
+   * Left: x → island. Right: island+gap → screen/chrome strip.
+   * Explicit left+right (right wing) so the box can't paint under the island
+   * even if fold lags one frame.
+   */
+  const hostBoxStyle = (width: number | "auto") =>
+    side === "right"
+      ? {
+          left: bounds.x,
+          right: rightPin,
+          width: "auto" as const,
+          maxWidth: bounds.maxExpandWidth,
+          height: SHORTCUTS_HEIGHT,
+        }
+      : {
+          left: bounds.x,
+          right: "auto" as const,
+          width,
+          maxWidth: bounds.maxExpandWidth,
+          height: SHORTCUTS_HEIGHT,
+        };
+
+  useEffect(() => {
+    if (!foldOpen) return;
+    let un: (() => void) | undefined;
+    void listen("status-menu-popup-closed", () => {
+      setFoldOpen(false);
+      clearShortcutsFoldMenuItems();
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un?.();
+  }, [foldOpen]);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void listen<{ pluginId?: string }>(SHORTCUTS_FOLD_PICK_EVENT, (ev) => {
+      const pluginId = ev.payload?.pluginId?.trim();
+      if (!pluginId) return;
+      setFoldOpen(false);
+      const el = foldBtnRef.current;
+      void (async () => {
+        if (!el) return;
+        const { x, y } = await anchorPopupBelowElement(el);
+        await invoke("open_plugin_popup", { pluginId, x, y }).catch((err) =>
+          console.error("[ShortcutsHost] fold open", err),
+        );
+      })();
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un?.();
+  }, []);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void listen<ShortcutsFoldReorderPayload>(SHORTCUTS_FOLD_REORDER_EVENT, (ev) => {
+      const payload = ev.payload;
+      if (!payload || payload.side !== side) return;
+
+      const moveId = payload.movePluginId?.trim();
+      const moveTo =
+        payload.moveToSide === "left" || payload.moveToSide === "right"
+          ? payload.moveToSide
+          : null;
+      if (moveId && moveTo && dualMode && moveTo !== side) {
+        const base =
+          pluginOrderRef.current.length > 0
+            ? [...pluginOrderRef.current]
+            : [moveId];
+        const without = base.filter((id) => id !== moveId);
+        // Append on the destination wing (same as empty-side bar drop).
+        const nextOrder = [...without, moveId];
+        const nextSides = upsertPluginSide(pluginSidesRef.current, moveId, moveTo);
+        setFoldOpen(false);
+        clearShortcutsFoldMenuItems();
+        void invoke("close_status_menu_popup").catch(() => undefined);
+        void persistLayout(nextOrder, nextSides);
+        return;
+      }
+
+      const orderedIds = Array.isArray(payload.orderedIds)
+        ? payload.orderedIds.filter((id) => typeof id === "string" && id.trim())
+        : [];
+      if (orderedIds.length < 2) return;
+      const base =
+        pluginOrderRef.current.length > 0
+          ? [...pluginOrderRef.current]
+          : orderedIds;
+      const next = spliceOverflowOrder(base, orderedIds);
+      if (sameOrder(base, next)) return;
+      void persistLayout(next);
+    }).then((fn) => {
+      un = fn;
+    });
+    return () => un?.();
+  }, [side, dualMode, persistLayout]);
+
+  if (bounds.maxExpandWidth < 48 && stripPlugins.length === 0 && workers.length === 0) {
     return (
       <div
         ref={hostRef}
         className="shortcuts-host is-empty"
-        style={{ left: bounds.x, width: 0, height: SHORTCUTS_HEIGHT }}
+        data-side={side}
+        style={hostBoxStyle(0)}
         aria-hidden
       />
     );
   }
 
-  const reorderMode = ctrlHeld || dragId != null;
+  // Truly empty wing with no dual-mode drop target — stay out of the way.
+  if (plugins.length === 0 && !allowEmptyDrop) {
+    return (
+      <div
+        ref={hostRef}
+        className="shortcuts-host is-empty"
+        data-side={side}
+        style={hostBoxStyle(0)}
+        aria-hidden
+      />
+    );
+  }
+
+  // Dual-mode empty / workers-only wing: keep a full-width hit target for Ctrl+drag.
+  if (showEmptyDrop && stripPlugins.length === 0 && workers.length === 0) {
+    return (
+      <div
+        ref={hostRef}
+        className="shortcuts-host is-empty-drop"
+        data-side={side}
+        data-bounds-w={bounds.maxExpandWidth}
+        style={hostBoxStyle(bounds.maxExpandWidth)}
+        aria-label={side === "right" ? "右侧快捷区（空）" : "快捷区（空）"}
+      >
+        <div className="shortcuts-collapsed" role="toolbar" aria-hidden />
+      </div>
+    );
+  }
+
+  const openFoldMenu = async () => {
+    const btn = foldBtnRef.current;
+    if (!btn || overflowPlugins.length === 0) return;
+    const foldItems = overflowPlugins.map((p) => ({
+      pluginId: p.pluginId,
+      label: p.manifest.slots?.shortcuts?.label ?? p.manifest.name,
+    }));
+    // Same-window fallback; status-menu HWND reads foldItems from the IPC payload.
+    setShortcutsFoldMenuItems(foldItems);
+    const { x, y } = await anchorPopupBelowElement(btn, 200, 280, 6);
+    try {
+      const visible = await invoke<boolean>("is_status_menu_popup_open");
+      if (visible) await invoke("close_status_menu_popup");
+      await invoke("open_status_menu_popup", {
+        x,
+        y,
+        foldItems,
+        foldSide: side,
+        foldDual: dualMode,
+      });
+      setFoldOpen(true);
+    } catch (err) {
+      clearShortcutsFoldMenuItems();
+      setFoldOpen(false);
+      console.error("[ShortcutsHost] fold menu", err);
+    }
+  };
+
+  const foldButton = hasFold ? (
+    <button
+      ref={foldBtnRef}
+      type="button"
+      className={`shortcuts-chip is-fold${foldOpen ? " is-open" : ""}`}
+      aria-label={`折叠 ${overflowPlugins.length} 个快捷`}
+      aria-expanded={foldOpen}
+      {...(reorderMode
+        ? {}
+        : hostTipPointerProps(
+            overflowPlugins
+              .map((p) => p.manifest.slots?.shortcuts?.label ?? p.manifest.name)
+              .join(" · "),
+          ))}
+      onClick={() => {
+        if (reorderMode) return;
+        void hideChromeHoverTip();
+        void (async () => {
+          // Collapse expanded island if needed, then still open the fold menu.
+          await requestIslandCollapseIfExpanded();
+          if (foldOpen) {
+            setFoldOpen(false);
+            clearShortcutsFoldMenuItems();
+            await invoke("close_status_menu_popup").catch(() => undefined);
+          } else {
+            await openFoldMenu();
+          }
+        })();
+      }}
+    >
+      <span className="shortcuts-fold-mark" aria-hidden>
+        ⋯
+      </span>
+    </button>
+  ) : null;
 
   return (
     <div
       ref={hostRef}
       className={`shortcuts-host${popupOpen ? " is-popup-open" : ""}${
         reorderMode ? " is-reorder" : ""
-      }${dragId ? " is-dragging" : ""}`}
-      style={{
-        left: bounds.x,
-        width: "auto",
-        maxWidth: bounds.maxExpandWidth,
-        height: SHORTCUTS_HEIGHT,
-      }}
+      }${dragId ? " is-dragging" : ""}${showEmptyDrop ? " is-empty-drop" : ""}`}
+      style={hostBoxStyle(showEmptyDrop ? bounds.maxExpandWidth : "auto")}
+      data-side={side}
       data-bounds-w={bounds.maxExpandWidth}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="shortcuts-collapsed" role="toolbar" aria-label="快捷区">
-        {pluginsSorted.map((p) => {
+      <div
+        className="shortcuts-collapsed"
+        role="toolbar"
+        aria-label={side === "right" ? "右侧快捷区" : "快捷区"}
+      >
+        {/* ⋯ on the island-facing edge: left wing → after rail; right wing → before rail. */}
+        {side === "right" ? foldButton : null}
+        <div
+          className={`shortcuts-rail${hasFold ? " is-masked" : ""}`}
+          style={hasFold ? { maxWidth: Math.max(0, railPackW) } : undefined}
+        >
+        {renderPlugins.map((p) => {
           const entry = hasShortcutsEntry(p);
           const label = p.manifest.slots?.shortcuts?.label ?? p.manifest.name;
           const showSettingsChip = shouldShowHostSettingsChip(p);
@@ -785,6 +1201,8 @@ export default function ShortcutsHost({ settingsRef, islandWidth }: Props) {
             </div>
           );
         })}
+        </div>
+        {side === "left" ? foldButton : null}
       </div>
     </div>
   );

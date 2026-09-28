@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   WH_SHORTCUTS_EVT,
   WH_SHORTCUTS_HUB,
@@ -10,6 +9,7 @@ import {
   isAllowedShortcutsHubCmd,
 } from "../plugins/shortcutsHubBridge";
 import { SHORTCUTS_HEIGHT } from "../plugins/shortcutsGeometry";
+import { anchorPopupBelowElement } from "../popupAnchor";
 
 const POPUP_GAP = 8;
 
@@ -33,13 +33,7 @@ type Props = {
 };
 
 async function popupAnchorFromEl(el: HTMLElement) {
-  const win = getCurrentWindow();
-  const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
-  const rect = el.getBoundingClientRect();
-  return {
-    x: Math.max(8, outer.x / factor + rect.left + Math.min(rect.width, 28) / 2),
-    y: outer.y / factor + rect.bottom + POPUP_GAP,
-  };
+  return anchorPopupBelowElement(el, undefined, undefined, POPUP_GAP);
 }
 
 /**

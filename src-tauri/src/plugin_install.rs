@@ -463,6 +463,40 @@ pub fn uninstall_plugin(
     Ok(())
 }
 
+pub(crate) fn apply_plugin_enabled(
+    app: &AppHandle,
+    id: &str,
+    enabled: bool,
+    pins: &crate::plugin_hub::ShortcutsPinStore,
+) -> Result<bool, String> {
+    let mut reg = load_registry();
+    let Some(p) = reg.plugins.iter_mut().find(|p| p.id == id) else {
+        return Err("plugin not installed".into());
+    };
+    if p.enabled == enabled {
+        return Ok(false);
+    }
+    p.enabled = enabled;
+    let has_everything = p.capabilities.iter().any(|c| c == "everything.search");
+    save_registry(&reg)?;
+    if !enabled {
+        close_plugin_popup(app);
+        pins.inner_remove(id);
+        #[cfg(windows)]
+        if has_everything {
+            crate::everything::reset_if_idle();
+        }
+    } else {
+        pins.reload_plugin(id);
+        crate::companion_scripts::start_launchers_for_plugin(id);
+    }
+    let _ = app.emit("shortcuts-pins-changed", pins.all_flat());
+    emit_plugins(app, &reg);
+    #[cfg(windows)]
+    crate::win32::hotkey_registry::reload(app);
+    Ok(true)
+}
+
 #[tauri::command]
 pub fn set_plugin_enabled(
     app: AppHandle,
@@ -470,28 +504,10 @@ pub fn set_plugin_enabled(
     enabled: bool,
     pins: tauri::State<'_, crate::plugin_hub::ShortcutsPinStore>,
 ) -> Result<(), String> {
-    let mut reg = load_registry();
-    let Some(p) = reg.plugins.iter_mut().find(|p| p.id == id) else {
-        return Err("plugin not installed".into());
-    };
-    p.enabled = enabled;
-    let has_everything = p.capabilities.iter().any(|c| c == "everything.search");
-    save_registry(&reg)?;
-    if !enabled {
-        close_plugin_popup(&app);
-        pins.inner_remove(&id);
-        #[cfg(windows)]
-        if has_everything {
-            crate::everything::reset_if_idle();
-        }
-    } else {
-        pins.reload_plugin(&id);
-        crate::companion_scripts::start_launchers_for_plugin(&id);
+    if enabled {
+        let _ = crate::chrome_prefs::resolve_shortcuts_side_on_enable(&app, &id);
     }
-    let _ = app.emit("shortcuts-pins-changed", pins.all_flat());
-    emit_plugins(&app, &reg);
-    #[cfg(windows)]
-    crate::win32::hotkey_registry::reload(&app);
+    apply_plugin_enabled(&app, &id, enabled, pins.inner())?;
     Ok(())
 }
 

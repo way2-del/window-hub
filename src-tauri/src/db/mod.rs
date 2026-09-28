@@ -12,9 +12,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use host::{
-    ambient_get, ambient_set, dock_get, dock_set, general_get, general_set, hotkeys_get,
-    hotkeys_set, island_get, island_set, launchers_list, launchers_replace_all, material_get,
-    material_set, meta_get, meta_set, shortcuts_get, shortcuts_set, tray_get, tray_set,
+    ambient_get, ambient_set, chrome_get, chrome_set, dock_get, dock_set, general_get, general_set,
+    hotkeys_get, hotkeys_set, island_get, island_set, launchers_list, launchers_replace_all,
+    material_get, material_set, meta_get, meta_set, shortcuts_get, shortcuts_set, tray_get, tray_set,
     IslandPrefsRow, LauncherRow,
 };
 pub use migrate::migrate_legacy_files;
@@ -202,8 +202,15 @@ fn migrate_schema(conn: &Connection) -> Result<(), String> {
     }
 
     // Additive host tables for installs already past schema bumps.
+    // prefs_chrome was added after many installs reached SCHEMA_VERSION — must
+    // stay here or set_chrome_prefs fails and toggles never survive restart.
     conn.execute_batch(
         r#"
+        CREATE TABLE IF NOT EXISTS prefs_chrome (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS prefs_shortcuts (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           data_json TEXT NOT NULL,

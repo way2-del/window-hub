@@ -1,4 +1,5 @@
 mod commands;
+mod chrome_prefs;
 mod control_center;
 mod lifecycle;
 mod companion_scripts;
@@ -463,46 +464,12 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
             spawn_fullscreen_watcher(app.clone());
             boot_log("fullscreen", &format!("ok (+{}ms)", elapsed()));
 
-            // Menubar chips + ambient + tray BEFORE reveal.
-            boot_log("input-lang", "starting");
-            spawn_input_lang_watcher(app.clone());
-            boot_log("wifi", "starting");
-            spawn_wifi_watcher(app.clone());
+            // Menubar chips + ambient + tray BEFORE reveal (gated by chrome prefs).
+            boot_log("chrome-prefs", "starting enabled producers");
+            crate::chrome_prefs::start_enabled_producers(&app);
             boot_log("ambient", "starting early");
             spawn_ambient_watcher(app.clone());
             kick_ambient_seed(&app);
-
-            if crate::win32::tray::tray_boot_enabled() {
-                boot_log("tray", "starting (early)");
-                {
-                    let app_icons = app.clone();
-                    let app_attn = app.clone();
-                    let app_prefs = app.clone();
-                    crate::win32::tray::start(
-                        move |icons| {
-                            let _ = app_icons.emit("tray-icons", &icons);
-                        },
-                        move |attn| {
-                            let _ = app_attn.emit("tray-attention", &attn);
-                        },
-                        move |prefs| {
-                            let _ = app_prefs.emit("tray-prefs", &prefs);
-                        },
-                    );
-                }
-                boot_log(
-                    "tray",
-                    &format!(
-                        "streaming total={} clickable={} (+{}ms)",
-                        crate::win32::tray::total_icon_count(),
-                        crate::win32::tray::clickable_count(),
-                        elapsed()
-                    ),
-                );
-                crate::win32::tray::flush_publish();
-            } else {
-                boot_log("tray", "DISABLED (WH_DISABLE_TRAY=1)");
-            }
 
             // Tray discovery must not gate the clock, status controls, or Dock.
             boot_log("reveal", "show main + appbar + glass");
@@ -1050,6 +1017,8 @@ pub fn run() {
             commands::is_host_boot_ready,
             commands::get_tray_prefs,
             commands::set_tray_prefs,
+            chrome_prefs::get_chrome_prefs,
+            chrome_prefs::set_chrome_prefs,
             commands::get_input_lang,
             commands::cycle_input_lang,
             commands::toggle_input_ime,

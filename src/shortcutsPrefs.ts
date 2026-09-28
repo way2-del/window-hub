@@ -11,11 +11,15 @@ export type ShortcutsPluginScope = {
   windowKeys: string[];
 };
 
+export type ShortcutsSide = "left" | "right";
+
 export type ShortcutsPrefs = {
   exclusivePluginId: string | null;
   pluginOrder: string[] | null;
   /** pluginId → scope. Missing → all programs. */
   scopes: Record<string, ShortcutsPluginScope>;
+  /** pluginId → bar side. Missing → left. Right only valid in dual-shortcuts mode. */
+  pluginSides: Record<string, ShortcutsSide>;
 };
 
 export function emptyPluginScope(): ShortcutsPluginScope {
@@ -72,6 +76,54 @@ export function upsertPluginScope(
     out[id] = { mode, windowKeys };
   }
   return out;
+}
+
+export function parsePluginSides(raw: unknown): Record<string, ShortcutsSide> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, ShortcutsSide> = {};
+  for (const [pid, val] of Object.entries(raw as Record<string, unknown>)) {
+    const id = pid.trim();
+    if (!id) continue;
+    if (val === "right") out[id] = "right";
+    else if (val === "left") {
+      // omit defaults to keep patch payloads small
+    }
+  }
+  return out;
+}
+
+export function getPluginSide(
+  sides: Record<string, ShortcutsSide> | null | undefined,
+  pluginId: string,
+): ShortcutsSide {
+  const id = pluginId.trim();
+  return id && sides?.[id] === "right" ? "right" : "left";
+}
+
+export function upsertPluginSide(
+  sides: Record<string, ShortcutsSide>,
+  pluginId: string,
+  side: ShortcutsSide,
+): Record<string, ShortcutsSide> {
+  const id = pluginId.trim();
+  if (!id) return sides;
+  const out = { ...sides };
+  if (side === "left") delete out[id];
+  else out[id] = "right";
+  return out;
+}
+
+/** When enabling a plugin: keep right only if dual shortcuts is active. */
+export function resolvePluginSideOnEnable(
+  sides: Record<string, ShortcutsSide>,
+  pluginId: string,
+  dualShortcuts: boolean,
+): { sides: Record<string, ShortcutsSide>; side: ShortcutsSide; changed: boolean } {
+  const current = getPluginSide(sides, pluginId);
+  if (current === "right" && !dualShortcuts) {
+    return { sides: upsertPluginSide(sides, pluginId, "left"), side: "left", changed: true };
+  }
+  return { sides, side: current, changed: false };
 }
 
 function exeStemFromKey(key: string): string {

@@ -1,37 +1,30 @@
----
+﻿---
 name: window-hub-plugin-popup
 description: >-
-  Window Hub 插件托管弹窗几何 — shell 边距/间距 token、Host #app.wg-shell 挂载约定、
-  对照窗口组。改 entry.popup / popup.css 或新写弹窗插件时必读。
----
+  Window Hub 鎻掍欢鎵樼寮圭獥鍑犱綍 鈥?shell 杈硅窛/闂磋窛 token銆丠ost #app.wg-shell 鎸傝浇绾﹀畾銆?  瀵圭収绐楀彛缁勩€傛敼 entry.popup / popup.css 鎴栨柊鍐欏脊绐楁彃浠舵椂蹇呰銆?---
 
-# 插件弹窗几何（entry.popup）
-
-托管弹窗由 Host 打开（`open_plugin_popup`），**不渲染插件的 `popup.html` 外壳**；只注入同目录 `popup.css` + `popup.js`，挂到 Host 提供的节点上。
-
-## Host 挂载约定（易踩坑）
-
+# 鎻掍欢寮圭獥鍑犱綍锛坋ntry.popup锛?
+鎵樼寮圭獥鐢?Host 鎵撳紑锛坄open_plugin_popup`锛夛紝**涓嶆覆鏌撴彃浠剁殑 `popup.html` 澶栧３**锛涘彧娉ㄥ叆鍚岀洰褰?`popup.css` + `popup.js`锛屾寕鍒?Host 鎻愪緵鐨勮妭鐐逛笂銆?
+## Host 鎸傝浇绾﹀畾锛堟槗韪╁潙锛?
 ```tsx
 // PluginPopupHost.tsx
 <main id="app" className="wg-shell" />
 ```
 
-| 事实 | 含义 |
+| 浜嬪疄 | 鍚箟 |
 |------|------|
-| 根节点固定 `#app.wg-shell` | 插件 CSS **必须**能命中 `#app` 或 `.wg-shell` |
-| `popup.html` 的 class 不会出现在 DOM | 只写 `.memo-shell` 而 Host 是 `.wg-shell` → **边距全部失效、内容贴边** |
-| 推荐 | 壳样式写 `#app.wg-shell`，或在 JS 里 `document.getElementById("app").className = "…"` |
+| 鏍硅妭鐐瑰浐瀹?`#app.wg-shell` | 鎻掍欢 CSS **蹇呴』**鑳藉懡涓?`#app` 鎴?`.wg-shell` |
+| `popup.html` 鐨?class 涓嶄細鍑虹幇鍦?DOM | 鍙啓 `.memo-shell` 鑰?Host 鏄?`.wg-shell` 鈫?**杈硅窛鍏ㄩ儴澶辨晥銆佸唴瀹硅创杈?* |
+| 鎺ㄨ崘 | 澹虫牱寮忓啓 `#app.wg-shell`锛屾垨鍦?JS 閲?`document.getElementById("app").className = "鈥?` |
 
-真源对照：`docs/plugins/examples/window-groups/popup.css` → `.wg-shell`。
-
-## 外边距 / 间距 token（对齐窗口组）
-
-| Token | 值 | 用途 |
+鐪熸簮瀵圭収锛歚docs/plugins/examples/window-groups/popup.css` 鈫?`.wg-shell`銆?
+## 澶栬竟璺?/ 闂磋窛 token锛堝榻愮獥鍙ｇ粍锛?
+| Token | 鍊?| 鐢ㄩ€?|
 |-------|-----|------|
-| `--wh-popup-pad-x` | **12px** | 左右内边距 |
-| `--wh-popup-pad-top` | **12px** | 顶内边距 |
-| `--wh-popup-pad-bottom` | **14px** | 底内边距（略大于顶，视觉落底） |
-| `--wh-popup-gap` | **10px** | 壳内主区块垂直间距（header / 表单 / 列表） |
+| `--wh-popup-pad-x` | **12px** | 宸﹀彸鍐呰竟璺?|
+| `--wh-popup-pad-top` | **12px** | 椤跺唴杈硅窛 |
+| `--wh-popup-pad-bottom` | **14px** | 搴曞唴杈硅窛锛堢暐澶т簬椤讹紝瑙嗚钀藉簳锛?|
+| `--wh-popup-gap` | **10px** | 澹冲唴涓诲尯鍧楀瀭鐩撮棿璺濓紙header / 琛ㄥ崟 / 鍒楄〃锛?|
 
 ```css
 #app.wg-shell {
@@ -46,44 +39,35 @@ description: >-
 }
 ```
 
-### 硬性规则
+### 纭€ц鍒?
+1. **绂佹**鍐呭璐寸獥杈癸細澹充笂蹇呴』鏈変笂琛?padding锛堝彲涓?Host 榛樿鍙犲姞锛屽嬁鍐欐垚 0锛夈€?2. **绂佹**鍙粰鑷畾涔?class 鍐?padding 鍗翠笉鍛戒腑 `#app` / `.wg-shell`銆?3. 鍒楄〃鍖?`flex: 1; min-height: 0; overflow: auto`锛屽嬁璁╁垪琛ㄦ拺鐮村３瀵艰嚧搴曡竟琚銆?4. 宸﹀彸瀵圭О锛涘簳 鈮?椤讹紙榛樿 14 / 12锛夈€?5. 鍖哄潡闂磋窛鐢?`gap: 10px`锛屼笉瑕侀潬璐?margin 椤惰竟銆?
+## 澹冲唴娆＄骇闂磋窛锛堝缓璁級
 
-1. **禁止**内容贴窗边：壳上必须有上表 padding（可与 Host 默认叠加，勿写成 0）。
-2. **禁止**只给自定义 class 写 padding 却不命中 `#app` / `.wg-shell`。
-3. 列表区 `flex: 1; min-height: 0; overflow: auto`，勿让列表撑破壳导致底边被裁。
-4. 左右对称；底 ≥ 顶（默认 14 / 12）。
-5. 区块间距用 `gap: 10px`，不要靠负 margin 顶边。
-
-## 壳内次级间距（建议）
-
-| 元素 | 建议 |
+| 鍏冪礌 | 寤鸿 |
 |------|------|
-| 标题 | 13px / weight 650 |
-| 辅助说明 | 11px、muted |
-| 主按钮高 | 28–32px |
-| 列表行内边距 | ≈ 9–10px |
-| 表单控件圆角 | 6–8px |
+| 鏍囬 | 13px / weight 650 |
+| 杈呭姪璇存槑 | 11px銆乵uted |
+| 涓绘寜閽珮 | 28鈥?2px |
+| 鍒楄〃琛屽唴杈硅窛 | 鈮?9鈥?0px |
+| 琛ㄥ崟鎺т欢鍦嗚 | 6鈥?px |
 
-窗口尺寸默认 Host **320×480**（`PLUGIN_POPUP_W/H`）；插件可用 `settings.popupWidth` / `popupHeight` 或 `hub.popup.open({ width, height })` 自定义（clamp：宽 **280–2400**、高 **320–1600**）。内容按窗宽布局，勿假定固定像素。
+绐楀彛灏哄榛樿 Host **320脳480**锛坄PLUGIN_POPUP_W/H`锛夛紱鎻掍欢鍙敤 `settings.popupWidth` / `popupHeight` 鎴?`hub.popup.open({ width, height })` 鑷畾涔夛紙clamp锛氬 **280鈥?400**銆侀珮 **320鈥?600**锛夈€傚唴瀹规寜绐楀甯冨眬锛屽嬁鍋囧畾鍥哄畾鍍忕礌銆?
+澶х敾甯冪被鎻掍欢鍙澶栦娇鐢細
 
-大画布类插件可额外使用：
-
-| API | 说明 |
+| API | 璇存槑 |
 |-----|------|
-| `hub.popup.open({ nativeFrame, resizable, windowedFullscreen })` | `nativeFrame: true` → 系统标题栏（同设置窗）；最大化用系统按钮或 `windowedFullscreen` |
-| `hub.popup.setWindowedFullscreen(bool)` | 原生窗 maximize；无边框则铺满工作区 |
-| `hub.popup.resize({ width, height })` | 调整已开弹窗 |
+| `hub.popup.open({ nativeFrame, resizable, windowedFullscreen })` | `nativeFrame: true` 鈫?绯荤粺鏍囬鏍忥紙鍚岃缃獥锛夛紱鏈€澶у寲鐢ㄧ郴缁熸寜閽垨 `windowedFullscreen` |
+| `hub.popup.setWindowedFullscreen(bool)` | 鍘熺敓绐?maximize锛涙棤杈规鍒欓摵婊″伐浣滃尯 |
+| `hub.popup.resize({ width, height })` | 璋冩暣宸插紑寮圭獥 |
 
-官方示例：`docs/plugins/examples/excalidraw/`（始终 `nativeFrame: true`）。
+瀹樻柟绀轰緥锛歚docs/plugins/examples/excalidraw/`锛堝缁?`nativeFrame: true`锛夈€?
+## 鑷
 
-## 自检
-
-- [ ] 打开弹窗后，四边可见空隙（约 12px）
-- [ ] 开发者工具里 `#app` 的 computed padding 非 0
-- [ ] class 命中 `.wg-shell` 或已在 JS 重设 class
-- [ ] 无 `alert` / `confirm` / `prompt`
+- [ ] 鎵撳紑寮圭獥鍚庯紝鍥涜竟鍙绌洪殭锛堢害 12px锛?- [ ] 寮€鍙戣€呭伐鍏烽噷 `#app` 鐨?computed padding 闈?0
+- [ ] class 鍛戒腑 `.wg-shell` 鎴栧凡鍦?JS 閲嶈 class
+- [ ] 鏃?`alert` / `confirm` / `prompt`
 
 ## Related
 
-- 总流程：`window-hub-plugin`
-- 官方对照：`window-hub-window-groups`
+- 鎬绘祦绋嬶細`window-hub-plugin`
+- 瀹樻柟瀵圭収锛歚window-hub-window-groups`

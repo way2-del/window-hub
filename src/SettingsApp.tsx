@@ -32,12 +32,28 @@ import ShortcutsScopeSettings from "./components/ShortcutsScopeSettings";
 import IgnoreAmbientAppsSettings from "./components/IgnoreAmbientAppsSettings";
 import HotkeysSettingsPanel from "./components/HotkeysSettingsPanel";
 import {
+  getPluginSide,
+  parsePluginSides,
   parseScopes,
+  upsertPluginSide,
   type ShortcutsPluginScope,
+  type ShortcutsSide,
 } from "./shortcutsPrefs";
 import PrefSelect from "./components/PrefSelect";
 import { clickTrace } from "./clickTrace";
 import {
+  hasRightShortcutsWing,
+  resolveChromeRailTier,
+} from "./features/chrome/dualShortcuts";
+import {
+  getChromePrefs,
+  hydrateChromePrefs,
+  setChromePrefs,
+  subscribeChromePrefs,
+  type ChromePrefs,
+} from "./chromePrefs";
+import {
+  pushSettingsToast,
   subscribeSettingsToast,
   type SettingsToastPayload,
 } from "./components/settingsToastBus";
@@ -51,6 +67,7 @@ type DarkPref = "auto" | "dark" | "light";
 type NavId =
   | "general"
   | "theme"
+  | "chrome"
   | "dock"
   | "shortcuts"
   | "hotkeys"
@@ -395,6 +412,18 @@ const NAV: { id: NavId; label: string; tint: string; icon: ReactNode }[] = [
     ),
   },
   {
+    id: "chrome",
+    label: "顶栏",
+    tint: "#5e5ce6",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="4" width="18" height="6" rx="2" />
+        <path d="M7 7h.01M11 7h2M16 7h2" />
+        <path d="M6 14h12M6 18h8" />
+      </svg>
+    ),
+  },
+  {
     id: "dock",
     label: "Dock",
     tint: "#64d2ff",
@@ -533,6 +562,11 @@ export default function SettingsApp() {
     startOnBoot: false,
     startOnBootBackend: "none",
   });
+  const [chromePrefs, setChromePrefsState] = useState<ChromePrefs>(() => getChromePrefs());
+  const [chromeBusy, setChromeBusy] = useState(false);
+  /** 顶栏模块有未重启生效的改动时，在选项上方显示重启确认条 */
+  const [chromeRestartPrompt, setChromeRestartPrompt] = useState(false);
+  const [chromeRestartBusy, setChromeRestartBusy] = useState(false);
   const [appVersion, setAppVersion] = useState("0.2.0");
 
   useEffect(() => {
@@ -565,6 +599,11 @@ export default function SettingsApp() {
   const [shortcutsScopes, setShortcutsScopes] = useState<
     Record<string, ShortcutsPluginScope>
   >({});
+  const [shortcutsPluginSides, setShortcutsPluginSides] = useState<
+    Record<string, ShortcutsSide>
+  >({});
+  const chromeRailTier = resolveChromeRailTier(chromePrefs);
+  const chromeRightWing = hasRightShortcutsWing(chromePrefs);
   const [installed, setInstalled] = useState<InstalledPluginDto[]>([]);
   const [pluginMsg, setPluginMsg] = useState("");
   const [pluginBusy, setPluginBusy] = useState(false);
@@ -591,6 +630,7 @@ export default function SettingsApp() {
         n === "shortcuts" ||
         n === "plugins" ||
         n === "theme" ||
+        n === "chrome" ||
         n === "hotkeys" ||
         n === "tray" ||
         n === "developer" ||
@@ -613,6 +653,12 @@ export default function SettingsApp() {
   }, []);
 
   useEffect(() => subscribeSettingsToast(setSettingsToast), []);
+
+  useEffect(() => {
+    const unsub = subscribeChromePrefs(setChromePrefsState);
+    void hydrateChromePrefs().then(setChromePrefsState);
+    return unsub;
+  }, []);
 
   useEffect(() => {
     const unsub = subscribeIslandPrefs(setIslandPrefsState);
@@ -727,15 +773,18 @@ export default function SettingsApp() {
   const persistShortcutsPrefs = async (patch: {
     exclusivePluginId?: string | null;
     scopes?: Record<string, ShortcutsPluginScope>;
+    pluginSides?: Record<string, ShortcutsSide>;
   }) => {
     if (patch.exclusivePluginId !== undefined) {
       setShortcutsExclusiveId(patch.exclusivePluginId ?? "");
     }
     if (patch.scopes) setShortcutsScopes(patch.scopes);
+    if (patch.pluginSides) setShortcutsPluginSides(patch.pluginSides);
     try {
       const next = await invoke<{
         exclusivePluginId?: string | null;
         scopes?: Record<string, ShortcutsPluginScope> | null;
+        pluginSides?: Record<string, ShortcutsSide> | null;
       }>("set_shortcuts_prefs", {
         prefs: {
           exclusivePluginId:
@@ -743,6 +792,7 @@ export default function SettingsApp() {
               ? patch.exclusivePluginId || null
               : shortcutsExclusiveId || null,
           ...(patch.scopes ? { scopes: patch.scopes } : {}),
+          ...(patch.pluginSides ? { pluginSides: patch.pluginSides } : {}),
         },
       });
       setShortcutsExclusiveId(next.exclusivePluginId ?? "");
@@ -751,9 +801,24 @@ export default function SettingsApp() {
       } else if (patch.scopes) {
         setShortcutsScopes(patch.scopes);
       }
+      if (next.pluginSides != null) {
+        setShortcutsPluginSides(parsePluginSides(next.pluginSides));
+      } else if (patch.pluginSides) {
+        setShortcutsPluginSides(patch.pluginSides);
+      }
     } catch (err) {
       console.error(err);
+      pushSettingsToast(`快捷区设置保存失败：${String(err)}`);
     }
+  };
+
+  const persistPluginSide = async (pluginId: string, side: ShortcutsSide) => {
+    if (side === "right" && !chromeRightWing) {
+      pushSettingsToast("右侧快捷区不可用：请先关闭「托盘」图标轨（可保留时钟/网络等系统芯片）");
+      return;
+    }
+    const next = upsertPluginSide(shortcutsPluginSides, pluginId, side);
+    await persistShortcutsPrefs({ pluginSides: next });
   };
 
   const persistShortcutsExclusive = async (pluginId: string) => {
@@ -932,9 +997,11 @@ export default function SettingsApp() {
         const sp = await invoke<{
           exclusivePluginId?: string | null;
           scopes?: Record<string, ShortcutsPluginScope> | null;
+          pluginSides?: Record<string, ShortcutsSide> | null;
         }>("get_shortcuts_prefs");
         setShortcutsExclusiveId(sp.exclusivePluginId ?? "");
         setShortcutsScopes(parseScopes(sp.scopes));
+        setShortcutsPluginSides(parsePluginSides(sp.pluginSides));
       } catch {
         /* noop */
       }
@@ -968,12 +1035,38 @@ export default function SettingsApp() {
     void listen<{
       exclusivePluginId?: string | null;
       scopes?: Record<string, ShortcutsPluginScope> | null;
+      pluginSides?: Record<string, ShortcutsSide> | null;
     }>("shortcuts-prefs", (ev) => {
       setShortcutsExclusiveId(ev.payload?.exclusivePluginId ?? "");
       if (ev.payload?.scopes !== undefined) {
         setShortcutsScopes(parseScopes(ev.payload.scopes));
       }
+      if (ev.payload?.pluginSides !== undefined) {
+        setShortcutsPluginSides(parsePluginSides(ev.payload.pluginSides));
+      }
     }).then((fn) => unsubs.push(fn));
+    void listen<{ transition?: string; disabledCount?: number; tier?: string }>(
+      "chrome-dual-shortcuts",
+      (ev) => {
+        const t = ev.payload?.transition;
+        const n = ev.payload?.disabledCount ?? 0;
+        if (t === "exit") {
+          pushSettingsToast(
+            n > 0
+              ? `右侧快捷区已被完整托盘替代；已关闭 ${n} 个原右侧快捷插件（可在「插件」中重新启用）`
+              : "右侧快捷区已被完整托盘替代；原在右侧的快捷插件会关闭",
+          );
+        } else if (t === "enter") {
+          pushSettingsToast(
+            "右侧模块已全部关闭：左右均为快捷区。可在「快捷区」选左右，或 Ctrl+拖跨侧",
+          );
+        } else if (t === "hybrid") {
+          pushSettingsToast(
+            "右侧最外缘保留系统芯片，内侧仍为快捷区（开「托盘」后快捷会让位）",
+          );
+        }
+      },
+    ).then((fn) => unsubs.push(fn));
 
     void bootstrapPlugins().then((list) => {
       setInstalled(list);
@@ -1246,6 +1339,31 @@ export default function SettingsApp() {
     void invoke("set_plugin_enabled", { id, enabled: !enabled })
       .then(() => bumpRegistry((n) => n + 1))
       .catch((err) => setPluginMsg(String(err)));
+  }
+
+  async function persistChromePrefs(patch: Partial<ChromePrefs>) {
+    setChromeBusy(true);
+    try {
+      const saved = await setChromePrefs(patch);
+      setChromePrefsState(saved);
+      setChromeRestartPrompt(true);
+    } catch (e) {
+      console.error("[settings] chrome prefs save failed", e);
+      pushSettingsToast(`顶栏设置保存失败：${String(e)}`);
+    } finally {
+      setChromeBusy(false);
+    }
+  }
+
+  async function confirmChromeRestart() {
+    setChromeRestartBusy(true);
+    try {
+      await invoke("restart_app");
+    } catch (e) {
+      console.error("[settings] restart_app failed", e);
+      pushSettingsToast(`重启失败：${String(e)}`);
+      setChromeRestartBusy(false);
+    }
   }
 
   async function refreshLaunchers() {
@@ -1732,8 +1850,21 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>显示范围</h2>
                 <p className="card-desc">
-                  状态菜单左侧快捷区可并排多个插件，也可独占给某一个（例如窗口组占满整条）。下方可为每个插件指定适用的前台程序。
+                  灵动岛左右快捷区可并排多个插件，也可独占给某一个。空间不够时折叠为「⋯」。顶栏：全关=双侧快捷；只开系统芯片=右缘芯片+内侧快捷；开托盘图标=右侧快捷让位。
                 </p>
+                {chromeRailTier === "dual" ? (
+                  <p className="chrome-dual-status is-on" role="status">
+                    当前为双侧快捷区：左侧与右侧均可放置插件（Ctrl+拖可跨侧；超出折叠为「⋯」）。
+                  </p>
+                ) : chromeRailTier === "hybrid" ? (
+                  <p className="chrome-dual-status is-on" role="status">
+                    当前为混合档：右侧最外缘是系统芯片，内侧仍为快捷区。打开「托盘」后右侧快捷会让位。
+                  </p>
+                ) : (
+                  <p className="chrome-dual-status" role="status">
+                    当前为完整托盘档：右侧无快捷区。关闭「托盘」后可恢复内侧快捷；全关右侧模块则为纯双侧快捷。
+                  </p>
+                )}
                 <div className="pref-row-text" style={{ marginBottom: 8 }}>
                   <span className="pref-row-label">快捷区占用</span>
                   <span className="pref-row-desc">选「全部插件」或指定一个 shortcuts 插件</span>
@@ -1836,6 +1967,61 @@ export default function SettingsApp() {
                 </div>
               </section>
               <section className="settings-card">
+                <h2>显示位置</h2>
+                <p className="card-desc">
+                  为每个快捷区插件选择显示在左侧还是右侧。岛栏 worker 固定在左侧。右侧选项仅在双侧快捷区可用。
+                </p>
+                {shortcutsPluginOptions.filter((p) => !p.barWorker).length === 0 ? (
+                  <p className="card-desc">暂无可配置位置的快捷区插件。</p>
+                ) : (
+                  <div className="shortcuts-side-list">
+                    {shortcutsPluginOptions
+                      .filter((p) => !p.barWorker)
+                      .map((p) => {
+                        const side = getPluginSide(shortcutsPluginSides, p.id);
+                        return (
+                          <div key={p.id} className="pref-row shortcuts-side-row">
+                            <span className="pref-row-text">
+                              <span className="pref-row-label">{p.name}</span>
+                              <span className="pref-row-desc">
+                                {side === "right" && !chromeRightWing
+                                  ? "已记为右侧；当前无右侧快捷区，启用后会改到左侧"
+                                  : side === "right"
+                                    ? "显示在右侧快捷区"
+                                    : "显示在左侧快捷区"}
+                              </span>
+                            </span>
+                            <div className="shortcuts-side-toggle" role="group" aria-label={`${p.name}显示位置`}>
+                              <button
+                                type="button"
+                                className={`settings-secondary-btn${side === "left" ? " is-selected" : ""}`}
+                                aria-pressed={side === "left"}
+                                onClick={() => void persistPluginSide(p.id, "left")}
+                              >
+                                左侧
+                              </button>
+                              <button
+                                type="button"
+                                className={`settings-secondary-btn${side === "right" ? " is-selected" : ""}`}
+                                aria-pressed={side === "right"}
+                                disabled={!chromeRightWing}
+                                title={
+                                  chromeRightWing
+                                    ? "显示在右侧快捷区"
+                                    : "需关闭「托盘」以开启右侧快捷区（可保留时钟/网络等芯片）"
+                                }
+                                onClick={() => void persistPluginSide(p.id, "right")}
+                              >
+                                右侧
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </section>
+              <section className="settings-card">
                 <h2>按程序显示</h2>
                 <p className="card-desc">
                   为每个快捷区插件选择「全部程序」或仅在指定程序位于前台时显示。未启用任何 shortcuts
@@ -1899,6 +2085,111 @@ export default function SettingsApp() {
                   ))}
                 </div>
               </div>
+            </section>
+          )}
+
+          {nav === "chrome" && (
+            <section className="settings-card">
+              <h2>顶栏模块</h2>
+              <p className="card-desc">
+                控制灵动岛右侧系统菜单是否显示。可先改多项，再统一重启生效；未重启前部分芯片可能仍短暂显示。
+              </p>
+              <div
+                className={`chrome-dual-status${chromeRightWing ? " is-on" : ""}`}
+                role="status"
+              >
+                {chromeRailTier === "dual" ? (
+                  <>
+                    右侧模块已全部关闭：灵动岛左右两侧均为快捷区。超出宽度会折叠为「⋯」。打开系统芯片（时钟/网络等）后进入混合档；打开「托盘」后右侧快捷让位并关闭原右侧插件。
+                  </>
+                ) : chromeRailTier === "hybrid" ? (
+                  <>
+                    混合档：右侧最外缘保留系统芯片，内侧仍为快捷区。打开「托盘」后，右侧快捷区将被完整托盘替代，原在右侧的快捷插件会关闭。
+                  </>
+                ) : (
+                  <>
+                    完整托盘档：右侧无快捷区。关闭「托盘」可恢复内侧快捷（保留时钟/网络等）；再关掉全部系统芯片则为纯双侧快捷。
+                  </>
+                )}
+              </div>
+              {chromeRestartPrompt ? (
+                <div className="chrome-restart-prompt" role="status">
+                  <p className="chrome-restart-prompt-text">
+                    {chromeRailTier === "dual"
+                      ? "设置已保存。重启后左右均为快捷区；也可先改完再选手动下次重启。"
+                      : chromeRailTier === "hybrid"
+                        ? "设置已保存。重启后右侧为「系统芯片 + 内侧快捷」；打开托盘会使右侧快捷让位。"
+                        : "设置已保存。请重启使完整托盘生效；关闭托盘后可恢复右侧快捷。"}
+                  </p>
+                  <div className="chrome-restart-prompt-actions">
+                    <button
+                      type="button"
+                      className="settings-primary-btn"
+                      disabled={chromeRestartBusy || chromeBusy}
+                      onClick={() => void confirmChromeRestart()}
+                    >
+                      {chromeRestartBusy ? "正在重启…" : "确认重启 Window Hub"}
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-secondary-btn"
+                      disabled={chromeRestartBusy || chromeBusy}
+                      onClick={() => setChromeRestartPrompt(false)}
+                    >
+                      手动下次重启
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {(
+                [
+                  {
+                    key: "showTray" as const,
+                    label: "托盘（含下拉）",
+                    desc: "系统托盘图标与溢出下拉；关闭后停止托盘监听并隐藏下拉",
+                  },
+                  {
+                    key: "showWifi" as const,
+                    label: "WLAN / 网络",
+                    desc: "顶栏网络芯片与 Wi‑Fi 弹窗",
+                  },
+                  {
+                    key: "showClock" as const,
+                    label: "系统时间日期",
+                    desc: "顶栏时钟芯片（点击仍可打开系统通知中心）",
+                  },
+                  {
+                    key: "showIme" as const,
+                    label: "输入法",
+                    desc: "语言 / 输入法芯片与切换弹窗",
+                  },
+                  {
+                    key: "showControlCenter" as const,
+                    label: "控制中心",
+                    desc: "音量、亮度等快捷控制入口",
+                  },
+                ] as const
+              ).map((row) => {
+                const on = chromePrefs[row.key];
+                return (
+                  <label key={row.key} className="pref-row">
+                    <span className="pref-row-text">
+                      <span className="pref-row-label">{row.label}</span>
+                      <span className="pref-row-desc">{row.desc}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className={`pref-switch${on ? " is-on" : ""}`}
+                      role="switch"
+                      aria-checked={on}
+                      disabled={chromeBusy || chromeRestartBusy}
+                      onClick={() => void persistChromePrefs({ [row.key]: !on })}
+                    >
+                      <span className="pref-switch-knob" />
+                    </button>
+                  </label>
+                );
+              })}
             </section>
           )}
 

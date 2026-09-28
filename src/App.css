@@ -346,7 +346,8 @@ button {
   left: 50%;
   right: auto;
   translate: -50% 0;
-  z-index: 10;
+  /* Above shortcuts (28) / tray (30) so side fades + shell cover chrome when overlapping */
+  z-index: 40;
   background: transparent;
   transform-origin: top center;
   /* 顶直角贴屏、底贴合岛圆角（--island-r-bot 由 paintDom 写入） */
@@ -409,6 +410,64 @@ button {
   opacity: 0;
 }
 
+/*
+ * 岛左右外缘软过渡 — 高度锁定顶栏（--island-bar-h），不下延展开面板。
+ * 起点相对岛侧壁内缩 --island-r-bot（图3 绿框），压在岛壳之下：
+ * 黑壳盖住重叠段，底圆角透明楔透出阴影，外侧继续渐隐。
+ */
+.island-side-fade {
+  position: absolute;
+  top: 0;
+  height: var(--island-bar-h, 28px);
+  max-height: var(--island-bar-h, 28px);
+  /* 原外伸宽度 + 内缩量，外缘落点与原先接近 */
+  width: max(
+    calc(56px + var(--island-r-bot, 14px)),
+    calc(var(--island-r-bot, 14px) * 4.2)
+  );
+  pointer-events: none;
+  /* 低于 island-shape-layer，避免内缩后灰雾盖住黑胶囊侧壁 */
+  z-index: 0;
+  --_fade: rgb(var(--ambient-r, 32), var(--ambient-g, 32), var(--ambient-b, 34));
+  opacity: 1;
+  transition: opacity 320ms ease;
+}
+
+.island-side-fade--right {
+  /* 红框=100%；绿框=内缩圆角半径 */
+  left: calc(100% - var(--island-r-bot, 14px));
+  background: linear-gradient(
+    to right,
+    var(--_fade) 0%,
+    color-mix(in srgb, var(--_fade) 78%, transparent) 28%,
+    color-mix(in srgb, var(--_fade) 35%, transparent) 62%,
+    transparent 100%
+  );
+}
+
+.island-side-fade--left {
+  right: calc(100% - var(--island-r-bot, 14px));
+  left: auto;
+  background: linear-gradient(
+    to left,
+    var(--_fade) 0%,
+    color-mix(in srgb, var(--_fade) 78%, transparent) 28%,
+    color-mix(in srgb, var(--_fade) 35%, transparent) 62%,
+    transparent 100%
+  );
+}
+
+/* 桌面 Win32 顶栏材质：无窗口吸色时用玻璃洗色，避免假黑边 */
+.shell.has-bar-glass:not(.has-ambient) .island-side-fade {
+  --_fade: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
+}
+
+.island-root.is-immersed .island-side-fade {
+  opacity: 0;
+}
+
+/* 拖放/通知/搜索：岛壳不透明时侧过渡仍保留 */
+
 .island-root.is-drop-target .island-top-cap,
 .island-root.is-notifying.is-immersed .island-top-cap,
 .island-root.is-searching .island-top-cap {
@@ -431,7 +490,8 @@ button {
   width: 8px;
   height: 8px;
   pointer-events: none;
-  z-index: 0;
+  /* Above island shape + side fade; island-beam (40) still above tray/shortcuts */
+  z-index: 2;
   overflow: visible;
 }
 
@@ -478,7 +538,8 @@ button {
   width: calc(100% + 2 * var(--island-corner-patch));
   height: calc(100% + var(--island-top-bleed));
   pointer-events: none;
-  z-index: 0;
+  /* 高于 side-fade，黑壳盖住内缩重叠段；底圆角透明楔仍透出下层阴影 */
+  z-index: 1;
   overflow: visible;
 }
 
@@ -1263,22 +1324,44 @@ button {
   position: absolute;
   right: 10px;
   top: var(--island-top-gap);
+  /* Below island-beam (40) which carries side fades */
   z-index: 30;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  /* 勿用 max-width/overflow 硬夹 — 会把时钟/输入法挤成上下换行；挤占只靠 JS 折入 ▾ */
 }
 
 .tray-rail {
   height: var(--island-bar-h);
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 7px;
+  flex-shrink: 0;
   color: var(--chrome-right-fg, rgba(255, 255, 255, 0.94));
   text-shadow: var(--chrome-right-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
   transition:
     color 220ms ease,
     text-shadow 220ms ease;
+}
+
+.tray-icons {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  /* gap via margin on buttons so stashed icons can collapse to 0 cleanly */
+  gap: 0;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.tray-fixed-chrome {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
 }
 
 .tray-chevron {
@@ -1307,9 +1390,32 @@ button {
   transform: rotate(180deg);
 }
 
+.tray-chevron.has-overflow {
+  animation: tray-chevron-nudge 420ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+.tray-chevron.is-open.has-overflow {
+  animation: none;
+  transform: rotate(180deg);
+}
+
+@keyframes tray-chevron-nudge {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.18);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 .tray-icon-btn {
   width: 16px;
   height: 16px;
+  min-width: 16px;
+  margin-inline-end: 7px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -1318,15 +1424,38 @@ button {
   border-radius: 0;
   opacity: 0.95;
   position: relative;
+  overflow: hidden;
+  transform-origin: center right;
   transition:
-    opacity 140ms ease,
-    transform 120ms ease;
+    opacity 220ms ease,
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-width 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tray-icons .tray-icon-btn:last-child {
+  margin-inline-end: 0;
+}
+
+/* Fold into ▾: shrink toward screen edge, not a hard pop */
+.tray-icon-btn.is-stashed {
+  width: 0;
+  min-width: 0;
+  margin-inline-end: 0;
+  opacity: 0;
+  transform: scale(0.55) translateX(10px);
+  pointer-events: none;
 }
 
 .tray-icon-btn:hover {
   opacity: 1;
   background: transparent;
   transform: translateY(-0.5px);
+}
+
+.tray-icon-btn.is-stashed:hover {
+  transform: scale(0.55) translateX(10px);
 }
 
 .tray-cluster.is-reorder .tray-icon-btn[data-tray-pin] {
@@ -1506,6 +1635,7 @@ button {
   margin-left: 4px;
   padding: 0;
   height: var(--island-bar-h);
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   background: transparent;
@@ -1584,6 +1714,31 @@ button {
   padding: 7px 8px;
   border-radius: 8px;
   color: var(--glass-fg, rgba(255, 255, 255, 0.88));
+}
+
+.tray-drop-item.is-island-stashed {
+  animation: tray-stashed-in 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes tray-stashed-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tray-icon-btn,
+  .tray-icon-btn.is-stashed,
+  .tray-chevron.has-overflow,
+  .tray-drop-item.is-island-stashed {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 .tray-drop-item:hover {

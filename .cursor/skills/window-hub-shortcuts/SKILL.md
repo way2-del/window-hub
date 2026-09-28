@@ -18,6 +18,10 @@ Host 在顶栏快捷区几何内 **并排挂矮 iframe**（每插件一块）。
 
 模式对齐岛 panel：`srcdoc` + [`shortcutsHubBridge`](../../../src/plugins/shortcutsHubBridge.ts)。
 
+### 双侧快捷区
+
+当顶栏右侧五模块（托盘 / WLAN / 时钟 / 输入法 / 控制中心）**全部关闭**时，灵动岛左右两侧均为快捷区（`isDualShortcutsMode`）。`prefs_shortcuts.pluginSides` 记录每插件 `left|right`；Ctrl+拖可跨侧。重新打开任一项右侧模块后恢复托盘，并禁用原右侧插件（总开关）；再启用时若无右侧快捷区则改到左侧。岛栏 worker 始终左侧。
+
 ## 管理/设置钮 `slots.shortcuts.manage`（必读）
 
 快捷区左侧常见的 **2×2 宫格钮** 由 manifest **显式声明**，禁止 Host 对所有插件一律补画（会与自定义弹窗重复）。

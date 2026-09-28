@@ -2,9 +2,21 @@ import { lerp, clamp01, pullProgress, easeOutSmooth, channelEase } from "./featu
 import { createIslandGeometry, ISLAND_CORNER_PATCH_SIZE } from "./features/island/geometry";
 import { resolveIslandPullContent } from "./features/island/pullContent";
 import { chromeTokens, chromeCssVars, type Rgb } from "./features/chrome/tokens";
+import {
+  hasRightShortcutsWing,
+  resolveChromeRailTier,
+} from "./features/chrome/dualShortcuts";
+import { setLiveIslandWidth } from "./features/chrome/liveIslandGeometry";
+import { ISLAND_REQUEST_COLLAPSE_EVENT } from "./features/chrome/islandCollapseRequest";
 import { sampleStripBands } from "./features/chrome/sampleStripBands";
 import { AmbientStrip } from "./features/chrome/AmbientStrip";
 import { useTrayNotificationFocus } from "./features/chrome/useTrayNotificationFocus";
+import {
+  bindChromePrefsEvents,
+  getChromePrefs,
+  hydrateChromePrefs,
+  subscribeChromePrefs,
+} from "./chromePrefs";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -137,6 +149,12 @@ function IslandCornerPatches() {
     <>
       {/* 实色顶盖：盖住 SVG 顶边抗锯齿发丝缝（折叠岛贴屏时尤甚） */}
       <div className="island-top-cap" aria-hidden />
+      {/*
+        左右外缘过渡阴影：仅顶栏高度；起点缩进 --island-r-bot（图3 绿框），
+        压在岛壳下层，底圆角透明楔处透出阴影，外侧再渐隐。
+      */}
+      <div className="island-side-fade island-side-fade--left" aria-hidden />
+      <div className="island-side-fade island-side-fade--right" aria-hidden />
       <svg
         className="island-corner-patch island-corner-patch--left"
         width={ISLAND_CORNER_PATCH_SIZE}
@@ -374,6 +392,28 @@ async function applyBarMaterial(): Promise<{ dark?: boolean; kind?: Material }> 
 function App() {
   const [expanded, setExpanded] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
+  const [chromePrefs, setChromePrefsState] = useState(() => getChromePrefs());
+  const chromeRailTier = resolveChromeRailTier(chromePrefs);
+  const rightShortcuts = hasRightShortcutsWing(chromePrefs);
+  const [chromeStripW, setChromeStripW] = useState(0);
+
+  useEffect(() => {
+    const unsub = subscribeChromePrefs(setChromePrefsState);
+    void hydrateChromePrefs().then(setChromePrefsState);
+    let evUnsub: (() => void) | undefined;
+    void bindChromePrefsEvents().then((u) => {
+      evUnsub = u;
+    });
+    return () => {
+      unsub();
+      evUnsub?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (chromeRailTier === "dual" && trayOpen) setTrayOpen(false);
+    if (chromeRailTier !== "hybrid") setChromeStripW(0);
+  }, [chromeRailTier, trayOpen]);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   /** Hidden until Rust host-boot-ready (tray seeded + chrome reveal). */
   const [bootReady, setBootReady] = useState(false);
@@ -1178,12 +1218,22 @@ function App() {
     sizeRef.current = next;
     revealRef.current = nextReveal;
     liveIslandClip = { width: next.width, height: next.height };
+    setLiveIslandWidth(next.width);
     // 顶角直角贴屏；壳层向上 bleed 1px，盖住 WebView 顶边发丝缝
     const topSquare = 1;
     const gap = 0;
     const bleed = ISLAND_TOP_BLEED;
     const w = Math.max(28, next.width);
     const h = Math.max(28, next.height);
+    // 供快捷区/托盘折叠与侧渐变定位：跟 rAF 同步，不经 React size debounce
+    const shellEl = document.querySelector(".shell") as HTMLElement | null;
+    if (shellEl) {
+      shellEl.style.setProperty("--live-island-w", `${w}px`);
+      shellEl.style.setProperty(
+        "--island-r-bot",
+        `${islandBottomRadius(w, h)}px`,
+      );
+    }
     const root = islandRef.current;
     if (root) {
       root.style.top = `${gap}px`;
@@ -1675,6 +1725,28 @@ function App() {
       if (r.kind) setMaterial(r.kind);
     })();
   }, [islandPrefs.barGlass]);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void listen(ISLAND_REQUEST_COLLAPSE_EVENT, () => {
+      // Fold / tray chrome: fully clear search retention so the bar shrinks.
+      retainSearchModeRef.current = false;
+      if (expandedRef.current || revealRef.current > 0.01) {
+        void collapse();
+        return;
+      }
+      if (searchModeRef.current || searchLeavingRef.current) {
+        exitIslandSearchChrome({ animated: true });
+        void shrinkIslandWindow();
+      }
+    })
+      .then((fn) => {
+        un = fn;
+      })
+      .catch(() => undefined);
+    return () => un?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Desktop ↔ window flips: re-sync (desktop forces Win32 glass on).
   useEffect(() => {
@@ -3166,6 +3238,7 @@ function App() {
 
   const ambientCss = {
     ["--island-top-gap" as string]: `${TOP_GAP}px`,
+    // --live-island-w：仅 paintDom / layout 刷 DOM，勿用 React size 覆盖（会拖垮折叠与侧渐变）
     ["--ambient-r" as string]: String(ambient.r),
     ["--ambient-g" as string]: String(ambient.g),
     ["--ambient-b" as string]: String(ambient.b),
@@ -3411,13 +3484,35 @@ function App() {
         />
       </div>
 
-      <ShortcutsHost settingsRef={settingsAnchorRef} islandWidth={size.width} />
+      <ShortcutsHost
+        settingsRef={settingsAnchorRef}
+        islandWidth={size.width}
+        side="left"
+        dualMode={rightShortcuts}
+      />
+      {rightShortcuts ? (
+        <ShortcutsHost
+          settingsRef={settingsAnchorRef}
+          islandWidth={size.width}
+          side="right"
+          dualMode
+          chromeStripW={chromeRailTier === "hybrid" ? chromeStripW : 0}
+        />
+      ) : null}
 
-      {TRAY_UI_ENABLED ? (
-        <TrayCluster open={trayOpen} onOpenChange={setTrayOpen} />
-      ) : (
+      {TRAY_UI_ENABLED && chromeRailTier !== "dual" ? (
+        <TrayCluster
+          open={trayOpen}
+          onOpenChange={setTrayOpen}
+          compactChipsOnly={chromeRailTier === "hybrid"}
+          islandWidth={size.width}
+          onRailWidthChange={
+            chromeRailTier === "hybrid" ? setChromeStripW : undefined
+          }
+        />
+      ) : !TRAY_UI_ENABLED && chromeRailTier !== "dual" ? (
         <ChromeStatusCluster />
-      )}
+      ) : null}
 
       <BorderBeam
         ref={islandRef}

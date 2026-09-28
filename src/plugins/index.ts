@@ -4,10 +4,12 @@ export { assertCapability, describeCapabilities, isSensitiveCapability } from ".
 export { listWindows, getWindow, focusWindow, subscribeWindows } from "./windowsApi";
 export {
   SHORTCUTS_LEFT_INSET,
+  SHORTCUTS_RIGHT_INSET,
   SHORTCUTS_ISLAND_GAP,
   SHORTCUTS_HEIGHT,
   STATUS_MENU_BAR_HEIGHT,
   computeShortcutsBounds,
+  computeShortcutsBoundsRight,
 } from "./shortcutsGeometry";
 export {
   ISLAND_VIEW_W,

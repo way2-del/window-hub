@@ -277,6 +277,61 @@ a {
   color: var(--glass-fg-muted, #9ca3af);
 }
 
+.chrome-dual-status {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--glass-fg, #f3f4f6);
+  border: 1px solid color-mix(in srgb, var(--glass-fg, #fff) 14%, transparent);
+  background: color-mix(in srgb, var(--glass-fg, #fff) 6%, transparent);
+}
+
+.chrome-dual-status.is-on {
+  border-color: color-mix(in srgb, var(--sys-accent, #34c759) 45%, transparent);
+  background: color-mix(in srgb, var(--sys-accent, #34c759) 12%, transparent);
+}
+
+.shortcuts-side-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.shortcuts-side-toggle {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.shortcuts-side-toggle .settings-secondary-btn.is-selected {
+  border: 1px solid color-mix(in srgb, var(--sys-accent, #34c759) 55%, transparent);
+  color: var(--sys-accent, #34c759);
+}
+
+.chrome-restart-prompt {
+  margin-top: 12px;
+  padding: 12px 12px 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--sys-accent, #34c759) 45%, transparent);
+  background: color-mix(in srgb, var(--sys-accent, #34c759) 12%, transparent);
+}
+
+.chrome-restart-prompt-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--glass-fg, #f3f4f6);
+}
+
+.chrome-restart-prompt-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .pref-row {
   margin-top: 14px;
   display: flex;
@@ -2456,6 +2511,26 @@ html[data-theme="light"] .settings-card {
 
 html[data-theme="light"] .card-desc {
   color: #3f3f46;
+}
+
+html[data-theme="light"] .chrome-dual-status {
+  color: #18181b;
+  border-color: rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.03);
+}
+
+html[data-theme="light"] .chrome-dual-status.is-on {
+  border-color: color-mix(in srgb, var(--sys-accent, #34c759) 40%, rgba(0, 0, 0, 0.12));
+  background: color-mix(in srgb, var(--sys-accent, #34c759) 10%, #ffffff);
+}
+
+html[data-theme="light"] .chrome-restart-prompt {
+  border-color: color-mix(in srgb, var(--sys-accent, #34c759) 40%, rgba(0, 0, 0, 0.12));
+  background: color-mix(in srgb, var(--sys-accent, #34c759) 10%, #ffffff);
+}
+
+html[data-theme="light"] .chrome-restart-prompt-text {
+  color: #18181b;
 }
 
 /* Weather inputs + tray pin list: light surfaces, dark text */

@@ -1,17 +1,52 @@
 .shortcuts-host {
   position: absolute;
   top: var(--island-top-gap, 0px);
-  z-index: 28;
+  /* Below island-beam (40) which carries side fades */
+  z-index: 20;
   display: flex;
   align-items: center;
   height: 28px;
   max-height: 28px;
   overflow: hidden;
   pointer-events: auto;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .shortcuts-host.is-empty {
   pointer-events: none;
+}
+
+/* Left wing: group hugs the island; ⋯ is the rightmost chip (island-facing). */
+.shortcuts-host[data-side="left"] {
+  justify-content: flex-end;
+}
+
+/* Right wing: group hugs wifi / tray chrome (right-align); ⋯ stays island-facing (left of chips). */
+.shortcuts-host[data-side="right"] {
+  justify-content: flex-end;
+}
+
+/* Empty wing drop target: fill the safe zone so cross-side Ctrl+drag can land. */
+.shortcuts-host.is-empty-drop {
+  pointer-events: auto;
+  min-width: 48px;
+}
+
+.shortcuts-chip.is-fold {
+  min-width: 28px;
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+  /* Match tray-rail / tray-fixed-chrome rhythm */
+  margin: 0;
+}
+
+.shortcuts-fold-mark {
+  font-size: 16px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  transform: translateY(-1px);
 }
 
 .shortcuts-host.is-resizing {
@@ -22,12 +57,67 @@
 .shortcuts-expanded {
   display: flex;
   align-items: center;
-  gap: 0;
+  /* Same 7px rhythm as .tray-rail / .tray-fixed-chrome */
+  gap: 7px;
   height: 100%;
   min-width: 0;
   width: max-content;
   max-width: 100%;
   overflow: hidden;
+}
+
+/* Soft-mask rail: overflow strips stay in DOM; island-facing edge fades into ⋯. */
+.shortcuts-rail {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 100%;
+  min-width: 0;
+  flex: 0 1 auto;
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* Left: keep screen-edge strips; clip/fade toward island (right). */
+.shortcuts-host[data-side="left"] .shortcuts-rail {
+  justify-content: flex-start;
+}
+
+.shortcuts-host[data-side="left"] .shortcuts-rail.is-masked {
+  -webkit-mask-image: linear-gradient(
+    to left,
+    transparent 0,
+    #000 12px,
+    #000 100%
+  );
+  mask-image: linear-gradient(
+    to left,
+    transparent 0,
+    #000 12px,
+    #000 100%
+  );
+}
+
+/* Right: keep tray-edge strips; clip/fade toward island (left). */
+.shortcuts-host[data-side="right"] .shortcuts-rail {
+  justify-content: flex-end;
+}
+
+.shortcuts-host[data-side="right"] .shortcuts-rail.is-masked {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 12px,
+    #000 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 12px,
+    #000 100%
+  );
 }
 
 .shortcuts-strip-unit {

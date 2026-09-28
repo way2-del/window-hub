@@ -31,6 +31,7 @@ pub mod status_menu;
 pub mod switcher;
 pub mod topmost;
 pub mod tray;
+pub mod popup_fit;
 pub mod work_area;
 #[cfg(windows)]
 pub mod max_clamp;

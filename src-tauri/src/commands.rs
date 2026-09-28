@@ -689,6 +689,18 @@ const TRAY_POPUP_W: f64 = 280.0;
 /// Placeholder only — frontend measures + slide-reveals while still hidden.
 const TRAY_POPUP_H: f64 = 320.0;
 
+fn main_hwnd_raw(app: &AppHandle) -> isize {
+    app.get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0)
+}
+
+/// Keep chrome/plugin popups inside the work area (flip/clamp near screen edges).
+fn fit_popup_xy(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
+    crate::win32::popup_fit::fit_popup_origin(main_hwnd_raw(app), x, y, w, h)
+}
+
 const TRAY_POPUP_INIT: &str = r#"
   window.__WH_IS_TRAY_POPUP__ = true;
   document.addEventListener('keydown', function (e) {
@@ -842,6 +854,7 @@ pub async fn open_tray_popup(
         .name("tray-refresh-on-open".into())
         .spawn(|| crate::win32::tray::request_refresh())
         .ok();
+    let (x, y) = fit_popup_xy(&app, x, y, TRAY_POPUP_W, TRAY_POPUP_H);
     crate::win32::click_trace::log("rust", &format!("open_tray_popup enter x={x:.0} y={y:.0}"));
     close_sibling_popups(&app, "tray-popup");
 
@@ -900,6 +913,13 @@ const STATUS_MENU_POPUP_W: f64 = 200.0;
 /// Placeholder only — frontend measures + fits while still hidden, then shows.
 const STATUS_MENU_POPUP_H: f64 = 340.0;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusMenuFoldItem {
+    pub plugin_id: String,
+    pub label: String,
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusMenuOpenPayload {
@@ -908,6 +928,12 @@ struct StatusMenuOpenPayload {
     /// Pinned tile id to insert a separator after (gap / “在右侧”).
     after_item_id: Option<String>,
     pin_bottom: Option<f64>,
+    /// Shortcuts ⋯ overflow list (cross-webview; in-memory bus does not share).
+    fold_items: Vec<StatusMenuFoldItem>,
+    /// Which shortcuts wing opened the fold menu (`left` | `right`).
+    fold_side: Option<String>,
+    /// Dual shortcuts mode — fold menu can drag items to the other wing.
+    fold_dual: bool,
 }
 
 fn status_menu_init_script(payload: &StatusMenuOpenPayload) -> String {
@@ -926,6 +952,13 @@ fn status_menu_init_script(payload: &StatusMenuOpenPayload) -> String {
         .pin_bottom
         .map(|n| n.to_string())
         .unwrap_or_else(|| "null".into());
+    let fold_items = serde_json::to_string(&payload.fold_items).unwrap_or_else(|_| "[]".into());
+    let fold_side = payload
+        .fold_side
+        .as_ref()
+        .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
+    let fold_dual = if payload.fold_dual { "true" } else { "false" };
     format!(
         r#"
       window.__WH_IS_STATUS_MENU_POPUP__ = true;
@@ -933,6 +966,9 @@ fn status_menu_init_script(payload: &StatusMenuOpenPayload) -> String {
       window.__WH_STATUS_MENU_ITEM_ID__ = {item_id};
       window.__WH_STATUS_MENU_AFTER_ITEM_ID__ = {after_item_id};
       window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom};
+      window.__WH_STATUS_MENU_FOLD_ITEMS__ = {fold_items};
+      window.__WH_STATUS_MENU_FOLD_SIDE__ = {fold_side};
+      window.__WH_STATUS_MENU_FOLD_DUAL__ = {fold_dual};
       document.addEventListener('keydown', function (e) {{
         if (e.key === 'Escape') {{
           try {{ window.__TAURI__.core.invoke('close_status_menu_popup'); }} catch (_) {{}}
@@ -958,8 +994,15 @@ fn apply_status_menu_payload(win: &WebviewWindow, payload: &StatusMenuOpenPayloa
         .pin_bottom
         .map(|n| n.to_string())
         .unwrap_or_else(|| "null".into());
+    let fold_items = serde_json::to_string(&payload.fold_items).unwrap_or_else(|_| "[]".into());
+    let fold_side = payload
+        .fold_side
+        .as_ref()
+        .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "null".into()))
+        .unwrap_or_else(|| "null".into());
+    let fold_dual = if payload.fold_dual { "true" } else { "false" };
     let _ = win.eval(&format!(
-        "window.__WH_STATUS_MENU_FROM_DOCK__ = {from_dock}; window.__WH_STATUS_MENU_ITEM_ID__ = {item_id}; window.__WH_STATUS_MENU_AFTER_ITEM_ID__ = {after_item_id}; window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom};"
+        "window.__WH_STATUS_MENU_FROM_DOCK__ = {from_dock}; window.__WH_STATUS_MENU_ITEM_ID__ = {item_id}; window.__WH_STATUS_MENU_AFTER_ITEM_ID__ = {after_item_id}; window.__WH_STATUS_MENU_PIN_BOTTOM__ = {pin_bottom}; window.__WH_STATUS_MENU_FOLD_ITEMS__ = {fold_items}; window.__WH_STATUS_MENU_FOLD_SIDE__ = {fold_side}; window.__WH_STATUS_MENU_FOLD_DUAL__ = {fold_dual};"
     ));
 }
 
@@ -1025,7 +1068,11 @@ pub async fn open_status_menu_popup(
     item_id: Option<String>,
     after_item_id: Option<String>,
     pin_bottom: Option<f64>,
+    fold_items: Option<Vec<StatusMenuFoldItem>>,
+    fold_side: Option<String>,
+    fold_dual: Option<bool>,
 ) -> Result<(), String> {
+    let (x, y) = fit_popup_xy(&app, x, y, STATUS_MENU_POPUP_W, STATUS_MENU_POPUP_H);
     crate::win32::click_trace::log(
         "rust",
         &format!(
@@ -1043,6 +1090,20 @@ pub async fn open_status_menu_popup(
     #[cfg(windows)]
     crate::win32::blur_glass::strip_dock_windows(&app);
 
+    let fold_items = fold_items
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|it| !it.plugin_id.trim().is_empty() && !it.label.trim().is_empty())
+        .map(|it| StatusMenuFoldItem {
+            plugin_id: it.plugin_id.trim().to_string(),
+            label: it.label.trim().to_string(),
+        })
+        .collect();
+    let fold_side = fold_side
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s == "left" || s == "right");
+    let fold_dual = fold_dual.unwrap_or(false) && fold_side.is_some();
+
     let payload = StatusMenuOpenPayload {
         from_dock,
         item_id: item_id
@@ -1052,6 +1113,9 @@ pub async fn open_status_menu_popup(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
         pin_bottom,
+        fold_items,
+        fold_side,
+        fold_dual,
     };
 
     if let Some(existing) = app.get_webview_window("status-menu-popup") {
@@ -1214,6 +1278,8 @@ pub async fn open_dock_add_icon_popup(
         pin_bottom,
     };
 
+    let (x, y) = fit_popup_xy(&app, x, y, DOCK_ADD_ICON_POPUP_W, DOCK_ADD_ICON_POPUP_H);
+
     if let Some(existing) = app.get_webview_window("dock-add-icon-popup") {
         apply_saved_material(&existing, &state);
         let _ = existing.hide();
@@ -1338,13 +1404,14 @@ fn remember_plugin_popup_geometry(win: &WebviewWindow) {
     }
 }
 
-fn restore_plugin_popup_geometry(win: &WebviewWindow, plugin_id: &str) {
+fn restore_plugin_popup_geometry(app: &AppHandle, win: &WebviewWindow, plugin_id: &str) {
     let saved = PLUGIN_POPUP_RESTORE
         .lock()
         .ok()
         .and_then(|g| *g);
     if let Some((x, y, w, h)) = saved {
         let (cw, ch) = clamp_popup_size(w, h);
+        let (x, y) = fit_popup_xy(app, x, y, cw, ch);
         let _ = win.set_size(LogicalSize::new(cw, ch));
         let _ = win.set_position(LogicalPosition::new(x, y));
         return;
@@ -1512,6 +1579,13 @@ pub async fn open_plugin_popup(
     let want_fs = windowed_fullscreen.unwrap_or(false);
     let want_resize = resizable.unwrap_or(want_fs || want_native);
     let (popup_w, popup_h) = resolve_plugin_popup_size(&plugin_id, width, height);
+    // Framed / fullscreen surfaces manage their own geometry; floating popups
+    // must stay inside the monitor work area (right shortcuts / screen corners).
+    let (x, y) = if want_native || want_fs {
+        (x, y)
+    } else {
+        fit_popup_xy(&app, x, y, popup_w, popup_h)
+    };
 
     let popup = plugin_popup_path(&record)?;
     let parent = popup
@@ -1799,7 +1873,7 @@ pub async fn set_plugin_popup_windowed_fullscreen(
         let _ = win.set_always_on_top(false);
         let _ = win.set_skip_taskbar(false);
     } else {
-        restore_plugin_popup_geometry(&win, &plugin_id);
+        restore_plugin_popup_geometry(&app, &win, &plugin_id);
         let _ = win.set_always_on_top(true);
         let _ = win.set_skip_taskbar(true);
     }
@@ -2398,6 +2472,7 @@ pub async fn open_input_lang_popup(
     y: f64,
 ) -> Result<(), String> {
     close_sibling_popups(&app, "input-lang-popup");
+    let (x, y) = fit_popup_xy(&app, x, y, INPUT_LANG_POPUP_W, INPUT_LANG_POPUP_H);
 
     if let Some(existing) = app.get_webview_window("input-lang-popup") {
         apply_saved_material(&existing, &state);
@@ -3208,6 +3283,7 @@ pub async fn open_wifi_popup(
 ) -> Result<(), String> {
     close_sibling_popups(&app, "wifi-popup");
     let _ = crate::win32::wifi::refresh();
+    let (x, y) = fit_popup_xy(&app, x, y, WIFI_POPUP_W, WIFI_POPUP_H);
 
     if let Some(existing) = app.get_webview_window("wifi-popup") {
         apply_saved_material(&existing, &state);
@@ -4386,6 +4462,9 @@ pub struct ShortcutsPrefsDto {
     /// `None` on patch = leave unchanged; `Some({})` clears custom scopes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<std::collections::HashMap<String, ShortcutsPluginScopeDto>>,
+    /// pluginId → `"left"` | `"right"`. Missing = left. `None` on patch = leave unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_sides: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Default for ShortcutsPrefsDto {
@@ -4394,6 +4473,7 @@ impl Default for ShortcutsPrefsDto {
             exclusive_plugin_id: None,
             plugin_order: None,
             scopes: None,
+            plugin_sides: None,
         }
     }
 }
@@ -4453,6 +4533,20 @@ fn normalize_shortcuts_prefs(mut p: ShortcutsPrefsDto) -> ShortcutsPrefsDto {
         }
         *scopes = cleaned;
     }
+    if let Some(sides) = p.plugin_sides.as_mut() {
+        let mut cleaned = std::collections::HashMap::new();
+        for (pid, side) in sides.drain() {
+            let id = pid.trim().to_string();
+            if id.is_empty() {
+                continue;
+            }
+            if side.trim().eq_ignore_ascii_case("right") {
+                cleaned.insert(id, "right".into());
+            }
+            // omit "left" defaults
+        }
+        *sides = cleaned;
+    }
     p
 }
 
@@ -4480,9 +4574,13 @@ pub fn set_shortcuts_prefs(
     if let Some(scopes) = patch.scopes {
         next.scopes = Some(scopes);
     }
+    if let Some(sides) = patch.plugin_sides {
+        next.plugin_sides = Some(sides);
+    }
     let val = serde_json::to_value(&next).map_err(|e| e.to_string())?;
     crate::db::with_conn(|c| crate::db::shortcuts_set(c, &val))?;
     let _ = app.emit("shortcuts-prefs", &next);
     Ok(next)
 }
+
 

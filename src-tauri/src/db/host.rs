@@ -74,6 +74,14 @@ pub fn tray_set(conn: &Connection, value: &Value) -> Result<(), String> {
     singleton_set_json(conn, "prefs_tray", value)
 }
 
+pub fn chrome_get(conn: &Connection) -> Result<Option<Value>, String> {
+    singleton_get_json(conn, "prefs_chrome")
+}
+
+pub fn chrome_set(conn: &Connection, value: &Value) -> Result<(), String> {
+    singleton_set_json(conn, "prefs_chrome", value)
+}
+
 // ── prefs_shortcuts ──────────────────────────────────────────────────
 
 pub fn shortcuts_get(conn: &Connection) -> Result<Option<Value>, String> {
@@ -338,6 +346,11 @@ pub fn create_host_tables(conn: &Connection) -> Result<(), String> {
           updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS prefs_tray (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS prefs_chrome (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           data_json TEXT NOT NULL,
           updated_at INTEGER NOT NULL

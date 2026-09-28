@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clickTrace } from "../clickTrace";
 import { hideChromeHoverTip, hostTipPointerProps } from "../chromeHoverTip";
+import { anchorPopupBelowElement } from "../popupAnchor";
+import { clearShortcutsFoldMenuItems } from "../features/chrome/shortcutsFoldMenuBus";
 import "./StatusMenu.css";
 
 type ForegroundApp = {
@@ -20,6 +21,7 @@ type Props = {
 };
 
 const STATUS_MENU_W = 200;
+const STATUS_MENU_H_EST = 280;
 const STATUS_MENU_GAP = 8;
 
 function truncateLabel(s: string, maxChars = 10): string {
@@ -31,13 +33,12 @@ function truncateLabel(s: string, maxChars = 10): string {
 }
 
 async function popupAnchor(el: HTMLElement) {
-  const win = getCurrentWindow();
-  const [factor, outer] = await Promise.all([win.scaleFactor(), win.outerPosition()]);
-  const rect = el.getBoundingClientRect();
-  const logicalX = outer.x / factor;
-  const logicalY = outer.y / factor;
-  const x = logicalX + rect.left;
-  const y = logicalY + rect.bottom + STATUS_MENU_GAP;
+  const { x, y } = await anchorPopupBelowElement(
+    el,
+    STATUS_MENU_W,
+    STATUS_MENU_H_EST,
+    STATUS_MENU_GAP,
+  );
   return { x, y, w: STATUS_MENU_W };
 }
 
@@ -124,6 +125,7 @@ export default function StatusMenu({
       clickTrace("fe-status", "before popupAnchor");
       const { x, y } = await popupAnchor(el);
       clickTrace("fe-status", `anchor x=${x.toFixed(0)} y=${y.toFixed(0)}`);
+      clearShortcutsFoldMenuItems();
       clickTrace("fe-status", "before open_status_menu_popup");
       await invoke("open_status_menu_popup", { x, y });
       clickTrace("fe-status", "after open_status_menu_popup");

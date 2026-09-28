@@ -334,6 +334,11 @@ async function openStatusMenuAtClientPoint(
   await invoke<boolean>("dock_set_hover_expand", { expanded: false }).catch(() => false);
   await invoke("dock_set_interaction_hold", { hold: true }).catch(() => undefined);
 
+  const { clearShortcutsFoldMenuItems } = await import(
+    "./features/chrome/shortcutsFoldMenuBus"
+  );
+  clearShortcutsFoldMenuItems();
+
   const visible = await invoke<boolean>("is_status_menu_popup_open");
   if (visible) {
     await invoke("close_status_menu_popup");

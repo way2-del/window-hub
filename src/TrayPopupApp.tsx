@@ -18,6 +18,10 @@ import { armTrayLeftClick, fireTrayLeftDouble, invokeTrayRightClick } from "./tr
 import ChromePopupShell, {
   CHROME_POPUP_SHELL_SELECTOR,
 } from "./features/chromePopup/ChromePopupShell";
+import {
+  getTrayRailFold,
+  subscribeTrayRailFold,
+} from "./features/chrome/trayRailFoldBus";
 
 const POPUP_W = 280;
 const TRAY_FIT = {
@@ -93,6 +97,10 @@ export default function TrayPopupApp() {
   const [entered, setEntered] = useState(false);
   /** React-owned — DOM `classList.toggle("is-scrollable")` is wiped on re-render. */
   const [scrollable, setScrollable] = useState(false);
+  /** Island-squeezed rail icons (temporary; restore when island shrinks). */
+  const [railFoldIds, setRailFoldIds] = useState<string[]>(
+    () => getTrayRailFold().overflowIds,
+  );
   const revealGen = useRef(0);
   const reuseArmedRef = useRef(false);
 
@@ -101,22 +109,32 @@ export default function TrayPopupApp() {
     () => icons.map((i) => trayPinKey(i)).filter(Boolean),
     [icons],
   );
+  const railFoldSet = useMemo(() => new Set(railFoldIds), [railFoldIds]);
   const pinnedIcons = useMemo(() => {
     const list = icons.filter(
-      (i) => isTrayResident(i) || isTrayPinned(i, pinnedSet, liveTrayKeys),
+      (i) =>
+        !railFoldSet.has(i.id) &&
+        (isTrayResident(i) || isTrayPinned(i, pinnedSet, liveTrayKeys)),
     );
     return [
       ...list.filter((i) => !isTrayResident(i)),
       ...list.filter((i) => isTrayResident(i)),
     ];
-  }, [icons, pinnedSet, liveTrayKeys]);
-  const overflowIcons = useMemo(
-    () =>
-      icons.filter(
-        (i) => !isTrayResident(i) && !isTrayPinned(i, pinnedSet, liveTrayKeys),
-      ),
-    [icons, pinnedSet, liveTrayKeys],
-  );
+  }, [icons, pinnedSet, liveTrayKeys, railFoldSet]);
+  const overflowIcons = useMemo(() => {
+    const unpinned = icons.filter(
+      (i) => !isTrayResident(i) && !isTrayPinned(i, pinnedSet, liveTrayKeys),
+    );
+    const islandStashed = icons.filter((i) => railFoldSet.has(i.id));
+    const seen = new Set<string>();
+    const out: TrayIconInfo[] = [];
+    for (const icon of [...islandStashed, ...unpinned]) {
+      if (seen.has(icon.id)) continue;
+      seen.add(icon.id);
+      out.push(icon);
+    }
+    return out;
+  }, [icons, pinnedSet, liveTrayKeys, railFoldSet]);
 
   const refit = () => {
     schedulePopupFit(TRAY_FIT, [0, 40, 120]);
@@ -211,6 +229,23 @@ export default function TrayPopupApp() {
       else fn();
     });
 
+    void listen<{ overflowIds?: string[] }>("tray-rail-fold", (ev) => {
+      setRailFoldIds(
+        Array.isArray(ev.payload?.overflowIds) ? ev.payload.overflowIds : [],
+      );
+    }).then((fn) => {
+      if (!cancelled) unsubs.push(fn);
+      else fn();
+    });
+
+    unsubs.push(
+      subscribeTrayRailFold((p) => {
+        setRailFoldIds(p.overflowIds);
+      }),
+    );
+
+    setRailFoldIds(getTrayRailFold().overflowIds);
+
     return () => {
       cancelled = true;
       window.clearTimeout(retryA);
@@ -279,11 +314,12 @@ export default function TrayPopupApp() {
             <div className="tray-drop-section">
               <div className="tray-drop-label">已收纳</div>
               <div className="tray-drop-grid">
-                {overflowIcons.map((icon) => (
+                {overflowIcons.map((icon, i) => (
                   <button
                     key={icon.id}
                     type="button"
-                    className={`tray-drop-item${icon.flashing ? " is-flashing" : ""}`}
+                    className={`tray-drop-item is-island-stashed${icon.flashing ? " is-flashing" : ""}`}
+                    style={{ animationDelay: `${Math.min(i, 8) * 28}ms` }}
                     title={trayLabel(icon)}
                     onClick={() => void clickTray(icon, "left")}
                     onDoubleClick={(e) => {
