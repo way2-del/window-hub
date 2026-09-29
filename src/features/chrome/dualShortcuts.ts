@@ -1,7 +1,10 @@
 /** Pure policy: right-rail chrome tiers + dual / hybrid / tray shortcuts. */
 
 export type ChromeVisibility = {
+  /** Resident tray icons on the bar. */
   showTray: boolean;
+  /** Tray overflow / full list dropdown (chevron). */
+  showTrayMenu: boolean;
   showWifi: boolean;
   showClock: boolean;
   showIme: boolean;
@@ -13,20 +16,21 @@ export type ChromeRailTier = "dual" | "hybrid" | "tray";
 
 export type DualShortcutsTransition = "enter" | "exit" | "none";
 
-/** System chips (not the tray-icons rail). */
+/** System chips + optional tray-menu chevron (not the tray-icons rail). */
 export function hasSystemChromeChips(prefs: ChromeVisibility): boolean {
   return (
     prefs.showWifi ||
     prefs.showClock ||
     prefs.showIme ||
-    prefs.showControlCenter
+    prefs.showControlCenter ||
+    prefs.showTrayMenu
   );
 }
 
 /**
  * - dual: all modules off → left+right shortcuts, no tray cluster
- * - hybrid: tray icons off, ≥1 system chip → far-right chips + inner right shortcuts
- * - tray: tray icons on → full tray, no right shortcuts
+ * - hybrid: resident tray icons off, ≥1 chip/chevron → far-right chips + inner right shortcuts
+ * - tray: resident tray icons on → full tray, no right shortcuts
  */
 export function resolveChromeRailTier(prefs: ChromeVisibility): ChromeRailTier {
   if (prefs.showTray) return "tray";
@@ -67,9 +71,15 @@ export function enteredTrayTier(
 export function countRightChromeModules(prefs: ChromeVisibility): number {
   let n = 0;
   if (prefs.showTray) n += 1;
+  if (prefs.showTrayMenu) n += 1;
   if (prefs.showWifi) n += 1;
   if (prefs.showClock) n += 1;
   if (prefs.showIme) n += 1;
   if (prefs.showControlCenter) n += 1;
   return n;
+}
+
+/** Tray subsystem (hook / icons) needed when resident bar or dropdown is on. */
+export function needsTraySubsystem(prefs: ChromeVisibility): boolean {
+  return prefs.showTray || prefs.showTrayMenu;
 }

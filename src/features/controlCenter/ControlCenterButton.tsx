@@ -18,7 +18,12 @@ async function popupOrigin(el: HTMLElement, width: number) {
 }
 
 /** Shared by the standalone host status rail and the tray's host controls. */
-export default function ControlCenterButton() {
+export default function ControlCenterButton({
+  reorderLocked = false,
+}: {
+  /** When true (Ctrl+drag chrome reorder), ignore press/click. */
+  reorderLocked?: boolean;
+}) {
   const pressedOpen = useRef<Promise<boolean> | null>(null);
   async function toggle(button: HTMLButtonElement) {
     const beforePress = pressedOpen.current;
@@ -43,8 +48,9 @@ export default function ControlCenterButton() {
       className="chrome-control-center-btn"
       aria-label="打开控制中心"
       aria-haspopup="dialog"
-      {...hostTipPointerProps("控制中心")}
+      {...(reorderLocked ? {} : hostTipPointerProps("控制中心"))}
       onPointerDown={(event) => {
+        if (reorderLocked || event.ctrlKey) return;
         if (event.button === 0) {
           pressedOpen.current = invoke<boolean>("is_control_center_open").catch(() => false);
         }
@@ -53,7 +59,10 @@ export default function ControlCenterButton() {
         pressedOpen.current = null;
       }}
       onMouseDown={(event) => event.preventDefault()}
-      onClick={(event) => void toggle(event.currentTarget)}
+      onClick={(event) => {
+        if (reorderLocked || event.ctrlKey) return;
+        void toggle(event.currentTarget);
+      }}
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
         <rect x="3" y="4" width="18" height="6" rx="3" />

@@ -1,0 +1,521 @@
+/* Bloub popup — packed top→apply→full-width sequence, no dead vertical gap */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: var(--glass-fg, #f4f4f5);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    system-ui, sans-serif;
+  user-select: none;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+#app.wg-shell {
+  position: relative;
+  box-sizing: border-box;
+  height: auto;
+  min-height: 100%;
+  padding: var(--wh-popup-pad-top, 10px) var(--wh-popup-pad-x, 12px)
+    var(--wh-popup-pad-bottom, 12px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 8px;
+  overflow: hidden;
+  background: transparent;
+  color: var(--glass-fg, #f4f4f5);
+}
+
+/* Do not grow — right column bottom-aligns with left save button */
+.cz-top {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(120px, 148px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: end;
+  overflow: hidden;
+}
+
+.cz-side {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  align-items: stretch;
+}
+
+.cz-stage {
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+  aspect-ratio: 1;
+  max-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.1));
+  background:
+    radial-gradient(color-mix(in srgb, var(--glass-fg, #fff) 8%, transparent) 1px, transparent 1px);
+  background-size: 16px 16px;
+  background-color: var(--glass-card, rgba(255, 255, 255, 0.07));
+  overflow: hidden;
+}
+
+.cz-bloub {
+  display: block;
+  max-width: 88%;
+  max-height: 88%;
+}
+
+.cz-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--glass-fg-muted, #a1a1aa);
+  flex: 0 0 auto;
+  text-align: left;
+}
+
+.cz-meta strong {
+  color: var(--glass-fg, #f4f4f5);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 10px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.cz-side-actions {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.cz-side-actions .cz-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+/* 「播放」「保存」同宽通栏 */
+.cz-side-actions #btnPlay,
+.cz-side-actions #btnSave {
+  grid-column: 1 / -1;
+}
+
+.cz-main {
+  min-width: 0;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 12px;
+  align-items: stretch;
+  width: 100%;
+}
+
+.cz-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  align-items: flex-start;
+  overflow: visible;
+}
+
+.cz-section .cz-panel,
+.cz-section .cz-section-label {
+  width: 100%;
+}
+
+.cz-follow-section {
+  margin-top: 2px;
+}
+
+.cz-follow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 26px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.1));
+  background: var(--glass-card, rgba(255, 255, 255, 0.05));
+  color: var(--glass-fg, #f4f4f5);
+  font: 600 11px/1.2 inherit;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cz-follow input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--glass-fg, #f4f4f5);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+/* Optional scene-name row after primary save */
+.cz-apply-row {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.cz-apply-row[hidden] {
+  display: none !important;
+}
+
+.cz-apply-row input {
+  flex: 1 1 160px;
+  min-width: 120px;
+  max-width: 240px;
+  height: 26px;
+  border: 1px solid var(--glass-btn-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  background: var(--glass-input, rgba(0, 0, 0, 0.22));
+  color: var(--glass-fg, #f4f4f5);
+  font: 600 11px/1 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  padding: 0 6px;
+  outline: none;
+}
+
+.cz-apply-row input:focus {
+  border-color: color-mix(in srgb, var(--glass-fg, #fff) 40%, transparent);
+}
+
+/* Sequence spans full popup width, packed under apply row */
+.cz-bottom {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.cz-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--glass-fg-muted, #a1a1aa);
+  flex: 0 0 auto;
+  line-height: 1.2;
+  text-align: left;
+}
+
+.cz-muted {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.85;
+}
+
+.cz-panel {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-start;
+  overflow: visible;
+}
+
+.cz-expr .cz-btn {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  padding: 0 8px;
+  height: 24px;
+  min-width: 2.75em;
+}
+
+.cz-colors {
+  gap: 6px;
+  align-items: center;
+  /* Room for the active outline on the first (black) swatch */
+  padding-left: 6px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.cz-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid var(--glass-border, rgba(255, 255, 255, 0.12));
+  background: var(--swatch, #0a0a0c);
+  cursor: pointer;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.cz-swatch:hover {
+  transform: scale(1.08);
+}
+
+.cz-swatch.active {
+  outline: 2px solid var(--glass-fg, #f4f4f5);
+  outline-offset: 2px;
+  border-color: transparent;
+  /* box-shadow as fallback so ring isn't clipped by overflow */
+  box-shadow: 0 0 0 2px var(--glass-fg, #f4f4f5);
+  outline: none;
+}
+
+.cz-track {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 0 4px;
+  min-height: 52px;
+  align-items: stretch;
+  justify-content: flex-start;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--glass-fg, #fff) 28%, transparent) transparent;
+}
+
+.cz-track::-webkit-scrollbar {
+  height: 4px;
+}
+
+.cz-track::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cz-track::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--glass-fg, #fff) 28%, transparent);
+  border-radius: 999px;
+}
+
+.cz-track-empty {
+  font-size: 11px;
+  color: var(--glass-fg-muted, #a1a1aa);
+  padding: 8px 4px;
+}
+
+.cz-pill {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  min-width: 84px;
+  width: max-content;
+  max-width: 140px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.1));
+  background: var(--glass-card, rgba(255, 255, 255, 0.07));
+  color: var(--glass-fg, #f4f4f5);
+  cursor: pointer;
+  font: 600 10px/1.2 inherit;
+  text-align: left;
+}
+
+.cz-pill:hover {
+  background: var(--glass-btn, rgba(255, 255, 255, 0.08));
+  border-color: var(--glass-btn-border, rgba(255, 255, 255, 0.12));
+}
+
+.cz-pill.is-selected {
+  border-color: var(--glass-fg, #f4f4f5);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--glass-fg, #fff) 35%, transparent);
+}
+
+.cz-pill.is-playing {
+  background: var(--glass-fg, #f4f4f5);
+  color: var(--glass-main-bg, #1c1c1e);
+  border-color: var(--glass-fg, #f4f4f5);
+}
+
+.cz-pill-i {
+  opacity: 0.45;
+  font-size: 9px;
+  line-height: 1.1;
+}
+
+.cz-pill-t {
+  text-transform: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.cz-pill-d {
+  opacity: 0.55;
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1.1;
+}
+
+.cz-editor {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(88px, 1.1fr) minmax(88px, 1.1fr) 56px auto;
+  gap: 6px;
+  align-items: end;
+  justify-content: start;
+  width: 100%;
+}
+
+.cz-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: stretch;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--glass-fg-muted, #a1a1aa);
+  text-align: left;
+}
+
+.cz-field select,
+.cz-field input {
+  height: 24px;
+  border: 1px solid var(--glass-btn-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  background: var(--glass-input, rgba(0, 0, 0, 0.22));
+  color: var(--glass-fg, #f4f4f5);
+  font: 600 11px/1 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  padding: 0 6px;
+  text-transform: none;
+  letter-spacing: 0;
+  outline: none;
+}
+
+.cz-field select:focus,
+.cz-field input:focus {
+  border-color: color-mix(in srgb, var(--glass-fg, #fff) 40%, transparent);
+}
+
+.cz-field select:disabled,
+.cz-field input:disabled {
+  opacity: 0.45;
+}
+
+.cz-edit-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-start;
+}
+
+.cz-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--glass-btn, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--glass-btn-border, rgba(255, 255, 255, 0.12));
+  color: var(--glass-fg, #f4f4f5);
+  transition: background 0.15s ease, border-color 0.15s ease;
+  text-transform: none;
+  padding: 0 8px;
+  border-radius: 6px;
+  font: 600 11px/1.2 inherit;
+  letter-spacing: 0;
+  cursor: pointer;
+  height: 26px;
+  white-space: nowrap;
+}
+
+.cz-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--glass-fg, #fff) 14%, transparent);
+}
+
+.cz-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.cz-btn.active {
+  background: var(--glass-fg, #f4f4f5);
+  color: var(--glass-main-bg, #1c1c1e);
+  border-color: var(--glass-fg, #f4f4f5);
+}
+
+.cz-btn.dashed {
+  border-style: dashed;
+  background: transparent;
+}
+
+@media (max-width: 480px) {
+  .cz-top {
+    grid-template-columns: 1fr;
+  }
+
+  .cz-side {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .cz-stage {
+    flex: 0 0 96px;
+    width: 96px;
+    max-height: 96px;
+  }
+
+  .cz-meta {
+    flex: 1 1 120px;
+  }
+
+  .cz-side-actions {
+    flex: 1 1 100%;
+  }
+
+  .cz-side-actions #btnPlay,
+  .cz-side-actions #btnSave {
+    grid-column: auto;
+  }
+
+  .cz-editor {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .cz-edit-actions {
+    grid-column: 1 / -1;
+  }
+}

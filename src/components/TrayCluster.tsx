@@ -17,8 +17,13 @@ import {
   bindChromePrefsEvents,
   getChromePrefs,
   hydrateChromePrefs,
+  setChromePrefs,
   subscribeChromePrefs,
 } from "../chromePrefs";
+import {
+  orderedVisibleChromeChips,
+  type ChromeChipId,
+} from "../features/chrome/chromeChipOrder";
 import {
   computeTrayIconBudget,
   computeTrayRailMaxWidth,
@@ -432,7 +437,7 @@ export default function TrayCluster({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Tier1 hybrid: only system chips (no tray icons / chevron). */
+  /** Hybrid tier: hide resident tray-icon rail; chevron still follows showTrayMenu. */
   compactChipsOnly?: boolean;
   /** Report rail width (logical px) so right shortcuts can leave a gap. */
   onRailWidthChange?: (width: number) => void;
@@ -441,6 +446,8 @@ export default function TrayCluster({
 }) {
   const [chrome, setChrome] = useState(() => getChromePrefs());
   const showTrayIcons = chrome.showTray && !compactChipsOnly;
+  /** Dropdown chevron is independent of resident tray icons. */
+  const showTrayMenu = chrome.showTrayMenu;
   const [icons, setIcons] = useState<TrayIconInfo[]>([]);
   const [pinned, setPinned] = useState<string[]>([]);
   const [menuHeights, setMenuHeights] = useState<Record<string, number>>({});
@@ -449,16 +456,6 @@ export default function TrayCluster({
   const [fixedChromeW, setFixedChromeW] = useState(0);
   const [viewportW, setViewportW] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 1280),
-  );
-
-
-  useProgressiveGlyphs(
-    icons.filter(i => !i.icon_png_base64 && !glyphCacheRef.current.lookup(i)).map(i => i.id),
-    map => {
-      if (glyphCacheRef.current.ingest(map, icons)) {
-        setIcons(prev => glyphCacheRef.current.merge(prev));
-      }
-    },
   );
   const [now, setNow] = useState(() => new Date());
   const [inputLang, setInputLang] = useState<InputLangState>(FALLBACK_LANG);
@@ -470,6 +467,13 @@ export default function TrayCluster({
   const [dropHint, setDropHint] = useState<{ toId: string; place: "before" | "after" } | null>(
     null,
   );
+  const [chipDragId, setChipDragId] = useState<ChromeChipId | null>(null);
+  const [chipDropHint, setChipDropHint] = useState<{
+    toId: string;
+    place: "before" | "after";
+  } | null>(null);
+  /** After ctrlHeld/chipDragId state — never reference them above. */
+  const chipReorderMode = ctrlHeld || chipDragId != null;
   const rootRef = useRef<HTMLDivElement>(null);
   const fixedChromeRef = useRef<HTMLDivElement>(null);
   const chevronRef = useRef<HTMLButtonElement>(null);
@@ -477,14 +481,46 @@ export default function TrayCluster({
   const wifiChipRef = useRef<HTMLButtonElement>(null);
   const dragKeyRef = useRef<string | null>(null);
   const dropHintRef = useRef<{ toId: string; place: "before" | "after" } | null>(null);
+  const chipDragIdRef = useRef<ChromeChipId | null>(null);
+  const chipDropHintRef = useRef<{ toId: string; place: "before" | "after" } | null>(null);
   const pinnedRef = useRef<string[]>([]);
   const menuHeightsRef = useRef<Record<string, number>>({});
+  const chromeChipOrderRef = useRef(chrome.chipOrder);
   const suppressClickRef = useRef(false);
   const trayFoldOverflowRef = useRef<string[]>([]);
   dragKeyRef.current = dragKey;
   dropHintRef.current = dropHint;
+  chipDragIdRef.current = chipDragId;
+  chipDropHintRef.current = chipDropHint;
   pinnedRef.current = pinned;
   menuHeightsRef.current = menuHeights;
+  chromeChipOrderRef.current = chrome.chipOrder;
+
+  const visibleChromeChips = useMemo(
+    () =>
+      orderedVisibleChromeChips(chrome.chipOrder, {
+        wifi: chrome.showWifi,
+        ime: chrome.showIme,
+        controlCenter: chrome.showControlCenter,
+        clock: chrome.showClock,
+      }),
+    [
+      chrome.chipOrder,
+      chrome.showWifi,
+      chrome.showIme,
+      chrome.showControlCenter,
+      chrome.showClock,
+    ],
+  );
+
+  useProgressiveGlyphs(
+    icons.filter(i => !i.icon_png_base64 && !glyphCacheRef.current.lookup(i)).map(i => i.id),
+    map => {
+      if (glyphCacheRef.current.ingest(map, icons)) {
+        setIcons(prev => glyphCacheRef.current.merge(prev));
+      }
+    },
+  );
 
   // Subscribe before snapshot. Late snapshots must not replace newer tray events.
   useEffect(() => {
@@ -530,12 +566,13 @@ export default function TrayCluster({
     };
   }, []);
 
+  // Close tray popup when dropdown is disabled.
   useEffect(() => {
-    if (!showTrayIcons && open) {
+    if (!showTrayMenu && open) {
       onOpenChange(false);
       void invoke("close_tray_popup").catch(() => undefined);
     }
-  }, [showTrayIcons, open, onOpenChange]);
+  }, [showTrayMenu, open, onOpenChange]);
 
   useLayoutEffect(() => {
     setLiveIslandW((prev) => {
@@ -592,6 +629,8 @@ export default function TrayCluster({
     chrome.showClock,
     chrome.showIme,
     chrome.showControlCenter,
+    chrome.showTrayMenu,
+    chrome.chipOrder,
     showTrayIcons,
     open,
   ]);
@@ -622,6 +661,8 @@ export default function TrayCluster({
     chrome.showClock,
     chrome.showIme,
     chrome.showControlCenter,
+    chrome.showTrayMenu,
+    chrome.chipOrder,
     showTrayIcons,
   ]);
 
@@ -797,6 +838,13 @@ export default function TrayCluster({
         setDragKey(null);
         setDropHint(null);
         dropHintRef.current = null;
+        dragKeyRef.current = null;
+      }
+      if (chipDragIdRef.current) {
+        setChipDragId(null);
+        setChipDropHint(null);
+        chipDropHintRef.current = null;
+        chipDragIdRef.current = null;
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -896,6 +944,16 @@ export default function TrayCluster({
     }
   }, []);
 
+  const persistChipOrder = useCallback(async (nextOrder: ChromeChipId[]) => {
+    setChrome((prev) => ({ ...prev, chipOrder: nextOrder }));
+    try {
+      const saved = await setChromePrefs({ chipOrder: nextOrder });
+      setChrome(saved);
+    } catch (err) {
+      console.error("[TrayCluster] persist chip order", err);
+    }
+  }, []);
+
   const onTrayReorderDown = useCallback(
     (icon: TrayIconInfo, e: ReactPointerEvent<HTMLButtonElement>) => {
       if (!e.ctrlKey || e.button !== 0 || isTrayResident(icon)) return;
@@ -944,6 +1002,68 @@ export default function TrayCluster({
       window.addEventListener("pointercancel", onUp);
     },
     [persistPinnedOrder],
+  );
+
+  const onChromeChipReorderDown = useCallback(
+    (chipId: ChromeChipId, e: ReactPointerEvent<HTMLElement>) => {
+      if (!e.ctrlKey || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void hideChromeHoverTip();
+      setChipDragId(chipId);
+      setChipDropHint(null);
+      chipDropHintRef.current = null;
+      chipDragIdRef.current = chipId;
+      suppressClickRef.current = false;
+
+      const onMove = (ev: PointerEvent) => {
+        if (!chipDragIdRef.current) return;
+        suppressClickRef.current = true;
+        const rail = fixedChromeRef.current;
+        if (!rail) return;
+        const units = Array.from(
+          rail.querySelectorAll<HTMLElement>("[data-chrome-chip]"),
+        )
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            return {
+              id: el.dataset.chromeChip || "",
+              left: r.left,
+              width: r.width,
+            };
+          })
+          .filter((u) => u.id);
+        const hint = pickDropTarget(ev.clientX, units, chipDragIdRef.current);
+        chipDropHintRef.current = hint;
+        setChipDropHint(hint);
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        const fromId = chipDragIdRef.current;
+        const hint = chipDropHintRef.current;
+        setChipDragId(null);
+        setChipDropHint(null);
+        chipDropHintRef.current = null;
+        chipDragIdRef.current = null;
+        if (!fromId || !hint) return;
+        const next = moveIdInOrder(
+          chromeChipOrderRef.current,
+          fromId,
+          hint.toId,
+          hint.place,
+        ).filter((id): id is ChromeChipId =>
+          ["wifi", "ime", "controlCenter", "clock"].includes(id),
+        );
+        if (sameOrder(chromeChipOrderRef.current, next)) return;
+        void persistChipOrder(next);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    },
+    [persistChipOrder],
   );
 
   async function openLangMenu() {
@@ -1159,95 +1279,180 @@ export default function TrayCluster({
           </div>
         ) : null}
 
-        <div className="tray-fixed-chrome" ref={fixedChromeRef}>
-          {chrome.showWifi ? (
-            <button
-              ref={wifiChipRef}
-              type="button"
-              className={`tray-wifi-btn${wifiMenuOpen ? " is-open" : ""}${
-                wifiOn ? " is-on" : ""
-              }${!wifi.enabled && !wifi.ethernetConnected ? " is-off" : ""}`}
-              {...hostTipPointerProps(wifiTip)}
-              aria-label={wifiAria}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                clickTrace("fe-tray", "wifi click");
-                void hideChromeHoverTip();
-                void openWifiMenu();
-              }}
-            >
-              <WifiGlyph state={wifi} />
-            </button>
-          ) : null}
+        <div
+          className={`tray-fixed-chrome${chipDragId ? " is-chip-dragging" : ""}${
+            chipReorderMode ? " is-chip-reorder" : ""
+          }`}
+          ref={fixedChromeRef}
+        >
+          {visibleChromeChips.map((chipId) => {
+            const unitClass = [
+              "tray-chrome-chip",
+              chipDragId === chipId ? "is-dragging" : "",
+              chipDropHint?.toId === chipId ? `is-drop-${chipDropHint.place}` : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            const chipPointerDown = (e: ReactPointerEvent<HTMLElement>) => {
+              if (e.ctrlKey) onChromeChipReorderDown(chipId, e);
+            };
+            const reorderHit = chipReorderMode ? (
+              <div
+                className="tray-chrome-reorder-hit"
+                aria-hidden
+                onPointerDown={chipPointerDown}
+              />
+            ) : null;
 
-          {chrome.showIme ? (
-            <>
-              <button
-                ref={langChipRef}
-                type="button"
-                className={`tray-lang-btn${langMenuOpen ? " is-open" : ""}`}
-                {...hostTipPointerProps(langTip)}
-                aria-label={`输入语言 ${inputLang.langAbbr}`}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  clickTrace("fe-tray", "lang click");
-                  void hideChromeHoverTip();
-                  void onLangClick();
-                }}
-                onContextMenu={(e) => void onLangContext(e)}
+            if (chipId === "wifi") {
+              return (
+                <div
+                  key="wifi"
+                  className={unitClass}
+                  data-chrome-chip="wifi"
+                  onPointerDown={chipPointerDown}
+                >
+                  {reorderHit}
+                  <button
+                    ref={wifiChipRef}
+                    type="button"
+                    className={`tray-wifi-btn${wifiMenuOpen ? " is-open" : ""}${
+                      wifiOn ? " is-on" : ""
+                    }${!wifi.enabled && !wifi.ethernetConnected ? " is-off" : ""}`}
+                    {...(chipReorderMode ? {} : hostTipPointerProps(wifiTip))}
+                    aria-label={wifiAria}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      if (suppressClickRef.current || chipReorderMode) {
+                        suppressClickRef.current = false;
+                        return;
+                      }
+                      clickTrace("fe-tray", "wifi click");
+                      void hideChromeHoverTip();
+                      void openWifiMenu();
+                    }}
+                  >
+                    <WifiGlyph state={wifi} />
+                  </button>
+                </div>
+              );
+            }
+
+            if (chipId === "ime") {
+              return (
+                <div
+                  key="ime"
+                  className={`${unitClass} is-ime-pair`}
+                  data-chrome-chip="ime"
+                  onPointerDown={chipPointerDown}
+                >
+                  {reorderHit}
+                  <button
+                    ref={langChipRef}
+                    type="button"
+                    className={`tray-lang-btn${langMenuOpen ? " is-open" : ""}`}
+                    {...(chipReorderMode ? {} : hostTipPointerProps(langTip))}
+                    aria-label={`输入语言 ${inputLang.langAbbr}`}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      if (suppressClickRef.current || chipReorderMode) {
+                        suppressClickRef.current = false;
+                        return;
+                      }
+                      clickTrace("fe-tray", "lang click");
+                      void hideChromeHoverTip();
+                      void onLangClick();
+                    }}
+                    onContextMenu={(e) => {
+                      if (chipReorderMode) return;
+                      void onLangContext(e);
+                    }}
+                  >
+                    <span className="tray-lang-abbr">
+                      {sanitizeLangAbbr(inputLang.langAbbr)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`tray-ime-btn${
+                      inputLang.langAbbr === "中" || inputLang.imeOpen
+                        ? " is-open"
+                        : ""
+                    }${langMenuOpen ? " is-menu" : ""}`}
+                    {...(chipReorderMode ? {} : hostTipPointerProps(imeTip))}
+                    aria-label={`输入法 ${inputLang.imeName || "IME"}`}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      if (suppressClickRef.current || chipReorderMode) {
+                        suppressClickRef.current = false;
+                        return;
+                      }
+                      clickTrace("fe-tray", "ime click");
+                      void hideChromeHoverTip();
+                      void openLangMenu();
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (chipReorderMode) return;
+                      void openLangMenu();
+                    }}
+                  >
+                    <span className="tray-ime-mark">{imeChipLabel(inputLang)}</span>
+                  </button>
+                </div>
+              );
+            }
+
+            if (chipId === "controlCenter") {
+              return (
+                <div
+                  key="controlCenter"
+                  className={unitClass}
+                  data-chrome-chip="controlCenter"
+                  onPointerDown={chipPointerDown}
+                >
+                  {reorderHit}
+                  <ControlCenterButton reorderLocked={chipReorderMode} />
+                </div>
+              );
+            }
+
+            return (
+              <div
+                key="clock"
+                className={unitClass}
+                data-chrome-chip="clock"
+                onPointerDown={chipPointerDown}
               >
-                <span className="tray-lang-abbr">
-                  {sanitizeLangAbbr(inputLang.langAbbr)}
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`tray-ime-btn${
-                  inputLang.langAbbr === "中" || inputLang.imeOpen
-                    ? " is-open"
-                    : ""
-                }${langMenuOpen ? " is-menu" : ""}`}
-                {...hostTipPointerProps(imeTip)}
-                aria-label={`输入法 ${inputLang.imeName || "IME"}`}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  clickTrace("fe-tray", "ime click");
-                  void hideChromeHoverTip();
-                  void openLangMenu();
-                }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  void openLangMenu();
-                }}
-              >
-                <span className="tray-ime-mark">{imeChipLabel(inputLang)}</span>
-              </button>
-            </>
-          ) : null}
+                {reorderHit}
+                <button
+                  type="button"
+                  className="tray-clock"
+                  {...(chipReorderMode
+                    ? {}
+                    : hostTipPointerProps("打开通知中心"))}
+                  aria-label="打开通知中心"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    if (suppressClickRef.current || chipReorderMode) {
+                      suppressClickRef.current = false;
+                      return;
+                    }
+                    clickTrace("fe-tray", "clock click");
+                    void hideChromeHoverTip();
+                    void invoke("open_notification_center").catch((e) =>
+                      console.error(e),
+                    );
+                  }}
+                >
+                  <time dateTime={now.toISOString()}>{formatMenuClock(now)}</time>
+                </button>
+              </div>
+            );
+          })}
 
-          {chrome.showControlCenter ? <ControlCenterButton /> : null}
-
-          {chrome.showClock ? (
-            <button
-              type="button"
-              className="tray-clock"
-              {...hostTipPointerProps("打开通知中心")}
-              aria-label="打开通知中心"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                clickTrace("fe-tray", "clock click");
-                void hideChromeHoverTip();
-                void invoke("open_notification_center").catch((e) =>
-                  console.error(e),
-                );
-              }}
-            >
-              <time dateTime={now.toISOString()}>{formatMenuClock(now)}</time>
-            </button>
-          ) : null}
-
-          {showTrayIcons ? (
+          {showTrayMenu ? (
             <button
               key={`tray-chevron-${trayFold.overflowIds.length}`}
               ref={chevronRef}

@@ -1,0 +1,57 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: max-content;
+  min-width: var(--wh-bar-h, 28px);
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  margin: 0;
+  overflow: hidden;
+  background: transparent !important;
+  display: flex;
+  align-items: center;
+  color: var(--wh-chrome-fg, rgb(10, 10, 12));
+  user-select: none;
+}
+
+.cz-chip {
+  box-sizing: border-box;
+  height: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  min-width: var(--wh-bar-h, 28px);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0 !important;
+  border-radius: 6px;
+  background: transparent !important;
+  color: inherit;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.cz-chip:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent) !important;
+}
+
+.cz-bloub {
+  display: block;
+  width: var(--wh-bar-h, 28px);
+  height: var(--wh-bar-h, 28px);
+  max-width: var(--wh-bar-h, 28px);
+  max-height: var(--wh-bar-h, 28px);
+  pointer-events: none;
+  overflow: visible;
+  color: inherit;
+}
+
+.cz-bloub .cz-body,
+.cz-bloub circle {
+  fill: currentColor;
+}

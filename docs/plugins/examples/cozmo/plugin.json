@@ -1,0 +1,83 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.cozmo",
+  "name": "Bloub 表情",
+  "version": "2.0.0",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "基于 Bloub（https://github.com/jeremy-prt/bloub）的机器人表情：弹窗编排形状/颜色/表情与动画序列，快捷区循环播放。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "popup": "popup.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "Bloub",
+      "order": 28,
+      "action": "popup.open",
+      "manage": "none"
+    }
+  },
+  "settings": [
+    {
+      "key": "popupWidth",
+      "type": "number",
+      "label": "弹窗宽度",
+      "default": 640,
+      "min": 560,
+      "max": 800
+    },
+    {
+      "key": "popupHeight",
+      "type": "number",
+      "label": "弹窗高度（参考）",
+      "description": "打开时会按内容自适应；此项仅作上限参考偏好",
+      "default": 560,
+      "min": 420,
+      "max": 900
+    },
+    {
+      "key": "shortcutsCycle",
+      "type": "select",
+      "label": "快捷区动画循环",
+      "description": "快捷区 montage（默认表情向；完整 SEQUENCE 含三角等，小尺寸难看）",
+      "default": "face",
+      "options": [
+        { "value": "idle", "label": "待机：眨眼 / 目光漂移" },
+        { "value": "face", "label": "表情向：眨眼 / 睁大 / 睡眠" },
+        { "value": "show", "label": "展示：环绕 / 爆发 / 彗星" },
+        { "value": "calm", "label": "安静：睡眠" },
+        { "value": "custom", "label": "自定义（弹窗编排）" },
+        { "value": "default", "label": "完整 SEQUENCE（小尺寸慎用）" }
+      ]
+    },
+    {
+      "key": "defaultExpression",
+      "type": "select",
+      "label": "默认表情",
+      "description": "休息脸表情（idle 等 baseFace 状态会用到）",
+      "default": "neutre",
+      "options": [
+        { "value": "neutre", "label": "中性" },
+        { "value": "attentif", "label": "专注" },
+        { "value": "surpris", "label": "惊讶" },
+        { "value": "excite", "label": "兴奋" },
+        { "value": "heureux", "label": "开心" },
+        { "value": "hilare", "label": "大笑" },
+        { "value": "colere", "label": "愤怒" },
+        { "value": "triste", "label": "难过" },
+        { "value": "effraye", "label": "害怕" },
+        { "value": "mefiant", "label": "怀疑" },
+        { "value": "confus", "label": "困惑" },
+        { "value": "curieux", "label": "好奇" },
+        { "value": "fier", "label": "得意" },
+        { "value": "timide", "label": "害羞" },
+        { "value": "blase", "label": "无语" },
+        { "value": "somnolent", "label": "困倦" },
+        { "value": "musique", "label": "听歌" }
+      ]
+    }
+  ],
+  "capabilities": ["storage", "shortcuts", "popup"]
+}

@@ -9,6 +9,7 @@ const geo = loadTs(fileURLToPath(new URL('../src/plugins/shortcutsGeometry.ts', 
 
 const allOn = {
   showTray: true,
+  showTrayMenu: true,
   showWifi: true,
   showClock: true,
   showIme: true,
@@ -16,6 +17,7 @@ const allOn = {
 };
 const allOff = {
   showTray: false,
+  showTrayMenu: false,
   showWifi: false,
   showClock: false,
   showIme: false,
@@ -26,10 +28,12 @@ test('chrome rail tiers: dual / hybrid / tray', () => {
   assert.equal(dual.resolveChromeRailTier(allOff), 'dual');
   assert.equal(dual.resolveChromeRailTier({ ...allOff, showClock: true }), 'hybrid');
   assert.equal(dual.resolveChromeRailTier({ ...allOff, showWifi: true, showIme: true }), 'hybrid');
+  assert.equal(dual.resolveChromeRailTier({ ...allOff, showTrayMenu: true }), 'hybrid');
   assert.equal(dual.resolveChromeRailTier({ ...allOff, showTray: true }), 'tray');
   assert.equal(dual.resolveChromeRailTier(allOn), 'tray');
   assert.equal(dual.hasRightShortcutsWing(allOff), true);
   assert.equal(dual.hasRightShortcutsWing({ ...allOff, showClock: true }), true);
+  assert.equal(dual.hasRightShortcutsWing({ ...allOff, showTrayMenu: true }), true);
   assert.equal(dual.hasRightShortcutsWing({ ...allOff, showTray: true }), false);
 });
 
@@ -37,13 +41,21 @@ test('enteredTrayTier only when crossing into tray icons', () => {
   assert.equal(dual.enteredTrayTier(allOff, { ...allOff, showClock: true }), false);
   assert.equal(dual.enteredTrayTier({ ...allOff, showClock: true }, { ...allOff, showTray: true }), true);
   assert.equal(dual.enteredTrayTier(allOn, allOn), false);
+  // Dropdown alone does not enter tray tier
+  assert.equal(
+    dual.enteredTrayTier(allOff, { ...allOff, showTrayMenu: true }),
+    false,
+  );
 });
 
 test('dual helpers stay consistent with tiers', () => {
   assert.equal(dual.isDualShortcutsMode(allOff), true);
   assert.equal(dual.isDualShortcutsMode({ ...allOff, showClock: true }), false);
   assert.equal(dual.dualShortcutsTransition(allOn, allOff), 'enter');
-  assert.equal(dual.countRightChromeModules(allOn), 5);
+  assert.equal(dual.countRightChromeModules(allOn), 6);
+  assert.equal(dual.needsTraySubsystem({ ...allOff, showTrayMenu: true }), true);
+  assert.equal(dual.needsTraySubsystem({ ...allOff, showTray: true }), true);
+  assert.equal(dual.needsTraySubsystem(allOff), false);
 });
 
 test('right shortcuts zone accounts for chrome strip width', () => {

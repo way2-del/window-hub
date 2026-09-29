@@ -9,9 +9,12 @@ use tauri::{AppHandle, Emitter, Manager};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChromePrefs {
-    /// System tray icons + overflow chevron / dropdown.
+    /// Resident tray icons on the menubar rail.
     #[serde(default = "default_true")]
     pub show_tray: bool,
+    /// Tray overflow / full-list dropdown (chevron popup).
+    #[serde(default = "default_true")]
+    pub show_tray_menu: bool,
     /// WLAN / ethernet chip.
     #[serde(default = "default_true")]
     pub show_wifi: bool,
@@ -24,20 +27,58 @@ pub struct ChromePrefs {
     /// Control center button + popup.
     #[serde(default = "default_true")]
     pub show_control_center: bool,
+    /// Ctrl+drag order of system chips (wifi / ime / controlCenter / clock).
+    #[serde(default = "default_chip_order")]
+    pub chip_order: Vec<String>,
 }
 
 fn default_true() -> bool {
     true
 }
 
+fn default_chip_order() -> Vec<String> {
+    vec![
+        "wifi".into(),
+        "ime".into(),
+        "controlCenter".into(),
+        "clock".into(),
+    ]
+}
+
+fn normalize_chip_order(raw: &[String]) -> Vec<String> {
+    let defaults = default_chip_order();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for id in raw {
+        let t = id.trim();
+        if t.is_empty() || seen.contains(t) {
+            continue;
+        }
+        if !defaults.iter().any(|d| d == t) {
+            continue;
+        }
+        seen.insert(t.to_string());
+        out.push(t.to_string());
+    }
+    for d in &defaults {
+        if seen.contains(d.as_str()) {
+            continue;
+        }
+        out.push(d.clone());
+    }
+    out
+}
+
 impl Default for ChromePrefs {
     fn default() -> Self {
         Self {
             show_tray: true,
+            show_tray_menu: true,
             show_wifi: true,
             show_clock: true,
             show_ime: true,
             show_control_center: true,
+            chip_order: default_chip_order(),
         }
     }
 }
@@ -46,14 +87,18 @@ impl Default for ChromePrefs {
 pub enum ChromeRailTier {
     /// All modules off: left+right shortcuts.
     Dual,
-    /// Tray icons off, ≥1 system chip: far-right chips + inner right shortcuts.
+    /// Resident tray icons off, ≥1 system chip/chevron: far-right chips + inner right shortcuts.
     Hybrid,
-    /// Tray icons on: full tray, no right shortcuts.
+    /// Resident tray icons on: full tray, no right shortcuts.
     Tray,
 }
 
 fn has_system_chrome_chips(prefs: &ChromePrefs) -> bool {
-    prefs.show_wifi || prefs.show_clock || prefs.show_ime || prefs.show_control_center
+    prefs.show_wifi
+        || prefs.show_clock
+        || prefs.show_ime
+        || prefs.show_control_center
+        || prefs.show_tray_menu
 }
 
 pub fn chrome_rail_tier(prefs: &ChromePrefs) -> ChromeRailTier {
@@ -74,6 +119,10 @@ pub fn has_right_shortcuts_wing(prefs: &ChromePrefs) -> bool {
 /// All right-rail modules off → island left+right become shortcut strips.
 pub fn is_dual_shortcuts_mode(prefs: &ChromePrefs) -> bool {
     chrome_rail_tier(prefs) == ChromeRailTier::Dual
+}
+
+fn needs_tray_subsystem(prefs: &ChromePrefs) -> bool {
+    prefs.show_tray || prefs.show_tray_menu
 }
 
 static TRAY_STARTED: AtomicBool = AtomicBool::new(false);
@@ -106,8 +155,10 @@ fn save(prefs: &ChromePrefs) -> Result<(), String> {
 }
 
 fn close_related_popups(app: &AppHandle, prefs: &ChromePrefs) {
-    if !prefs.show_tray {
+    if !prefs.show_tray_menu {
         crate::commands::hide_chrome_popup(app, "tray-popup");
+    }
+    if !needs_tray_subsystem(prefs) {
         crate::win32::tray::set_emit_paused(true);
     } else {
         crate::win32::tray::set_emit_paused(false);
@@ -124,9 +175,9 @@ fn close_related_popups(app: &AppHandle, prefs: &ChromePrefs) {
     }
 }
 
-/// Start tray hook once (when enabled). Safe to call repeatedly.
+/// Start tray hook once (when resident bar or dropdown needs it). Safe to call repeatedly.
 pub fn ensure_tray_started(app: &AppHandle) {
-    if !load().show_tray {
+    if !needs_tray_subsystem(&load()) {
         return;
     }
     if !crate::win32::tray::tray_boot_enabled() {
@@ -141,17 +192,17 @@ pub fn ensure_tray_started(app: &AppHandle) {
     let app_prefs = app.clone();
     crate::win32::tray::start(
         move |icons| {
-            if load().show_tray {
+            if needs_tray_subsystem(&load()) {
                 let _ = app_icons.emit("tray-icons", &icons);
             }
         },
         move |attn| {
-            if load().show_tray {
+            if needs_tray_subsystem(&load()) {
                 let _ = app_attn.emit("tray-attention", &attn);
             }
         },
         move |prefs| {
-            if load().show_tray {
+            if needs_tray_subsystem(&load()) {
                 let _ = app_prefs.emit("tray-prefs", &prefs);
             }
         },
@@ -210,16 +261,18 @@ pub fn set_chrome_prefs(app: AppHandle, prefs: ChromePrefs) -> Result<ChromePref
     let prev = load();
     let next = ChromePrefs {
         show_tray: prefs.show_tray,
+        show_tray_menu: prefs.show_tray_menu,
         show_wifi: prefs.show_wifi,
         show_clock: prefs.show_clock,
         show_ime: prefs.show_ime,
         show_control_center: prefs.show_control_center,
+        chip_order: normalize_chip_order(&prefs.chip_order),
     };
     let prev_tier = chrome_rail_tier(&prev);
     let next_tier = chrome_rail_tier(&next);
     save(&next)?;
     close_related_popups(&app, &next);
-    if next.show_tray {
+    if needs_tray_subsystem(&next) {
         ensure_tray_started(&app);
     }
     if next.show_wifi {
@@ -346,7 +399,7 @@ pub fn start_enabled_producers(app: &AppHandle) {
     if prefs.show_wifi {
         ensure_wifi_started(app);
     }
-    if prefs.show_tray {
+    if needs_tray_subsystem(&prefs) {
         ensure_tray_started(app);
     }
 }

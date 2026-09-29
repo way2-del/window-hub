@@ -814,7 +814,7 @@ export default function SettingsApp() {
 
   const persistPluginSide = async (pluginId: string, side: ShortcutsSide) => {
     if (side === "right" && !chromeRightWing) {
-      pushSettingsToast("右侧快捷区不可用：请先关闭「托盘」图标轨（可保留时钟/网络等系统芯片）");
+      pushSettingsToast("右侧快捷区不可用：请先关闭「托盘常驻」图标轨（可保留时钟/网络等系统芯片）");
       return;
     }
     const next = upsertPluginSide(shortcutsPluginSides, pluginId, side);
@@ -1062,7 +1062,7 @@ export default function SettingsApp() {
           );
         } else if (t === "hybrid") {
           pushSettingsToast(
-            "右侧最外缘保留系统芯片，内侧仍为快捷区（开「托盘」后快捷会让位）",
+            "右侧最外缘保留系统芯片，内侧仍为快捷区（开「托盘常驻」后快捷会让位）",
           );
         }
       },
@@ -1344,9 +1344,13 @@ export default function SettingsApp() {
   async function persistChromePrefs(patch: Partial<ChromePrefs>) {
     setChromeBusy(true);
     try {
+      const before = chromePrefs;
       const saved = await setChromePrefs(patch);
       setChromePrefsState(saved);
-      setChromeRestartPrompt(true);
+      // Only prompt restart when rail tier changes (dual ↔ hybrid ↔ tray).
+      const tierChanged =
+        resolveChromeRailTier(before) !== resolveChromeRailTier(saved);
+      setChromeRestartPrompt(tierChanged);
     } catch (e) {
       console.error("[settings] chrome prefs save failed", e);
       pushSettingsToast(`顶栏设置保存失败：${String(e)}`);
@@ -1850,7 +1854,7 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>显示范围</h2>
                 <p className="card-desc">
-                  灵动岛左右快捷区可并排多个插件，也可独占给某一个。空间不够时折叠为「⋯」。顶栏：全关=双侧快捷；只开系统芯片=右缘芯片+内侧快捷；开托盘图标=右侧快捷让位。
+                  灵动岛左右快捷区可并排多个插件，也可独占给某一个。空间不够时折叠为「⋯」。顶栏：全关=双侧快捷；只开系统芯片=右缘芯片+内侧快捷；开托盘常驻=右侧快捷让位。
                 </p>
                 {chromeRailTier === "dual" ? (
                   <p className="chrome-dual-status is-on" role="status">
@@ -1858,11 +1862,11 @@ export default function SettingsApp() {
                   </p>
                 ) : chromeRailTier === "hybrid" ? (
                   <p className="chrome-dual-status is-on" role="status">
-                    当前为混合档：右侧最外缘是系统芯片，内侧仍为快捷区。打开「托盘」后右侧快捷会让位。
+                    当前为混合档：右侧最外缘是系统芯片，内侧仍为快捷区。打开「托盘常驻」后右侧快捷会让位。
                   </p>
                 ) : (
                   <p className="chrome-dual-status" role="status">
-                    当前为完整托盘档：右侧无快捷区。关闭「托盘」后可恢复内侧快捷；全关右侧模块则为纯双侧快捷。
+                    当前为完整托盘档：右侧无快捷区。关闭「托盘常驻」后可恢复内侧快捷；全关右侧模块则为纯双侧快捷。
                   </p>
                 )}
                 <div className="pref-row-text" style={{ marginBottom: 8 }}>
@@ -2008,7 +2012,7 @@ export default function SettingsApp() {
                                 title={
                                   chromeRightWing
                                     ? "显示在右侧快捷区"
-                                    : "需关闭「托盘」以开启右侧快捷区（可保留时钟/网络等芯片）"
+                                    : "需关闭「托盘常驻」以开启右侧快捷区（可保留时钟/网络等芯片）"
                                 }
                                 onClick={() => void persistPluginSide(p.id, "right")}
                               >
@@ -2092,7 +2096,9 @@ export default function SettingsApp() {
             <section className="settings-card">
               <h2>顶栏模块</h2>
               <p className="card-desc">
-                控制灵动岛右侧系统菜单是否显示。可先改多项，再统一重启生效；未重启前部分芯片可能仍短暂显示。
+                控制灵动岛右侧系统菜单是否显示。「托盘常驻」（顶栏图标轨）与「托盘下拉」（▾
+                完整列表）分开开关，互不绑定。系统芯片（网络 / 输入法 / 控制中心 /
+                时钟）可在顶栏右侧 Ctrl+拖拽排序，仅限该区域。可先改多项，再统一重启生效。
               </p>
               <div
                 className={`chrome-dual-status${chromeRightWing ? " is-on" : ""}`}
@@ -2100,15 +2106,15 @@ export default function SettingsApp() {
               >
                 {chromeRailTier === "dual" ? (
                   <>
-                    右侧模块已全部关闭：灵动岛左右两侧均为快捷区。超出宽度会折叠为「⋯」。打开系统芯片（时钟/网络等）后进入混合档；打开「托盘」后右侧快捷让位并关闭原右侧插件。
+                    右侧模块已全部关闭：灵动岛左右两侧均为快捷区。超出宽度会折叠为「⋯」。打开系统芯片（时钟/网络等）后进入混合档；打开「托盘常驻」后右侧快捷让位并关闭原右侧插件。
                   </>
                 ) : chromeRailTier === "hybrid" ? (
                   <>
-                    混合档：右侧最外缘保留系统芯片，内侧仍为快捷区。打开「托盘」后，右侧快捷区将被完整托盘替代，原在右侧的快捷插件会关闭。
+                    混合档：右侧最外缘保留系统芯片，内侧仍为快捷区。打开「托盘常驻」后，右侧快捷区将被完整托盘替代，原在右侧的快捷插件会关闭。
                   </>
                 ) : (
                   <>
-                    完整托盘档：右侧无快捷区。关闭「托盘」可恢复内侧快捷（保留时钟/网络等）；再关掉全部系统芯片则为纯双侧快捷。
+                    完整托盘档：右侧无快捷区。关闭「托盘常驻」可恢复内侧快捷（保留时钟/网络等）；再关掉全部系统芯片则为纯双侧快捷。
                   </>
                 )}
               </div>
@@ -2118,8 +2124,8 @@ export default function SettingsApp() {
                     {chromeRailTier === "dual"
                       ? "设置已保存。重启后左右均为快捷区；也可先改完再选手动下次重启。"
                       : chromeRailTier === "hybrid"
-                        ? "设置已保存。重启后右侧为「系统芯片 + 内侧快捷」；打开托盘会使右侧快捷让位。"
-                        : "设置已保存。请重启使完整托盘生效；关闭托盘后可恢复右侧快捷。"}
+                        ? "设置已保存。重启后右侧为「系统芯片 + 内侧快捷」；打开托盘常驻会使右侧快捷让位。"
+                        : "设置已保存。请重启使完整托盘生效；关闭托盘常驻后可恢复右侧快捷。"}
                   </p>
                   <div className="chrome-restart-prompt-actions">
                     <button
@@ -2145,8 +2151,13 @@ export default function SettingsApp() {
                 [
                   {
                     key: "showTray" as const,
-                    label: "托盘（含下拉）",
-                    desc: "系统托盘图标与溢出下拉；关闭后停止托盘监听并隐藏下拉",
+                    label: "托盘常驻",
+                    desc: "顶栏右侧显示托盘图标轨（可 Ctrl+拖排序常显图标）；与「托盘下拉」互不绑定",
+                  },
+                  {
+                    key: "showTrayMenu" as const,
+                    label: "托盘下拉",
+                    desc: "顶栏 ▾ 打开完整托盘列表；关闭常驻后仍可单独开启，仅用下拉查看",
                   },
                   {
                     key: "showWifi" as const,

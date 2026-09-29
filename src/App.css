@@ -1364,6 +1364,68 @@ button {
   flex-shrink: 0;
 }
 
+.tray-chrome-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.tray-chrome-chip.is-ime-pair {
+  gap: 7px;
+}
+
+.tray-fixed-chrome.is-chip-reorder .tray-chrome-chip {
+  cursor: grab;
+}
+
+.tray-fixed-chrome.is-chip-reorder .tray-wifi-btn,
+.tray-fixed-chrome.is-chip-reorder .tray-lang-btn,
+.tray-fixed-chrome.is-chip-reorder .tray-ime-btn,
+.tray-fixed-chrome.is-chip-reorder .tray-clock,
+.tray-fixed-chrome.is-chip-reorder .chrome-control-center-btn {
+  pointer-events: none;
+}
+
+.tray-chrome-reorder-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  cursor: grab;
+  touch-action: none;
+}
+
+.tray-fixed-chrome.is-chip-dragging .tray-chrome-reorder-hit {
+  cursor: grabbing;
+}
+
+.tray-fixed-chrome.is-chip-dragging .tray-chrome-chip.is-dragging {
+  opacity: 0.55;
+  cursor: grabbing;
+}
+
+.tray-chrome-chip.is-drop-before::before,
+.tray-chrome-chip.is-drop-after::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--chrome-right-fg, #fff) 75%, transparent);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.tray-chrome-chip.is-drop-before::before {
+  left: -4px;
+}
+
+.tray-chrome-chip.is-drop-after::after {
+  right: -4px;
+}
+
 .tray-chevron {
   width: 16px;
   height: 16px;
