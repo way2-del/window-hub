@@ -1,15 +1,15 @@
-//! Dock show/hide policy for the 8 display modes.
+﻿//! Dock show/hide policy for the 8 display modes.
 //!
-//! AutoHide / SmartHide (pointer part) — three rules only:
-//! 1. Hidden → bottom reveal strip on the **dock’s monitor** shows the dock
-//! 2. Shown  → pointer inside the **exact dock window rect** (or dock HWND) keeps it
-//! 3. Outside that area for `hide_linger_ms` → hide
+//! AutoHide / SmartHide (pointer part) 鈥?three rules only:
+//! 1. Hidden 鈫?bottom reveal strip on the **dock鈥檚 monitor** shows the dock
+//! 2. Shown  鈫?pointer inside the **exact dock window rect** (or dock HWND) keeps it
+//! 3. Outside that area for `hide_linger_ms` 鈫?hide
 //!
 //! AutoHide additionally stays visible on the desktop / when nothing covers the
 //! dock bar (same clear-area idea as SmartHide), and `tick` honors that via `want`.
 //!
-//! Geometry always uses the dock window’s monitor (not the cursor’s) so a stacked
-//! upper display’s bottom edge (often y=0) cannot drive primary-dock reveal/hide.
+//! Geometry always uses the dock window鈥檚 monitor (not the cursor鈥檚) so a stacked
+//! upper display鈥檚 bottom edge (often y=0) cannot drive primary-dock reveal/hide.
 //! Animation is never cancelled mid-slide (`busy`).
 
 use serde::{Deserialize, Serialize};
@@ -22,10 +22,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{DockActivationPosition, DockDisplayMode};
 
 const POLL_MS: u64 = 50;
-/// Brief settle after show anim — blocks leave while the pointer settles onto the bar.
+/// Brief settle after show anim 鈥?blocks leave while the pointer settles onto the bar.
 const SETTLE_MS: u64 = 900;
 /// Hidden-state reveal: logical px at the monitor bottom edge (prefs may be thinner).
-/// Kept tiny so “slightly above the bottom” does not show the dock.
+/// Kept tiny so 鈥渟lightly above the bottom鈥?does not show the dock.
 const REVEAL_THICK_MAX: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,33 +35,48 @@ pub struct DockVisibilityState {
     pub reason: String,
 }
 
+#[derive(Debug, Clone)]
+struct SurfaceVis {
+    desired: bool,
+    shown: bool,
+    busy: bool,
+    hide_deadline: Option<Instant>,
+    shown_at: Option<Instant>,
+    near_streak: u32,
+    away_streak: u32,
+    mouse_near: bool,
+    last_reason: String,
+}
+
+impl Default for SurfaceVis {
+    fn default() -> Self {
+        Self {
+            desired: true,
+            shown: true,
+            busy: false,
+            hide_deadline: None,
+            shown_at: None,
+            near_streak: 0,
+            away_streak: 0,
+            mouse_near: false,
+            last_reason: "init".into(),
+        }
+    }
+}
+
 struct VisInner {
     mode: DockDisplayMode,
     force_show: bool,
-    mouse_near: bool,
     activation_position: DockActivationPosition,
     activation_thickness_px: u32,
     bottom_offset_px: u32,
     hide_linger_ms: u32,
-    /// Latest wanted visibility (may differ from `shown` while animating).
-    desired: bool,
-    /// Matches HWND rest pose after place completes.
-    shown: bool,
-    busy: bool,
-    /// Frontend drag / modal — keep AutoHide from collapsing the bar.
+    /// Frontend drag / modal 鈥?keep AutoHide from collapsing the bar.
     interaction_hold: bool,
-    /// Interactive window-preview tip is open — keep AutoHide while cursor moves onto it.
+    /// Interactive window-preview tip is open 鈥?keep AutoHide while cursor moves onto it.
     preview_tip_keep: bool,
-    /// When `Some`, hide only after this instant if still unwanted.
-    hide_deadline: Option<Instant>,
-    /// When the HWND last finished a show transition.
-    shown_at: Option<Instant>,
-    /// Consecutive polls with pointer in/out of chrome (hysteresis).
-    near_streak: u32,
-    away_streak: u32,
-    last_reason: String,
-    /// Per `dock-sat-*` label visibility (same policy as primary, that monitor).
-    sat_shown: HashMap<String, bool>,
+    /// Per dock HWND label (`dock`, `dock-sat-*`) 鈥?same FSM, per-monitor inputs.
+    surfaces: HashMap<String, SurfaceVis>,
 }
 
 pub struct DockVisibility {
@@ -71,26 +86,19 @@ pub struct DockVisibility {
 
 impl DockVisibility {
     pub fn new() -> Arc<Self> {
+        let mut surfaces = HashMap::new();
+        surfaces.insert("dock".into(), SurfaceVis::default());
         Arc::new(Self {
             inner: Mutex::new(VisInner {
                 mode: DockDisplayMode::Default,
                 force_show: false,
-                mouse_near: false,
                 activation_position: DockActivationPosition::ScreenBottom,
                 activation_thickness_px: 2,
                 bottom_offset_px: 0,
                 hide_linger_ms: 800,
-                desired: false,
-                shown: false,
-                busy: false,
                 interaction_hold: false,
                 preview_tip_keep: false,
-                hide_deadline: None,
-                shown_at: None,
-                near_streak: 0,
-                away_streak: 0,
-                last_reason: "init".into(),
-                sat_shown: HashMap::new(),
+                surfaces,
             }),
             running: AtomicBool::new(false),
         })
@@ -99,7 +107,8 @@ impl DockVisibility {
     pub fn ui_shown(&self) -> bool {
         self.inner
             .lock()
-            .map(|g| g.shown)
+            .ok()
+            .and_then(|g| g.surfaces.get("dock").map(|s| s.shown))
             .unwrap_or(true)
     }
 
@@ -108,11 +117,15 @@ impl DockVisibility {
         self.inner
             .lock()
             .ok()
-            .and_then(|g| g.sat_shown.get(label).copied())
+            .and_then(|g| g.surfaces.get(label).map(|s| s.shown))
     }
 
     pub fn is_busy(&self) -> bool {
-        self.inner.lock().map(|g| g.busy).unwrap_or(false)
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.surfaces.get("dock").map(|s| s.busy))
+            .unwrap_or(false)
     }
 
     pub fn set_mode(&self, mode: DockDisplayMode) {
@@ -163,7 +176,7 @@ impl DockVisibility {
         self.tick(app);
     }
 
-    /// Kept for IPC compatibility — AutoHide ignores this (native geometry only).
+    /// Kept for IPC compatibility 鈥?AutoHide ignores this (native geometry only).
     pub fn set_mouse_near_bottom(&self, _near: bool) {}
 
     /// Hold AutoHide open (e.g. icon reorder drag leaving the chrome strip).
@@ -171,8 +184,10 @@ impl DockVisibility {
         if let Ok(mut g) = self.inner.lock() {
             g.interaction_hold = hold;
             if hold {
-                g.hide_deadline = None;
-                g.desired = true;
+                for s in g.surfaces.values_mut() {
+                    s.hide_deadline = None;
+                    s.desired = true;
+                }
             }
         }
     }
@@ -190,8 +205,10 @@ impl DockVisibility {
         if let Ok(mut g) = self.inner.lock() {
             g.preview_tip_keep = keep;
             if keep {
-                g.hide_deadline = None;
-                g.desired = true;
+                for s in g.surfaces.values_mut() {
+                    s.hide_deadline = None;
+                    s.desired = true;
+                }
             }
         }
     }
@@ -229,12 +246,15 @@ impl DockVisibility {
                 reason,
             };
         };
+        let prim = g.surfaces.get("dock");
         let visible = match g.mode {
-            DockDisplayMode::AutoHide | DockDisplayMode::SmartHide => g.shown || g.desired,
+            DockDisplayMode::AutoHide | DockDisplayMode::SmartHide => prim
+                .map(|s| s.shown || s.desired)
+                .unwrap_or(want),
             _ => want,
         };
         let reason = if visible && !want {
-            g.last_reason.clone()
+            prim.map(|s| s.last_reason.clone()).unwrap_or(reason)
         } else {
             reason
         };
@@ -242,20 +262,26 @@ impl DockVisibility {
     }
 
     /// Snap/animate to a visibility target (window create / prefs apply / external sync).
+    /// Applies the **same** target to every dock surface (primary + satellites).
     pub fn apply_dock_shown(self: &Arc<Self>, app: &AppHandle, visible: bool, animate: bool) {
         let prefs = super::load_dock_prefs();
         {
             let Ok(mut g) = self.inner.lock() else {
                 return;
             };
-            g.desired = visible;
-            if g.busy {
+            for (label, _) in list_dock_surfaces(app) {
+                g.surfaces.entry(label).or_default();
+            }
+            if g.surfaces.values().any(|s| s.busy) {
                 return;
             }
-            g.busy = true;
+            for s in g.surfaces.values_mut() {
+                s.desired = visible;
+                s.busy = true;
+            }
         }
         eprintln!(
-            "[dock-vis] apply place visible={} animate={}",
+            "[dock-vis] apply place visible={} animate={} (all surfaces)",
             u8::from(visible),
             u8::from(animate)
         );
@@ -270,18 +296,27 @@ impl DockVisibility {
             );
             std::thread::sleep(Duration::from_millis(48));
         }
-        super::place_dock_window(app, &prefs, visible, animate);
-        if let Ok(mut g) = self.inner.lock() {
-            g.shown = visible;
-            g.busy = false;
-            if visible {
-                g.desired = true;
-                g.hide_deadline = None;
-                g.shown_at = Some(Instant::now());
-            } else {
-                g.shown_at = None;
+        super::place_dock_window_primary(app, &prefs, visible, animate);
+        for (label, _) in list_dock_surfaces(app) {
+            if label == "dock" {
+                continue;
             }
-            g.last_reason = if animate { "apply-anim" } else { "apply-snap" }.into();
+            super::place_one_dock_satellite(app, &prefs, &label, visible, animate);
+        }
+        if let Ok(mut g) = self.inner.lock() {
+            let reason = if animate { "apply-anim" } else { "apply-snap" };
+            for s in g.surfaces.values_mut() {
+                s.shown = visible;
+                s.busy = false;
+                s.desired = visible;
+                s.hide_deadline = None;
+                s.shown_at = if visible {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                s.last_reason = reason.into();
+            }
         }
         if visible {
             let _ = app.emit(
@@ -292,204 +327,14 @@ impl DockVisibility {
                 },
             );
         }
-        self.sync_satellite_docks(app);
     }
 
     fn tick(self: &Arc<Self>, app: &AppHandle) {
-        let near_raw = self.poll_pointer(app);
-        let (want, reason) = self.compute_want(app, near_raw);
-
-        let mut should_place: Option<(bool, bool, String)> = None;
-        let mut emit: Option<DockVisibilityState> = None;
-        let mut leave_timer_started = None;
-        let mut leave_timer_fired = false;
-
-        // State only while locked. HWND getters dispatch to the UI thread,
-        // which can be waiting here in set_preview_tip_keep (chrome clicks).
-        if let Ok(mut g) = self.inner.lock() {
-            if near_raw {
-                g.near_streak = g.near_streak.saturating_add(1);
-                g.away_streak = 0;
-            } else {
-                g.away_streak = g.away_streak.saturating_add(1);
-                g.near_streak = 0;
-            }
-            // ~100ms stable at 50ms poll — ignore 1-frame keep-zone flicker.
-            let near = g.near_streak >= 2;
-            let away = g.away_streak >= 2;
-            g.mouse_near = near;
-            let shown = g.shown;
-            let busy = g.busy;
-            let linger = Duration::from_millis(g.hide_linger_ms as u64);
-            let settling = g
-                .shown_at
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(SETTLE_MS));
-
-            let uses_linger = matches!(
-                g.mode,
-                DockDisplayMode::AutoHide | DockDisplayMode::SmartHide
-            );
-
-            if uses_linger {
-                // Exclusive FS: never keep dock via bottom-edge `near` (games cursors sit there).
-                let fullscreen_hide = reason == "fullscreen";
-                // AutoHide/SmartHide: policy `want` (desktop / clear / edge) plus
-                // pointer hysteresis. AutoHide previously used `near` only, which
-                // ignored on-desktop and made that preference a no-op.
-                let want_eff = if fullscreen_hide {
-                    false
-                } else {
-                    want || near
-                };
-
-                if busy {
-                    // In-flight slide — do not change desired / leave.
-                } else if fullscreen_hide {
-                    // Drop immediately — skip settle / linger while a game owns the display.
-                    g.hide_deadline = None;
-                    g.desired = false;
-                    g.shown_at = None;
-                } else if shown && settling {
-                    g.hide_deadline = None;
-                    g.desired = true;
-                } else if want_eff {
-                    // Policy `want` (desktop / clear) cancels leave immediately.
-                    // Pointer-only keep still needs a stronger near streak so
-                    // edge flicker does not reset the linger timer.
-                    if want || g.hide_deadline.is_none() || g.near_streak >= 4 {
-                        g.hide_deadline = None;
-                    }
-                    g.desired = true;
-                } else if shown && away {
-                    match g.hide_deadline {
-                        None => {
-                            g.hide_deadline = Some(Instant::now() + linger);
-                            g.desired = true;
-                            let shown_ms = g
-                                .shown_at
-                                .map(|t| t.elapsed().as_millis())
-                                .unwrap_or(0);
-                            leave_timer_started = Some((
-                                g.hide_linger_ms,
-                                shown_ms,
-                                g.bottom_offset_px,
-                            ));
-                        }
-                        Some(deadline) if Instant::now() >= deadline => {
-                            g.desired = false;
-                            g.hide_deadline = None;
-                            leave_timer_fired = true;
-                        }
-                        Some(_) => {
-                            g.desired = true;
-                        }
-                    }
-                } else if shown {
-                    // Flicker / not yet stably away — keep visible, don't reset leave timer.
-                    g.desired = true;
-                } else {
-                    g.desired = false;
-                    g.hide_deadline = None;
-                }
-            } else {
-                g.desired = want;
-                g.hide_deadline = None;
-            }
-
-            let desired = g.desired;
-            g.last_reason = reason.clone();
-
-            if !busy && desired != shown {
-                g.busy = true;
-                should_place = Some((desired, true, reason.clone()));
-            }
-
-            if should_place.is_some() {
-                emit = Some(DockVisibilityState {
-                    visible: desired,
-                    reason: reason.clone(),
-                });
-            }
-        }
-
-        // Diagnostics must not hold inner across native/Tauri calls or I/O.
-        if let Some((linger_ms, shown_ms, bottom_offset_px)) = leave_timer_started {
-            let dock_area = dock_area_rect_px(app, bottom_offset_px);
-            eprintln!(
-                "[dock-vis] leave-timer start linger={}ms shown_for={}ms cursor={:?} dock_area={:?} reason={}",
-                linger_ms,
-                shown_ms,
-                cursor_pos_px(),
-                dock_area,
-                reason
-            );
-        }
-        if leave_timer_fired {
-            eprintln!(
-                "[dock-vis] leave-timer fired → hide cursor={:?}",
-                cursor_pos_px()
-            );
-        }
-
-        if let Some((target, animate, why)) = should_place {
-            let prev_shown = self.ui_shown();
-            let near_log = self
-                .inner
-                .lock()
-                .map(|g| g.mouse_near)
-                .unwrap_or(false);
-            eprintln!(
-                "[dock-vis] mode={} near={} want={} shown={}→{} reason={}",
-                self.mode_str(),
-                u8::from(near_log),
-                u8::from(want),
-                u8::from(prev_shown),
-                u8::from(target),
-                why
-            );
-            let prefs = super::load_dock_prefs();
-            // Hide: notify FE to snap fan *before* the slide. This poll thread is not
-            // the UI thread, so WebView can commit rest scales during a short wait —
-            // otherwise magnified tiles paint through the tween and freeze mid-CSS
-            // when the HWND hides.
-            if !target {
-                super::set_hover_expanded_pub(false);
-                if let Some(ref state) = emit {
-                    let _ = app.emit("dock-visibility", state);
-                }
-                std::thread::sleep(Duration::from_millis(48));
-            }
-            super::place_dock_window(app, &prefs, target, animate);
-            if let Ok(mut g) = self.inner.lock() {
-                g.shown = target;
-                g.busy = false;
-                if target {
-                    g.desired = true;
-                    g.hide_deadline = None;
-                    g.shown_at = Some(Instant::now());
-                } else {
-                    g.shown_at = None;
-                    super::set_hover_expanded_pub(false);
-                }
-            }
-            // Show: emit after place (settle). Hide already emitted above.
-            if target {
-                if let Some(state) = emit {
-                    let _ = app.emit("dock-visibility", &state);
-                }
-            }
-        }
-        // Secondary docks: same show/hide policy as primary, scoped to each monitor.
-        self.sync_satellite_docks(app);
-    }
-
-    /// Evaluate + place each `dock-sat-*` independently (fullscreen / AutoHide / …).
-    fn sync_satellite_docks(self: &Arc<Self>, app: &AppHandle) {
         let prefs = super::load_dock_prefs();
         if !prefs.enabled {
             return;
         }
-        let (mode, force, thick, bottom, linger, hold) = {
+        let (mode, force, thick, bottom, linger_ms, hold) = {
             let Ok(g) = self.inner.lock() else {
                 return;
             };
@@ -502,68 +347,194 @@ impl DockVisibility {
                 g.interaction_hold || g.preview_tip_keep,
             )
         };
-        let snap = crate::display_placement::snapshot();
-        let mut places: Vec<(String, bool)> = Vec::new();
-        for r in &snap.resolved {
-            if r.is_primary || !r.dock {
-                continue;
+        let linger = Duration::from_millis(linger_ms as u64);
+        let surfaces = list_dock_surfaces(app);
+        if let Ok(mut g) = self.inner.lock() {
+            for (label, _) in &surfaces {
+                g.surfaces.entry(label.clone()).or_default();
             }
-            let label = crate::display_placement::dock_sat_label(&r.id);
-            let Some(win) = app.get_webview_window(&label) else {
-                continue;
-            };
-            let Ok(hwnd) = win.hwnd() else {
-                continue;
-            };
-            let hwnd_raw = hwnd.0 as isize;
+        }
+
+        let mut places: Vec<(String, bool, String)> = Vec::new();
+        let mut leave_logs: Vec<(String, u32, u128)> = Vec::new();
+        let mut leave_fired: Vec<String> = Vec::new();
+
+        for (label, hwnd) in &surfaces {
             let was_shown = self
                 .inner
                 .lock()
                 .ok()
-                .and_then(|g| g.sat_shown.get(&label).copied())
+                .and_then(|g| g.surfaces.get(label).map(|s| s.shown))
                 .unwrap_or(true);
-            let near = if hold {
+            let near_raw = if hold {
                 true
             } else {
-                pointer_near_dock_hwnd(app, hwnd_raw, was_shown, thick, bottom)
+                pointer_near_dock_hwnd(app, *hwnd, was_shown, thick, bottom)
             };
             let (want, reason) =
-                compute_want_for_dock_hwnd(app, hwnd_raw, mode, force, near);
-            // Soft linger: when leaving AutoHide/SmartHide keep shown briefly via
-            // was_shown + !near — callers place every tick; only animate on flip.
+                compute_want_for_dock_hwnd(app, *hwnd, mode, force, near_raw);
+
+            let Ok(mut g) = self.inner.lock() else {
+                continue;
+            };
+            let Some(surf) = g.surfaces.get_mut(label) else {
+                continue;
+            };
+            if near_raw {
+                surf.near_streak = surf.near_streak.saturating_add(1);
+                surf.away_streak = 0;
+            } else {
+                surf.away_streak = surf.away_streak.saturating_add(1);
+                surf.near_streak = 0;
+            }
+            let near = surf.near_streak >= 2;
+            let away = surf.away_streak >= 2;
+            surf.mouse_near = near;
+
             let uses_linger = matches!(
                 mode,
                 DockDisplayMode::AutoHide | DockDisplayMode::SmartHide
             );
-            let target = if reason == "fullscreen" {
-                false
-            } else if uses_linger {
-                want || near
+            let fullscreen_hide = reason == "fullscreen";
+            let settling = surf
+                .shown_at
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(SETTLE_MS));
+
+            if uses_linger {
+                let want_eff = if fullscreen_hide {
+                    false
+                } else {
+                    want || near
+                };
+                if surf.busy {
+                    // In-flight slide.
+                } else if fullscreen_hide {
+                    surf.hide_deadline = None;
+                    surf.desired = false;
+                    surf.shown_at = None;
+                } else if surf.shown && settling {
+                    surf.hide_deadline = None;
+                    surf.desired = true;
+                } else if want_eff {
+                    if want || surf.hide_deadline.is_none() || surf.near_streak >= 4 {
+                        surf.hide_deadline = None;
+                    }
+                    surf.desired = true;
+                } else if surf.shown && away {
+                    match surf.hide_deadline {
+                        None => {
+                            surf.hide_deadline = Some(Instant::now() + linger);
+                            surf.desired = true;
+                            let shown_ms = surf
+                                .shown_at
+                                .map(|t| t.elapsed().as_millis())
+                                .unwrap_or(0);
+                            leave_logs.push((label.clone(), linger_ms, shown_ms));
+                        }
+                        Some(deadline) if Instant::now() >= deadline => {
+                            surf.desired = false;
+                            surf.hide_deadline = None;
+                            leave_fired.push(label.clone());
+                        }
+                        Some(_) => {
+                            surf.desired = true;
+                        }
+                    }
+                } else if surf.shown {
+                    surf.desired = true;
+                } else {
+                    surf.desired = false;
+                    surf.hide_deadline = None;
+                }
             } else {
-                want
-            };
-            let _ = linger; // reserved — primary owns timed leave; sat uses near hysteresis
-            if target != was_shown {
-                eprintln!(
-                    "[dock-vis] sat {} want={} shown={}→{} reason={} near={}",
-                    label,
-                    u8::from(want),
-                    u8::from(was_shown),
-                    u8::from(target),
-                    reason,
-                    u8::from(near)
+                surf.desired = want;
+                surf.hide_deadline = None;
+            }
+
+            surf.last_reason = reason.clone();
+            let desired = surf.desired;
+            let shown = surf.shown;
+            let busy = surf.busy;
+            if !busy && desired != shown {
+                surf.busy = true;
+                places.push((label.clone(), desired, reason));
+            }
+        }
+
+        for (label, linger_ms, shown_ms) in leave_logs {
+            eprintln!(
+                "[dock-vis] {} leave-timer start linger={}ms shown_for={}ms cursor={:?}",
+                label,
+                linger_ms,
+                shown_ms,
+                cursor_pos_px()
+            );
+        }
+        for label in leave_fired {
+            eprintln!(
+                "[dock-vis] {} leave-timer fired → hide cursor={:?}",
+                label,
+                cursor_pos_px()
+            );
+        }
+
+        for (label, target, why) in places {
+            let near_log = self
+                .inner
+                .lock()
+                .ok()
+                .and_then(|g| g.surfaces.get(&label).map(|s| s.mouse_near))
+                .unwrap_or(false);
+            eprintln!(
+                "[dock-vis] {} mode={} near={} shown→{} reason={}",
+                label,
+                mode.as_str(),
+                u8::from(near_log),
+                u8::from(target),
+                why
+            );
+            if label == "dock" && !target {
+                super::set_hover_expanded_pub(false);
+                let _ = app.emit(
+                    "dock-visibility",
+                    &DockVisibilityState {
+                        visible: false,
+                        reason: why.clone(),
+                    },
                 );
-                places.push((label.clone(), target));
-                if let Ok(mut g) = self.inner.lock() {
-                    g.sat_shown.insert(label, target);
+                std::thread::sleep(Duration::from_millis(48));
+            }
+            if label == "dock" {
+                super::place_dock_window_primary(app, &prefs, target, true);
+                if target {
+                    let _ = app.emit(
+                        "dock-visibility",
+                        &DockVisibilityState {
+                            visible: true,
+                            reason: why,
+                        },
+                    );
+                }
+            } else {
+                super::place_one_dock_satellite(app, &prefs, &label, target, true);
+            }
+            if let Ok(mut g) = self.inner.lock() {
+                if let Some(surf) = g.surfaces.get_mut(&label) {
+                    surf.shown = target;
+                    surf.busy = false;
+                    if target {
+                        surf.desired = true;
+                        surf.hide_deadline = None;
+                        surf.shown_at = Some(Instant::now());
+                    } else {
+                        surf.shown_at = None;
+                    }
                 }
             }
         }
-        for (label, shown) in places {
-            super::place_one_dock_satellite(app, &prefs, &label, shown, true);
-        }
     }
 
+    #[allow(dead_code)]
     fn mode_str(&self) -> &'static str {
         self.inner
             .lock()
@@ -571,7 +542,7 @@ impl DockVisibility {
             .unwrap_or("default")
     }
 
-    /// `want` = policy wants dock visible (before leave-linger).
+    /// `want` = policy wants primary dock visible (before leave-linger).
     fn compute_want(&self, app: &AppHandle, near: bool) -> (bool, String) {
         let Ok(g) = self.inner.lock() else {
             return (true, "lock".into());
@@ -596,61 +567,32 @@ impl DockVisibility {
     fn poll_pointer(&self, app: &AppHandle) -> bool {
         #[cfg(windows)]
         {
-            use windows::Win32::Foundation::POINT;
-            use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
             let (thick_log, bottom_off, shown, hold) = {
                 let Ok(g) = self.inner.lock() else {
                     return false;
                 };
+                let shown = g
+                    .surfaces
+                    .get("dock")
+                    .map(|s| s.shown)
+                    .unwrap_or(false);
                 (
                     g.activation_thickness_px,
                     g.bottom_offset_px,
-                    g.shown,
+                    shown,
                     g.interaction_hold || g.preview_tip_keep,
                 )
             };
             if hold {
                 return true;
             }
-
-            unsafe {
-                let mut pt = POINT::default();
-                if GetCursorPos(&mut pt).is_err() {
-                    return false;
-                }
-
-                let Some((mi, scale)) = dock_monitor_info(app) else {
-                    return false;
-                };
-                if !point_in_monitor(&mi, pt.x, pt.y) {
-                    return false;
-                }
-
-                if shown {
-                    // Rest: chrome strip only (empty headroom must not block hide).
-                    // Hover-expanded: chrome + fan headroom — magnified icon hits
-                    // extend there; excluding them hid the dock while fan stayed on.
-                    if pointer_in_dock_chrome(app, &mi, scale, bottom_off, pt.x, pt.y) {
-                        return true;
-                    }
-                    // Preview tip sits above the icons HWND — treat as keep zone.
-                    pointer_in_chrome_hover_tip(app, pt.x, pt.y)
-                } else {
-                    // Hidden: razor strip on the monitor bottom edge only.
-                    let reveal_thick = thick_log.clamp(1, REVEAL_THICK_MAX);
-                    point_on_activation_strip(
-                        app,
-                        &mi,
-                        scale,
-                        DockActivationPosition::ScreenBottom,
-                        reveal_thick,
-                        bottom_off,
-                        pt.x,
-                        pt.y,
-                    )
-                }
-            }
+            let Some(hwnd) = app
+                .get_webview_window("dock")
+                .and_then(|w| w.hwnd().ok().map(|h| h.0 as isize))
+            else {
+                return false;
+            };
+            pointer_near_dock_hwnd(app, hwnd, shown, thick_log, bottom_off)
         }
         #[cfg(not(windows))]
         {
@@ -658,6 +600,29 @@ impl DockVisibility {
             false
         }
     }
+}
+
+/// Primary + every enabled `dock-sat-*` on the placement snapshot.
+fn list_dock_surfaces(app: &AppHandle) -> Vec<(String, isize)> {
+    let mut out = Vec::new();
+    if let Some(dock) = app.get_webview_window("dock") {
+        if let Ok(hwnd) = dock.hwnd() {
+            out.push(("dock".into(), hwnd.0 as isize));
+        }
+    }
+    let snap = crate::display_placement::snapshot();
+    for r in &snap.resolved {
+        if r.is_primary || !r.dock {
+            continue;
+        }
+        let label = crate::display_placement::dock_sat_label(&r.id);
+        if let Some(win) = app.get_webview_window(&label) {
+            if let Ok(hwnd) = win.hwnd() {
+                out.push((label, hwnd.0 as isize));
+            }
+        }
+    }
+    out
 }
 
 fn cursor_pos_px() -> Option<(i32, i32)> {
@@ -741,7 +706,7 @@ fn point_on_activation_strip(
     let _ = activation;
     let thick = ((thick_log as f64) * scale).round().clamp(1.0, 16.0) as i32;
     let margin = ((bottom_off as f64) * scale).round() as i32;
-    // rcMonitor.bottom is exclusive — last visible row is bottom - 1.
+    // rcMonitor.bottom is exclusive 鈥?last visible row is bottom - 1.
     let zone_bottom = mi.rcMonitor.bottom - 1 - margin;
     let zone_top = zone_bottom - thick + 1;
     // Inclusive [zone_top, zone_bottom] on the last physical pixel rows.
@@ -754,7 +719,7 @@ fn point_on_activation_strip(
 /// Dock keep area while shown: resting **content** width, centered in the icons
 /// HWND. Height is chrome-only at rest; when hover-expanded (fan live), include
 /// magnification headroom so moving onto a peaked icon does not start AutoHide.
-/// Never trust the glass HWND width — live resize bugs made it span almost the
+/// Never trust the glass HWND width 鈥?live resize bugs made it span almost the
 /// full monitor and AutoHide could not leave.
 #[cfg(windows)]
 fn dock_chrome_keep_rect(
@@ -1078,7 +1043,7 @@ fn compute_want_for_dock_hwnd(
         return (false, "fullscreen".into());
     }
 
-    let on_desktop = is_desktop_foreground();
+    let on_desktop = crate::win32::ambient::is_desktop_scene(Some(dock_hwnd));
     let overlapped = is_dock_overlapped_hwnd(dock_hwnd);
     let _ = app;
 

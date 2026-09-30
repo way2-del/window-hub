@@ -1,9 +1,8 @@
-//! Per-monitor **top** AppBar for secondary chrome satellites.
+//! Per-monitor bottom AppBar for secondary docks.
 //!
-//! Uses a dedicated invisible host HWND (same idea as `dock_appbar` /
-//! `satellite_dock_appbar`). The chrome-sat WebView is **never** the AppBar
-//! window — `ABM_SETPOS` would otherwise move glass/吸色 down into `rcWork`
-//! (one strip below the reservation) after a bottom Dock AppBar is claimed.
+//! Uses a **dedicated invisible host HWND** per dock-sat (same idea as
+//! `dock_appbar.rs`) so `ABM_SETPOS` never moves the Dock WebView — and never
+//! nudges the top chrome AppBar down by one strip height.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -20,27 +19,23 @@ mod win {
     };
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::Shell::{
-        SHAppBarMessage, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
+        SHAppBarMessage, ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, IsWindow, LoadCursorW,
-        MoveWindow, RegisterClassW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-        CS_HREDRAW, CS_VREDRAW, IDC_ARROW, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWNOACTIVATE,
-        WM_CREATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TRANSPARENT, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, IsWindow, LoadCursorW, MoveWindow,
+        RegisterClassW, SetLayeredWindowAttributes, ShowWindow, CS_HREDRAW, CS_VREDRAW, IDC_ARROW,
+        LWA_ALPHA, SW_SHOWNOACTIVATE, WM_CREATE, WM_DESTROY, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
     };
 
-    const STRIP_LOGICAL_H: i32 = 28;
-    const CLASS_NAME: windows::core::PCWSTR = w!("WindowHubChromeSatAppBarHost");
+    /// Match `dock_appbar::STRIP_LOGICAL_H` / `dock::DOCK_H`.
+    const STRIP_LOGICAL_H: i32 = 52;
+    const CLASS_NAME: windows::core::PCWSTR = w!("WindowHubDockSatAppBarHost");
 
-    /// chrome-sat hwnd → host hwnd
+    /// dock-sat hwnd → host hwnd
     fn hosts() -> &'static Mutex<HashMap<isize, isize>> {
         static MAP: OnceLock<Mutex<HashMap<isize, isize>>> = OnceLock::new();
         MAP.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    fn strip_logical_h() -> i32 {
-        crate::chrome_prefs::bar_height_logical().max(STRIP_LOGICAL_H)
     }
 
     fn dpi_scale(hwnd: HWND) -> f64 {
@@ -69,14 +64,16 @@ mod win {
         }
     }
 
-    fn desired_strip(anchor: HWND) -> Option<RECT> {
+    fn desired_strip(anchor: HWND, bottom_offset_px: u32) -> Option<RECT> {
         let mon = monitor_rect(anchor)?;
-        let h = (strip_logical_h() as f64 * dpi_scale(anchor)).round().max(1.0) as i32;
+        let scale = dpi_scale(anchor);
+        let h = (STRIP_LOGICAL_H as f64 * scale).round().max(1.0) as i32;
+        let margin = (bottom_offset_px as f64 * scale).round().max(0.0) as i32;
         Some(RECT {
             left: mon.left,
-            top: mon.top,
+            top: mon.bottom - margin - h,
             right: mon.right,
-            bottom: mon.top + h,
+            bottom: mon.bottom - margin,
         })
     }
 
@@ -85,7 +82,7 @@ mod win {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
             hWnd: hwnd,
             uCallbackMessage: 0,
-            uEdge: ABE_TOP,
+            uEdge: ABE_BOTTOM,
             rc,
             lParam: LPARAM(0),
         }
@@ -97,8 +94,12 @@ mod win {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if msg == WM_CREATE {
-            return LRESULT(0);
+        if msg == WM_DESTROY || msg == WM_CREATE {
+            return if msg == WM_CREATE {
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            };
         }
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
@@ -120,7 +121,7 @@ mod win {
         }
     }
 
-    fn create_host(rc: RECT) -> Option<HWND> {
+    fn create_host(anchor: HWND, rc: RECT) -> Option<HWND> {
         ensure_class();
         let hwnd = unsafe {
             CreateWindowExW(
@@ -143,33 +144,35 @@ mod win {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let mut data = abd(hwnd, RECT::default());
-            if SHAppBarMessage(ABM_NEW, &mut data) == 0 {
+            let ok = SHAppBarMessage(ABM_NEW, &mut data);
+            if ok == 0 {
                 let _ = DestroyWindow(hwnd);
                 return None;
             }
         }
+        let _ = anchor;
         Some(hwnd)
     }
 
-    /// Claim the physical top strip. Ignore QUERYPOS's `rc.top` if the shell
-    /// already inset `rcWork` — that would stack a second strip under occupancy.
-    fn apply_pos(host: HWND, desired: RECT) {
+    fn apply_pos(host: HWND, anchor: HWND, bottom_offset_px: u32) {
+        let Some(desired) = desired_strip(anchor, bottom_offset_px) else {
+            return;
+        };
         let h = (desired.bottom - desired.top).max(1);
-        let mut rc = desired;
-        let mut data = abd(host, rc);
+        let mut data = abd(host, desired);
         unsafe {
             SHAppBarMessage(ABM_QUERYPOS, &mut data);
-            rc = data.rc;
-            rc.left = desired.left;
-            rc.right = desired.right;
-            rc.top = desired.top;
-            rc.bottom = desired.top + h;
-            data.rc = rc;
+            // Keep the physical bottom edge. QUERYPOS can report rcWork after a
+            // top AppBar claim and would otherwise grow the bottom strip upward.
+            data.rc.left = desired.left;
+            data.rc.right = desired.right;
+            data.rc.bottom = desired.bottom;
+            data.rc.top = desired.bottom - h;
             SHAppBarMessage(ABM_SETPOS, &mut data);
             let _ = MoveWindow(
                 host,
                 desired.left,
-                desired.top,
+                desired.bottom - h,
                 (desired.right - desired.left).max(1),
                 h,
                 false,
@@ -177,84 +180,42 @@ mod win {
         }
     }
 
-    /// Visual chrome stays flush to the monitor top; occupancy is the host only.
-    fn pin_visual_to_monitor_top(anchor: HWND) {
-        unsafe {
-            let Some(mon) = monitor_rect(anchor) else {
-                return;
-            };
-            let mut wr = RECT::default();
-            if GetWindowRect(anchor, &mut wr).is_err() {
-                return;
-            };
-            let h = (wr.bottom - wr.top).max(1);
-            let w = (mon.right - mon.left).max(1);
-            if wr.left == mon.left && wr.top == mon.top && (wr.right - wr.left) == w {
-                return;
-            }
-            let _ = SetWindowPos(
-                anchor,
-                None,
-                mon.left,
-                mon.top,
-                w,
-                h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-    }
-
-    /// If an older build registered the visual HWND itself, drop that claim.
-    fn drop_legacy_visual_appbar(anchor: HWND) {
-        unsafe {
-            if !IsWindow(anchor).as_bool() {
-                return;
-            }
-            let mut data = abd(anchor, RECT::default());
-            let _ = SHAppBarMessage(ABM_REMOVE, &mut data);
-        }
-    }
-
-    pub fn register_and_sync(hwnd_raw: isize) {
-        let anchor = HWND(hwnd_raw as *mut _);
+    pub fn register_and_sync(dock_hwnd_raw: isize, bottom_offset_px: u32) {
+        let anchor = HWND(dock_hwnd_raw as *mut _);
         unsafe {
             if !IsWindow(anchor).as_bool() {
                 return;
             }
         }
-        let Some(desired) = desired_strip(anchor) else {
+        let Some(desired) = desired_strip(anchor, bottom_offset_px) else {
             return;
         };
-        drop_legacy_visual_appbar(anchor);
-
         let mut map = hosts().lock().unwrap_or_else(|e| e.into_inner());
-        let host = if let Some(&raw) = map.get(&hwnd_raw) {
+        let host = if let Some(&raw) = map.get(&dock_hwnd_raw) {
             let h = HWND(raw as *mut _);
             if unsafe { IsWindow(h).as_bool() } {
                 h
             } else {
-                map.remove(&hwnd_raw);
-                let Some(created) = create_host(desired) else {
+                map.remove(&dock_hwnd_raw);
+                let Some(created) = create_host(anchor, desired) else {
                     return;
                 };
-                map.insert(hwnd_raw, created.0 as isize);
+                map.insert(dock_hwnd_raw, created.0 as isize);
                 created
             }
         } else {
-            let Some(created) = create_host(desired) else {
+            let Some(created) = create_host(anchor, desired) else {
                 return;
             };
-            map.insert(hwnd_raw, created.0 as isize);
+            map.insert(dock_hwnd_raw, created.0 as isize);
             created
         };
-        apply_pos(host, desired);
-        pin_visual_to_monitor_top(anchor);
+        apply_pos(host, anchor, bottom_offset_px);
     }
 
-    pub fn unregister(hwnd_raw: isize) {
-        drop_legacy_visual_appbar(HWND(hwnd_raw as *mut _));
+    pub fn unregister(dock_hwnd_raw: isize) {
         let mut map = hosts().lock().unwrap_or_else(|e| e.into_inner());
-        let Some(raw) = map.remove(&hwnd_raw) else {
+        let Some(raw) = map.remove(&dock_hwnd_raw) else {
             return;
         };
         let host = HWND(raw as *mut _);
@@ -269,7 +230,8 @@ mod win {
 
     pub fn unregister_all() {
         let mut map = hosts().lock().unwrap_or_else(|e| e.into_inner());
-        for (_dock, host_raw) in map.drain() {
+        let pairs: Vec<(isize, isize)> = map.drain().collect();
+        for (_dock, host_raw) in pairs {
             let host = HWND(host_raw as *mut _);
             unsafe {
                 if IsWindow(host).as_bool() {
@@ -286,7 +248,7 @@ mod win {
 pub use win::{register_and_sync, unregister, unregister_all};
 
 #[cfg(not(windows))]
-pub fn register_and_sync(_hwnd_raw: isize) {}
+pub fn register_and_sync(_hwnd_raw: isize, _bottom_offset_px: u32) {}
 
 #[cfg(not(windows))]
 pub fn unregister(_hwnd_raw: isize) {}

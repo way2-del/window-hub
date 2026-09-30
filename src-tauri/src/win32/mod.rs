@@ -39,6 +39,15 @@ pub mod satellite_appbar;
 pub mod satellite_appbar {
     pub fn register_and_sync(_hwnd_raw: isize) {}
     pub fn unregister(_hwnd_raw: isize) {}
+    pub fn unregister_all() {}
+}
+#[cfg(windows)]
+pub mod satellite_dock_appbar;
+#[cfg(not(windows))]
+pub mod satellite_dock_appbar {
+    pub fn register_and_sync(_hwnd_raw: isize, _bottom_offset_px: u32) {}
+    pub fn unregister(_hwnd_raw: isize) {}
+    pub fn unregister_all() {}
 }
 #[cfg(windows)]
 pub mod max_clamp;

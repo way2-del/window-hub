@@ -196,6 +196,16 @@ pub fn load() -> DisplayPlacementPrefs {
     prefs
 }
 
+/// One monitor: allDisplays/custom are meaningless — force primaryOnly.
+fn coerce_single_display(prefs: &mut DisplayPlacementPrefs, display_count: usize) -> bool {
+    if display_count <= 1 && prefs.preset != PlacementPreset::PrimaryOnly {
+        prefs.preset = PlacementPreset::PrimaryOnly;
+        prefs.monitors.clear();
+        return true;
+    }
+    false
+}
+
 fn save(prefs: &DisplayPlacementPrefs) -> Result<(), String> {
     let v = serde_json::to_value(prefs).map_err(|e| e.to_string())?;
     crate::db::with_conn(|c| {
@@ -374,10 +384,17 @@ pub fn resolve_placements(
         .map(|m| (m.id.as_str(), m))
         .collect();
 
+    // Single display always behaves as primaryOnly (ignore stale custom/allDisplays).
+    let effective = if displays.len() <= 1 {
+        PlacementPreset::PrimaryOnly
+    } else {
+        prefs.preset
+    };
+
     displays
         .iter()
         .map(|d| {
-            let (top_bar, dock) = match prefs.preset {
+            let (top_bar, dock) = match effective {
                 PlacementPreset::PrimaryOnly => {
                     if d.is_primary {
                         (TopBarMode::Full, true)
@@ -425,8 +442,11 @@ pub fn resolve_placements(
 }
 
 pub fn snapshot() -> PlacementSnapshot {
-    let prefs = load();
+    let mut prefs = load();
     let displays = list_displays();
+    if coerce_single_display(&mut prefs, displays.len()) {
+        let _ = save(&prefs);
+    }
     let resolved = resolve_placements(&prefs, &displays);
     let primary_top_bar = resolved
         .iter()
@@ -464,10 +484,61 @@ fn pin_hwnd_to_monitor_rect(hwnd_raw: isize, x: i32, y: i32, width: i32, height:
 }
 
 #[cfg(windows)]
-fn pin_hwnd_to_monitor_top(hwnd_raw: isize, d: &ResolvedPlacement, logical_h: i32) {
+pub(crate) fn pin_hwnd_to_monitor_top(hwnd_raw: isize, d: &ResolvedPlacement, logical_h: i32) {
     let scale = d.scale_factor.max(0.5);
     let phys_h = ((logical_h as f64) * scale).round().max(1.0) as i32;
     pin_hwnd_to_monitor_rect(hwnd_raw, d.x, d.y, d.width as i32, phys_h);
+}
+
+/// Re-pin any top-bar HWND to its monitor's physical top (after bottom AppBar churn).
+#[cfg(windows)]
+pub(crate) fn pin_top_bar_hwnd_public(hwnd_raw: isize) {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut info).as_bool() {
+            return;
+        }
+        let mut wr = RECT::default();
+        if GetWindowRect(hwnd, &mut wr).is_err() {
+            return;
+        }
+        let h = (wr.bottom - wr.top).max(1);
+        let m = info.rcMonitor;
+        let w = (m.right - m.left).max(1);
+        if wr.left == m.left && wr.top == m.top && (wr.right - wr.left) == w {
+            return;
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            m.left,
+            m.top,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn pin_chrome_sat_to_monitor(
+    hwnd_raw: isize,
+    d: &ResolvedPlacement,
+    logical_h: i32,
+) {
+    pin_hwnd_to_monitor_top(hwnd_raw, d, logical_h);
 }
 
 #[cfg(windows)]
@@ -991,6 +1062,13 @@ fn destroy_all_dock_satellites(app: &AppHandle) {
         prev.clone()
     };
     for old in &leftover {
+        if is_dock_sat_label(old) {
+            if let Some(w) = app.get_webview_window(old) {
+                if let Ok(h) = w.hwnd() {
+                    crate::win32::satellite_dock_appbar::unregister(h.0 as isize);
+                }
+            }
+        }
         destroy_window(app, old);
     }
     let sweep: Vec<String> = app
@@ -1000,8 +1078,16 @@ fn destroy_all_dock_satellites(app: &AppHandle) {
         .cloned()
         .collect();
     for old in sweep {
+        if is_dock_sat_label(&old) {
+            if let Some(w) = app.get_webview_window(&old) {
+                if let Ok(h) = w.hwnd() {
+                    crate::win32::satellite_dock_appbar::unregister(h.0 as isize);
+                }
+            }
+        }
         destroy_window(app, &old);
     }
+    crate::win32::satellite_dock_appbar::unregister_all();
     *LAST_SAT_DOCK.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
 }
 
@@ -1056,6 +1142,8 @@ pub async fn set_display_placement(
             return Err("monitor id required".into());
         }
     }
+    let display_count = list_displays().len();
+    let _ = coerce_single_display(&mut next, display_count);
     if next.preset == PlacementPreset::Custom {
         seed_custom_monitors(&mut next);
     } else {

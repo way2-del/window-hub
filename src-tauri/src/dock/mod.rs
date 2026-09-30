@@ -837,6 +837,7 @@ pub(crate) fn mode_reserves_bottom_work_area(mode: DockDisplayMode) -> bool {
 }
 
 /// Register / release bottom AppBar so maximized windows stop above the Dock chrome.
+/// Primary uses `dock_appbar`; each `dock-sat-*` uses `satellite_dock_appbar` on its monitor.
 pub(crate) fn sync_dock_bottom_appbar(app: &AppHandle, prefs: &DockPrefs, shown: bool) {
     #[cfg(windows)]
     {
@@ -844,8 +845,8 @@ pub(crate) fn sync_dock_bottom_appbar(app: &AppHandle, prefs: &DockPrefs, shown:
         if crate::win32::work_area::island_hidden_for_fullscreen() {
             return;
         }
-        let want = prefs.enabled
-            && mode_reserves_bottom_work_area(prefs.mode())
+        let mode_wants = prefs.enabled && mode_reserves_bottom_work_area(prefs.mode());
+        let primary_want = mode_wants
             && match prefs.mode() {
                 // Default hides for exclusive fullscreen — drop reservation with the bar.
                 DockDisplayMode::Default => shown,
@@ -853,36 +854,102 @@ pub(crate) fn sync_dock_bottom_appbar(app: &AppHandle, prefs: &DockPrefs, shown:
             };
         let was = crate::win32::dock_appbar::is_registered();
         let quiet = crate::win32::work_area::work_area_quiet();
-        if want {
+        if primary_want {
             if let Some(w) = app.get_webview_window("dock") {
                 if let Ok(h) = w.hwnd() {
                     let raw = h.0 as isize;
                     if was {
-                        // Quiet: skip redundant SETPOS (ABN / place spam).
-                        if quiet {
-                            return;
+                        if !quiet {
+                            crate::win32::dock_appbar::sync(raw);
                         }
-                        crate::win32::dock_appbar::sync(raw);
                     } else {
-                        // First claim always allowed — quiet only kills feedback loops.
                         crate::win32::dock_appbar::register(raw);
                         reassert_settings_material(app);
                     }
-                    return;
                 }
             }
-        }
-        if was {
-            if quiet {
-                return;
-            }
+        } else if was && !quiet {
             crate::win32::dock_appbar::suspend();
             reassert_settings_material(app);
         }
+        // Secondary: Always/Layered/… always reserve when mode wants it (not tied to primary shown).
+        sync_satellite_dock_bottom_appbars(app, prefs, mode_wants, quiet);
+        // Bottom AppBar SETPOS can shove top chrome off monitor.top by one strip —
+        // re-pin main + chrome-sat flush to the physical top (dock unchanged).
+        reassert_top_chrome_pins(app);
     }
     #[cfg(not(windows))]
     {
         let _ = (app, prefs, shown);
+    }
+}
+
+/// Keep top chrome at monitor.top after bottom AppBar work-area changes.
+#[cfg(windows)]
+fn reassert_top_chrome_pins(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        if let Ok(hwnd) = main.hwnd() {
+            let raw = hwnd.0 as isize;
+            // Same pin path as boot / display-placement (physical monitor top).
+            crate::display_placement::pin_top_bar_hwnd_public(raw);
+            crate::win32::appbar::force_sync(raw);
+        }
+    }
+    let snap = crate::display_placement::snapshot();
+    for r in &snap.resolved {
+        if r.is_primary || r.top_bar == crate::display_placement::TopBarMode::None {
+            continue;
+        }
+        let label = crate::display_placement::chrome_sat_label(&r.id);
+        let Some(win) = app.get_webview_window(&label) else {
+            continue;
+        };
+        let Ok(hwnd) = win.hwnd() else {
+            continue;
+        };
+        let raw = hwnd.0 as isize;
+        let bar_h = crate::chrome_prefs::bar_height_logical();
+        crate::display_placement::pin_chrome_sat_to_monitor(raw, r, bar_h);
+        crate::win32::satellite_appbar::register_and_sync(raw);
+    }
+}
+
+/// Per-monitor bottom strip for every enabled `dock-sat-*`.
+#[cfg(windows)]
+fn sync_satellite_dock_bottom_appbars(
+    app: &AppHandle,
+    prefs: &DockPrefs,
+    mode_wants: bool,
+    _quiet: bool,
+) {
+    let snap = crate::display_placement::snapshot();
+    let offset = prefs.bottom_offset_px;
+    for r in &snap.resolved {
+        if r.is_primary || !r.dock {
+            continue;
+        }
+        let label = crate::display_placement::dock_sat_label(&r.id);
+        let Some(win) = app.get_webview_window(&label) else {
+            continue;
+        };
+        let Ok(hwnd) = win.hwnd() else {
+            continue;
+        };
+        let raw = hwnd.0 as isize;
+        let sat_shown = app
+            .try_state::<std::sync::Arc<DockVisibility>>()
+            .and_then(|v| v.sat_is_shown(&label))
+            .unwrap_or(true);
+        let sat_want = mode_wants
+            && match prefs.mode() {
+                DockDisplayMode::Default => sat_shown,
+                _ => true,
+            };
+        if sat_want {
+            crate::win32::satellite_dock_appbar::register_and_sync(raw, offset);
+        } else {
+            crate::win32::satellite_dock_appbar::unregister(raw);
+        }
     }
 }
 
@@ -1069,6 +1136,8 @@ pub fn position_dock_window(app: &AppHandle, prefs: &DockPrefs) {
         .map(|v| v.ui_shown())
         .unwrap_or(true);
     place_dock_window(app, prefs, shown, false);
+    // Refresh sat geometry; each sat keeps its own visibility from the vis map.
+    place_dock_satellites(app, prefs, shown, false);
 }
 
 /// Move the **entire outer HWND** (glass + WebView content as one unit).
@@ -1159,7 +1228,6 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
                     win32_dock_clear_transparent(hwnd.0 as isize);
                 }
                 sync_dock_bottom_appbar(app, prefs, shown);
-                place_dock_satellites(app, prefs, shown, animate);
                 return;
             }
         }
@@ -1215,7 +1283,11 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     }
     let _ = win.set_ignore_cursor_events(!shown);
     sync_dock_bottom_appbar(app, prefs, shown);
-    place_dock_satellites(app, prefs, shown, animate);
+}
+
+/// Primary dock only — visibility tick uses this so sats are not forced to primary `shown`.
+pub fn place_dock_window_primary(app: &AppHandle, prefs: &DockPrefs, shown: bool, animate: bool) {
+    place_dock_window(app, prefs, shown, animate);
 }
 
 /// Place every `dock-sat-*` pair. Visibility is **per-monitor** (same policy as
@@ -1325,6 +1397,8 @@ pub fn place_one_dock_satellite(
         } else {
             let _ = win.hide();
         }
+        // Always / Layered / Default(shown): reserve bottom work area on this monitor.
+        sync_dock_bottom_appbar(app, prefs, shown);
     }
     #[cfg(not(windows))]
     {
@@ -2589,6 +2663,7 @@ pub async fn set_dock_prefs(
             // Still size/place to current policy without fighting the vis thread later.
             let vis_shown = vis.ui_shown();
             place_dock_window(&app, &next, vis_shown, false);
+            place_dock_satellites(&app, &next, vis_shown, false);
         }
         if let Some(w) = app.get_webview_window("dock") {
             let top = !matches!(next.mode(), DockDisplayMode::Hotkey | DockDisplayMode::Desktop);
@@ -2599,11 +2674,29 @@ pub async fn set_dock_prefs(
             let _ = g.set_always_on_top(top);
             let _ = g.set_ignore_cursor_events(true);
         }
+        // Same always-on-top policy on every dock-sat (shared display mode).
+        let snap = crate::display_placement::snapshot();
+        let top = !matches!(next.mode(), DockDisplayMode::Hotkey | DockDisplayMode::Desktop);
+        for r in &snap.resolved {
+            if r.is_primary || !r.dock {
+                continue;
+            }
+            let label = crate::display_placement::dock_sat_label(&r.id);
+            let glass_label = crate::display_placement::dock_sat_glass_label(&r.id);
+            if let Some(w) = app.get_webview_window(&label) {
+                let _ = w.set_always_on_top(top);
+            }
+            if let Some(g) = app.get_webview_window(&glass_label) {
+                let _ = g.set_always_on_top(top);
+                let _ = g.set_ignore_cursor_events(true);
+            }
+        }
         // Taskbar / work-area churn from mode changes can bleach settings Mica.
         reassert_settings_material(&app);
     } else {
         vis.stop();
         crate::win32::dock_appbar::suspend();
+        crate::win32::satellite_dock_appbar::unregister_all();
         if let Some(w) = app.get_webview_window("dock") {
             let _ = w.close();
         }

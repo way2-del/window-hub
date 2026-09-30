@@ -125,6 +125,21 @@ export const PLACEMENT_PRESETS: {
   },
 ];
 
+/** Single display: only「仅主屏」is meaningful; hide allDisplays/custom. */
+export function placementPresetsForDisplayCount(count: number) {
+  if (count <= 1) {
+    return PLACEMENT_PRESETS.filter((p) => p.id === "primaryOnly");
+  }
+  return PLACEMENT_PRESETS;
+}
+
+export function needsPrimaryOnlyForDisplays(
+  preset: PlacementPreset,
+  displayCount: number,
+): boolean {
+  return displayCount <= 1 && preset !== "primaryOnly";
+}
+
 export const TOP_BAR_OPTIONS: { value: TopBarMode; label: string }[] = [
   { value: "full", label: "完整" },
   { value: "shortcuts", label: "仅快捷区" },

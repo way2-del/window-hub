@@ -10,11 +10,13 @@
 | 全部显示器 | 完整顶栏+岛+Dock | 仅快捷区顶栏 + Dock |
 | 自定义 | 表格逐屏：顶栏 `完整` / `仅快捷区` / `无`，Dock 开/关 | 同左 |
 
+仅一块屏幕时设置页只展示「仅主屏」；`allDisplays` / `custom` 会自动回落并持久化为 `primaryOnly`。
+
 ## 约束
 
 - **灵动岛只在主屏**：且仅当主屏顶栏为 `完整`。主屏 `仅快捷区` / `无` 时不挂载岛、通知栈与下拉。
 - **副屏 `完整`**：快捷区 + 右侧系统芯片；**不含**岛中心、下拉与岛通知。运行时窗口 label：`chrome-sat-<hash>`。
-- **Dock**：`dock=true` 的第一块屏用现有 `dock` + `dock-glass`；其余屏为 `dock-sat-*` / `dock-sat-glass-*` 克隆（共享同一 `DockPrefs`）。**显隐策略与主屏同一套**（全屏 / AutoHide / SmartHide 等），按**该屏**的 Dock HWND 与指针判定，不跟主屏 `shown` 绑死。全局 Dock 关闭时全部隐藏。
+- **Dock**：`dock=true` 的第一块屏用现有 `dock` + `dock-glass`；其余屏为 `dock-sat-*` / `dock-sat-glass-*` 克隆（共享同一 `DockPrefs` / **同一套显示模式**）。每屏独立跑相同显隐状态机（全屏 / AutoHide linger / SmartHide / 热键等），输入按该屏 Dock HWND 与指针判定。需要底部占位的模式（始终 / 叠层 / 默认等）在**每块有 Dock 的屏**上各自注册 `ABE_BOTTOM` AppBar，最大化窗口不会盖住该屏 Dock。全局 Dock 关闭时全部隐藏。
 - 偏好键：`prefs_display_placement`（独立 JSON，不并入 Chrome/Dock prefs）。
 - 启动、`set_display_placement`、约 2s 轮询拓扑变化时调用同一套 `apply`。
 

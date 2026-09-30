@@ -45,7 +45,8 @@ import {
   getDisplayPlacementSnapshot,
   hydrateDisplayPlacement,
   listenDisplayPlacement,
-  PLACEMENT_PRESETS,
+  needsPrimaryOnlyForDisplays,
+  placementPresetsForDisplayCount,
   setDisplayPlacement,
   TOP_BAR_OPTIONS,
   type DisplayPlacementPrefs,
@@ -997,7 +998,21 @@ export default function SettingsApp() {
 
     void (async () => {
       await hydrateIslandPrefs().then(setIslandPrefsState);
-      await hydrateDisplayPlacement().then(setPlacementSnap);
+      await hydrateDisplayPlacement().then(async (snap) => {
+        if (needsPrimaryOnlyForDisplays(snap.prefs.preset, snap.displays.length)) {
+          try {
+            const fixed = await setDisplayPlacement({
+              preset: "primaryOnly",
+              monitors: [],
+            });
+            setPlacementSnap(fixed);
+            return;
+          } catch {
+            /* fall through */
+          }
+        }
+        setPlacementSnap(snap);
+      });
 
       try {
         const prefs = await invoke<MaterialPrefs>("get_material_prefs");
@@ -1690,12 +1705,12 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>多显示器</h2>
                 <p className="card-desc">
-                  分别指定每块屏幕的顶栏与 Dock。灵动岛仅在主屏且顶栏为「完整」时显示。应用顺序：先稳住主屏顶栏与
-                  Dock，再按需创建副屏顶栏。当前版本副屏 Dock 暂不克隆（避免抢主屏材质），Dock
-                  固定跟主屏。
+                  {placementSnap.displays.length <= 1
+                    ? "当前仅一块屏幕：使用主屏完整顶栏（含灵动岛）与 Dock。接入副屏后可在此选择「全部显示器」或「自定义」。"
+                    : "分别指定每块屏幕的顶栏与 Dock。灵动岛仅在主屏且顶栏为「完整」时显示。应用顺序：先稳住主屏顶栏与 Dock，再按需创建副屏顶栏。当前版本副屏 Dock 暂不克隆（避免抢主屏材质），Dock 固定跟主屏。"}
                 </p>
                 <div className="mode-list">
-                  {PLACEMENT_PRESETS.map((p) => (
+                  {placementPresetsForDisplayCount(placementSnap.displays.length).map((p) => (
                     <button
                       key={p.id}
                       type="button"
@@ -1723,7 +1738,8 @@ export default function SettingsApp() {
                     </button>
                   ))}
                 </div>
-                {placementSnap.prefs.preset === "custom" ? (
+                {placementSnap.prefs.preset === "custom" &&
+                placementSnap.displays.length > 1 ? (
                   <div className="display-placement-table" role="table" aria-label="自定义显示器">
                     <div className="display-placement-head" role="row">
                       <span role="columnheader">显示器</span>
