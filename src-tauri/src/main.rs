@@ -38,6 +38,10 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Before single-instance: unelevate so a leftover admin launch cannot block
+    // the medium-IL copy, and so Explorer can drag-drop onto the island.
+    #[cfg(windows)]
+    window_hub_lib::ensure_gui_not_elevated();
     #[cfg(windows)]
     window_hub_lib::ensure_single_instance();
     window_hub_lib::run()

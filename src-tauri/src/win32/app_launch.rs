@@ -606,7 +606,187 @@ pub async fn set_general_prefs(mut prefs: GeneralPrefs) -> Result<GeneralPrefsVi
     .map_err(|e| format!("set_general_prefs join: {e}"))?
 }
 
+/// Spawn a medium-IL copy via the elevated process's linked token (UIPI-safe DnD).
+#[cfg(windows)]
+fn spawn_via_linked_token(exe: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Security::{
+        DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TokenLinkedToken,
+        TokenPrimary, TOKEN_ALL_ACCESS, TOKEN_LINKED_TOKEN, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{
+        CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, CREATE_UNICODE_ENVIRONMENT,
+        NORMAL_PRIORITY_CLASS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows::core::PWSTR;
+
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| format!("OpenProcessToken: {e}"))?;
+        let mut linked = TOKEN_LINKED_TOKEN::default();
+        let mut ret = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenLinkedToken,
+            Some(&mut linked as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
+            &mut ret,
+        );
+        let _ = CloseHandle(token);
+        if ok.is_err() || linked.LinkedToken.is_invalid() || linked.LinkedToken == INVALID_HANDLE_VALUE {
+            return Err("无可用的普通权限令牌（可能是内置 Administrator）".into());
+        }
+        let mut primary = HANDLE::default();
+        let dup = DuplicateTokenEx(
+            linked.LinkedToken,
+            TOKEN_ALL_ACCESS,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        );
+        let _ = CloseHandle(linked.LinkedToken);
+        dup.map_err(|e| format!("DuplicateTokenEx: {e}"))?;
+
+        let mut env = std::ptr::null_mut();
+        if CreateEnvironmentBlock(&mut env, primary, false).is_err() {
+            let _ = CloseHandle(primary);
+            return Err("CreateEnvironmentBlock 失败".into());
+        }
+
+        let cwd = exe
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut cmd: Vec<u16> = format!("\"{}\" --wait-for-restart", exe.to_string_lossy())
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut desktop: Vec<u16> = "winsta0\\default\0".encode_utf16().collect();
+        let dir: Vec<u16> = cwd
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let si = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            lpDesktop: PWSTR(desktop.as_mut_ptr()),
+            ..Default::default()
+        };
+        let mut pi = PROCESS_INFORMATION::default();
+        let created = CreateProcessAsUserW(
+            primary,
+            None,
+            PWSTR(cmd.as_mut_ptr()),
+            None,
+            None,
+            false,
+            CREATE_UNICODE_ENVIRONMENT | NORMAL_PRIORITY_CLASS,
+            Some(env),
+            PCWSTR(dir.as_ptr()),
+            &si,
+            &mut pi,
+        );
+        let _ = DestroyEnvironmentBlock(env);
+        let _ = CloseHandle(primary);
+        if created.is_err() {
+            return Err(format!("CreateProcessAsUser 失败: {created:?}"));
+        }
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+    }
+    Ok(())
+}
+
+/// Fallback: ask Explorer (medium IL) to launch us.
+#[cfg(windows)]
+fn spawn_via_explorer(exe: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let explorer = PathBuf::from(
+        std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows")),
+    )
+    .join("explorer.exe");
+    let file_w: Vec<u16> = explorer
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let params: Vec<u16> = format!("\"{}\" --wait-for-restart", exe.to_string_lossy())
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let ret = ShellExecuteW(
+            HWND::default(),
+            PCWSTR::null(),
+            PCWSTR(file_w.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        if (ret.0 as isize) <= 32 {
+            return Err(format!("explorer 启动失败，代码 {}", ret.0 as isize));
+        }
+    }
+    Ok(())
+}
+
+/// Relaunch at medium integrity so Explorer OLE drops work (UIPI).
+#[cfg(windows)]
+pub fn relaunch_unelevated() -> Result<(), String> {
+    let exe = current_exe_path()?;
+    match spawn_via_linked_token(&exe) {
+        Ok(()) => Ok(()),
+        Err(linked_err) => {
+            eprintln!("[launch] linked-token unelevate failed: {linked_err}");
+            spawn_via_explorer(&exe).map_err(|e| {
+                format!("降权启动失败（linked: {linked_err}；explorer: {e}）")
+            })
+        }
+    }
+}
+
+/// If GUI is elevated, spawn a medium-IL copy and signal caller to exit.
+/// Skip with `--allow-elevated` (debug / rare cases that need admin GUI).
+#[cfg(windows)]
+pub fn try_relaunch_unelevated() -> bool {
+    if !is_process_elevated() {
+        return false;
+    }
+    if std::env::args().any(|a| a == "--allow-elevated") {
+        eprintln!("[launch] elevated GUI kept (--allow-elevated); Explorer→island DnD blocked by UIPI");
+        return false;
+    }
+    match relaunch_unelevated() {
+        Ok(()) => {
+            eprintln!("[launch] elevated GUI → relaunched at medium IL (Explorer DnD)");
+            true
+        }
+        Err(e) => {
+            eprintln!("[launch] could not unelevate GUI: {e}");
+            false
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn try_relaunch_unelevated() -> bool {
+    false
+}
+
 /// Relaunch current exe; `as_admin` uses ShellExecute runas (UAC).
+/// Non-admin relaunch from an elevated process uses linked-token / Explorer unelevate.
 #[cfg(windows)]
 pub fn relaunch_now(as_admin: bool) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
@@ -643,6 +823,8 @@ pub fn relaunch_now(as_admin: bool) -> Result<(), String> {
             }
         }
         Ok(())
+    } else if is_process_elevated() {
+        relaunch_unelevated()
     } else {
         let mut cmd = std::process::Command::new(&exe);
         if let Ok(cwd) = std::env::current_dir() {

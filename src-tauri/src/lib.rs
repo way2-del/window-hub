@@ -1,6 +1,7 @@
 mod commands;
 mod chrome_prefs;
 mod control_center;
+mod island_file_drop;
 mod lifecycle;
 mod companion_scripts;
 mod db;
@@ -51,6 +52,16 @@ pub fn uninstall_autostart_service_once() -> Result<(), String> {
 #[cfg(windows)]
 pub fn ensure_single_instance() {
     crate::win32::single_instance::ensure_single_instance_or_exit();
+}
+
+/// Drop elevated GUI before taking the single-instance lock — Explorer OLE drops
+/// onto the island / Dock are blocked by UIPI while elevated. Pass `--allow-elevated`
+/// to keep an admin GUI (debug only).
+#[cfg(windows)]
+pub fn ensure_gui_not_elevated() {
+    if crate::win32::app_launch::try_relaunch_unelevated() {
+        std::process::exit(0);
+    }
 }
 
 /// 因全屏游戏隐藏顶栏时为 true；watchdog 期间勿重挂 AppBar / 几何。
@@ -810,6 +821,14 @@ pub fn run() {
                         "boot",
                         &format!("main hwnd={hwnd:#x} hang/http/mouse armed"),
                     );
+                    #[cfg(windows)]
+                    {
+                        crate::island_file_drop::install_island_file_drop(app.handle(), hwnd);
+                        crate::island_file_drop::schedule_island_file_drop_rebind(
+                            app.handle(),
+                            hwnd,
+                        );
+                    }
                     #[cfg(windows)]
                     show_hwnd(hwnd, false);
                     #[cfg(not(windows))]

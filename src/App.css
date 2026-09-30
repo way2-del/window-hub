@@ -578,7 +578,7 @@ button {
 }
 
 .island-root.is-immersed .island-corner-patch-fill {
-  fill-opacity: 0;
+  fill-opacity: 0.02;
 }
 
 .island-root.is-drop-target .island-corner-patch-fill,
@@ -634,7 +634,8 @@ button {
 }
 
 .island-root.is-immersed .island-path {
-  fill-opacity: 0;
+  /* WebView2 对 alpha=0 整窗点透，拖放进不来；极淡不透明仍可命中 OLE/DnD */
+  fill-opacity: 0.02;
 }
 
 /* 拖放高亮 / 通知横幅 / 搜索岛：保持不透明壳（中转站不阻断沉浸） */

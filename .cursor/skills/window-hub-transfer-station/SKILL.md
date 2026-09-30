@@ -31,7 +31,6 @@ description: >-
 - 索引：`hub.staging.*` → `plugin_kv.__staging_items`
 - 载荷：`%APPDATA%/window-hub/plugins/<id>/staging/`
 - 尺寸：`hub.settings.panelWidth` / `panelHeight`（默认 560×152）→ 否则 `defaultSize`
-
 ## Manifest（要点）
 
 ```json

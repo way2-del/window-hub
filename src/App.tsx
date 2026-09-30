@@ -2718,7 +2718,7 @@ function App() {
   useEffect(() => {
     const win = getCurrentWindow();
     const passThrough =
-      notifyStacked && !expanded && !pulling && reveal <= 0.12;
+      notifyStacked && !expanded && !pulling && reveal <= 0.12 && !dropTarget;
     if (!passThrough) {
       void win.setIgnoreCursorEvents(false).catch(() => undefined);
       return;
@@ -2775,7 +2775,7 @@ function App() {
       window.clearInterval(id);
       void win.setIgnoreCursorEvents(false).catch(() => undefined);
     };
-  }, [notifyStacked, expanded, pulling, reveal]);
+  }, [notifyStacked, expanded, pulling, reveal, dropTarget]);
 
   // 岛栏折叠宽自适应：slots.island.bar.adaptiveWidth（如正在播放长歌词）
   useLayoutEffect(() => {
@@ -3334,6 +3334,53 @@ function App() {
         un = fn;
       })
       .catch(() => undefined);
+    return () => un?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Native OLE file-drop (Rust) — wry DnD on transparent island often shows no-drop.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void listen<{
+      phase?: string;
+      count?: number;
+      paths?: string[];
+    }>("island-file-drag", (ev) => {
+      if (!dropPluginIdRef.current) {
+        if (ev.payload?.phase === "leave" || ev.payload?.phase === "drop") {
+          setDropTarget(false);
+        }
+        return;
+      }
+      const phase = ev.payload?.phase;
+      if (phase === "enter" || phase === "over") {
+        bumpIslandActivity();
+        setDropTarget(true);
+        void invoke("float_overlay").catch(() => undefined);
+      } else if (phase === "leave") {
+        setDropTarget(false);
+        if (!expandedRef.current) {
+          void invoke("settle_overlay").catch(() => undefined);
+        }
+      } else if (phase === "drop") {
+        setDropTarget(false);
+        bumpIslandActivity();
+        void invoke("float_overlay").catch(() => undefined);
+        const pluginId = dropPluginIdRef.current;
+        const paths = ev.payload?.paths ?? [];
+        if (pluginId && paths.length) {
+          void invoke("hub_staging_add_paths", { pluginId, paths })
+            .then(() => openPluginSession(pluginId))
+            .catch(console.error);
+        } else if (pluginId) {
+          void openPluginSession(pluginId);
+        }
+      } else if (phase === "error") {
+        setDropTarget(false);
+      }
+    }).then((fn) => {
+      un = fn;
+    });
     return () => un?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

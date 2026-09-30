@@ -150,6 +150,8 @@ type AutostartBackend = "service" | "task" | "none";
 type GeneralPrefs = {
   startOnBoot: boolean;
   startOnBootBackend: AutostartBackend;
+  /** True when the GUI process is elevated (Explorer→island DnD blocked by UIPI). */
+  isElevated?: boolean;
   /** Optional toast after one-shot UAC for service install/uninstall. */
   notice?: string | null;
 };
@@ -583,6 +585,7 @@ export default function SettingsApp() {
   const [generalPrefs, setGeneralPrefs] = useState<GeneralPrefs>({
     startOnBoot: false,
     startOnBootBackend: "none",
+    isElevated: false,
   });
   const [chromePrefs, setChromePrefsState] = useState<ChromePrefs>(() => getChromePrefs());
   const [chromeBusy, setChromeBusy] = useState(false);
@@ -607,6 +610,7 @@ export default function SettingsApp() {
     return {
       startOnBoot: backend !== "none",
       startOnBootBackend: backend,
+      isElevated: !!gp.isElevated,
       notice: typeof gp.notice === "string" ? gp.notice : null,
     };
   };
