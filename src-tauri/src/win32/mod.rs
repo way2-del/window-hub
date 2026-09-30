@@ -34,6 +34,13 @@ pub mod tray;
 pub mod popup_fit;
 pub mod work_area;
 #[cfg(windows)]
+pub mod satellite_appbar;
+#[cfg(not(windows))]
+pub mod satellite_appbar {
+    pub fn register_and_sync(_hwnd_raw: isize) {}
+    pub fn unregister(_hwnd_raw: isize) {}
+}
+#[cfg(windows)]
 pub mod max_clamp;
 #[cfg(not(windows))]
 pub mod max_clamp {

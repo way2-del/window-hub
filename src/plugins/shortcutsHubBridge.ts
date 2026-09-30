@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { SHORTCUTS_HEIGHT } from "./shortcutsGeometry";
+import { chromeScale, getLiveBarHeight } from "../features/chrome/barHeight";
 
 /** Shortcuts strip iframe ↔ host hub bridge (postMessage). */
 
@@ -21,6 +21,15 @@ const ALLOWED_CMDS = new Set([
   "get_foreground_app",
   "hub_notify",
   "hub_fetch",
+  "hub_webview_open",
+  "hub_webview_close",
+  "hub_webview_navigate",
+  "hub_webview_start_pick",
+  "hub_webview_take_last_pick",
+  "hub_webview_snapshot",
+  "hub_webview_watch_start",
+  "hub_webview_watch_stop",
+  "hub_webview_watch_list",
   "hub_media_send_key",
   "hub_island_set_bar",
   "hub_island_clear_bar",
@@ -212,6 +221,55 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
     sysmon: {
       snapshot: function () { return invoke("hub_sysmon_snapshot", withPlugin()); }
     },
+    webview: {
+      open: function (opts) { return invoke("hub_webview_open", withPlugin({ opts: opts || {} })); },
+      close: function (opts) { return invoke("hub_webview_close", withPlugin({ opts: opts || {} })); },
+      navigate: function (opts) { return invoke("hub_webview_navigate", withPlugin({ opts: opts || {} })); },
+      startPick: function (opts) { return invoke("hub_webview_start_pick", withPlugin({ opts: opts || {} })); },
+      takeLastPick: function () { return invoke("hub_webview_take_last_pick", withPlugin()); },
+      snapshot: function (opts) { return invoke("hub_webview_snapshot", withPlugin({ opts: opts || {} })); },
+      watch: {
+        start: function (opts) { return invoke("hub_webview_watch_start", withPlugin({ opts: opts || {} })); },
+        stop: function (opts) { return invoke("hub_webview_watch_stop", withPlugin({ opts: opts || {} })); },
+        list: function () { return invoke("hub_webview_watch_list", withPlugin()); }
+      },
+      onChanged: function (cb) {
+        function onEvt(ev) {
+          var d = ev && ev.detail;
+          if (!d || d.type !== "webview-watch-changed") return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("wh-shortcuts-evt", onEvt);
+        return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
+      },
+      onScanned: function (cb) {
+        function onEvt(ev) {
+          var d = ev && ev.detail;
+          if (!d || d.type !== "webview-watch-scanned") return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("wh-shortcuts-evt", onEvt);
+        return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
+      },
+      onPick: function (cb) {
+        function onEvt(ev) {
+          var d = ev && ev.detail;
+          if (!d || d.type !== "webview-pick-result") return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("wh-shortcuts-evt", onEvt);
+        return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
+      },
+      onClosed: function (cb) {
+        function onEvt(ev) {
+          var d = ev && ev.detail;
+          if (!d || d.type !== "webview-session-closed") return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("wh-shortcuts-evt", onEvt);
+        return function () { window.removeEventListener("wh-shortcuts-evt", onEvt); };
+      }
+    },
     foreground: {
       get: function () { return invoke("get_foreground_app", {}); },
       subscribe: function (cb) {
@@ -235,6 +293,7 @@ export function shortcutsHubBootstrapScript(pluginId: string): string {
         urgency: opts && opts.urgency,
         ttlMs: opts && opts.ttlMs,
         actions: opts && opts.actions,
+        defaultActionId: opts && opts.defaultActionId,
         data: opts && opts.data
       }
     }));
@@ -349,15 +408,16 @@ export async function buildShortcutsSrcdoc(pluginId: string, entryPath: string):
       html = `<style id="wh-plugin-shortcuts-css">${css}</style>${html}`;
     }
   }
-  const barH = SHORTCUTS_HEIGHT;
+  const barH = getLiveBarHeight();
+  const scale = chromeScale(barH);
   // Host chrome + manage-icon center (must not depend on plugin CSS link resolve)
   const shellCss = `<style id="wh-shortcuts-shell">
 *{box-sizing:border-box;border:none!important;outline:none!important;box-shadow:none!important}
-:root{--wh-bar-h:${barH}px}
-html,body{margin:0;padding:0;overflow:hidden!important;background:transparent!important;height:var(--wh-bar-h,${barH}px);max-height:var(--wh-bar-h,${barH}px);width:max-content;min-width:${barH}px;scrollbar-width:none;color:var(--wh-chrome-fg,rgba(255,255,255,.94));text-shadow:var(--wh-chrome-shadow,0 1px 2px rgba(0,0,0,.35));display:flex;align-items:center;transition:color 220ms ease,text-shadow 220ms ease}
+:root{--wh-bar-h:${barH}px;--wh-chrome-scale:${scale}}
+html,body{margin:0;padding:0;overflow:hidden!important;background:transparent!important;height:var(--wh-bar-h,${barH}px);max-height:var(--wh-bar-h,${barH}px);width:max-content;min-width:${barH}px;scrollbar-width:none;color:var(--wh-chrome-fg,rgba(255,255,255,.94));text-shadow:var(--wh-chrome-shadow,0 1px 2px rgba(0,0,0,.35));display:flex;align-items:center;font-size:calc(12px * var(--wh-chrome-scale,1));transition:color 220ms ease,text-shadow 220ms ease}
 button{border:none!important;background:transparent!important;outline:none!important;box-shadow:none!important;-webkit-appearance:none!important;appearance:none!important;border-radius:0!important;color:inherit;font:inherit}
 .wg-chip.is-manage{position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;width:${barH}px!important;min-width:${barH}px!important;height:var(--wh-bar-h,${barH}px)!important;max-height:var(--wh-bar-h,${barH}px)!important;padding:0!important;margin:0!important;line-height:0!important;text-shadow:none!important}
-.wg-chip.is-manage .wg-chip-icon{position:absolute!important;left:50%!important;top:50%!important;width:13px!important;height:13px!important;margin:0!important;padding:0!important;transform:translate(-50%,-50%)!important;display:block!important;overflow:visible!important;text-shadow:none!important;filter:none!important;pointer-events:none!important}
+.wg-chip.is-manage .wg-chip-icon{position:absolute!important;left:50%!important;top:50%!important;width:calc(13px * var(--wh-chrome-scale,1))!important;height:calc(13px * var(--wh-chrome-scale,1))!important;margin:0!important;padding:0!important;transform:translate(-50%,-50%)!important;display:block!important;overflow:visible!important;text-shadow:none!important;filter:none!important;pointer-events:none!important}
 ::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}
 </style>`;
   const boot = `${shellCss}<script>${shortcutsHubBootstrapScript(pluginId)}</script>`;

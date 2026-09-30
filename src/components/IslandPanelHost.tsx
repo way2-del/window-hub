@@ -453,6 +453,68 @@ export default function IslandPanelHost({
   }, [pluginId, enabled]);
 
   useEffect(() => {
+    if (!pluginId || !enabled) return;
+    const unsubs: Array<() => void> = [];
+    void (async () => {
+      unsubs.push(
+        await listen<Record<string, unknown>>("webview-watch-changed", (ev) => {
+          if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+          iframeRef.current?.contentWindow?.postMessage(
+            {
+              channel: "webview-watch-changed-fwd",
+              ...(ev.payload ?? {}),
+              pluginId: ev.payload?.pluginId ?? pluginId,
+            },
+            "*",
+          );
+        }),
+      );
+      unsubs.push(
+        await listen<Record<string, unknown>>("webview-watch-scanned", (ev) => {
+          if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+          iframeRef.current?.contentWindow?.postMessage(
+            {
+              channel: "webview-watch-scanned-fwd",
+              ...(ev.payload ?? {}),
+              pluginId: ev.payload?.pluginId ?? pluginId,
+            },
+            "*",
+          );
+        }),
+      );
+      unsubs.push(
+        await listen<Record<string, unknown>>("webview-pick-result", (ev) => {
+          if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+          iframeRef.current?.contentWindow?.postMessage(
+            {
+              channel: "webview-pick-result-fwd",
+              ...(ev.payload ?? {}),
+              pluginId: ev.payload?.pluginId ?? pluginId,
+            },
+            "*",
+          );
+        }),
+      );
+      unsubs.push(
+        await listen<Record<string, unknown>>("webview-session-closed", (ev) => {
+          if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+          iframeRef.current?.contentWindow?.postMessage(
+            {
+              channel: "webview-session-closed-fwd",
+              ...(ev.payload ?? {}),
+              pluginId: ev.payload?.pluginId ?? pluginId,
+            },
+            "*",
+          );
+        }),
+      );
+    })();
+    return () => {
+      for (const u of unsubs) u();
+    };
+  }, [pluginId, enabled]);
+
+  useEffect(() => {
     if (!pluginId || !enabled || !searchSubmit) return;
     const payload = {
       channel: "island-search-fwd",

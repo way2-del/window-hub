@@ -17,6 +17,7 @@ import DockApp from "./DockApp";
 import DockGlassApp from "./DockGlassApp";
 import DockIconEditorApp from "./DockIconEditorApp";
 import DockAddIconPopupApp from "./DockAddIconPopupApp";
+import ChromeSatelliteApp from "./ChromeSatelliteApp";
 import { applyGlassCss } from "./glassPrefs";
 import "./App.css";
 import "./settings.css";
@@ -44,6 +45,8 @@ const bodyClass = kind === "control-center" ? "is-control-center-popup" :
                     ? "is-dock-add-icon-popup"
                   : kind === "dock-icon-editor"
                     ? ["is-dock-icon-editor", "is-settings"]
+                    : kind === "chrome-sat"
+                      ? "is-chrome-sat"
                     : kind === "dock" || kind === "dock-glass" || kind === "island-bar-glass"
                       ? "is-dock"
                       : "is-island";
@@ -129,6 +132,8 @@ ReactDOM.createRoot(root).render(
       <DockAddIconPopupApp />
     ) : kind === "dock-icon-editor" ? (
       <DockIconEditorApp />
+    ) : kind === "chrome-sat" ? (
+      <ChromeSatelliteApp />
     ) : kind === "dock" ? (
       <DockApp />
     ) : kind === "dock-glass" || kind === "island-bar-glass" ? (

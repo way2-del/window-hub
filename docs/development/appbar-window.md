@@ -27,3 +27,5 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib appbar_window::tests::shel
 测试覆盖未保护窗口确实可最小化、受保护窗口拒绝同一命令、框架样式刷新、应用主动隐藏、实际 HWND 的 Shell 注册、展开前后占位不变，以及无 watchdog 时的全部最小化和两轮显示桌面。
 
 2026-09-24：以上测试通过；release-fast 构建成功并替换运行版本。真实顶栏两轮显示桌面共 60 次采样均可见、非最小化、保持置顶且可命中；截图位于本地 `workspace/screenshots/appbar-show-desktop.png`。物理触摸板三指手势未直接自动化；全屏游戏、多显示器/DPI 切换及 Explorer 重启尚未做本轮实机回归。
+
+多显示器布局（顶栏 / Dock 分屏、副屏卫星顶栏）见 [display-placement.md](display-placement.md)。

@@ -1,0 +1,60 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.page-watch",
+  "name": "网页监测",
+  "version": "1.2.6",
+  "official": true,
+  "logo": "icon.svg",
+  "description": "打开网页、划定元素并后台监测变化，变更时推送灵动岛通知。使用托管 WebView2，登录态与 Cookie 按插件隔离保存。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "popup": "popup.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "网页监测",
+      "order": 35,
+      "action": "popup.open",
+      "manage": "custom"
+    },
+    "island.notify": {
+      "priority": "active",
+      "maxPerMinute": 6
+    }
+  },
+  "settings": [
+    {
+      "key": "popupWidth",
+      "type": "number",
+      "label": "弹窗宽度",
+      "default": 420,
+      "min": 360,
+      "max": 560,
+      "step": 10,
+      "unit": "px"
+    },
+    {
+      "key": "popupHeight",
+      "type": "number",
+      "label": "弹窗高度",
+      "default": 480,
+      "min": 360,
+      "max": 640,
+      "step": 10,
+      "unit": "px"
+    },
+    {
+      "key": "defaultIntervalSec",
+      "type": "number",
+      "label": "默认监测间隔",
+      "description": "新建任务时的默认秒数（最少 30 秒）",
+      "default": 60,
+      "min": 30,
+      "max": 3600,
+      "step": 10,
+      "unit": "秒"
+    }
+  ],
+  "capabilities": ["shortcuts", "storage", "popup", "notify", "webview"]
+}

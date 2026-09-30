@@ -30,10 +30,22 @@ pub struct ChromePrefs {
     /// Ctrl+drag order of system chips (wifi / ime / controlCenter / clock).
     #[serde(default = "default_chip_order")]
     pub chip_order: Vec<String>,
+    /// Collapsed menubar / island strip height (logical px, 24–40).
+    #[serde(default = "default_bar_height")]
+    pub bar_height: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+pub const DEFAULT_BAR_HEIGHT: u32 = 28;
+pub const MIN_BAR_HEIGHT: u32 = 24;
+pub const MAX_BAR_HEIGHT: u32 = 40;
+pub const BAR_HEIGHT_STEP: u32 = 2;
+
+fn default_bar_height() -> u32 {
+    DEFAULT_BAR_HEIGHT
 }
 
 fn default_chip_order() -> Vec<String> {
@@ -69,6 +81,19 @@ fn normalize_chip_order(raw: &[String]) -> Vec<String> {
     out
 }
 
+/// Clamp + snap to even steps in [24, 40]; invalid → default.
+pub fn normalize_bar_height(raw: u32) -> u32 {
+    let clamped = raw.clamp(MIN_BAR_HEIGHT, MAX_BAR_HEIGHT);
+    let steps = ((clamped - MIN_BAR_HEIGHT) as f64 / BAR_HEIGHT_STEP as f64).round() as u32;
+    let snapped = MIN_BAR_HEIGHT + steps * BAR_HEIGHT_STEP;
+    snapped.clamp(MIN_BAR_HEIGHT, MAX_BAR_HEIGHT)
+}
+
+/// Logical strip height for AppBar / composition frost / boot window.
+pub fn bar_height_logical() -> i32 {
+    normalize_bar_height(load().bar_height) as i32
+}
+
 impl Default for ChromePrefs {
     fn default() -> Self {
         Self {
@@ -79,6 +104,7 @@ impl Default for ChromePrefs {
             show_ime: true,
             show_control_center: true,
             chip_order: default_chip_order(),
+            bar_height: DEFAULT_BAR_HEIGHT,
         }
     }
 }
@@ -130,10 +156,13 @@ static WIFI_STARTED: AtomicBool = AtomicBool::new(false);
 static IME_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn load() -> ChromePrefs {
-    match crate::db::with_conn(|c| crate::db::chrome_get(c)) {
+    let mut prefs = match crate::db::with_conn(|c| crate::db::chrome_get(c)) {
         Ok(Some(v)) => serde_json::from_value(v).unwrap_or_default(),
         _ => ChromePrefs::default(),
-    }
+    };
+    prefs.chip_order = normalize_chip_order(&prefs.chip_order);
+    prefs.bar_height = normalize_bar_height(prefs.bar_height);
+    prefs
 }
 
 fn save(prefs: &ChromePrefs) -> Result<(), String> {
@@ -267,6 +296,7 @@ pub fn set_chrome_prefs(app: AppHandle, prefs: ChromePrefs) -> Result<ChromePref
         show_ime: prefs.show_ime,
         show_control_center: prefs.show_control_center,
         chip_order: normalize_chip_order(&prefs.chip_order),
+        bar_height: normalize_bar_height(prefs.bar_height),
     };
     let prev_tier = chrome_rail_tier(&prev);
     let next_tier = chrome_rail_tier(&next);

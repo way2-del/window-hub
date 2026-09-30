@@ -941,6 +941,63 @@ pub fn hub_init_script(plugin_id: &str) -> String {
     sysmon: {{
       snapshot: () => invoke("hub_sysmon_snapshot", withPlugin()),
     }},
+    webview: {{
+      open: (opts) => invoke("hub_webview_open", withPlugin({{ opts: opts || {{}} }})),
+      close: (opts) => invoke("hub_webview_close", withPlugin({{ opts: opts || {{}} }})),
+      navigate: (opts) => invoke("hub_webview_navigate", withPlugin({{ opts: opts || {{}} }})),
+      startPick: (opts) => invoke("hub_webview_start_pick", withPlugin({{ opts: opts || {{}} }})),
+      takeLastPick: () => invoke("hub_webview_take_last_pick", withPlugin()),
+      snapshot: (opts) => invoke("hub_webview_snapshot", withPlugin({{ opts: opts || {{}} }})),
+      watch: {{
+        start: (opts) => invoke("hub_webview_watch_start", withPlugin({{ opts: opts || {{}} }})),
+        stop: (opts) => invoke("hub_webview_watch_stop", withPlugin({{ opts: opts || {{}} }})),
+        list: () => invoke("hub_webview_watch_list", withPlugin()),
+      }},
+      onChanged: (cb) => {{
+        const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+        if (!listen) return () => {{}};
+        let un = () => {{}};
+        listen("webview-watch-changed", (ev) => {{
+          const p = ev && ev.payload;
+          if (!p || p.pluginId !== PLUGIN_ID) return;
+          try {{ cb(p); }} catch (_) {{}}
+        }}).then((fn) => {{ un = fn; }});
+        return () => un();
+      }},
+      onScanned: (cb) => {{
+        const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+        if (!listen) return () => {{}};
+        let un = () => {{}};
+        listen("webview-watch-scanned", (ev) => {{
+          const p = ev && ev.payload;
+          if (!p || p.pluginId !== PLUGIN_ID) return;
+          try {{ cb(p); }} catch (_) {{}}
+        }}).then((fn) => {{ un = fn; }});
+        return () => un();
+      }},
+      onPick: (cb) => {{
+        const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+        if (!listen) return () => {{}};
+        let un = () => {{}};
+        listen("webview-pick-result", (ev) => {{
+          const p = ev && ev.payload;
+          if (!p || p.pluginId !== PLUGIN_ID) return;
+          try {{ cb(p); }} catch (_) {{}}
+        }}).then((fn) => {{ un = fn; }});
+        return () => un();
+      }},
+      onClosed: (cb) => {{
+        const listen = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+        if (!listen) return () => {{}};
+        let un = () => {{}};
+        listen("webview-session-closed", (ev) => {{
+          const p = ev && ev.payload;
+          if (!p || p.pluginId !== PLUGIN_ID) return;
+          try {{ cb(p); }} catch (_) {{}}
+        }}).then((fn) => {{ un = fn; }});
+        return () => un();
+      }},
+    }},
     panel: {{
       close: () => invoke("close_plugin_popup"),
       openSession: () => invoke("hub_panel_open_session", withPlugin()),
@@ -981,6 +1038,7 @@ pub fn hub_init_script(plugin_id: &str) -> String {
           urgency: opts && opts.urgency,
           ttlMs: opts && opts.ttlMs,
           actions: opts && opts.actions,
+          defaultActionId: opts && opts.defaultActionId,
           data: opts && opts.data,
         }},
       }}),

@@ -11,6 +11,8 @@ export type HubNotifyArgs = {
   urgency?: NotifyUrgency;
   ttlMs?: number;
   actions?: NotifyActionInput[];
+  /** Body click fires this actionId via onAction; omit → dismiss (+ panel if any). */
+  defaultActionId?: string;
   data?: unknown;
 };
 
@@ -32,6 +34,7 @@ export async function hubNotify(
     urgency: args.urgency ?? "active",
     ttlMs: args.ttlMs,
     actions: args.actions,
+    defaultActionId: args.defaultActionId,
     data: args.data,
   });
   return { id };

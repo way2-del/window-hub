@@ -19,6 +19,7 @@ const FILE_SEARCH_EXAMPLE_ID: &str = "com.window-hub.file-search";
 const SYSMON_EXAMPLE_ID: &str = "com.window-hub.sysmon";
 const EXCALIDRAW_EXAMPLE_ID: &str = "com.window-hub.excalidraw";
 const WORLD_CLOCK_EXAMPLE_ID: &str = "com.window-hub.world-clock";
+const PAGE_WATCH_EXAMPLE_ID: &str = "com.window-hub.page-watch";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -233,6 +234,7 @@ pub fn ensure_official_plugins(app: &AppHandle) {
         ("now-playing", NOW_PLAYING_EXAMPLE_ID),
         ("file-search", FILE_SEARCH_EXAMPLE_ID),
         ("world-clock", WORLD_CLOCK_EXAMPLE_ID),
+        ("page-watch", PAGE_WATCH_EXAMPLE_ID),
     ] {
         let reg = load_registry();
         let bundled = match resolve_example_plugin_dir(app, folder) {
@@ -458,6 +460,7 @@ pub fn uninstall_plugin(
     let _ = crate::db::with_conn(|c| crate::db::plugin_clear_all(c, &id));
     pins.inner_remove(&id);
     crate::commands::detach_plugin_from_island_prefs(&app, &id);
+    crate::plugin_webview::cleanup_plugin(&app, &id);
     let _ = app.emit("shortcuts-pins-changed", pins.all_flat());
     emit_plugins(&app, &reg);
     Ok(())
@@ -482,6 +485,7 @@ pub(crate) fn apply_plugin_enabled(
     if !enabled {
         close_plugin_popup(app);
         pins.inner_remove(id);
+        crate::plugin_webview::cleanup_plugin(app, id);
         #[cfg(windows)]
         if has_everything {
             crate::everything::reset_if_idle();
@@ -565,6 +569,8 @@ fn example_folder(example_id: &str) -> Result<&'static str, String> {
         Ok("excalidraw")
     } else if id == "world-clock" || id == WORLD_CLOCK_EXAMPLE_ID {
         Ok("world-clock")
+    } else if id == "page-watch" || id == PAGE_WATCH_EXAMPLE_ID {
+        Ok("page-watch")
     } else {
         Err(format!("unknown example plugin: {example_id}"))
     }

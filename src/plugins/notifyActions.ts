@@ -55,7 +55,8 @@ export function isSafeCssColor(raw: string): boolean {
 
 /**
  * Normalize plugin actions for Host UI.
- * - slot ∈ {start,end}; at most one button per slot
+ * - slot ∈ {start,end} for ordering (start then end); at most one per slot
+ * - Layout: Host appends all actions after the text, centered as one cluster
  * - content = exactly 2-char label XOR iconPng
  * - background required & sanitized
  */

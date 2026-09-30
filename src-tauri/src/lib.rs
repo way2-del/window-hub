@@ -4,6 +4,7 @@ mod control_center;
 mod lifecycle;
 mod companion_scripts;
 mod db;
+mod display_placement;
 mod dock;
 mod ecs;
 #[cfg(windows)]
@@ -11,6 +12,7 @@ mod everything;
 mod hub_fetch_guard;
 mod plugin_hub;
 mod plugin_install;
+mod plugin_webview;
 mod staging;
 mod sysmon;
 mod win32;
@@ -343,12 +345,17 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 last_desktop = Some(crate::win32::ambient::is_desktop_scene(hwnd_of(&window)));
                 // Wallpaper seed only — defer live BitBlt until work-area quiet ends.
                 let seed = crate::win32::ambient::sample_nonblocking(hwnd_of(&window));
-                let _ = app.emit("ambient-color", seed);
+                let _ = app.emit("ambient-color", seed.with_label("main"));
                 boot_log("ambient", "seed emitted (live capture deferred)");
             }
 
             let mut last_foreground = crate::win32::ambient::foreground_key();
             let mut last_poll = std::time::Instant::now();
+            // Per chrome-sat desktop scene — mirror main's last_desktop flip → material.
+            let mut sat_desktop_by_label: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            let mut sat_scene_poll = std::time::Instant::now();
+            let mut sat_color_tick: u32 = 0;
             loop {
                 let ms = if crate::win32::ambient::is_settling() {
                     450
@@ -361,6 +368,63 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 if let Some(token) = crate::win32::notification_focus::poll(foreground) {
                     let _ = app.emit_to("main", "tray-notification-viewed", token);
                 }
+
+                // Secondary chrome: scene flip must run even during main AppBar quiet,
+                // otherwise desktop↔maximize never auto-switches (manual refresh still works).
+                if sat_scene_poll.elapsed() >= Duration::from_millis(280) {
+                    sat_scene_poll = std::time::Instant::now();
+                    sat_color_tick = sat_color_tick.wrapping_add(1);
+                    let quiet = crate::win32::work_area::work_area_quiet();
+                    let refresh_color = !quiet && sat_color_tick % 2 == 0;
+                    let mut sat_material_needed = false;
+                    for (label, win) in app.webview_windows() {
+                        if !label.starts_with("chrome-sat-") {
+                            continue;
+                        }
+                        let hwnd = hwnd_of(&win);
+                        let sat_desktop = crate::win32::ambient::is_desktop_scene(hwnd);
+                        let flipped =
+                            sat_desktop_by_label.get(&label).copied() != Some(sat_desktop);
+                        if !flipped && !refresh_color {
+                            continue;
+                        }
+                        // Always live-sample on maximize — never charcoal hwnd marker
+                        // (that painted black under glass before the real ribbon arrived).
+                        let strip = if sat_desktop {
+                            crate::win32::ambient::sample_wallpaper_only(hwnd)
+                        } else {
+                            crate::win32::ambient::sample_for_satellite(hwnd)
+                        };
+                        let strip_desktop = strip.hwnd == 0;
+                        let scene_changed = flipped
+                            || sat_desktop_by_label.get(&label).copied() != Some(strip_desktop);
+                        let labeled = strip.with_label(&label);
+                        // Cache + emit only. Maximize: FE paints 吸色 *over* glass, then
+                        // apply_window_effect — never detach glass here (black flash).
+                        crate::win32::ambient::remember_sat_strip(&label, labeled.clone());
+                        let _ = app.emit_to(&label, "ambient-color", &labeled);
+                        let _ = app.emit("ambient-color", &labeled);
+                        if scene_changed {
+                            sat_desktop_by_label.insert(label.clone(), strip_desktop);
+                            if strip_desktop {
+                                // Back to desktop — reattach HostBackdrop.
+                                sat_material_needed = true;
+                                let prefs = crate::commands::load_material_prefs();
+                                let win2 = win.clone();
+                                std::thread::spawn(move || {
+                                    crate::win32::island_bar_glass::sync_sat_window_now(
+                                        &win2, &prefs,
+                                    );
+                                });
+                            }
+                            // maximize: leave glass up until FE covers then clears.
+                        }
+                    }
+                    if sat_material_needed {
+                        crate::commands::apply_main_window_material(&app);
+                    }
+                }
+
                 if foreground == last_foreground && last_poll.elapsed() < Duration::from_millis(ms) {
                     continue;
                 }
@@ -381,7 +445,7 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                     // Quiet blocked live BitBlt — force one capture so chrome 反色 paints.
                     crate::win32::ambient::reset_sampling_gate();
                     let strip = crate::win32::ambient::sample(hwnd_of(&window));
-                    let _ = app.emit("ambient-color", &strip);
+                    let _ = app.emit("ambient-color", strip.with_label("main"));
                 }
 
                 // BitBlt + bar_comp during AppBar settle → DWM / main-thread 未响应.
@@ -397,7 +461,7 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 }
 
                 if let Some(strip) = crate::win32::ambient::poll_changed(hwnd_of(&window)) {
-                    let _ = app.emit("ambient-color", strip);
+                    let _ = app.emit("ambient-color", strip.with_label("main"));
                 }
             }
         })
@@ -547,6 +611,19 @@ fn spawn_boot_pipeline(app: tauri::AppHandle) {
             lifecycle::dock_done();
             reclaim_appbar_now(&app);
             kick_ambient_live(&app);
+
+            boot_log("display-placement", "phase1 primary (deferred)");
+            let app_dp = app.clone();
+            std::thread::spawn(move || {
+                // Let normal dock bootstrap finish first.
+                std::thread::sleep(Duration::from_millis(3500));
+                if crate::lifecycle::stopping() {
+                    return;
+                }
+                // Phase 1 only via apply — secondary chrome waits inside apply_inner.
+                crate::display_placement::apply_sync(&app_dp);
+                crate::display_placement::spawn_display_change_watcher(app_dp);
+            });
 
             #[cfg(windows)]
             {
@@ -840,6 +917,16 @@ pub fn run() {
                                         }
                                     }
                                 }
+                                // Picking / browsing in Host-managed plugin WebView — keep popup
+                                // alive so hub.webview.startPick can return selector into the form.
+                                if label == "plugin-popup"
+                                    && (crate::plugin_webview::pick_hold_active()
+                                        || crate::plugin_webview::foreground_is_plugin_webview(
+                                            &app,
+                                        ))
+                                {
+                                    return;
+                                }
                             }
                             #[cfg(not(windows))]
                             if let Some(w) = app.get_webview_window(&label) {
@@ -1006,6 +1093,7 @@ pub fn run() {
             commands::system_apps_dark,
             commands::set_material_prefs,
             commands::sample_ambient_color,
+            commands::sample_ambient_for_window,
             commands::get_ambient_mode,
             commands::set_ambient_mode,
             commands::get_window_material,
@@ -1019,6 +1107,10 @@ pub fn run() {
             commands::set_tray_prefs,
             chrome_prefs::get_chrome_prefs,
             chrome_prefs::set_chrome_prefs,
+            display_placement::list_displays_cmd,
+            display_placement::get_display_placement,
+            display_placement::set_display_placement,
+            display_placement::apply_display_placement,
             commands::get_input_lang,
             commands::cycle_input_lang,
             commands::toggle_input_ime,
@@ -1150,6 +1242,15 @@ pub fn run() {
             commands::hub_media_send_key,
             commands::hub_notify,
             commands::hub_fetch,
+            commands::hub_webview_open,
+            commands::hub_webview_close,
+            commands::hub_webview_navigate,
+            commands::hub_webview_start_pick,
+            commands::hub_webview_take_last_pick,
+            commands::hub_webview_snapshot,
+            commands::hub_webview_watch_start,
+            commands::hub_webview_watch_stop,
+            commands::hub_webview_watch_list,
             plugin_install::preview_plugin_from_path,
             plugin_install::preview_example_plugin,
             ];

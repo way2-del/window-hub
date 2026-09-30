@@ -27,6 +27,7 @@ drag = { version = "2.1", features = ["serde"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 ureq = { version = "2.12", features = ["json"] }
 sysinfo = "0.33"
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 # Vendored: blank NIF_ICON frames (WeChat flash) must not be dropped.
@@ -52,6 +53,7 @@ windows = { version = "0.58", features = [
   "Win32_UI_Input_Ime",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
   "Win32_UI_HiDpi",
   "Win32_UI_TextServices",
   "Win32_System_Com",

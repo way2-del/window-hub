@@ -64,6 +64,18 @@ pub fn item_matches_window(item: &DockItem, w: &WindowInfo) -> bool {
     if item.kind != "app" {
         return false;
     }
+    let win_aumid = w.aumid.as_deref().unwrap_or("").trim();
+    let item_aumid = item.virtual_path.trim();
+    if !win_aumid.is_empty() {
+        if !item_aumid.is_empty() && item_aumid.eq_ignore_ascii_case(win_aumid) {
+            return true;
+        }
+        if crate::dock::icon::path_matches_aumid(&item.real_path, win_aumid)
+            || crate::dock::icon::path_matches_aumid(&item.launch_path, win_aumid)
+        {
+            return true;
+        }
+    }
     let want = item.match_exe.to_ascii_lowercase();
     if want.is_empty() {
         return false;

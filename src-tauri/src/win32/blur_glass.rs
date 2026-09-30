@@ -228,10 +228,18 @@ fn dwm_frame_changed(hwnd: HWND) {
 }
 
 /// Ensure WebView2 / window clear pixels so SYSTEMBACKDROP (or CSS blur) can show through.
-fn clear_webview_fill(window: &WebviewWindow) {
+pub fn clear_webview_fill(window: &WebviewWindow) {
     use tauri::utils::config::Color;
     // Alpha must be 0 — any non-zero A becomes 255 on Win8+ WebView2.
     let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+}
+
+/// Top-bar frost for chrome-sat when Composition HostBackdrop fails.
+/// Same tint recipe as `bar_comp::tint_for` / primary desktop glass.
+pub fn apply_chrome_bar_swca(hwnd_raw: isize, dark: Option<bool>) -> Result<(), String> {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    prepare_hwnd_for_system_backdrop(hwnd);
+    apply_swca_acrylic(hwnd, dark)
 }
 
 /// Thin always-on-top / popup glass: SYSTEMBACKDROP often paints a dead
@@ -474,6 +482,30 @@ pub fn apply_dock_glass_layer(window: &WebviewWindow, dark: Option<bool>) -> Res
             }
         });
     });
+    clear_webview_fill(window);
+    Ok(())
+}
+
+/// Satellite dock glass — SWCA acrylic only.
+/// Never call `dock_comp::attach` / `detach`: those are single-session and would
+/// steal or wipe the primary `dock-glass` HostBackdrop.
+pub fn apply_dock_glass_layer_satellite(
+    window: &WebviewWindow,
+    dark: Option<bool>,
+) -> Result<(), String> {
+    let hwnd = hwnd_of(window)?;
+    prepare_hwnd_for_system_backdrop(hwnd);
+    clear_webview_fill(window);
+    // Cap radius so we stay on SWCA path visually (no composition capsule).
+    let radius = dock_corner_radius_px().min(8);
+    let dark = Some(crate::win32::dock_comp::resolve_theme_dark(dark));
+    apply_dock_glass_chrome(hwnd, dark, radius);
+    clear_window_region(hwnd);
+    disable_blur_behind(hwnd);
+    disable_system_backdrop(hwnd);
+    apply_swca_acrylic(hwnd, dark)?;
+    let _ = window.set_shadow(false);
+    strip_class_drop_shadow(hwnd);
     clear_webview_fill(window);
     Ok(())
 }
@@ -907,7 +939,7 @@ fn apply_dock_glass_frost(
         return Ok(());
     }
 
-    crate::win32::dock_comp::detach();
+    crate::win32::dock_comp::detach_hwnd(hwnd.0 as isize);
     apply_swca_acrylic(hwnd, dark)?;
     Ok(())
 }
@@ -1001,7 +1033,7 @@ pub fn apply_dock_glass_round_frost_sized_pub(
         disable_system_backdrop(hwnd);
         let _ = crate::win32::dock_comp::sync_attach_or_update_sized(hwnd, size_px, r, dark);
     } else {
-        crate::win32::dock_comp::detach();
+        crate::win32::dock_comp::detach_hwnd(hwnd.0 as isize);
         let _ = apply_swca_acrylic(hwnd, dark);
     }
 }
@@ -1072,6 +1104,13 @@ pub fn apply_effect(
             if matches!(kind, WindowMaterial::MicaAlt) && is_native_frame_plugin_popup(window) {
                 return apply_settings_frame_mica(window, dark);
             }
+        }
+        label if label.starts_with("dock-sat-glass-") => {
+            // Same HostBackdrop path as primary dock-glass (multi-session dock_comp).
+            return apply_dock_glass_layer(window, dark);
+        }
+        label if label.starts_with("dock-sat-") => {
+            return apply_dock_icons_layer(window, dark);
         }
         _ => {}
     }

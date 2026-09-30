@@ -17,6 +17,16 @@ import {
   hydrateChromePrefs,
   subscribeChromePrefs,
 } from "./chromePrefs";
+import {
+  getPrimaryTopBarMode,
+  hydrateDisplayPlacement,
+  listenDisplayPlacement,
+  subscribeDisplayPlacement,
+} from "./displayPlacementPrefs";
+import {
+  DEFAULT_BAR_H,
+  getLiveBarHeight,
+} from "./features/chrome/barHeight";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -59,7 +69,6 @@ import {
 } from "./glassPrefs";
 import { islandNotifyBus, type IslandNotifyBanner } from "./plugins/islandNotify";
 import {
-  actionsForSlot,
   normalizeNotifyActions,
   type NotifyAction,
 } from "./plugins/notifyActions";
@@ -96,17 +105,22 @@ const VIEW_W_DEFAULT = 380;
 const VIEW_H_DEFAULT = 220;
 /** 岛贴屏顶后顶隙为 0；窗口高度 = 岛高（+ 冲突通知叠层） */
 const TOP_GAP = 0;
-const ISLAND_BAR_H = 28;
 /** 冲突通知：主岛下方独立胶囊与顶边距 */
 const NOTIFY_STACK_GAP = 4;
-const NOTIFY_STACK_H = ISLAND_BAR_H;
 const ISLAND_COLLAPSED_W_DEFAULT = 300;
 /** Alt+Space 搜索态折叠岛宽（容纳搜索框） */
 const ISLAND_SEARCH_COLLAPSED_W = 460;
 /** 搜索框 ↔ 常驻摘要交接时长（与 .bar-weather 过渡对齐） */
 const SEARCH_CHROME_EXIT_MS = 420;
+/** Runtime collapsed strip height (chromePrefs.barHeight). */
+function islandBarH() {
+  return getLiveBarHeight();
+}
+function notifyStackH() {
+  return getLiveBarHeight();
+}
 /** 折叠目标宽（自适应歌词等）；与 liveExpanded 一样由 App 同步 */
-const liveCollapsed = { width: ISLAND_COLLAPSED_W_DEFAULT, height: ISLAND_BAR_H };
+const liveCollapsed = { width: ISLAND_COLLAPSED_W_DEFAULT, height: DEFAULT_BAR_H };
 function collapsedNow(): IslandSize {
   return { width: liveCollapsed.width, height: liveCollapsed.height };
 }
@@ -188,6 +202,8 @@ type Ambient = {
   offset_x?: number;
   span_width?: number;
   png_base64?: string;
+  /** `main` or `chrome-sat-*` — ignore foreign labels on the island surface. */
+  windowLabel?: string;
 };
 
 type TrayAttention = {
@@ -220,6 +236,8 @@ type MsgBanner = {
   version?: number;
   notifyId: string;
   actions: NotifyAction[];
+  /** Body click → onAction(this id); omit → dismiss (+ panel). */
+  defaultActionId?: string;
   data?: unknown;
   /** 托盘/通知图标面积最大色，用于左侧描边 */
   accentColor?: string;
@@ -243,6 +261,7 @@ function bannerFromBus(b: IslandNotifyBanner): MsgBanner {
     version: b.tray?.version,
     notifyId: b.id,
     actions: b.actions ?? [],
+    defaultActionId: b.defaultActionId,
     data: b.data,
   };
 }
@@ -257,12 +276,12 @@ async function screenLogicalWidth() {
 let cachedScreenW: number | null = null;
 /** Last Win32 height we applied — NEVER probe via innerSize/scaleFactor after expand
  * (click-trace #138→HUNG: shrink path deadlocked on those IPC queries). */
-let lastAppliedBarWinH = ISLAND_BAR_H;
+let lastAppliedBarWinH = islandBarH();
 /** Serialize setBarHeight — morph used to overlap dozens of resize IPC calls. */
 let barHeightTail: Promise<void> = Promise.resolve();
 let barHeightSeq = 0;
 /** 供 Win32 顶栏材质裁剪：展开时 = 顶栏条 ∪ 岛壳 */
-let liveIslandClip = { width: ISLAND_COLLAPSED_W_DEFAULT, height: ISLAND_BAR_H };
+let liveIslandClip = { width: ISLAND_COLLAPSED_W_DEFAULT, height: islandBarH() };
 
 async function setBarHeight(islandH: number) {
   // Integer px only — fractional morph steps must not each SetWindowPos.
@@ -289,7 +308,7 @@ async function setBarHeightInner(islandH: number) {
   }
   const width = cachedScreenW;
   const targetH = winHeight(islandH);
-  const raised = islandH > ISLAND_BAR_H + 2;
+  const raised = islandH > islandBarH() + 2;
   if (raised) {
     try {
       clickTrace("fe-island", "before float_overlay");
@@ -339,7 +358,7 @@ async function setBarHeightInner(islandH: number) {
     }
   }
   try {
-    const raisedIsland = islandH > ISLAND_BAR_H + 2;
+    const raisedIsland = islandH > islandBarH() + 2;
     const clipW = raisedIsland
       ? Math.max(liveIslandClip.width, liveExpanded.width)
       : liveIslandClip.width;
@@ -396,10 +415,19 @@ function App() {
   const chromeRailTier = resolveChromeRailTier(chromePrefs);
   const rightShortcuts = hasRightShortcutsWing(chromePrefs);
   const [chromeStripW, setChromeStripW] = useState(0);
+  const [primaryTopBar, setPrimaryTopBar] = useState(() => getPrimaryTopBarMode());
+  const shortcutsOnlyChrome = primaryTopBar === "shortcuts";
+  const hideIslandChrome = primaryTopBar === "none" || shortcutsOnlyChrome;
 
   useEffect(() => {
-    const unsub = subscribeChromePrefs(setChromePrefsState);
-    void hydrateChromePrefs().then(setChromePrefsState);
+    const unsub = subscribeChromePrefs((p) => {
+      setChromePrefsState(p);
+      liveCollapsed.height = p.barHeight;
+    });
+    void hydrateChromePrefs().then((p) => {
+      setChromePrefsState(p);
+      liveCollapsed.height = p.barHeight;
+    });
     let evUnsub: (() => void) | undefined;
     void bindChromePrefsEvents().then((u) => {
       evUnsub = u;
@@ -407,6 +435,19 @@ function App() {
     return () => {
       unsub();
       evUnsub?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    void hydrateDisplayPlacement().then((s) => setPrimaryTopBar(s.primaryTopBar));
+    const unsub = subscribeDisplayPlacement((s) => setPrimaryTopBar(s.primaryTopBar));
+    let evUn: (() => void) | undefined;
+    void listenDisplayPlacement(() => {}).then((u) => {
+      evUn = u;
+    });
+    return () => {
+      unsub();
+      evUn?.();
     };
   }, []);
 
@@ -502,7 +543,7 @@ function App() {
 
   /** 折叠岛宽：即时 paintDom 居中变宽；debounce 的是 React size（ShortcutsHost 用） */
   function syncCollapsedIslandWidth(nextW: number) {
-    const w = Math.max(28, Math.round(nextW));
+    const w = Math.max(islandBarH(), Math.round(nextW));
     liveCollapsed.width = w;
     if (!expandedRef.current && revealRef.current < 0.02 && !pullingRef.current) {
       const root = islandRef.current;
@@ -512,7 +553,7 @@ function App() {
         root.style.right = "auto";
         root.style.setProperty("translate", "-50% 0");
       }
-      paintDom({ width: w, height: ISLAND_BAR_H }, revealRef.current);
+      paintDom({ width: w, height: islandBarH() }, revealRef.current);
     }
     if (collapsedSizeTimer.current != null) {
       window.clearTimeout(collapsedSizeTimer.current);
@@ -520,8 +561,8 @@ function App() {
     collapsedSizeTimer.current = window.setTimeout(() => {
       collapsedSizeTimer.current = null;
       setSize((prev) => {
-        if (Math.abs(prev.width - w) < 1 && prev.height === ISLAND_BAR_H) return prev;
-        return { width: w, height: ISLAND_BAR_H };
+        if (Math.abs(prev.width - w) < 1 && prev.height === islandBarH()) return prev;
+        return { width: w, height: islandBarH() };
       });
     }, 64);
   }
@@ -607,8 +648,9 @@ function App() {
   const islandBar = showSearchChrome
     ? scenarioBar ?? residentBar
     : overlayBar ?? scenarioBar ?? residentBar;
-  /** 托盘闪动消息提示（岛内落下） */
-  const [msgBanner, setMsgBanner] = useState<MsgBanner | null>(null);
+  /** 托盘闪动 / 插件通知（可多条叠层；[0] 为当前主横幅） */
+  const [msgBanners, setMsgBanners] = useState<MsgBanner[]>([]);
+  const msgBanner = msgBanners[0] ?? null;
   const gen = useRef(0);
   const busy = useRef(false);
   const expandedRef = useRef(expanded);
@@ -623,6 +665,8 @@ function App() {
   const trayBannerShownRef = useRef<Set<string>>(new Set());
   const msgBannerRef = useRef<MsgBanner | null>(null);
   const notifyRef = useRef<HTMLDivElement>(null);
+  /** 整列叠层胶囊（含多条）；ignoreCursorEvents 命中必须用这一层，不能只认 primary。 */
+  const notifyStackRef = useRef<HTMLDivElement>(null);
   const swipe = useRef<{
     pointerId: number;
     startX: number;
@@ -641,9 +685,9 @@ function App() {
   const shapeLayerRef = useRef<HTMLDivElement>(null);
   const islandUiRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const lastWinH = useRef(winHeight(ISLAND_BAR_H));
+  const lastWinH = useRef(winHeight(islandBarH()));
   /** 窗口真实逻辑高度（lastWinH 可能被预拉高污染，拖拽必须以实测为准） */
-  const actualWinHRef = useRef(winHeight(ISLAND_BAR_H));
+  const actualWinHRef = useRef(winHeight(islandBarH()));
   /** 悬停离开后的窗口收回 debounce，避免「预拉高 → 离开收回 → 按下拖拽」竞态裁切 */
   const leaveShrinkTimer = useRef<number | null>(null);
   const idleTimer = useRef<number | null>(null);
@@ -700,8 +744,8 @@ function App() {
   function snapCollapsedFromBar(): IslandSize {
     if (searchModeRef.current) {
       liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
-      liveCollapsed.height = ISLAND_BAR_H;
-      return { width: ISLAND_SEARCH_COLLAPSED_W, height: ISLAND_BAR_H };
+      liveCollapsed.height = islandBarH();
+      return { width: ISLAND_SEARCH_COLLAPSED_W, height: islandBarH() };
     }
     const overlay = overlayBarRef.current;
     const scenario = scenarioBarRef.current;
@@ -718,8 +762,8 @@ function App() {
       ? widthForBarLabel(text, pluginId, showDot, false)
       : ISLAND_COLLAPSED_W_DEFAULT;
     liveCollapsed.width = w;
-    liveCollapsed.height = ISLAND_BAR_H;
-    return { width: w, height: ISLAND_BAR_H };
+    liveCollapsed.height = islandBarH();
+    return { width: w, height: islandBarH() };
   }
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
@@ -937,8 +981,8 @@ function App() {
 
   async function shrinkIslandWindow(): Promise<void> {
     clickTrace("fe-island", "shrinkIslandWindow");
-    await setBarHeight(ISLAND_BAR_H);
-    const targetWinH = winHeight(ISLAND_BAR_H);
+    await setBarHeight(islandBarH());
+    const targetWinH = winHeight(islandBarH());
     lastWinH.current = targetWinH;
     actualWinHRef.current = targetWinH;
   }
@@ -968,17 +1012,16 @@ function App() {
     }
   }
 
-  function dismissMsgBanner() {
+  function dismissMsgBanner(notifyId?: string) {
     const el = notifyRef.current;
     if (el) {
       el.style.transition = "";
       el.style.transform = "";
       el.style.opacity = "";
     }
-    const banner = msgBannerRef.current;
-    const id = banner?.notifyId;
-    msgBannerRef.current = null;
-    setMsgBanner(null);
+    const id = (notifyId || msgBannerRef.current?.notifyId || "").trim();
+    const banner =
+      (id && msgBanners.find((b) => b.notifyId === id)) || msgBannerRef.current;
     if (id) islandNotifyBus.dismiss(id);
     else islandNotifyBus.dismiss();
     // 划掉/关闭也要复位 flashing，否则托盘一直闪却不再发 tray-attention 上升沿
@@ -995,13 +1038,12 @@ function App() {
   useTrayNotificationFocus(
     msgBanner?.source === "tray" ? msgBanner.notifyId : undefined,
     msgBanner?.hwnd,
-    dismissMsgBanner,
+    () => dismissMsgBanner(msgBanner?.notifyId),
   );
 
-  function fireNotifyAction(action: NotifyAction) {
-    const banner = msgBannerRef.current;
-    if (!banner || banner.source !== "plugin" || !banner.pluginId) {
-      dismissMsgBanner();
+  function fireNotifyAction(banner: MsgBanner, action: NotifyAction) {
+    if (banner.source !== "plugin" || !banner.pluginId) {
+      dismissMsgBanner(banner.notifyId);
       return;
     }
     const payload = {
@@ -1011,42 +1053,92 @@ function App() {
       data: action.data !== undefined ? action.data : banner.data,
     };
     void emit("island-notify-action", payload).catch(console.error);
-    dismissMsgBanner();
+    dismissMsgBanner(banner.notifyId);
   }
 
-  function applyMsgBannerFromBus(b: IslandNotifyBanner) {
-    // 「闪动时通知上岛」关闭时：绝不把托盘 attention 落到岛上（含收起后补弹 / bus 订阅）
-    if (b.source === "tray" && !trayFlashNotifyAllowed({
-      id: b.tray?.iconId,
-      pinKey: b.tray?.pinKey,
-    })) {
-      console.info("[tray-attention] bus apply blocked: flash notify off", b.id);
-      islandNotifyBus.dismiss(b.id);
-      return;
+  /** Resolve body-click default: named action from list, or synthetic with banner.data. */
+  function resolveDefaultNotifyAction(banner: MsgBanner): NotifyAction | null {
+    const id = (banner.defaultActionId || "").trim();
+    if (!id) return null;
+    const listed = banner.actions.find((a) => a.id === id);
+    if (listed) return listed;
+    return {
+      id,
+      slot: "end",
+      background: "#000000",
+      data: banner.data,
+    };
+  }
+
+  function renderNotifyActionButton(banner: MsgBanner, act: NotifyAction) {
+    return (
+      <button
+        key={act.id + ":" + act.slot}
+        type="button"
+        className="bar-notify-action"
+        style={{ background: act.background }}
+        {...hostTipPointerProps(act.label || act.id)}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          void hideChromeHoverTip();
+          fireNotifyAction(banner, act);
+        }}
+      >
+        {act.iconPng ? (
+          <img
+            className="bar-notify-action-icon"
+            src={`data:image/png;base64,${act.iconPng}`}
+            alt=""
+            draggable={false}
+          />
+        ) : (
+          act.label
+        )}
+      </button>
+    );
+  }
+
+  function syncMsgStackFromBus() {
+    const raw = islandNotifyBus.getStack();
+    const kept: IslandNotifyBanner[] = [];
+    for (const b of raw) {
+      if (
+        b.source === "tray" &&
+        !trayFlashNotifyAllowed({
+          id: b.tray?.iconId,
+          pinKey: b.tray?.pinKey,
+        })
+      ) {
+        islandNotifyBus.dismiss(b.id);
+        continue;
+      }
+      kept.push(b);
     }
-    bumpIslandActivity();
-    clearIdleTimer();
-    const next = bannerFromBus(b);
-    msgBannerRef.current = next;
-    setMsgBanner(next);
-    const key = next.key;
-    const png = next.iconPng;
-    void dominantColorFromPngBase64(png).then((dbg) => {
-      console.info("[notify-accent]", {
-        key,
-        source: next.source,
-        title: next.title,
-        ...dbg,
+    const next = kept.map(bannerFromBus);
+    msgBannerRef.current = next[0] ?? null;
+    setMsgBanners(next);
+    for (const item of next) {
+      const key = item.key;
+      const png = item.iconPng;
+      void dominantColorFromPngBase64(png).then((dbg) => {
+        setMsgBanners((prev) => {
+          const i = prev.findIndex((x) => x.key === key);
+          if (i < 0) return prev;
+          const cur = prev[i];
+          if (cur.accentColor === dbg.color) return prev;
+          const patched = {
+            ...cur,
+            accentColor: dbg.color,
+            accentDebug: `${dbg.reason} · ${dbg.color} · top=${dbg.top.map((t) => `${t.color}×${t.n}`).join(" | ") || "∅"}`,
+          };
+          const copy = prev.slice();
+          copy[i] = patched;
+          if (i === 0) msgBannerRef.current = patched;
+          return copy;
+        });
       });
-      if (msgBannerRef.current?.key !== key) return;
-      const patched = {
-        ...msgBannerRef.current,
-        accentColor: dbg.color,
-        accentDebug: `${dbg.reason} · ${dbg.color} · top=${dbg.top.map((t) => `${t.color}×${t.n}`).join(" | ") || "∅"}`,
-      };
-      msgBannerRef.current = patched;
-      setMsgBanner(patched);
-    });
+    }
   }
 
   /** Global msgNotify + per-icon flash_notify (missing = on). */
@@ -1152,7 +1244,7 @@ function App() {
 
     const pending = islandNotifyBus.getCurrent();
     if (pending && !msgBannerRef.current) {
-      applyMsgBannerFromBus(pending);
+      syncMsgStackFromBus();
       return;
     }
     if (msgBannerRef.current) return;
@@ -1223,8 +1315,8 @@ function App() {
     const topSquare = 1;
     const gap = 0;
     const bleed = ISLAND_TOP_BLEED;
-    const w = Math.max(28, next.width);
-    const h = Math.max(28, next.height);
+    const w = Math.max(islandBarH(), next.width);
+    const h = Math.max(islandBarH(), next.height);
     // 供快捷区/托盘折叠与侧渐变定位：跟 rAF 同步，不经 React size debounce
     const shellEl = document.querySelector(".shell") as HTMLElement | null;
     if (shellEl) {
@@ -1465,8 +1557,8 @@ function App() {
       paintDom(sizeRef.current, revealRef.current);
       await animateMorph(token, false);
       if (token !== gen.current) return;
-      await setBarHeight(ISLAND_BAR_H);
-      lastWinH.current = winHeight(ISLAND_BAR_H);
+      await setBarHeight(islandBarH());
+      lastWinH.current = winHeight(islandBarH());
       morphingRef.current = false;
       // 再测一次 + 立刻 setSize，避免 React style 仍停在展开宽导致壳/居中错位
       const settled = snapCollapsedFromBar();
@@ -1645,7 +1737,7 @@ function App() {
           el.style.transform = "translateX(-120%)";
           el.style.opacity = "0";
         }
-        window.setTimeout(() => dismissMsgBanner(), 200);
+        window.setTimeout(() => dismissMsgBanner(msgBannerRef.current?.notifyId), 200);
         window.setTimeout(() => {
           swipe.current = null;
         }, 280);
@@ -1718,8 +1810,8 @@ function App() {
 
   useEffect(() => {
     void (async () => {
-      await setBarHeight(ISLAND_BAR_H);
-      lastWinH.current = winHeight(ISLAND_BAR_H);
+      await setBarHeight(islandBarH());
+      lastWinH.current = winHeight(islandBarH());
       const r = await applyBarMaterial();
       if (r.dark != null) setBarGlassDark(r.dark);
       if (r.kind) setMaterial(r.kind);
@@ -1820,7 +1912,7 @@ function App() {
   useEffect(() => {
     if (expanded || busy.current || pulling || springing) return;
     // 托盘改为独立弹窗，主顶栏保持折叠高度
-    if (!trayOpen) void setBarHeight(ISLAND_BAR_H);
+    if (!trayOpen) void setBarHeight(islandBarH());
   }, [trayOpen, expanded, pulling, springing]);
 
   useEffect(() => {
@@ -1857,6 +1949,8 @@ function App() {
       }
       try {
         unlisten = await listen<Ambient>("ambient-color", (ev) => {
+          const label = (ev.payload.windowLabel || "main").trim();
+          if (label !== "main") return;
           setAmbient(ev.payload);
         });
       } catch {
@@ -2038,17 +2132,11 @@ function App() {
       clearStalePanelOverride();
     });
     const unsub = subscribeIslandPrefs(setIslandPrefsState);
-    const unsubBus = islandNotifyBus.subscribe((b) => {
-      if (!b) {
-        msgBannerRef.current = null;
-        setMsgBanner(null);
-        return;
-      }
-      if (expandedRef.current || revealRef.current > 0.05) {
-        console.info("[notify-bus] banner held (island busy)", b.id);
-        return;
-      }
-      applyMsgBannerFromBus(b);
+    const unsubBus = islandNotifyBus.subscribe((_b) => {
+      // Always sync stack UI (multi-banner / conflict overlay). Sticky until click/swipe.
+      bumpIslandActivity();
+      clearIdleTimer();
+      syncMsgStackFromBus();
     });
     let unlistenPrefs: (() => void) | undefined;
     let unlistenTrayPrefs: (() => void) | undefined;
@@ -2431,10 +2519,10 @@ function App() {
       urgency?: "passive" | "active" | "critical";
       ttlMs?: number;
       actions?: unknown;
+      defaultActionId?: string;
       data?: unknown;
     }>("island-notify", (ev) => {
       const p = ev.payload;
-      const prefs = islandPrefsRef.current;
       islandNotifyBus.push(
         {
           source: "plugin",
@@ -2443,8 +2531,13 @@ function App() {
           body: p.body,
           iconPng: p.iconPng,
           urgency: p.urgency ?? "active",
-          ttlMs: p.ttlMs ?? prefs.msgNotifySec * 1000,
+          // Plugin notifies stay until click/swipe (WeChat-like). Pass ttlMs to auto-dismiss.
+          ttlMs: p.ttlMs ?? 0,
           actions: normalizeNotifyActions(p.actions),
+          defaultActionId:
+            typeof p.defaultActionId === "string" && p.defaultActionId.trim()
+              ? p.defaultActionId.trim()
+              : undefined,
           data: p.data,
         },
         p.maxPerMinute,
@@ -2490,7 +2583,7 @@ function App() {
     if (!TRAY_UI_ENABLED) return;
     const pending = islandNotifyBus.getCurrent();
     if (pending && !msgBannerRef.current) {
-      applyMsgBannerFromBus(pending);
+      syncMsgStackFromBus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, reveal]);
@@ -2550,7 +2643,7 @@ function App() {
     }
     const id = banner.notifyId;
     msgBannerRef.current = null;
-    setMsgBanner(null);
+    setMsgBanners((prev) => prev.filter((b) => b.source !== "tray"));
     if (id) islandNotifyBus.dismiss(id);
     else islandNotifyBus.dismiss();
     scheduleImmerse();
@@ -2567,6 +2660,7 @@ function App() {
   /**
    * 主岛已被临时占用时，通知不得盖住栏内内容，改为下方独立胶囊：
    * Alt+空格搜索 / 情景临时（正在播放等）/ 下拉展开。
+   * 多条通知时也走下方叠层（像微信消息叠）。
    */
   const notifyConflict =
     showSearchChrome ||
@@ -2574,8 +2668,11 @@ function App() {
     expanded ||
     pulling ||
     reveal > 0.12;
-  const notifyStacked = Boolean(msgBanner) && notifyConflict;
-  const notifyInline = Boolean(msgBanner) && !notifyConflict;
+  const notifyStackCount = msgBanners.length;
+  const notifyForceStack = notifyStackCount > 1;
+  const notifyStacked =
+    notifyStackCount > 0 && (notifyConflict || notifyForceStack);
+  const notifyInline = notifyStackCount === 1 && !notifyConflict;
   const weatherBarExiting =
     notifyInline || (searchActive && !searchLeaving);
   const stagingBar = islandBar?.text ?? "";
@@ -2600,15 +2697,21 @@ function App() {
           ?.excludeFromBarResident,
     );
 
-  // 冲突通知叠层：拉高/收回窗口附加高度（不改 SVG 岛身尺寸）
+  // 冲突 / 多条通知叠层：拉高/收回窗口附加高度（不改 SVG 岛身尺寸）
   useLayoutEffect(() => {
-    const extra = notifyStacked ? NOTIFY_STACK_GAP + NOTIFY_STACK_H : 0;
+    const n = notifyStacked ? notifyStackCount : 0;
+    const extra =
+      n > 0
+        ? NOTIFY_STACK_GAP +
+          n * notifyStackH() +
+          Math.max(0, n - 1) * NOTIFY_STACK_GAP
+        : 0;
     if (liveNotifyStackExtra === extra) return;
     liveNotifyStackExtra = extra;
-    const islandH = Math.max(ISLAND_BAR_H, sizeRef.current.height);
+    const islandH = Math.max(islandBarH(), sizeRef.current.height);
     lastWinH.current = winHeight(islandH);
     void setBarHeight(islandH);
-  }, [notifyStacked]);
+  }, [notifyStacked, notifyStackCount]);
 
   // 叠层胶囊：主窗仍是全屏宽，左右透明条带必须 OS 级穿透。
   // CSS pointer-events 不够时，按光标是否落在可点区域切换 ignoreCursorEvents。
@@ -2641,7 +2744,10 @@ function App() {
         const pos = await invoke<[number, number] | null>("main_cursor_client_pos");
         if (!pos || cancelled) return;
         const [x, y] = pos;
+        // 叠层：先认整列 notify stack（第 2/3 条也曾只挂 primary ref → OS 点透）。
+        // 再认岛：天气常驻仍可点；与 stack 几何重叠时由更高 z-index 的胶囊吃点击。
         const over =
+          hit(notifyStackRef.current?.getBoundingClientRect(), x, y) ||
           hit(notifyRef.current?.getBoundingClientRect(), x, y) ||
           hit(islandRef.current?.getBoundingClientRect(), x, y) ||
           hit(settingsAnchorRef.current?.getBoundingClientRect(), x, y) ||
@@ -3275,27 +3381,32 @@ function App() {
 
   const shellExpanded = expanded || reveal > 0.2;
 
-  function renderNotifyBanner(opts: { stacked: boolean }) {
-    if (!msgBanner) return null;
+  function renderNotifyBanner(opts: {
+    stacked: boolean;
+    banner: MsgBanner;
+    /** Only the top stacked / sole inline banner owns the swipe ref. */
+    primary?: boolean;
+  }) {
+    const banner = opts.banner;
     return (
       <div
         className={`bar-notify${opts.stacked ? " is-stacked" : ""}`}
-        key={msgBanner.key}
-        ref={notifyRef}
+        key={banner.key}
+        ref={opts.primary ? notifyRef : undefined}
         role="button"
         tabIndex={0}
-        data-notify-accent={msgBanner.accentColor || undefined}
+        data-notify-accent={banner.accentColor || undefined}
         style={
           opts.stacked
             ? ({
                 ["--notify-stack-accent" as string]:
-                  msgBanner.accentColor || "#34c759",
+                  banner.accentColor || "#34c759",
               } as CSSProperties)
             : undefined
         }
         onPointerDown={(e) => {
           e.stopPropagation();
-          if (!opts.stacked || e.button !== 0) return;
+          if (!opts.stacked || !opts.primary || e.button !== 0) return;
           e.currentTarget.setPointerCapture(e.pointerId);
           swipe.current = {
             pointerId: e.pointerId,
@@ -3308,16 +3419,23 @@ function App() {
           };
           bumpIslandActivity();
         }}
-        onPointerMove={opts.stacked ? onIslandPointerMove : undefined}
-        onPointerUp={opts.stacked ? onIslandPointerUp : undefined}
-        onPointerCancel={opts.stacked ? onIslandPointerCancel : undefined}
+        onPointerMove={
+          opts.stacked && opts.primary ? onIslandPointerMove : undefined
+        }
+        onPointerUp={opts.stacked && opts.primary ? onIslandPointerUp : undefined}
+        onPointerCancel={
+          opts.stacked && opts.primary ? onIslandPointerCancel : undefined
+        }
         onClick={(e) => {
           e.stopPropagation();
-          const banner = msgBannerRef.current;
-          if (!banner) return;
           if (banner.source === "plugin") {
+            const def = resolveDefaultNotifyAction(banner);
+            if (def) {
+              fireNotifyAction(banner, def);
+              return;
+            }
             const pluginId = banner.pluginId;
-            dismissMsgBanner();
+            dismissMsgBanner(banner.notifyId);
             if (pluginId) {
               const runtime = pluginRegistry.get(pluginId);
               const hasPanel =
@@ -3356,87 +3474,32 @@ function App() {
               } catch {
                 /* noop */
               }
-              dismissMsgBanner();
+              dismissMsgBanner(banner.notifyId);
             }
           })();
         }}
       >
-        <div className="bar-notify-slot is-start">
-          {(() => {
-            const act = actionsForSlot(msgBanner.actions, "start");
-            if (!act) return null;
-            return (
-              <button
-                type="button"
-                className="bar-notify-action"
-                style={{ background: act.background }}
-                {...hostTipPointerProps(act.label || act.id)}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void hideChromeHoverTip();
-                  fireNotifyAction(act);
-                }}
-              >
-                {act.iconPng ? (
-                  <img
-                    className="bar-notify-action-icon"
-                    src={`data:image/png;base64,${act.iconPng}`}
-                    alt=""
-                    draggable={false}
-                  />
-                ) : (
-                  act.label
-                )}
-              </button>
-            );
-          })()}
-        </div>
-        <div className="bar-notify-main">
-          {msgBanner.iconPng ? (
+        <div className="bar-notify-cluster">
+          {banner.iconPng ? (
             <img
               className="bar-notify-icon"
-              src={`data:image/png;base64,${msgBanner.iconPng}`}
+              src={`data:image/png;base64,${banner.iconPng}`}
               alt=""
               draggable={false}
             />
           ) : (
             <span className="bar-notify-fallback" aria-hidden>
-              {(msgBanner.title || "消").charAt(0).toUpperCase()}
+              {(banner.title || "消").charAt(0).toUpperCase()}
             </span>
           )}
-          <span className="bar-notify-text">{msgBanner.text}</span>
-        </div>
-        <div className="bar-notify-slot is-end">
-          {(() => {
-            const act = actionsForSlot(msgBanner.actions, "end");
-            if (!act) return null;
-            return (
-              <button
-                type="button"
-                className="bar-notify-action"
-                style={{ background: act.background }}
-                {...hostTipPointerProps(act.label || act.id)}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void hideChromeHoverTip();
-                  fireNotifyAction(act);
-                }}
-              >
-                {act.iconPng ? (
-                  <img
-                    className="bar-notify-action-icon"
-                    src={`data:image/png;base64,${act.iconPng}`}
-                    alt=""
-                    draggable={false}
-                  />
-                ) : (
-                  act.label
-                )}
-              </button>
-            );
-          })()}
+          <span className="bar-notify-text">{banner.text}</span>
+          {banner.actions.length > 0 ? (
+            <div className="bar-notify-actions">
+              {banner.actions.map((act) =>
+                renderNotifyActionButton(banner, act),
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
     );
@@ -3477,30 +3540,34 @@ function App() {
         className="settings-anchor"
         onClick={(e) => e.stopPropagation()}
       >
-        <StatusMenu
-          anchorRef={settingsAnchorRef}
-          menuOpen={statusMenuOpen}
-          onMenuOpenChange={setStatusMenuOpen}
-        />
+        {!hideIslandChrome ? (
+          <StatusMenu
+            anchorRef={settingsAnchorRef}
+            menuOpen={statusMenuOpen}
+            onMenuOpenChange={setStatusMenuOpen}
+          />
+        ) : null}
       </div>
 
       <ShortcutsHost
         settingsRef={settingsAnchorRef}
-        islandWidth={size.width}
+        islandWidth={hideIslandChrome ? 120 : size.width}
         side="left"
-        dualMode={rightShortcuts}
+        dualMode={rightShortcuts || shortcutsOnlyChrome}
       />
-      {rightShortcuts ? (
+      {rightShortcuts || shortcutsOnlyChrome ? (
         <ShortcutsHost
           settingsRef={settingsAnchorRef}
-          islandWidth={size.width}
+          islandWidth={hideIslandChrome ? 120 : size.width}
           side="right"
           dualMode
-          chromeStripW={chromeRailTier === "hybrid" ? chromeStripW : 0}
+          chromeStripW={
+            !shortcutsOnlyChrome && chromeRailTier === "hybrid" ? chromeStripW : 0
+          }
         />
       ) : null}
 
-      {TRAY_UI_ENABLED && chromeRailTier !== "dual" ? (
+      {!shortcutsOnlyChrome && TRAY_UI_ENABLED && chromeRailTier !== "dual" ? (
         <TrayCluster
           open={trayOpen}
           onOpenChange={setTrayOpen}
@@ -3510,10 +3577,12 @@ function App() {
             chromeRailTier === "hybrid" ? setChromeStripW : undefined
           }
         />
-      ) : !TRAY_UI_ENABLED && chromeRailTier !== "dual" ? (
+      ) : !shortcutsOnlyChrome && !TRAY_UI_ENABLED && chromeRailTier !== "dual" ? (
         <ChromeStatusCluster />
       ) : null}
 
+      {!hideIslandChrome ? (
+      <>
       <BorderBeam
         ref={islandRef}
         size="pulse-inner"
@@ -3602,10 +3671,15 @@ function App() {
             // 冲突叠层通知不在主岛内，点主岛不处理横幅
             const banner = notifyInline ? msgBannerRef.current : null;
             if (banner) {
-              // 插件通知：点横幅 → 下拉该插件面板看详情；左右按钮走 actions（非托盘跳转）
+              // 插件通知：优先 defaultAction；否则 dismiss（有 panel 则开面板）
               if (banner.source === "plugin") {
+                const def = resolveDefaultNotifyAction(banner);
+                if (def) {
+                  fireNotifyAction(banner, def);
+                  return;
+                }
                 const pluginId = banner.pluginId;
-                dismissMsgBanner();
+                dismissMsgBanner(banner.notifyId);
                 if (pluginId) {
                   const runtime = pluginRegistry.get(pluginId);
                   const hasPanel =
@@ -3646,7 +3720,7 @@ function App() {
                   } catch {
                     /* noop */
                   }
-                  dismissMsgBanner();
+                  dismissMsgBanner(banner.notifyId);
                 }
               })();
               return;
@@ -3812,7 +3886,13 @@ function App() {
                   </button>
                 </div>
               ) : null}
-              {notifyInline ? renderNotifyBanner({ stacked: false }) : null}
+              {notifyInline && msgBanner
+                ? renderNotifyBanner({
+                    stacked: false,
+                    banner: msgBanner,
+                    primary: true,
+                  })
+                : null}
             </div>
 
             <div
@@ -3844,6 +3924,7 @@ function App() {
       </BorderBeam>
       {notifyStacked ? (
         <div
+          ref={notifyStackRef}
           className="island-notify-stack"
           style={
             {
@@ -3852,8 +3933,16 @@ function App() {
             } as CSSProperties
           }
         >
-          {renderNotifyBanner({ stacked: true })}
+          {msgBanners.map((b, i) =>
+            renderNotifyBanner({
+              stacked: true,
+              banner: b,
+              primary: i === 0,
+            }),
+          )}
         </div>
+      ) : null}
+      </>
       ) : null}
     </div>
   );

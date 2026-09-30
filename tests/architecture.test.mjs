@@ -19,19 +19,22 @@ test('native window labels and query aliases retain their routes', () => {
     ['dock-glass', 'dock-glass', 'dock-glass'], ['island-bar-glass', 'island-bar-glass', 'island-bar-glass'],
     ['dock-icon-editor', 'dock-icon-editor', 'dock-icon-editor'],
     ['dock-add-icon-popup', 'dock-add-icon', 'dock-add-icon'],
+    ['chrome-sat-a1b2c3d4', 'chrome-sat', 'chrome-sat'],
   ];
   for (const [label, query, expected] of cases) {
     assert.equal(resolveWindowKind({}, () => label, '?window=unknown'), expected);
     assert.equal(resolveWindowKind({}, () => { throw new Error('no Tauri'); }, `?window=${query}`), expected);
   }
   assert.equal(resolveWindowKind({}, () => 'main', '?window=unknown'), 'island');
+  assert.equal(resolveWindowKind({}, () => 'dock-sat-deadbeef', '?window=unknown'), 'dock');
+  assert.equal(resolveWindowKind({}, () => 'dock-sat-glass-deadbeef', '?window=unknown'), 'dock-glass');
 });
 
 test('injected flags outrank native/query routes without touching Tauri', () => {
   const flags = [
     ['DOCK_ICON_EDITOR', 'dock-icon-editor'], ['DOCK_ADD_ICON_POPUP', 'dock-add-icon'],
     ['DOCK_GLASS', 'dock-glass'],
-    ['ISLAND_BAR_GLASS', 'island-bar-glass'], ['DOCK', 'dock'], ['PLUGIN_POPUP', 'plugin-popup'],
+    ['ISLAND_BAR_GLASS', 'island-bar-glass'], ['CHROME_SAT', 'chrome-sat'], ['DOCK', 'dock'], ['PLUGIN_POPUP', 'plugin-popup'],
     ['WIFI_AUTH_POPUP', 'wifi-auth'], ['CONTROL_CENTER', 'control-center'], ['WIFI_POPUP', 'wifi'], ['CHROME_HOVER_TIP', 'chrome-tip'],
     ['INPUT_LANG_POPUP', 'input-lang'], ['STATUS_MENU_POPUP', 'status-menu'],
     ['TRAY_POPUP', 'tray'], ['SETTINGS', 'settings'],

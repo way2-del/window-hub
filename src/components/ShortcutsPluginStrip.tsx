@@ -374,12 +374,21 @@ export default function ShortcutsPluginStrip({
   }, [pluginId, onRequestWidth]);
 
   useEffect(() => {
+    let cancelled = false;
     const unsubs: Array<() => void> = [];
     const frame = () => iframeRef.current?.contentWindow;
 
+    const track = (un: () => void) => {
+      if (cancelled) {
+        un();
+        return;
+      }
+      unsubs.push(un);
+    };
+
     void (async () => {
       try {
-        unsubs.push(
+        track(
           await listen<{ windows: unknown }>("hub-windows-changed", (ev) => {
             frame()?.postMessage(
               {
@@ -392,7 +401,8 @@ export default function ShortcutsPluginStrip({
             window.setTimeout(measureAndReport, 0);
           }),
         );
-        unsubs.push(
+        if (cancelled) return;
+        track(
           await listen<string>("plugin-popup-opened", (ev) => {
             const id = typeof ev.payload === "string" ? ev.payload : null;
             frame()?.postMessage(
@@ -401,14 +411,16 @@ export default function ShortcutsPluginStrip({
             );
           }),
         );
-        unsubs.push(
+        if (cancelled) return;
+        track(
           await listen("plugin-popup-closed", () => {
             frame()?.postMessage({ channel: WH_SHORTCUTS_EVT, type: "popup-closed" }, "*");
             frame()?.postMessage({ channel: WH_SHORTCUTS_EVT, type: "refresh" }, "*");
             window.setTimeout(measureAndReport, 80);
           }),
         );
-        unsubs.push(
+        if (cancelled) return;
+        track(
           await listen<{ pluginId?: string; settings?: Record<string, unknown> }>(
             "plugin-settings-changed",
             (ev) => {
@@ -424,7 +436,8 @@ export default function ShortcutsPluginStrip({
             },
           ),
         );
-        unsubs.push(
+        if (cancelled) return;
+        track(
           await listen<{
             pluginId?: string;
             notifyId: string;
@@ -444,7 +457,64 @@ export default function ShortcutsPluginStrip({
             );
           }),
         );
-        unsubs.push(
+        if (cancelled) return;
+        track(
+          await listen<Record<string, unknown>>("webview-watch-changed", (ev) => {
+            if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+            frame()?.postMessage(
+              {
+                channel: WH_SHORTCUTS_EVT,
+                type: "webview-watch-changed",
+                ...(ev.payload ?? {}),
+              },
+              "*",
+            );
+          }),
+        );
+        if (cancelled) return;
+        track(
+          await listen<Record<string, unknown>>("webview-watch-scanned", (ev) => {
+            if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+            frame()?.postMessage(
+              {
+                channel: WH_SHORTCUTS_EVT,
+                type: "webview-watch-scanned",
+                ...(ev.payload ?? {}),
+              },
+              "*",
+            );
+          }),
+        );
+        if (cancelled) return;
+        track(
+          await listen<Record<string, unknown>>("webview-pick-result", (ev) => {
+            if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+            frame()?.postMessage(
+              {
+                channel: WH_SHORTCUTS_EVT,
+                type: "webview-pick-result",
+                ...(ev.payload ?? {}),
+              },
+              "*",
+            );
+          }),
+        );
+        if (cancelled) return;
+        track(
+          await listen<Record<string, unknown>>("webview-session-closed", (ev) => {
+            if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+            frame()?.postMessage(
+              {
+                channel: WH_SHORTCUTS_EVT,
+                type: "webview-session-closed",
+                ...(ev.payload ?? {}),
+              },
+              "*",
+            );
+          }),
+        );
+        if (cancelled) return;
+        track(
           await listen<{ pluginId?: string }>("island-bar-click", (ev) => {
             if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
             frame()?.postMessage({ channel: WH_SHORTCUTS_EVT, type: "bar-click" }, "*");
@@ -458,6 +528,7 @@ export default function ShortcutsPluginStrip({
 
     // 前台轮询改由 ShortcutsHost 统一广播，避免 N 条 × get_foreground_app
     return () => {
+      cancelled = true;
       unsubs.forEach((fn) => fn());
     };
   }, [pluginId, srcdoc]);

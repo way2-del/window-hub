@@ -82,38 +82,23 @@ pub fn is_cached_icon_path(icon_path: &str) -> bool {
     !icon_path.trim().is_empty() && p.is_file() && path_is_under_icons_dir(p)
 }
 
-/// Resolve source → write `%APPDATA%\window-hub\dock-icons\{itemId}.png` → return path.
-pub fn materialize_item_icon(
-    item_id: &str,
-    icon_path: &str,
-    launch_path: &str,
-) -> Result<Option<String>, String> {
-    let id = item_id.trim();
-    if id.is_empty() {
-        return Err("item_id required".into());
-    }
-    if is_cached_icon_path(icon_path) {
-        return Ok(Some(normalize_path_string(icon_path.trim())));
-    }
-    let Some(png) = resolve_item_icon_png_bytes(icon_path, launch_path) else {
-        return Ok(None);
-    };
-    let dest = owned_icon_path(id)?;
-    std::fs::write(&dest, &png).map_err(|e| format!("write dock icon: {e}"))?;
-    // Invalidate hot cache entries that may still point at the old source.
-    clear_icon_cache();
-    Ok(Some(normalize_path_string(&dest.to_string_lossy())))
+/// First known AppsFolder AUMID for a packaged system exe path (if any).
+pub fn preferred_aumid_for_path(path: &str) -> Option<String> {
+    aumid_candidates_for_paths(path, path)
+        .into_iter()
+        .next()
+        .map(|s| s.to_string())
 }
 
-/// Copy / extract a user-picked file into the owned icon store for `item_id`.
-pub fn cache_icon_from_source(item_id: &str, source_path: &str) -> Result<String, String> {
-    let src = source_path.trim();
-    if src.is_empty() {
-        return Err("source_path required".into());
+/// True when `aumid` is a known AppsFolder id for this exe / launch path.
+pub fn path_matches_aumid(path: &str, aumid: &str) -> bool {
+    let id = aumid.trim();
+    if id.is_empty() {
+        return false;
     }
-    let cached = materialize_item_icon(item_id, src, src)?
-        .ok_or_else(|| "无法解析图标".to_string())?;
-    Ok(cached)
+    aumid_candidates_for_paths(path, path)
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(id))
 }
 
 /// Ensure each pin stores an owned `icon_path` under `dock-icons` (when a raster exists).
@@ -139,15 +124,73 @@ pub fn ensure_item_icon_cached(item: &mut super::DockItem) {
         }
         return;
     }
-    if item.icon_path.trim().is_empty() {
-        return;
-    }
     if is_cached_icon_path(&item.icon_path) {
         return;
     }
-    if let Ok(Some(path)) = materialize_item_icon(&item.id, &item.icon_path, &item.launch_path) {
+    // Prefer AppsFolder when we already know the AUMID (UWP / system settings).
+    let aumid = item.virtual_path.trim();
+    if !aumid.is_empty() {
+        if let Some(png) = resolve_item_icon_png_bytes("", "", aumid) {
+            if let Ok(dest) = owned_icon_path(&item.id) {
+                if std::fs::write(&dest, &png).is_ok() {
+                    clear_icon_cache();
+                    item.icon_path = normalize_path_string(&dest.to_string_lossy());
+                    return;
+                }
+            }
+        }
+    }
+    if item.icon_path.trim().is_empty() && aumid.is_empty() {
+        return;
+    }
+    if let Ok(Some(path)) =
+        materialize_item_icon_with_aumid(&item.id, &item.icon_path, &item.launch_path, aumid)
+    {
         item.icon_path = path;
     }
+}
+
+/// Resolve source → write `%APPDATA%\window-hub\dock-icons\{itemId}.png` → return path.
+pub fn materialize_item_icon(
+    item_id: &str,
+    icon_path: &str,
+    launch_path: &str,
+) -> Result<Option<String>, String> {
+    materialize_item_icon_with_aumid(item_id, icon_path, launch_path, "")
+}
+
+pub fn materialize_item_icon_with_aumid(
+    item_id: &str,
+    icon_path: &str,
+    launch_path: &str,
+    aumid: &str,
+) -> Result<Option<String>, String> {
+    let id = item_id.trim();
+    if id.is_empty() {
+        return Err("item_id required".into());
+    }
+    if is_cached_icon_path(icon_path) {
+        return Ok(Some(normalize_path_string(icon_path.trim())));
+    }
+    let Some(png) = resolve_item_icon_png_bytes(icon_path, launch_path, aumid) else {
+        return Ok(None);
+    };
+    let dest = owned_icon_path(id)?;
+    std::fs::write(&dest, &png).map_err(|e| format!("write dock icon: {e}"))?;
+    // Invalidate hot cache entries that may still point at the old source.
+    clear_icon_cache();
+    Ok(Some(normalize_path_string(&dest.to_string_lossy())))
+}
+
+/// Copy / extract a user-picked file into the owned icon store for `item_id`.
+pub fn cache_icon_from_source(item_id: &str, source_path: &str) -> Result<String, String> {
+    let src = source_path.trim();
+    if src.is_empty() {
+        return Err("source_path required".into());
+    }
+    let cached = materialize_item_icon(item_id, src, src)?
+        .ok_or_else(|| "无法解析图标".to_string())?;
+    Ok(cached)
 }
 
 pub fn ensure_prefs_icons_cached(prefs: &mut super::DockPrefs) {
@@ -161,10 +204,21 @@ fn normalize_path_string(s: &str) -> String {
 }
 
 pub fn resolve_item_icon_png(icon_path: &str, launch_path: &str) -> Option<String> {
+    resolve_item_icon_png_with_aumid(icon_path, launch_path, "")
+}
+
+/// Same as [`resolve_item_icon_png`], but prefer `shell:AppsFolder\{aumid}` for UWP /
+/// packaged apps (Settings, Security Center, Store hosts, etc.).
+pub fn resolve_item_icon_png_with_aumid(
+    icon_path: &str,
+    launch_path: &str,
+    aumid: &str,
+) -> Option<String> {
     let key = format!(
-        "{}||{}",
+        "{}||{}||{}",
         icon_path.trim().to_ascii_lowercase(),
-        launch_path.trim().to_ascii_lowercase()
+        launch_path.trim().to_ascii_lowercase(),
+        aumid.trim().to_ascii_lowercase()
     );
     {
         let cache = icon_cache().lock();
@@ -172,12 +226,31 @@ pub fn resolve_item_icon_png(icon_path: &str, launch_path: &str) -> Option<Strin
             return hit.clone();
         }
     }
-    let resolved = resolve_item_icon_png_bytes(icon_path, launch_path).map(|b| B64.encode(b));
+    let resolved =
+        resolve_item_icon_png_bytes(icon_path, launch_path, aumid).map(|b| B64.encode(b));
     icon_cache().lock().insert(key, resolved.clone());
     resolved
 }
 
-fn resolve_item_icon_png_bytes(icon_path: &str, launch_path: &str) -> Option<Vec<u8>> {
+fn resolve_item_icon_png_bytes(icon_path: &str, launch_path: &str, aumid: &str) -> Option<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        let aumid = aumid.trim();
+        if !aumid.is_empty() {
+            if let Some(b) = extract_via_apps_folder(aumid) {
+                return Some(b);
+            }
+        }
+        for cand in aumid_candidates_for_paths(icon_path, launch_path) {
+            if cand.eq_ignore_ascii_case(aumid) {
+                continue;
+            }
+            if let Some(b) = extract_via_apps_folder(cand) {
+                return Some(b);
+            }
+        }
+    }
+
     if !icon_path.trim().is_empty() {
         let (path, _idx) = split_icon_location(icon_path.trim());
         if let Some(b) = load_image_file_png_bytes(Path::new(path)) {
@@ -217,6 +290,44 @@ fn resolve_item_icon_png_bytes(icon_path: &str, launch_path: &str) -> Option<Vec
     }
 }
 
+/// Known packaged-app AUMIDs when HWND property store is missing (pinned exe path only).
+fn aumid_candidates_for_paths(icon_path: &str, launch_path: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for raw in [icon_path, launch_path] {
+        let name = Path::new(raw.trim())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "systemsettings.exe" => {
+                out.push(
+                    "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel",
+                );
+                out.push("Microsoft.Windows.Settings_cw5n1h2txyewy!Settings");
+            }
+            "sechealthui.exe" | "securityhealthsystray.exe" | "securityhealthhost.exe" => {
+                out.push("Microsoft.Windows.SecHealthUI_cw5n1h2txyewy!SecHealthUI");
+            }
+            _ => {}
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+#[cfg(windows)]
+fn extract_via_apps_folder(aumid: &str) -> Option<Vec<u8>> {
+    let id = aumid.trim();
+    if id.is_empty() {
+        return None;
+    }
+    // Prefer AppsFolder parsing name — this is where branded UWP icons live.
+    let uri = format!("shell:AppsFolder\\{id}");
+    extract_via_parsing_name(&uri)
+}
+
 /// Windows icon location: `C:\App\app.exe,0` or plain path.
 fn split_icon_location(s: &str) -> (&str, i32) {
     if let Some((path, idx)) = s.rsplit_once(',') {
@@ -248,22 +359,29 @@ fn encode_rgba_png_bytes(pixels: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 
 #[cfg(windows)]
 fn extract_shell_icon_png_bytes(path: &Path) -> Option<Vec<u8>> {
-    extract_via_shell_item(path).or_else(|| extract_via_shgfi_fallback(path))
+    extract_via_parsing_name(&path.to_string_lossy()).or_else(|| extract_via_shgfi_fallback(path))
 }
 
-/// High-quality path: shell image factory (jumbo / scaled icon, not 32px SHGFI).
+/// High-quality path: shell image factory for file paths **or** `shell:AppsFolder\{AUMID}`.
 #[cfg(windows)]
-fn extract_via_shell_item(path: &Path) -> Option<Vec<u8>> {
+fn extract_via_parsing_name(name: &str) -> Option<Vec<u8>> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::DeleteObject;
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{
-        SHCreateItemFromParsingName, IShellItemImageFactory, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     };
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let wide: Vec<u16> = std::ffi::OsStr::new(trimmed)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let factory: IShellItemImageFactory =

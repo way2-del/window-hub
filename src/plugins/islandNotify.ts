@@ -13,7 +13,7 @@ export type IslandNotifyRequest = {
   /** PNG base64 without data: prefix */
   iconPng?: string;
   urgency?: NotifyUrgency;
-  /** Auto-dismiss ms; 0 = sticky until user dismisses */
+  /** Auto-dismiss ms; 0 = sticky until user dismisses / swipes (plugin default). */
   ttlMs?: number;
   /** Tray invoke payload (optional) */
   tray?: {
@@ -26,8 +26,13 @@ export type IslandNotifyRequest = {
     callbackMsg: number;
     version: number;
   };
-  /** Host-normalized actions (start/end only). */
+  /** Host-normalized actions (order preserved; rendered after text). */
   actions?: NotifyAction[];
+  /**
+   * Body click: fire `hub.notify.onAction` with this id, then dismiss.
+   * Omit → dismiss only (and open island.panel if declared).
+   */
+  defaultActionId?: string;
   /** Opaque payload echoed with action clicks. */
   data?: unknown;
 };
@@ -45,17 +50,18 @@ const URGENCY_RANK: Record<NotifyUrgency, number> = {
   critical: 2,
 };
 
-/** Same tray icon / plugin → one banner; later events refresh instead of stacking. */
+/** Same tray icon → one banner; plugin notifies stack (no coalesce). */
 function coalesceKey(req: IslandNotifyRequest): string | null {
   if (req.source === "tray" && req.tray) {
     if (req.tray.iconId) return `tray:${req.tray.iconId}`;
     return `tray:${req.tray.hwnd}:${req.tray.uid}`;
   }
-  if (req.source === "plugin" && req.pluginId) {
-    return `plugin:${req.pluginId}`;
-  }
+  // Plugins: each hub.notify is its own banner (WeChat-like stack).
   return null;
 }
+
+/** Max banners kept (current + queue). Oldest waiting dropped first. */
+const MAX_PENDING = 6;
 
 class IslandNotifyBus {
   private current: IslandNotifyBanner | null = null;
@@ -72,6 +78,11 @@ class IslandNotifyBus {
 
   getCurrent(): IslandNotifyBanner | null {
     return this.current;
+  }
+
+  /** Current + waiting queue (front = on-screen / next). */
+  getStack(): IslandNotifyBanner[] {
+    return this.current ? [this.current, ...this.queue] : [...this.queue];
   }
 
   /** Rate-limit plugin notifies (default 6/min). */
@@ -139,22 +150,32 @@ class IslandNotifyBus {
 
     const curRank = URGENCY_RANK[this.current.urgency ?? "active"];
     const nextRank = URGENCY_RANK[banner.urgency ?? "active"];
-    if (nextRank > curRank || banner.urgency === "critical") {
+    // Plugins: newest on top (WeChat-like stack). Tray: only preempt on higher urgency.
+    const takeFront =
+      req.source === "plugin" ||
+      nextRank > curRank ||
+      banner.urgency === "critical";
+    if (takeFront) {
       this.queue.unshift(this.current);
       // After demoting current, drop any queue dup of the incoming key (safety)
       if (key) {
         this.queue = this.queue.filter((b) => coalesceKey(b) !== key);
       }
+      this.trimPending();
       this.show(banner);
     } else {
       this.queue.push(banner);
+      this.trimPending();
+      this.emit(); // stack grew behind current — UI can overlay
     }
     return banner;
   }
 
   dismiss(id?: string) {
     if (id && this.current && this.current.id !== id) {
+      const before = this.queue.length;
       this.queue = this.queue.filter((b) => b.id !== id);
+      if (this.queue.length !== before) this.emit();
       return;
     }
     this.clearTtl();
@@ -201,6 +222,12 @@ class IslandNotifyBus {
         this.ttlTimer = null;
         if (this.current?.id === banner.id) this.dismiss(banner.id);
       }, ttl);
+    }
+  }
+
+  private trimPending() {
+    while ((this.current ? 1 : 0) + this.queue.length > MAX_PENDING && this.queue.length > 0) {
+      this.queue.shift();
     }
   }
 

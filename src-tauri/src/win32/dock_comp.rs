@@ -9,8 +9,9 @@
 
 #![cfg(windows)]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use parking_lot::Mutex as ParkingMutex;
 use tauri::WebviewWindow;
@@ -56,20 +57,32 @@ fn pack_tint_color(r: u8, g: u8, b: u8, a: u8) -> Color {
 
 static DISPATCHER: Mutex<Option<DispatcherQueueController>> = Mutex::new(None);
 static COMP_THREAD: ParkingMutex<Option<std::thread::ThreadId>> = ParkingMutex::new(None);
-static SESSION: ParkingMutex<Option<DockCompSession>> = ParkingMutex::new(None);
-static GLASS_WIN: ParkingMutex<Option<WebviewWindow>> = ParkingMutex::new(None);
+
+fn sessions() -> &'static ParkingMutex<HashMap<isize, DockCompSession>> {
+    static S: OnceLock<ParkingMutex<HashMap<isize, DockCompSession>>> = OnceLock::new();
+    S.get_or_init(|| ParkingMutex::new(HashMap::new()))
+}
+
+fn glass_wins() -> &'static ParkingMutex<HashMap<isize, WebviewWindow>> {
+    static S: OnceLock<ParkingMutex<HashMap<isize, WebviewWindow>>> = OnceLock::new();
+    S.get_or_init(|| ParkingMutex::new(HashMap::new()))
+}
+
+fn preferred_capsules() -> &'static ParkingMutex<HashMap<isize, CapsulePose>> {
+    static S: OnceLock<ParkingMutex<HashMap<isize, CapsulePose>>> = OnceLock::new();
+    S.get_or_init(|| ParkingMutex::new(HashMap::new()))
+}
+
 /// While true, ignore client-size auto layout (resize hooks would flash full-width capsule).
 static WIDTH_TWEEN_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Last intended visual capsule inside the (always host-sized) glass HWND.
-/// Rest = content width + centered offset; hover = full host. Frost re-attach
-/// must honor this — otherwise deferred material refresh paints “already wide”.
+
 #[derive(Clone, Copy)]
 struct CapsulePose {
     w: f32,
     h: f32,
     ox: f32,
 }
-static PREFERRED_CAPSULE: ParkingMutex<Option<CapsulePose>> = ParkingMutex::new(None);
+
 /// Last resolved dock theme: -1 unknown, 0 light, 1 dark.
 /// Place/resize frost refresh often passes `dark: None` — must not fall back to dark tint.
 static LAST_THEME_DARK: AtomicI8 = AtomicI8::new(-1);
@@ -100,8 +113,8 @@ pub fn resolve_theme_dark(dark: Option<bool>) -> bool {
     d
 }
 
-fn preferred_capsule() -> Option<CapsulePose> {
-    *PREFERRED_CAPSULE.lock()
+fn preferred_capsule_for(hwnd_raw: isize) -> Option<CapsulePose> {
+    preferred_capsules().lock().get(&hwnd_raw).copied()
 }
 
 pub fn begin_width_tween() {
@@ -118,12 +131,15 @@ pub fn width_tween_active() -> bool {
 
 /// Remember the visual capsule pose so later `attach_or_update` (frost retries)
 /// does not snap back to a full-bleed host (= looks pre-widened at rest).
-pub fn remember_capsule(width_px: f32, height_px: f32, offset_x: f32) {
-    *PREFERRED_CAPSULE.lock() = Some(CapsulePose {
-        w: width_px.max(1.0),
-        h: height_px.max(1.0),
-        ox: offset_x.max(0.0),
-    });
+pub fn remember_capsule(hwnd_raw: isize, width_px: f32, height_px: f32, offset_x: f32) {
+    preferred_capsules().lock().insert(
+        hwnd_raw,
+        CapsulePose {
+            w: width_px.max(1.0),
+            h: height_px.max(1.0),
+            ox: offset_x.max(0.0),
+        },
+    );
 }
 
 struct DockCompSession {
@@ -349,7 +365,7 @@ fn layout_session(
     radius_logical: u32,
     dark: Option<bool>,
 ) -> Result<(), String> {
-    if let Some(p) = preferred_capsule() {
+    if let Some(p) = preferred_capsule_for(session.hwnd_raw) {
         return layout_capsule(session, hwnd, p.w, p.h, p.ox, radius_logical, dark);
     }
     let (w, h) = client_size_px(hwnd).ok_or_else(|| "dock-comp: empty client".to_string())?;
@@ -365,7 +381,7 @@ fn layout_session_size(
     dark: Option<bool>,
 ) -> Result<(), String> {
     // Prefer remembered rest/hover pose over a full-host size hint from place.
-    if let Some(p) = preferred_capsule() {
+    if let Some(p) = preferred_capsule_for(session.hwnd_raw) {
         return layout_capsule(session, hwnd, p.w, p.h, p.ox, radius_logical, dark);
     }
     layout_capsule(session, hwnd, w, h, 0.0, radius_logical, dark)
@@ -528,13 +544,10 @@ pub fn animate_capsule_width(
         return Err("composition radius too small".into());
     }
     let raw = hwnd.0 as isize;
-    let slot = SESSION.lock();
-    let Some(session) = slot.as_ref() else {
+    let map = sessions().lock();
+    let Some(session) = map.get(&raw) else {
         return Err("no composition session".into());
     };
-    if session.hwnd_raw != raw {
-        return Err("composition hwnd mismatch".into());
-    }
 
     let h = height_px.max(1.0);
     let to = to_w.max(1.0);
@@ -557,11 +570,11 @@ pub fn animate_capsule_width(
     let from_ox = cur_off.X.clamp(0.0, (host - 1.0).max(0.0));
 
     // Target pose for frost re-attach while tweening / after settle.
-    remember_capsule(to, h, to_ox);
+    remember_capsule(raw, to, h, to_ox);
 
     // Already there — commit pose, no keyframes.
     if (from - to).abs() < 1.5 {
-        drop(slot);
+        drop(map);
         layout_tween_frame(hwnd, to, h, to_ox, radius_logical)?;
         return Ok(0);
     }
@@ -674,7 +687,7 @@ pub fn sync_animate_capsule_width(
         return animate_capsule_width(hwnd, to_w, height_px, host_w, radius_logical);
     }
     let raw = hwnd.0 as isize;
-    let win = GLASS_WIN.lock().clone();
+    let win = glass_win_for(raw);
     let Some(w) = win else {
         return animate_capsule_width(hwnd, to_w, height_px, host_w, radius_logical);
     };
@@ -691,8 +704,8 @@ pub fn sync_animate_capsule_width(
 }
 
 /// True when preferred capsule is already within ~2px of the expected rest/hover width.
-pub fn capsule_near_target(expanded: bool, content_px: f32, host_px: f32) -> bool {
-    let Some(p) = preferred_capsule() else {
+pub fn capsule_near_target(hwnd_raw: isize, expanded: bool, content_px: f32, host_px: f32) -> bool {
+    let Some(p) = preferred_capsule_for(hwnd_raw) else {
         return false;
     };
     let expect = if expanded {
@@ -716,15 +729,16 @@ pub fn layout_tween_frame(
         return Ok(());
     }
     let raw = hwnd.0 as isize;
-    let slot = SESSION.lock();
-    let Some(session) = slot.as_ref() else {
+    let map = sessions().lock();
+    let Some(session) = map.get(&raw) else {
         return Ok(());
     };
-    if session.hwnd_raw != raw {
-        return Ok(());
-    }
-    remember_capsule(width_px, height_px, offset_x);
+    remember_capsule(raw, width_px, height_px, offset_x);
     layout_capsule_inner(session, hwnd, width_px, height_px, offset_x, r, None, false)
+}
+
+fn glass_win_for(hwnd_raw: isize) -> Option<WebviewWindow> {
+    glass_wins().lock().get(&hwnd_raw).cloned()
 }
 
 pub fn sync_layout_tween_frame(
@@ -738,8 +752,7 @@ pub fn sync_layout_tween_frame(
         return layout_tween_frame(hwnd, width_px, height_px, offset_x, radius_logical);
     }
     let raw = hwnd.0 as isize;
-    let win = GLASS_WIN.lock().clone();
-    if let Some(w) = win {
+    if let Some(w) = glass_win_for(raw) {
         let _ = w.run_on_main_thread(move || {
             let h = HWND(raw as *mut _);
             let _ = layout_tween_frame(h, width_px, height_px, offset_x, radius_logical);
@@ -763,8 +776,7 @@ pub fn sync_layout_tween_frame_wait(
         return layout_tween_frame(hwnd, width_px, height_px, offset_x, radius_logical);
     }
     let raw = hwnd.0 as isize;
-    let win = GLASS_WIN.lock().clone();
-    let Some(w) = win else {
+    let Some(w) = glass_win_for(raw) else {
         return layout_tween_frame(hwnd, width_px, height_px, offset_x, radius_logical);
     };
     let (tx, rx) = std::sync::mpsc::channel();
@@ -779,12 +791,22 @@ pub fn sync_layout_tween_frame_wait(
     }
 }
 
-/// Tear down Composition session (restore SWCA path caller responsibility).
+/// Tear down all Composition sessions.
 pub fn detach() {
-    let mut slot = SESSION.lock();
-    if let Some(session) = slot.take() {
+    let mut map = sessions().lock();
+    for (_, session) in map.drain() {
         enable_host_backdrop_attr(HWND(session.hwnd_raw as *mut _), false);
     }
+    preferred_capsules().lock().clear();
+}
+
+/// Tear down one glass HWND (satellite destroy / radius demote).
+pub fn detach_hwnd(hwnd_raw: isize) {
+    if let Some(session) = sessions().lock().remove(&hwnd_raw) {
+        enable_host_backdrop_attr(HWND(session.hwnd_raw as *mut _), false);
+    }
+    preferred_capsules().lock().remove(&hwnd_raw);
+    glass_wins().lock().remove(&hwnd_raw);
 }
 
 /// Attach or refresh Composition acrylic under WebView2. Call on UI thread.
@@ -800,8 +822,9 @@ pub fn attach_or_update_sized(
 ) -> Result<(), String> {
     let dark = Some(resolve_theme_dark(dark));
     let r = radius_logical.min(DOCK_CORNER_RADIUS_MAX);
+    let raw = hwnd.0 as isize;
     if r < DOCK_COMP_RADIUS_MIN {
-        detach();
+        detach_hwnd(raw);
         return Ok(());
     }
 
@@ -811,25 +834,19 @@ pub fn attach_or_update_sized(
         return Ok(());
     }
 
-    let raw = hwnd.0 as isize;
-    let slot = SESSION.lock();
-    let needs_rebuild = match slot.as_ref() {
-        None => true,
-        Some(s) => s.hwnd_raw != raw,
-    };
+    let needs_rebuild = !sessions().lock().contains_key(&raw);
     if needs_rebuild {
-        drop(slot);
-        detach();
+        detach_hwnd(raw);
         let session = build_session(hwnd, dark)?;
         match size_px {
             Some((w, h)) => layout_session_size(&session, hwnd, w, h, r, dark)?,
             None => layout_session(&session, hwnd, r, dark)?,
         }
-        *SESSION.lock() = Some(session);
+        sessions().lock().insert(raw, session);
         return Ok(());
     }
 
-    if let Some(session) = slot.as_ref() {
+    if let Some(session) = sessions().lock().get(&raw) {
         match size_px {
             Some((w, h)) => layout_session_size(session, hwnd, w, h, r, dark)?,
             None => layout_session(session, hwnd, r, dark)?,
@@ -839,7 +856,9 @@ pub fn attach_or_update_sized(
 }
 
 pub fn remember_glass_window(window: &WebviewWindow) {
-    *GLASS_WIN.lock() = Some(window.clone());
+    if let Ok(hwnd) = window.hwnd() {
+        glass_wins().lock().insert(hwnd.0 as isize, window.clone());
+    }
 }
 
 fn on_composition_thread() -> bool {
@@ -858,8 +877,7 @@ pub fn sync_attach_or_update_sized(
         return attach_or_update_sized(hwnd, size_px, radius_logical, dark);
     }
     let raw = hwnd.0 as isize;
-    let win = GLASS_WIN.lock().clone();
-    if let Some(w) = win {
+    if let Some(w) = glass_win_for(raw) {
         let _ = w.run_on_main_thread(move || {
             let h = HWND(raw as *mut _);
             let _ = attach_or_update_sized(h, size_px, radius_logical, dark);

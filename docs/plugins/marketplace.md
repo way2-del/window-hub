@@ -21,7 +21,7 @@
 5. `plugins-changed` → 前端热加载
 6. 开发目录安装：id 自动加 `__dev`
 
-首次启动会 `ensure_official_plugins` 种子官方包（天气 / 成语 / 文件搜索等）。手动导入示例：
+首次启动会 `ensure_official_plugins` 种子官方包（天气 / 成语 / 文件搜索 / 网页监测等）。手动导入示例：
 
 - `preview_example_plugin` → 确认 → `install_example_plugin("window-groups"|…)`
 

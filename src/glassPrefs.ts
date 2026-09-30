@@ -51,7 +51,9 @@ export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean) {
     root.style.setProperty("--glass-main-bg", "#1c1c1e");
     root.style.setProperty("--glass-fg", "#f4f4f5");
     root.style.setProperty("--glass-fg-muted", "#a1a1aa");
-    root.style.setProperty("--glass-side", "transparent");
+    // Opaque-enough side fill: DWM mica can flip light after AppBar churn and
+    // left a white shell while cards stayed dark. Keep a dark wash so nav matches.
+    root.style.setProperty("--glass-side", "rgba(28, 28, 30, 0.82)");
     root.style.setProperty("--glass-card", "rgba(255, 255, 255, 0.07)");
     root.style.setProperty("--glass-border", "rgba(255, 255, 255, 0.1)");
     root.style.setProperty("--glass-input", "rgba(0, 0, 0, 0.22)");
@@ -62,7 +64,7 @@ export function applyGlassCss(prefs: GlassPrefs, resolvedSystemDark?: boolean) {
     root.style.setProperty("--glass-main-bg", "#f2f2f7");
     root.style.setProperty("--glass-fg", "#1c1c1e");
     root.style.setProperty("--glass-fg-muted", "#3f3f46");
-    root.style.setProperty("--glass-side", "transparent");
+    root.style.setProperty("--glass-side", "rgba(242, 242, 247, 0.88)");
     root.style.setProperty("--glass-card", "rgba(255, 255, 255, 0.85)");
     root.style.setProperty("--glass-border", "rgba(0, 0, 0, 0.1)");
     root.style.setProperty("--glass-input", "rgba(255, 255, 255, 0.72)");

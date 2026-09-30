@@ -43,6 +43,7 @@ declare global {
         open: (path: string) => Promise<unknown>;
         reveal: (path: string) => Promise<unknown>;
       };
+      webview?: Record<string, unknown>;
       popup: {
         close: () => Promise<unknown>;
         resize?: (opts?: { width?: number; height?: number }) => Promise<unknown>;
@@ -115,6 +116,7 @@ function ensureHub(pluginId: string) {
     urgency?: string;
     ttlMs?: number;
     actions?: unknown[];
+    defaultActionId?: string;
     data?: unknown;
   }) =>
     invoke("hub_notify", withPlugin({
@@ -125,6 +127,7 @@ function ensureHub(pluginId: string) {
         urgency: opts?.urgency,
         ttlMs: opts?.ttlMs,
         actions: opts?.actions,
+        defaultActionId: opts?.defaultActionId,
         data: opts?.data,
       },
     }))) as NotifyFn;
@@ -147,6 +150,67 @@ function ensureHub(pluginId: string) {
       un = fn;
     });
     return () => un();
+  };
+
+  const webviewApi = {
+    open: (opts: Record<string, unknown>) =>
+      invoke("hub_webview_open", withPlugin({ opts: opts ?? {} })),
+    close: (opts: Record<string, unknown>) =>
+      invoke("hub_webview_close", withPlugin({ opts: opts ?? {} })),
+    navigate: (opts: Record<string, unknown>) =>
+      invoke("hub_webview_navigate", withPlugin({ opts: opts ?? {} })),
+    startPick: (opts: Record<string, unknown>) =>
+      invoke("hub_webview_start_pick", withPlugin({ opts: opts ?? {} })),
+    takeLastPick: () => invoke("hub_webview_take_last_pick", withPlugin()),
+    snapshot: (opts: Record<string, unknown>) =>
+      invoke("hub_webview_snapshot", withPlugin({ opts: opts ?? {} })),
+    watch: {
+      start: (opts: Record<string, unknown>) =>
+        invoke("hub_webview_watch_start", withPlugin({ opts: opts ?? {} })),
+      stop: (opts: Record<string, unknown>) =>
+        invoke("hub_webview_watch_stop", withPlugin({ opts: opts ?? {} })),
+      list: () => invoke("hub_webview_watch_list", withPlugin()),
+    },
+    onChanged: (cb: (ev: Record<string, unknown>) => void) => {
+      let un = () => {};
+      void listen<Record<string, unknown>>("webview-watch-changed", (ev) => {
+        if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+        cb(ev.payload ?? {});
+      }).then((fn) => {
+        un = fn;
+      });
+      return () => un();
+    },
+    onScanned: (cb: (ev: Record<string, unknown>) => void) => {
+      let un = () => {};
+      void listen<Record<string, unknown>>("webview-watch-scanned", (ev) => {
+        if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+        cb(ev.payload ?? {});
+      }).then((fn) => {
+        un = fn;
+      });
+      return () => un();
+    },
+    onPick: (cb: (ev: Record<string, unknown>) => void) => {
+      let un = () => {};
+      void listen<Record<string, unknown>>("webview-pick-result", (ev) => {
+        if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+        cb(ev.payload ?? {});
+      }).then((fn) => {
+        un = fn;
+      });
+      return () => un();
+    },
+    onClosed: (cb: (ev: Record<string, unknown>) => void) => {
+      let un = () => {};
+      void listen<Record<string, unknown>>("webview-session-closed", (ev) => {
+        if (ev.payload?.pluginId && ev.payload.pluginId !== pluginId) return;
+        cb(ev.payload ?? {});
+      }).then((fn) => {
+        un = fn;
+      });
+      return () => un();
+    },
   };
 
   window.hub = {
@@ -191,6 +255,7 @@ function ensureHub(pluginId: string) {
       reveal: (path: string) =>
         invoke("hub_everything_reveal", withPlugin({ path: path || "" })),
     },
+    webview: webviewApi,
     popup: {
       close: () => invoke("close_plugin_popup"),
       resize: (opts?: { width?: number; height?: number }) =>

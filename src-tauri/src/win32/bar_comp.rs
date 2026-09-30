@@ -1,10 +1,12 @@
-//! Top status-bar frost via Windows.UI.Composition **under** WebView2 on `main`.
+//! Top status-bar frost via Windows.UI.Composition **under** WebView2.
 //!
-//! Replaces the sibling `island-bar-glass` HWND (DWM Z-order flicker when framed
-//! windows close). DesktopWindowTarget paints only the top ~28px strip; expanded
-//! panel sides stay fully clear.
+//! Used by `main` and secondary `chrome-sat-*` — same HostBackdrop strip.
+//! Multi-HWND map so satellites never steal primary's Composition session.
 
 #![cfg(windows)]
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use tauri::WebviewWindow;
@@ -27,9 +29,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_NOREDIRECTIONBITMAP,
 };
 
-const BAR_H_LOGICAL: f32 = 28.0;
-
-static SESSION: Mutex<Option<BarCompSession>> = Mutex::new(None);
+fn sessions() -> &'static Mutex<HashMap<isize, BarCompSession>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<isize, BarCompSession>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 struct BarCompSession {
     hwnd_raw: isize,
@@ -143,7 +146,8 @@ fn force_dwm_donotround(hwnd: HWND) {
 
 fn bar_height_px(hwnd: HWND) -> f32 {
     let dpi = unsafe { GetDpiForWindow(hwnd).max(96) } as f32;
-    BAR_H_LOGICAL * dpi / 96.0
+    let logical = crate::chrome_prefs::bar_height_logical().max(24) as f32;
+    logical * dpi / 96.0
 }
 
 fn client_width_px(hwnd: HWND) -> Option<f32> {
@@ -283,37 +287,40 @@ fn layout_strip(session: &BarCompSession, hwnd: HWND, dark: Option<bool>) -> Res
     Ok(())
 }
 
-/// Tear down bar Composition (e.g. bar glass off or over maximized window).
+/// Tear down all bar Composition sessions (bar glass off).
 pub fn detach() {
-    let mut slot = SESSION.lock();
-    if let Some(session) = slot.take() {
+    let mut map = sessions().lock();
+    for (_, session) in map.drain() {
+        enable_host_backdrop_attr(HWND(session.hwnd_raw as *mut _), false);
+    }
+}
+
+/// Tear down one HWND (e.g. chrome-sat destroyed).
+pub fn detach_hwnd(hwnd_raw: isize) {
+    let mut map = sessions().lock();
+    if let Some(session) = map.remove(&hwnd_raw) {
         enable_host_backdrop_attr(HWND(session.hwnd_raw as *mut _), false);
     }
 }
 
 pub fn is_attached_to(hwnd_raw: isize) -> bool {
-    SESSION
-        .lock()
-        .as_ref()
-        .is_some_and(|s| s.hwnd_raw == hwnd_raw)
+    sessions().lock().contains_key(&hwnd_raw)
 }
 
 /// Attach or refresh the top-strip HostBackdrop under WebView2. UI thread only.
+/// Does not remove sessions for other HWNDs (main + satellites coexist).
 pub fn attach_or_update(hwnd: HWND, dark: Option<bool>) -> Result<(), String> {
     let dark = Some(crate::win32::dock_comp::resolve_theme_dark(dark));
     let raw = hwnd.0 as isize;
-    let needs_rebuild = match SESSION.lock().as_ref() {
-        None => true,
-        Some(s) => s.hwnd_raw != raw,
-    };
+    let needs_rebuild = !sessions().lock().contains_key(&raw);
     if needs_rebuild {
-        detach();
+        detach_hwnd(raw);
         let session = build_session(hwnd, dark)?;
         layout_strip(&session, hwnd, dark)?;
-        *SESSION.lock() = Some(session);
+        sessions().lock().insert(raw, session);
         return Ok(());
     }
-    if let Some(session) = SESSION.lock().as_ref() {
+    if let Some(session) = sessions().lock().get(&raw) {
         layout_strip(session, hwnd, dark)?;
     }
     Ok(())
@@ -322,14 +329,15 @@ pub fn attach_or_update(hwnd: HWND, dark: Option<bool>) -> Result<(), String> {
 /// Relayout after monitor move / width change — no session rebuild.
 pub fn refresh_layout(hwnd: HWND, dark: Option<bool>) -> Result<(), String> {
     let raw = hwnd.0 as isize;
-    let slot = SESSION.lock();
-    let Some(session) = slot.as_ref() else {
+    let map = sessions().lock();
+    let Some(session) = map.get(&raw) else {
         return Ok(());
     };
-    if session.hwnd_raw != raw {
-        return Ok(());
-    }
-    layout_strip(session, hwnd, Some(crate::win32::dock_comp::resolve_theme_dark(dark)))
+    layout_strip(
+        session,
+        hwnd,
+        Some(crate::win32::dock_comp::resolve_theme_dark(dark)),
+    )
 }
 
 /// Marshals to the main WebView thread when called off-UI (ambient debounce).

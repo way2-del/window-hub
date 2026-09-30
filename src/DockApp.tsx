@@ -83,6 +83,8 @@ type DockPrefs = {
   hoverWindowPreview?: boolean;
   hoverPreviewDelayMs?: number;
   hoverPreviewHeightPx?: number;
+  /** Auto solid plate behind transparent-edge icons (default true). */
+  iconPlate?: boolean;
 };
 
 type HubWindow = {
@@ -393,10 +395,13 @@ function DockItemGlyph({
   item,
   label,
   scale,
+  iconPlate = true,
 }: {
   item: DockItem;
   label: string;
   scale: number;
+  /** Global prefs: auto solid plate for transparent-edge icons. */
+  iconPlate?: boolean;
 }) {
   const iconScale =
     typeof item.iconScale === "number" && item.iconScale > 0
@@ -414,7 +419,8 @@ function DockItemGlyph({
   })();
   const src = activePng ? `data:image/png;base64,${activePng}` : null;
   const autoPlate = useDockIconPlate(src);
-  const autoColor = useAutoPlateColor(bgRaw ? null : activePng);
+  // Only sample dominant color when global plate is on and no explicit iconBg.
+  const autoColor = useAutoPlateColor(!iconPlate || bgRaw ? null : activePng);
 
   let plateClass = "dock-icon-tile";
   let plateBg: string | undefined;
@@ -422,6 +428,7 @@ function DockItemGlyph({
     plateClass += " has-bg";
     plateBg = "transparent";
   } else if (bgRaw) {
+    // Per-item plate always wins — works with global iconPlate off.
     plateClass += " has-custom-bg";
     plateBg = bgRaw;
   } else if (item.kind === "startmenu" && !activePng) {
@@ -430,14 +437,17 @@ function DockItemGlyph({
   } else if (item.kind === "trash" && !activePng) {
     plateClass += " has-custom-bg";
     plateBg = DOCK_TRASH_BG;
-  } else if (src && autoPlate) {
+  } else if (iconPlate && src && autoPlate) {
     // Transparent-edge icons: plate = island-notify style dominant color.
     plateClass += " has-custom-bg";
     plateBg = autoColor || DOCK_AUTO_PLATE_BG;
   } else if (src) {
     plateClass += " has-bg";
-  } else {
+  } else if (iconPlate) {
     plateClass += " needs-plate";
+  } else {
+    plateClass += " has-bg";
+    plateBg = "transparent";
   }
 
   const glyph =
@@ -1973,7 +1983,12 @@ export default function DockApp() {
                           }}
                         >
                           <span className="dock-hit">
-                            <DockItemGlyph item={item} label={label} scale={scale} />
+                            <DockItemGlyph
+                              item={item}
+                              label={label}
+                              scale={scale}
+                              iconPlate={prefs?.iconPlate !== false}
+                            />
                           </span>
                           <span
                             className={`dock-dot${running ? " is-on" : ""}`}

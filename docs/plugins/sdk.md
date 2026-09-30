@@ -50,25 +50,30 @@ hub.shortcuts.setBadge(badge)
 // hub.shortcuts.setPins / clearPins
 ```
 
-**已注入：** `hub.notify` / `hub.notify.onAction`、`hub.fetch`（三表面均有；`fetch` 需 capability）。  
+**已注入：** `hub.notify` / `hub.notify.onAction`、`hub.fetch`、`hub.webview.*`（三表面均有；`fetch` / `webview` 需对应 capability）。  
 **未注入（勿调用）：** `hub.clipboard.*`。
 
 ```ts
 hub.notify({
   title, body?, iconPng?, urgency?, ttlMs?, data?,
+  defaultActionId?, // 点中部 → onAction；省略则 dismiss
   actions?: [{ id, slot: "start"|"end", label? /* 2字 */, iconPng?, background, data? }]
 })
 hub.notify.onAction((ev) => { /* ev.actionId / ev.data */ })
 hub.fetch(url, { method?, headers?, body?, timeoutMs? }?)
+hub.webview.open / close / navigate / startPick / snapshot
+hub.webview.watch.start / stop / list
+hub.webview.onChanged / onScanned / onClosed / onPick
+hub.webview.takeLastPick()
 ```
 
-通知按钮位置/样式由 Host 强制（仅 start/end）。`hub.fetch` 须声明 `network` + `permissions.network`。
+通知按钮由 Host 追加在文案后并整体居中。`hub.fetch` 须声明 `network` + `permissions.network`。`hub.webview` 须声明 `webview`。
 
 快捷区高度用 `getBounds().height` 或 `var(--wh-bar-h)`，禁止写死像素。细则：`.cursor/skills/window-hub-shortcuts/SKILL.md`。
 
 ## CapGate
 
-`capabilities` 必须覆盖所用 API。敏感项（`windows.focus`、`staging`、`network`、`notify`、`everything.search` 等）在安装确认弹层明示。
+`capabilities` 必须覆盖所用 API。敏感项（`windows.focus`、`staging`、`network`、`notify`、`everything.search`、`webview` 等）在安装确认弹层明示。
 
 Companion 脚本不在 CapGate 内，见 [companion-scripts.md](./companion-scripts.md)。
 
@@ -78,6 +83,7 @@ Companion 脚本不在 CapGate 内，见 [companion-scripts.md](./companion-scri
 |------|------|------|
 | 窗口组 | `examples/window-groups/` | shortcuts + popup |
 | 应用库 | `examples/app-library/` | shortcuts + popup |
+| 网页监测 | `examples/page-watch/` | shortcuts + popup + notify + webview |
 | 中转站 | `examples/transfer-station/` | drop + bar + panel |
 | 天气 | `examples/weather/` | bar + panel（隐形 shortcuts worker） |
 | 成语 | `examples/idiom/` | shortcuts 自画 chip（点击切换） |

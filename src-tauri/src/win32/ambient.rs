@@ -55,6 +55,14 @@ pub struct AmbientStrip {
     pub png_base64: String,
     pub hwnd: isize,
     pub mode: SampleMode,
+    /// WebView label this strip belongs to (`main` or `chrome-sat-*`).
+    /// Keep snake_case on other fields — FE historically reads `png_base64` etc.
+    #[serde(rename = "windowLabel", default = "default_window_label")]
+    pub window_label: String,
+}
+
+fn default_window_label() -> String {
+    "main".into()
 }
 
 impl AmbientStrip {
@@ -69,7 +77,13 @@ impl AmbientStrip {
             png_base64: solid_png_b64(32, 32, 34),
             hwnd: 0,
             mode: SampleMode::Edge,
+            window_label: default_window_label(),
         }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.window_label = label.into();
+        self
     }
 }
 
@@ -84,6 +98,51 @@ fn solid_png_b64(r: u8, g: u8, b: u8) -> String {
         return String::new();
     }
     base64::engine::general_purpose::STANDARD.encode(buf)
+}
+
+/// Per chrome-sat last strip — watcher writes, FE poll reads (no BitBlt on IPC).
+/// Dual-monitor: global `emit` often misses secondary WebViews; cache + poll is the
+/// same path as manual「刷新」without reloading the page.
+fn sat_strip_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, AmbientStrip>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, AmbientStrip>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn remember_sat_strip(label: &str, strip: AmbientStrip) {
+    if let Ok(mut map) = sat_strip_cache().lock() {
+        map.insert(label.to_string(), strip);
+    }
+}
+
+pub fn last_sat_strip(label: &str) -> Option<AmbientStrip> {
+    sat_strip_cache()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(label).cloned())
+}
+
+/// FE / IPC: prefer cache; re-sample when cache is the charcoal maximize-fail marker.
+pub fn sample_sat_for_ipc(label: &str, self_hwnd: Option<isize>) -> AmbientStrip {
+    if let Some(cached) = last_sat_strip(label) {
+        let charcoal = cached.r == 48 && cached.g == 48 && cached.b == 52;
+        // Solid charcoal with hwnd≠0 means capture failed — don't keep serving it.
+        if !(charcoal && cached.hwnd != 0) {
+            return cached.with_label(label);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let strip = sample_for_satellite(self_hwnd).with_label(label);
+        remember_sat_strip(label, strip.clone());
+        return strip;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = self_hwnd;
+        AmbientStrip::fallback().with_label(label)
+    }
 }
 
 /// Kept for docs / future avg-only API.
@@ -110,7 +169,7 @@ impl From<&AmbientStrip> for AmbientColor {
 
 #[cfg(windows)]
 mod win {
-    use super::{solid_png_b64, AmbientStrip, SampleMode};
+    use super::{default_window_label, solid_png_b64, AmbientStrip, SampleMode};
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -385,13 +444,39 @@ mod win {
 
     /// AppBar must have reserved the top strip — otherwise screen Y is wrong and
     /// we BitBlt our own (often black/transparent) island → black bar + thrash.
+    /// Uses **this island's** height / work area (not primary-only appbar strip),
+    /// so chrome-sat on a secondary monitor can still junction-sample.
     fn junction_screen_y(island: HWND) -> Option<i32> {
-        let strip = crate::win32::appbar::strip_height_px();
-        if strip <= 0 {
+        let meet = work_area_top(island);
+        let (mon_top, local_strip) = unsafe {
+            let mon = MonitorFromWindow(island, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let mon_top = if GetMonitorInfoW(mon, &mut info).as_bool() {
+                info.rcMonitor.top
+            } else {
+                0
+            };
+            let mut mine = RECT::default();
+            let h = if GetWindowRect(island, &mut mine).is_ok() {
+                (mine.bottom - mine.top).max(0)
+            } else {
+                0
+            };
+            let strip = if h > 0 {
+                h
+            } else {
+                crate::win32::appbar::strip_height_px()
+            };
+            (mon_top, strip)
+        };
+        if local_strip <= 0 {
             return None;
         }
-        let meet = work_area_top(island);
-        if meet + 2 < strip {
+        // Work area must sit below this bar on its own monitor.
+        if meet + 2 < mon_top + local_strip {
             return None;
         }
         Some(meet + 1)
@@ -472,7 +557,7 @@ mod win {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::mpsc;
         static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
-        if INFLIGHT.load(Ordering::SeqCst) >= 1 {
+        if INFLIGHT.load(Ordering::SeqCst) >= 2 {
             return None;
         }
         INFLIGHT.fetch_add(1, Ordering::SeqCst);
@@ -670,6 +755,23 @@ mod win {
         unsafe { GetAncestor(hwnd, GA_ROOT) }
     }
 
+    /// True when `hwnd` sits on the same monitor as the chrome bar `self_hwnd`.
+    /// Multi-monitor: main must not steal a maximized window on a secondary, and
+    /// chrome-sat must only sample its own screen.
+    fn on_same_monitor(hwnd: HWND, self_hwnd: Option<isize>) -> bool {
+        let Some(raw) = self_hwnd else {
+            return true;
+        };
+        if raw == 0 {
+            return true;
+        }
+        unsafe {
+            let a = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let b = MonitorFromWindow(HWND(raw as *mut _), MONITOR_DEFAULTTONEAREST);
+            a == b
+        }
+    }
+
     fn covers_monitor(hwnd: HWND) -> bool {
         unsafe {
             let mut wr = RECT::default();
@@ -816,6 +918,10 @@ mod win {
             if !is_true_maximized_for_ambient(root) {
                 return BOOL(1);
             }
+            // Only windows on this chrome bar's monitor.
+            if !on_same_monitor(root, ctx.self_hwnd) {
+                return BOOL(1);
+            }
             if IsZoomed(root).as_bool() {
                 ctx.zoomed = Some(root);
                 return BOOL(0);
@@ -833,7 +939,7 @@ mod win {
         }
     }
 
-    /// Ambient only tracks true maximize / fullscreen.
+    /// Ambient only tracks true maximize / fullscreen **on this bar's monitor**.
     /// Drag-to-top / Snap Layouts → ignore FG, use maximized window below.
     fn pick_target(self_hwnd: Option<isize>) -> Option<HWND> {
         unsafe {
@@ -842,6 +948,7 @@ mod win {
             if !is_excluded(fg, self_hwnd)
                 && !is_ignored_ambient_hwnd(fg)
                 && is_true_maximized_for_ambient(fg)
+                && on_same_monitor(fg, self_hwnd)
             {
                 return Some(fg);
             }
@@ -1040,6 +1147,7 @@ mod win {
                 png_base64: solid_png_b64(avg_r, avg_g, avg_b),
                 hwnd: 0,
                 mode,
+                window_label: default_window_label(),
             });
         }
 
@@ -1082,6 +1190,7 @@ mod win {
             png_base64: encode_rgb_row(&slice, span),
             hwnd: 0,
             mode,
+            window_label: default_window_label(),
         })
     }
 
@@ -1225,6 +1334,317 @@ mod win {
         }
         // Wallpaper decode is local disk — safe; skip window BitBlt.
         sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback)
+    }
+
+    /// Satellite chrome only: wallpaper strip for that HWND's monitor.
+    /// Does not touch the shared main `GATE` / `LAST_STRIP` (avoids cross-talk + thrash).
+    pub fn sample_wallpaper_only(self_hwnd: Option<isize>) -> AmbientStrip {
+        sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback)
+    }
+
+    /// Full satellite sample (watcher / sat IPC): edge ribbon if a maximized
+    /// window is on **this** monitor, else wallpaper crop for that monitor.
+    /// Never reads/writes the main GATE — primary settle stays independent.
+    ///
+    /// Critical: when a maximized target exists, **always** set `hwnd != 0` even
+    /// if BitBlt fails — otherwise FE keeps desktop-glass mode and never 吸色.
+    pub fn sample_for_satellite(self_hwnd: Option<isize>) -> AmbientStrip {
+        let target = pick_target(self_hwnd);
+        if let Some(t) = target {
+            if let Some(strip) = capture_edge_ribbon(self_hwnd, Some(t)) {
+                return strip;
+            }
+            // Timed path may be blocked by main INFLIGHT — sync window-DC + screen junction.
+            if let Some(strip) = capture_edge_ribbon_sync(self_hwnd, t) {
+                return strip;
+            }
+            // Last resort: junction / top avg — never hardcode charcoal (looks like a black bar).
+            if let Some((r, g, b)) = window_top_avg_rgb(t).or_else(|| {
+                self_hwnd.and_then(|raw| junction_avg_rgb(HWND(raw as *mut _), t))
+            }) {
+                let bar_w = self_hwnd
+                    .and_then(|raw| {
+                        let me = HWND(raw as *mut _);
+                        unsafe {
+                            let mut mine = RECT::default();
+                            GetWindowRect(me, &mut mine).ok()?;
+                            let dpi = GetDpiForWindow(me).max(96) as f64;
+                            Some((((mine.right - mine.left) as f64) / (dpi / 96.0)).round() as i32)
+                        }
+                    })
+                    .unwrap_or(800)
+                    .max(1);
+                return AmbientStrip {
+                    r,
+                    g,
+                    b,
+                    width: 1,
+                    offset_x: 0,
+                    span_width: bar_w,
+                    png_base64: solid_png_b64(r, g, b),
+                    hwnd: t.0 as isize,
+                    mode: get_mode(),
+                    window_label: default_window_label(),
+                };
+            }
+            // Keep maximized scene (hwnd≠0) but use wallpaper tint so FE drops glass
+            // without painting a fake near-black slab.
+            let mut wall = sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback);
+            wall.hwnd = t.0 as isize;
+            return wall;
+        }
+        sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback)
+    }
+
+    /// Cheap maximized marker for chrome-sat during AppBar quiet (no BitBlt).
+    /// FE switches off glass immediately; live ribbon follows on the next quiet-free tick.
+    pub fn sample_sat_hwnd_marker(self_hwnd: Option<isize>) -> AmbientStrip {
+        if let Some(t) = pick_target(self_hwnd) {
+            let (r, g, b) = (48u8, 48, 52);
+            let bar_w = self_hwnd
+                .and_then(|raw| {
+                    let me = HWND(raw as *mut _);
+                    unsafe {
+                        let mut mine = RECT::default();
+                        GetWindowRect(me, &mut mine).ok()?;
+                        let dpi = GetDpiForWindow(me).max(96) as f64;
+                        Some((((mine.right - mine.left) as f64) / (dpi / 96.0)).round() as i32)
+                    }
+                })
+                .unwrap_or(800)
+                .max(1);
+            return AmbientStrip {
+                r,
+                g,
+                b,
+                width: 1,
+                offset_x: 0,
+                span_width: bar_w,
+                png_base64: solid_png_b64(r, g, b),
+                hwnd: t.0 as isize,
+                mode: get_mode(),
+                window_label: default_window_label(),
+            };
+        }
+        sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback)
+    }
+
+    /// Satellite-only: sync capture (no shared INFLIGHT gate) — same quality as main:
+    /// window-DC → screen junction → Edge ribbon / Center solid.
+    fn capture_edge_ribbon_sync(self_hwnd: Option<isize>, target: HWND) -> Option<AmbientStrip> {
+        unsafe {
+            let me = HWND(self_hwnd? as *mut _);
+            if crate::win32::hang::is_hung_hwnd(target.0 as isize) {
+                return None;
+            }
+            let mut mine = RECT::default();
+            GetWindowRect(me, &mut mine).ok()?;
+            let mut wr = RECT::default();
+            GetWindowRect(target, &mut wr).ok()?;
+            let win_w = (wr.right - wr.left).max(1);
+            let win_h = (wr.bottom - wr.top).max(1);
+            let frame = extended_frame_bounds(target).unwrap_or(wr);
+            let top_inset = (frame.top - wr.top).clamp(0, (win_h - 1).max(0));
+            let left_inset = (frame.left - wr.left).clamp(0, (win_w - 1).max(0));
+            let right_limit = (frame.right - wr.left).clamp(left_inset + 1, win_w);
+            let vis_w = (right_limit - left_inset).max(1);
+            let dpi_scale = {
+                let dpi = GetDpiForWindow(me);
+                if dpi == 0 {
+                    1.0
+                } else {
+                    dpi as f64 / 96.0
+                }
+            };
+            let bar_phys = (mine.right - mine.left).max(1);
+            let bar_logical = ((bar_phys as f64) / dpi_scale).round() as i32;
+            let meet = work_area_top(me);
+            let y_meet = (meet + 1 - wr.top).clamp(0, win_h - 1);
+            let y_inset = (top_inset + 1).clamp(0, win_h - 1);
+            let dst_w = vis_w.min(MAX_RIBBON_W).max(1);
+            let mut bgra: Option<Vec<u8>> = None;
+            for y in [y_meet, y_inset] {
+                let rows = TOP_ROWS.min(win_h - y).max(1);
+                if let Some(raw) = blit_window_rows(target, left_inset, y, vis_w, rows, dst_w) {
+                    let avg = average_bgra_rows(&raw, dst_w, rows);
+                    if !is_all_zero(&avg) {
+                        bgra = Some(avg);
+                        break;
+                    }
+                }
+            }
+            // Same screen junction as main — Electron/WebView title bars often blank in GetWindowDC.
+            if bgra.is_none() && !snap_overlay_visible() {
+                if let Some(screen_y) = junction_screen_y(me) {
+                    if !hub_chrome_blocks_screen_sample(me, screen_y) {
+                        let x0 = (wr.left + left_inset).max(wr.left);
+                        let src_w = vis_w.min(wr.right - x0).max(1);
+                        let jdst = src_w.min(MAX_RIBBON_W).max(1);
+                        if let Some(raw) = blit_screen_rows(x0, screen_y, src_w, TOP_ROWS) {
+                            let avg = average_bgra_rows(&raw, jdst, TOP_ROWS);
+                            if !is_all_zero(&avg) && row_avg_luma(&avg) >= 8 {
+                                bgra = Some(avg);
+                            }
+                        }
+                    }
+                }
+            }
+            let bgra = bgra?;
+            let captured_w = ((bgra.len() / 4) as i32).max(1);
+            let mode = get_mode();
+
+            if mode == SampleMode::Center {
+                let pad = ((captured_w as f64) * 0.35).round() as i32;
+                let cx0 = pad.clamp(0, captured_w / 3);
+                let cx1 = (captured_w - pad).max(cx0 + 1);
+                let mut mid = Vec::with_capacity(((cx1 - cx0) as usize) * 4);
+                for x in cx0..cx1 {
+                    let i = (x as usize) * 4;
+                    if i + 3 < bgra.len() {
+                        mid.extend_from_slice(&bgra[i..i + 4]);
+                    }
+                }
+                let (r, g, b) = robust_rgb_from_bgra(&mid);
+                return Some(AmbientStrip {
+                    r,
+                    g,
+                    b,
+                    width: 1,
+                    offset_x: 0,
+                    span_width: bar_logical.max(1),
+                    png_base64: solid_png_b64(r, g, b),
+                    hwnd: target.0 as isize,
+                    mode,
+                    window_label: default_window_label(),
+                });
+            }
+
+            // Edge: same bar-mapped ribbon as main capture_edge_ribbon.
+            let out_w = bar_logical.clamp(64, 1280) as u32;
+            let mut rgb = vec![0u8; (out_w as usize) * 3];
+            for ox in 0..out_w {
+                let t = (ox as f64 + 0.5) / out_w as f64;
+                let screen_x = mine.left as f64 + t * bar_phys as f64;
+                let wx = (screen_x - wr.left as f64).round() as i32;
+                let local = (wx - left_inset).clamp(0, vis_w - 1);
+                let src_x = if vis_w > 1 {
+                    ((local as i64 * (captured_w as i64 - 1)) / (vis_w as i64 - 1).max(1)) as i32
+                } else {
+                    0
+                }
+                .clamp(0, captured_w - 1);
+                let src = (src_x as usize) * 4;
+                let dst = (ox as usize) * 3;
+                if src + 2 < bgra.len() {
+                    rgb[dst] = bgra[src + 2];
+                    rgb[dst + 1] = bgra[src + 1];
+                    rgb[dst + 2] = bgra[src];
+                }
+            }
+
+            if let Some([r, g, b]) = super::policy::clutter_color(&rgb) {
+                return Some(AmbientStrip {
+                    r,
+                    g,
+                    b,
+                    width: 1,
+                    offset_x: 0,
+                    span_width: bar_logical.max(1),
+                    png_base64: solid_png_b64(r, g, b),
+                    hwnd: target.0 as isize,
+                    mode,
+                    window_label: default_window_label(),
+                });
+            }
+
+            let (avg_r, avg_g, avg_b) = {
+                let mut sr = 0u64;
+                let mut sg = 0u64;
+                let mut sb = 0u64;
+                for chunk in rgb.chunks_exact(3) {
+                    sr += chunk[0] as u64;
+                    sg += chunk[1] as u64;
+                    sb += chunk[2] as u64;
+                }
+                let n = (rgb.len() / 3).max(1) as u64;
+                ((sr / n) as u8, (sg / n) as u8, (sb / n) as u8)
+            };
+
+            Some(AmbientStrip {
+                r: avg_r,
+                g: avg_g,
+                b: avg_b,
+                width: out_w,
+                offset_x: 0,
+                span_width: bar_logical.max(1),
+                png_base64: encode_rgb_row(&rgb, out_w),
+                hwnd: target.0 as isize,
+                mode,
+                window_label: default_window_label(),
+            })
+        }
+    }
+
+    /// Sync screen-junction average for a maximized target (sat fallback).
+    fn junction_avg_rgb(island: HWND, target: HWND) -> Option<(u8, u8, u8)> {
+        unsafe {
+            if snap_overlay_visible() {
+                return None;
+            }
+            let screen_y = junction_screen_y(island)?;
+            if hub_chrome_blocks_screen_sample(island, screen_y) {
+                return None;
+            }
+            let mut wr = RECT::default();
+            GetWindowRect(target, &mut wr).ok()?;
+            let frame = extended_frame_bounds(target).unwrap_or(wr);
+            let left_inset = (frame.left - wr.left).clamp(0, (wr.right - wr.left - 1).max(0));
+            let right_limit = (frame.right - wr.left).clamp(left_inset + 1, wr.right - wr.left);
+            let vis_w = (right_limit - left_inset).max(1);
+            let x0 = (wr.left + left_inset).max(wr.left);
+            let src_w = vis_w.min(wr.right - x0).max(1);
+            let dst_w = src_w.min(MAX_RIBBON_W).max(1);
+            let raw = blit_screen_rows(x0, screen_y, src_w, TOP_ROWS)?;
+            let avg = average_bgra_rows(&raw, dst_w, TOP_ROWS);
+            if is_all_zero(&avg) || row_avg_luma(&avg) < 8 {
+                return None;
+            }
+            Some(robust_rgb_from_bgra(&avg))
+        }
+    }
+
+    /// Cheap top-edge average when full ribbon BitBlt fails.
+    /// Sync window-DC path — bypasses shared INFLIGHT so sat can sample while
+    /// main ambient is still capturing. Uses junction Y (not fixed y=2).
+    fn window_top_avg_rgb(hwnd: HWND) -> Option<(u8, u8, u8)> {
+        unsafe {
+            if crate::win32::hang::is_hung_hwnd(hwnd.0 as isize) {
+                return None;
+            }
+            let mut wr = RECT::default();
+            GetWindowRect(hwnd, &mut wr).ok()?;
+            let w = (wr.right - wr.left).max(1);
+            let h = (wr.bottom - wr.top).max(1);
+            let frame = extended_frame_bounds(hwnd).unwrap_or(wr);
+            let top_inset = (frame.top - wr.top).clamp(0, (h - 1).max(0));
+            let y_inset = (top_inset + 1).clamp(0, h - 1);
+            let y_meet = {
+                // Prefer work-area junction when island AppBar is on this monitor.
+                let meet = work_area_top(hwnd);
+                (meet + 1 - wr.top).clamp(0, h - 1)
+            };
+            let src_w = w.min(MAX_RIBBON_W).max(1);
+            for y in [y_meet, y_inset] {
+                let rows = TOP_ROWS.min(h - y).max(1);
+                if let Some(bgra) = blit_window_rows(hwnd, 0, y, w, rows, src_w) {
+                    let avg = average_bgra_rows(&bgra, src_w, rows);
+                    if !is_all_zero(&avg) {
+                        return Some(robust_rgb_from_bgra(&avg));
+                    }
+                }
+            }
+            None
+        }
     }
 
     fn encode_rgb_row(rgb: &[u8], width: u32) -> String {
@@ -1410,7 +1830,7 @@ mod win {
         if crate::win32::hang::is_hung_hwnd(target.0 as isize) {
             return None;
         }
-        if INFLIGHT.load(Ordering::SeqCst) >= 1 {
+        if INFLIGHT.load(Ordering::SeqCst) >= 2 {
             return None;
         }
         INFLIGHT.fetch_add(1, Ordering::SeqCst);
@@ -1590,6 +2010,7 @@ mod win {
                     png_base64: solid_png_b64(r, g, b),
                     hwnd: target.0 as isize,
                     mode,
+                    window_label: default_window_label(),
                 });
             }
 
@@ -1629,6 +2050,7 @@ mod win {
                     png_base64: solid_png_b64(r, g, b),
                     hwnd: target.0 as isize,
                     mode,
+                    window_label: default_window_label(),
                 });
             }
 
@@ -1655,6 +2077,7 @@ mod win {
                 png_base64: encode_rgb_row(&rgb, out_w),
                 hwnd: target.0 as isize,
                 mode,
+                window_label: default_window_label(),
             })
         }
     }
@@ -1724,7 +2147,8 @@ mod win {
 #[cfg(windows)]
 pub use win::{
     foreground_key, get_mode, is_desktop_scene, is_settling, poll_changed, reset_sampling_gate, sample,
-    sample_nonblocking, set_ambient_sample_target, set_mode, sync_ignore_ambient_apps,
+    sample_for_satellite, sample_nonblocking, sample_sat_hwnd_marker, sample_wallpaper_only,
+    set_ambient_sample_target, set_mode, sync_ignore_ambient_apps,
 };
 
 #[cfg(not(windows))]
@@ -1746,6 +2170,21 @@ pub fn sample(_self_hwnd: Option<isize>) -> AmbientStrip {
 
 #[cfg(not(windows))]
 pub fn sample_nonblocking(_self_hwnd: Option<isize>) -> AmbientStrip {
+    AmbientStrip::fallback()
+}
+
+#[cfg(not(windows))]
+pub fn sample_wallpaper_only(_self_hwnd: Option<isize>) -> AmbientStrip {
+    AmbientStrip::fallback()
+}
+
+#[cfg(not(windows))]
+pub fn sample_for_satellite(_self_hwnd: Option<isize>) -> AmbientStrip {
+    AmbientStrip::fallback()
+}
+
+#[cfg(not(windows))]
+pub fn sample_sat_hwnd_marker(_self_hwnd: Option<isize>) -> AmbientStrip {
     AmbientStrip::fallback()
 }
 

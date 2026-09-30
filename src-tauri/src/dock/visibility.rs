@@ -13,6 +13,7 @@
 //! Animation is never cancelled mid-slide (`busy`).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -59,6 +60,8 @@ struct VisInner {
     near_streak: u32,
     away_streak: u32,
     last_reason: String,
+    /// Per `dock-sat-*` label visibility (same policy as primary, that monitor).
+    sat_shown: HashMap<String, bool>,
 }
 
 pub struct DockVisibility {
@@ -87,6 +90,7 @@ impl DockVisibility {
                 near_streak: 0,
                 away_streak: 0,
                 last_reason: "init".into(),
+                sat_shown: HashMap::new(),
             }),
             running: AtomicBool::new(false),
         })
@@ -97,6 +101,14 @@ impl DockVisibility {
             .lock()
             .map(|g| g.shown)
             .unwrap_or(true)
+    }
+
+    /// Last applied visibility for a `dock-sat-*` label (None = not tracked yet).
+    pub fn sat_is_shown(&self, label: &str) -> Option<bool> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.sat_shown.get(label).copied())
     }
 
     pub fn is_busy(&self) -> bool {
@@ -280,6 +292,7 @@ impl DockVisibility {
                 },
             );
         }
+        self.sync_satellite_docks(app);
     }
 
     fn tick(self: &Arc<Self>, app: &AppHandle) {
@@ -466,6 +479,89 @@ impl DockVisibility {
                 }
             }
         }
+        // Secondary docks: same show/hide policy as primary, scoped to each monitor.
+        self.sync_satellite_docks(app);
+    }
+
+    /// Evaluate + place each `dock-sat-*` independently (fullscreen / AutoHide / …).
+    fn sync_satellite_docks(self: &Arc<Self>, app: &AppHandle) {
+        let prefs = super::load_dock_prefs();
+        if !prefs.enabled {
+            return;
+        }
+        let (mode, force, thick, bottom, linger, hold) = {
+            let Ok(g) = self.inner.lock() else {
+                return;
+            };
+            (
+                g.mode,
+                g.force_show,
+                g.activation_thickness_px,
+                g.bottom_offset_px,
+                g.hide_linger_ms,
+                g.interaction_hold || g.preview_tip_keep,
+            )
+        };
+        let snap = crate::display_placement::snapshot();
+        let mut places: Vec<(String, bool)> = Vec::new();
+        for r in &snap.resolved {
+            if r.is_primary || !r.dock {
+                continue;
+            }
+            let label = crate::display_placement::dock_sat_label(&r.id);
+            let Some(win) = app.get_webview_window(&label) else {
+                continue;
+            };
+            let Ok(hwnd) = win.hwnd() else {
+                continue;
+            };
+            let hwnd_raw = hwnd.0 as isize;
+            let was_shown = self
+                .inner
+                .lock()
+                .ok()
+                .and_then(|g| g.sat_shown.get(&label).copied())
+                .unwrap_or(true);
+            let near = if hold {
+                true
+            } else {
+                pointer_near_dock_hwnd(app, hwnd_raw, was_shown, thick, bottom)
+            };
+            let (want, reason) =
+                compute_want_for_dock_hwnd(app, hwnd_raw, mode, force, near);
+            // Soft linger: when leaving AutoHide/SmartHide keep shown briefly via
+            // was_shown + !near — callers place every tick; only animate on flip.
+            let uses_linger = matches!(
+                mode,
+                DockDisplayMode::AutoHide | DockDisplayMode::SmartHide
+            );
+            let target = if reason == "fullscreen" {
+                false
+            } else if uses_linger {
+                want || near
+            } else {
+                want
+            };
+            let _ = linger; // reserved — primary owns timed leave; sat uses near hysteresis
+            if target != was_shown {
+                eprintln!(
+                    "[dock-vis] sat {} want={} shown={}→{} reason={} near={}",
+                    label,
+                    u8::from(want),
+                    u8::from(was_shown),
+                    u8::from(target),
+                    reason,
+                    u8::from(near)
+                );
+                places.push((label.clone(), target));
+                if let Ok(mut g) = self.inner.lock() {
+                    g.sat_shown.insert(label, target);
+                }
+            }
+        }
+        for (label, shown) in places {
+            super::place_one_dock_satellite(app, &prefs, &label, shown, true);
+        }
     }
 
     fn mode_str(&self) -> &'static str {
@@ -484,7 +580,6 @@ impl DockVisibility {
         let force = g.force_show;
         drop(g);
 
-        // Prefer dock HWND for monitor match — island may sit on another display.
         let self_hwnd = app
             .get_webview_window("dock")
             .and_then(|w| w.hwnd().ok().map(|h| h.0 as isize))
@@ -492,69 +587,10 @@ impl DockVisibility {
                 app.get_webview_window("main")
                     .and_then(|w| w.hwnd().ok().map(|h| h.0 as isize))
             });
-        let fullscreen = crate::win32::fullscreen::should_hide_strip(self_hwnd);
-        // Always* modes intentionally stay up over games.
-        let fs_hides = matches!(
-            mode,
-            DockDisplayMode::Default
-                | DockDisplayMode::AutoHide
-                | DockDisplayMode::SmartHide
-                | DockDisplayMode::Desktop
-                | DockDisplayMode::Hotkey
-        );
-        if fullscreen && fs_hides {
-            return (false, "fullscreen".into());
-        }
-
-        let on_desktop = is_desktop_foreground();
-        let overlapped = is_dock_overlapped(app);
-
-        match mode {
-            DockDisplayMode::Default => (true, "default".into()),
-            DockDisplayMode::Layered | DockDisplayMode::Always => (true, "always".into()),
-            DockDisplayMode::AlwaysFullscreen => (true, "alwaysFullscreen".into()),
-            DockDisplayMode::AutoHide => {
-                // Desktop (or nothing covering the dock) → stay shown.
-                // Otherwise edge reveal only. `want_eff` in tick must honor this.
-                if on_desktop || !overlapped {
-                    (
-                        true,
-                        if on_desktop {
-                            "autoHideDesktop".into()
-                        } else {
-                            "autoHideClear".into()
-                        },
-                    )
-                } else if near {
-                    (true, "edge".into())
-                } else {
-                    (false, "leave".into())
-                }
-            }
-            DockDisplayMode::SmartHide => {
-                if !overlapped || on_desktop {
-                    (true, "smartShow".into())
-                } else if near {
-                    (true, "smartEdge".into())
-                } else {
-                    (false, "smartHide".into())
-                }
-            }
-            DockDisplayMode::Hotkey => {
-                if force {
-                    (true, "hotkeyOn".into())
-                } else {
-                    (false, "hotkeyOff".into())
-                }
-            }
-            DockDisplayMode::Desktop => {
-                if on_desktop {
-                    (true, "desktop".into())
-                } else {
-                    (false, "notDesktop".into())
-                }
-            }
-        }
+        let Some(hwnd) = self_hwnd else {
+            return (true, "no-hwnd".into());
+        };
+        compute_want_for_dock_hwnd(app, hwnd, mode, force, near)
     }
 
     fn poll_pointer(&self, app: &AppHandle) -> bool {
@@ -824,6 +860,59 @@ fn pointer_in_dock_chrome(
     x >= l && x < r && y >= t && y < b
 }
 
+#[cfg(windows)]
+fn pointer_in_dock_chrome_for_hwnd(
+    dock_hwnd: isize,
+    mi: &windows::Win32::Graphics::Gdi::MONITORINFO,
+    scale: f64,
+    bottom_off: u32,
+    x: i32,
+    y: i32,
+) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let prefs = super::load_dock_prefs();
+    let expanded = super::hover_expanded_hwnd(dock_hwnd);
+    let chrome_h = (super::dock_chrome_height() * scale).round().max(1.0) as i32;
+    let keep_h = if expanded {
+        (super::dock_window_height(prefs.magnification) * scale)
+            .round()
+            .max(chrome_h as f64) as i32
+    } else {
+        chrome_h
+    };
+    let layout = super::dock_layout_items(&prefs);
+    let logical_keep = super::dock_window_width(
+        &layout,
+        prefs.corner_radius_px,
+        prefs.magnification,
+        expanded,
+    );
+    let content_w = (logical_keep * scale).round().max(1.0) as i32;
+    let _ = bottom_off;
+
+    unsafe {
+        let mut wr = RECT::default();
+        let h = HWND(dock_hwnd as *mut _);
+        if GetWindowRect(h, &mut wr).is_err() {
+            // Fall back to rest pose on this monitor.
+            let logical_h = super::dock_window_height(prefs.magnification);
+            let (l, t, r, b) =
+                dock_rest_pose_rect(mi, scale, prefs.bottom_offset_px, logical_keep, logical_h);
+            return x >= l && x < r && y >= t && y < b;
+        }
+        let win_w = wr.right - wr.left;
+        let left = wr.left + ((win_w - content_w) / 2).max(0);
+        let top = if expanded {
+            wr.top.max(mi.rcMonitor.top)
+        } else {
+            (wr.bottom - keep_h).max(mi.rcMonitor.top)
+        };
+        x >= left && x < left + content_w && y >= top && y < wr.bottom
+    }
+}
+
 /// Screen-space hit of the chrome-hover-tip HWND (window preview sits above Dock).
 #[cfg(windows)]
 fn pointer_in_chrome_hover_tip(app: &AppHandle, x: i32, y: i32) -> bool {
@@ -953,6 +1042,152 @@ fn is_desktop_foreground() -> bool {
 fn is_dock_overlapped(app: &AppHandle) -> bool {
     #[cfg(windows)]
     {
+        let Some(dock) = app.get_webview_window("dock") else {
+            return false;
+        };
+        let Ok(hwnd) = dock.hwnd() else {
+            return false;
+        };
+        is_dock_overlapped_hwnd(hwnd.0 as isize)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+/// Same policy as primary `compute_want`, but `dock_hwnd` selects the monitor.
+fn compute_want_for_dock_hwnd(
+    app: &AppHandle,
+    dock_hwnd: isize,
+    mode: DockDisplayMode,
+    force: bool,
+    near: bool,
+) -> (bool, String) {
+    let fullscreen = crate::win32::fullscreen::should_hide_strip(Some(dock_hwnd));
+    let fs_hides = matches!(
+        mode,
+        DockDisplayMode::Default
+            | DockDisplayMode::AutoHide
+            | DockDisplayMode::SmartHide
+            | DockDisplayMode::Desktop
+            | DockDisplayMode::Hotkey
+    );
+    if fullscreen && fs_hides {
+        return (false, "fullscreen".into());
+    }
+
+    let on_desktop = is_desktop_foreground();
+    let overlapped = is_dock_overlapped_hwnd(dock_hwnd);
+    let _ = app;
+
+    match mode {
+        DockDisplayMode::Default => (true, "default".into()),
+        DockDisplayMode::Layered | DockDisplayMode::Always => (true, "always".into()),
+        DockDisplayMode::AlwaysFullscreen => (true, "alwaysFullscreen".into()),
+        DockDisplayMode::AutoHide => {
+            if on_desktop || !overlapped {
+                (
+                    true,
+                    if on_desktop {
+                        "autoHideDesktop".into()
+                    } else {
+                        "autoHideClear".into()
+                    },
+                )
+            } else if near {
+                (true, "edge".into())
+            } else {
+                (false, "leave".into())
+            }
+        }
+        DockDisplayMode::SmartHide => {
+            if !overlapped || on_desktop {
+                (true, "smartShow".into())
+            } else if near {
+                (true, "smartEdge".into())
+            } else {
+                (false, "smartHide".into())
+            }
+        }
+        DockDisplayMode::Hotkey => {
+            if force {
+                (true, "hotkeyOn".into())
+            } else {
+                (false, "hotkeyOff".into())
+            }
+        }
+        DockDisplayMode::Desktop => {
+            if on_desktop {
+                (true, "desktop".into())
+            } else {
+                (false, "notDesktop".into())
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn pointer_near_dock_hwnd(
+    app: &AppHandle,
+    dock_hwnd: isize,
+    shown: bool,
+    thick_log: u32,
+    bottom_off: u32,
+) -> bool {
+    use windows::Win32::Foundation::{HWND, POINT};
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        let h = HWND(dock_hwnd as *mut _);
+        let Some((mi, scale)) = monitor_info_from(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST))
+        else {
+            return false;
+        };
+        if !point_in_monitor(&mi, pt.x, pt.y) {
+            return false;
+        }
+        if shown {
+            if pointer_in_dock_chrome_for_hwnd(dock_hwnd, &mi, scale, bottom_off, pt.x, pt.y) {
+                return true;
+            }
+            pointer_in_chrome_hover_tip(app, pt.x, pt.y)
+        } else {
+            let reveal_thick = thick_log.clamp(1, REVEAL_THICK_MAX);
+            point_on_activation_strip(
+                app,
+                &mi,
+                scale,
+                DockActivationPosition::ScreenBottom,
+                reveal_thick,
+                bottom_off,
+                pt.x,
+                pt.y,
+            )
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn pointer_near_dock_hwnd(
+    _app: &AppHandle,
+    _dock_hwnd: isize,
+    _shown: bool,
+    _thick_log: u32,
+    _bottom_off: u32,
+) -> bool {
+    false
+}
+
+fn is_dock_overlapped_hwnd(dock_hwnd: isize) -> bool {
+    #[cfg(windows)]
+    {
         use windows::Win32::Foundation::{HWND, RECT};
         use windows::Win32::Graphics::Gdi::{
             GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -962,14 +1197,8 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
             GetAncestor, GetForegroundWindow, GetWindowRect, IsWindowVisible, GA_ROOT,
         };
 
-        let Some(dock) = app.get_webview_window("dock") else {
-            return false;
-        };
-        let Ok(hwnd) = dock.hwnd() else {
-            return false;
-        };
         unsafe {
-            let h = HWND(hwnd.0 as _);
+            let h = HWND(dock_hwnd as *mut _);
             let dock_root = {
                 let root = GetAncestor(h, GA_ROOT);
                 if root.0.is_null() {
@@ -1003,7 +1232,7 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
                 &layout,
                 prefs.corner_radius_px,
                 prefs.magnification,
-                super::dock_hover_expanded(),
+                false,
             );
             let logical_h = super::dock_window_height(prefs.magnification);
             let (l, t, r, b) =
@@ -1016,6 +1245,11 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
             if !IsWindowVisible(fg).as_bool() {
                 return false;
             }
+            // Foreground must be on this dock's monitor.
+            let fg_mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+            if fg_mon != mon {
+                return false;
+            }
             let mut rc = RECT::default();
             if GetWindowRect(fg, &mut rc).is_err() {
                 return false;
@@ -1025,7 +1259,7 @@ fn is_dock_overlapped(app: &AppHandle) -> bool {
     }
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = dock_hwnd;
         false
     }
 }

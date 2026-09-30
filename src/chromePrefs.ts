@@ -6,6 +6,12 @@ import {
   normalizeChromeChipOrder,
   type ChromeChipId,
 } from "./features/chrome/chromeChipOrder";
+import {
+  applyBarHeightCss,
+  DEFAULT_BAR_H,
+  normalizeBarHeight,
+  setLiveBarHeight,
+} from "./features/chrome/barHeight";
 
 export type ChromePrefs = {
   /** 托盘常驻图标（顶栏） */
@@ -22,6 +28,8 @@ export type ChromePrefs = {
   showControlCenter: boolean;
   /** 右侧系统芯片 Ctrl+拖 顺序 */
   chipOrder: ChromeChipId[];
+  /** 顶栏 / 岛栏折叠高度（逻辑 px，24–40） */
+  barHeight: number;
 };
 
 const DEFAULTS: ChromePrefs = {
@@ -32,6 +40,7 @@ const DEFAULTS: ChromePrefs = {
   showIme: true,
   showControlCenter: true,
   chipOrder: normalizeChromeChipOrder(null),
+  barHeight: DEFAULT_BAR_H,
 };
 
 let cache: ChromePrefs = { ...DEFAULTS, chipOrder: [...DEFAULTS.chipOrder] };
@@ -47,10 +56,17 @@ function normalize(raw: Partial<ChromePrefs> | null | undefined): ChromePrefs {
     showIme: raw?.showIme ?? true,
     showControlCenter: raw?.showControlCenter ?? true,
     chipOrder: normalizeChromeChipOrder(raw?.chipOrder),
+    barHeight: normalizeBarHeight(raw?.barHeight ?? DEFAULT_BAR_H),
   };
 }
 
+function applyLiveBar(p: ChromePrefs) {
+  setLiveBarHeight(p.barHeight);
+  applyBarHeightCss(p.barHeight);
+}
+
 function notify(p: ChromePrefs) {
+  applyLiveBar(p);
   for (const fn of listeners) {
     try {
       fn(p);

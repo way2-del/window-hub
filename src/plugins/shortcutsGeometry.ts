@@ -2,6 +2,11 @@
  * 快捷区几何常量（与 .cursor/skills/window-hub-shortcuts 契约一致）。
  * 基座 ShortcutsHost 实现时应引用本文件，避免魔法数漂移。
  */
+import {
+  DEFAULT_BAR_H,
+  getLiveBarHeight,
+} from "../features/chrome/barHeight";
+
 export const SHORTCUTS_LEFT_INSET = 12;
 /** 右侧快捷区距屏幕右缘（与 .tray-cluster right:10px 对齐） */
 export const SHORTCUTS_RIGHT_INSET = 10;
@@ -18,10 +23,10 @@ export const SHORTCUTS_ISLAND_CLEARANCE = Math.max(
 /** 右侧快捷区与系统芯片条间距（与 .tray-rail gap 一致） */
 export const SHORTCUTS_CHROME_STRIP_GAP = 7;
 /**
- * 状态菜单顶栏高度（逻辑 px）= 快捷区 iframe 高度 = `--island-bar-h`。
- * 插件经 `hub.shortcuts.getBounds().height` / CSS `--wh-bar-h` 读取，勿写死。
+ * 默认顶栏高度（逻辑 px）。运行时请用 `getLiveBarHeight()` /
+ * `hub.shortcuts.getBounds().height` / CSS `--wh-bar-h`，勿假定恒为 28。
  */
-export const SHORTCUTS_HEIGHT = 28;
+export const SHORTCUTS_HEIGHT = DEFAULT_BAR_H;
 /** 与 SHORTCUTS_HEIGHT 同值；文档/技能中称「状态栏高度」时用此别名。 */
 export const STATUS_MENU_BAR_HEIGHT = SHORTCUTS_HEIGHT;
 export const SHORTCUTS_CHIP_MAX_W = 120;
@@ -57,7 +62,7 @@ export function computeShortcutsBounds(
   return {
     x,
     width: maxExpandWidth,
-    height: SHORTCUTS_HEIGHT,
+    height: getLiveBarHeight(),
     maxExpandWidth,
   };
 }
@@ -84,7 +89,7 @@ export function computeShortcutsBoundsRight(
   return {
     x,
     width: maxExpandWidth,
-    height: SHORTCUTS_HEIGHT,
+    height: getLiveBarHeight(),
     maxExpandWidth,
   };
 }

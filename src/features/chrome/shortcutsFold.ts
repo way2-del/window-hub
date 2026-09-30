@@ -1,6 +1,9 @@
 /** Pure fold policy: which shortcut strips stay visible vs overflow into ⋯. */
 
-export const SHORTCUTS_FOLD_CHIP_W = 28;
+import { DEFAULT_BAR_H, getLiveBarHeight } from "./barHeight";
+
+/** Default overflow chip width (= default bar height). Prefer getLiveBarHeight() at call sites. */
+export const SHORTCUTS_FOLD_CHIP_W = DEFAULT_BAR_H;
 /** Match .shortcuts-collapsed / .tray-rail gap. */
 export const SHORTCUTS_FOLD_GAP = 7;
 
@@ -21,13 +24,14 @@ export function planShortcutsFold(
   widths: Record<string, number>,
   maxWidth: number,
   side: "left" | "right",
-  overflowChipW: number = SHORTCUTS_FOLD_CHIP_W,
+  overflowChipW: number = getLiveBarHeight(),
   gap: number = SHORTCUTS_FOLD_GAP,
 ): FoldPlan {
   const ids = orderedIds.filter(Boolean);
   if (ids.length === 0) return { visibleIds: [], overflowIds: [] };
   const budget = Math.max(0, maxWidth);
-  const widthOf = (id: string) => Math.max(0, Math.round(widths[id] ?? 28));
+  const widthOf = (id: string) =>
+    Math.max(0, Math.round(widths[id] ?? getLiveBarHeight()));
   const gapW = Math.max(0, Math.round(gap));
 
   let total = 0;

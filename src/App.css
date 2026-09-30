@@ -41,6 +41,64 @@ body.is-island #root {
   pointer-events: none;
 }
 
+body.is-chrome-sat,
+body.is-chrome-sat #root {
+  /* Same as main: clear so bar_comp HostBackdrop shows through. */
+  background: transparent !important;
+  pointer-events: none;
+}
+
+.chrome-sat-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: hidden;
+  background: transparent;
+}
+
+.chrome-sat-root .ambient-strip {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 1;
+  /* Match live tokens — never a charcoal flash under the ribbon */
+  background-color: rgb(var(--ambient-r, 48), var(--ambient-g, 48), var(--ambient-b, 52));
+}
+
+/* No opacity fade on sat: glass → 吸色 must be instant (main fade shows black under) */
+.chrome-sat-root .chrome-ambient-enter {
+  animation: none !important;
+  opacity: 1 !important;
+}
+
+.chrome-sat-root.has-ambient {
+  background-color: rgb(var(--ambient-r, 48), var(--ambient-g, 48), var(--ambient-b, 52));
+}
+
+/* Solid cover under AmbientStrip — sits on top of Win32 glass until glass is detached */
+.chrome-sat-ambient-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.chrome-sat-root.has-ambient-wallpaper .ambient-strip {
+  opacity: 1;
+}
+
+.chrome-sat-root .shortcuts-host,
+.chrome-sat-root .tray-cluster,
+.chrome-sat-root .chrome-status-cluster,
+.chrome-sat-root .settings-anchor {
+  pointer-events: auto;
+  position: relative;
+  z-index: 1;
+}
+
 body.is-settings,
 body.is-settings #root {
   background: transparent !important;
@@ -90,6 +148,7 @@ button {
   pointer-events: none;
   --island-top-gap: 0px;
   --island-bar-h: 28px;
+  --chrome-scale: 1;
   /* 灵动岛下拉面板：内边距与圆角（见 .cursor/skills/window-hub-island-panel） */
   --island-shell-radius: 32px;
   --island-panel-inset: 16px;
@@ -185,7 +244,13 @@ button {
 .shell.has-bar-glass:not(.has-ambient) .shortcuts-collapsed,
 .shell.has-bar-glass:not(.has-ambient) .status-menu-trigger,
 .shell.has-bar-glass:not(.has-ambient) .settings-btn,
-.shell.has-bar-glass:not(.has-ambient) .settings-label {
+.shell.has-bar-glass:not(.has-ambient) .settings-label,
+.chrome-sat-root.is-desktop-glass .tray-cluster,
+.chrome-sat-root.is-desktop-glass .shortcuts-host,
+.chrome-sat-root.is-desktop-glass .chrome-status-cluster,
+.chrome-sat-root.has-bar-glass .tray-cluster,
+.chrome-sat-root.has-bar-glass .shortcuts-host,
+.chrome-sat-root.has-bar-glass .chrome-status-cluster {
   color: var(--chrome-center-fg, rgba(255, 255, 255, 0.94));
   text-shadow: var(--chrome-center-shadow, 0 1px 2px rgba(0, 0, 0, 0.35));
   transition: none;
@@ -621,12 +686,12 @@ button {
   justify-content: center;
   gap: 7px;
   color: #fff;
-  font-size: 12px;
+  font-size: calc(12px * var(--chrome-scale, 1));
   font-weight: 600;
   letter-spacing: 0.01em;
   white-space: nowrap;
   line-height: 1;
-  height: 16px;
+  height: calc(16px * var(--chrome-scale, 1));
   max-width: 100%;
   overflow: hidden;
   pointer-events: none;
@@ -649,12 +714,12 @@ button {
   justify-content: center;
   gap: 7px;
   color: #fff;
-  font-size: 12px;
+  font-size: calc(12px * var(--chrome-scale, 1));
   font-weight: 600;
   letter-spacing: 0.01em;
   white-space: nowrap;
   line-height: 1;
-  height: 16px;
+  height: calc(16px * var(--chrome-scale, 1));
   max-width: 100%;
   overflow: hidden;
   pointer-events: auto;
@@ -738,8 +803,8 @@ button {
 
 .bar-search-icon {
   flex-shrink: 0;
-  width: 14px;
-  height: 14px;
+  width: calc(14px * var(--chrome-scale, 1));
+  height: calc(14px * var(--chrome-scale, 1));
   color: rgba(255, 255, 255, 0.72);
   display: block;
 }
@@ -753,7 +818,7 @@ button {
   background: transparent;
   color: #fff;
   font: inherit;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--chrome-scale, 1));
   letter-spacing: 0.01em;
   caret-color: #fff;
 }
@@ -773,7 +838,7 @@ button {
   background: transparent;
   color: rgba(255, 255, 255, 0.78);
   font: inherit;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--chrome-scale, 1));
   font-weight: 600;
   cursor: pointer;
   padding: 0 4px;
@@ -813,12 +878,11 @@ button {
 .bar-notify {
   position: absolute;
   inset: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  justify-items: stretch;
-  gap: 6px;
-  padding: 0 8px;
+  justify-content: center;
+  gap: 0;
+  padding: 0 10px;
   color: #fff;
   font-size: 12px;
   font-weight: 600;
@@ -831,20 +895,23 @@ button {
 }
 
 /* 冲突叠层：主岛下方独立胶囊（搜索 / 情景临时 / 下拉展开）
-   必须穿透左右空白：.shell > * 的 pointer-events:auto 不能盖住本层。 */
+   必须穿透左右空白：.shell > * 的 pointer-events:auto 不能盖住本层。
+   z-index 须高于 .island-beam(40)：与天气岛贴边重叠时胶囊吃点击，否则像「抢不过天气」。 */
 .shell > .island-notify-stack,
 .island-notify-stack {
   position: absolute;
   left: 50%;
   translate: -50% 0;
-  z-index: 6;
+  z-index: 45;
   display: flex;
-  justify-content: center;
-  align-items: stretch;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 4px;
   width: max-content;
   max-width: var(--notify-stack-max-w, 420px);
   min-width: 0;
-  height: 28px;
+  height: auto;
   pointer-events: none !important;
 }
 
@@ -854,7 +921,7 @@ button {
   /* Shrink-wrap to content — never stretch to island/window width. */
   width: max-content;
   max-width: 100%;
-  height: 100%;
+  height: var(--island-bar-h, 28px);
   padding: 0 12px;
   border-radius: 999px;
   background: #000;
@@ -868,99 +935,89 @@ button {
   animation: none;
 }
 
-.bar-notify-slot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  align-self: center;
-  min-width: 0;
-  pointer-events: none;
-}
-
-.bar-notify-slot:has(.bar-notify-action) {
-  pointer-events: auto;
-}
-
-.bar-notify.is-stacked .bar-notify-slot:has(.bar-notify-action),
-.bar-notify.is-stacked .bar-notify-main {
-  pointer-events: auto;
-}
-
-/* 图标+文案同一行盒，互相垂直居中（禁止 baseline 底对齐） */
-.bar-notify-main {
+/* 图标 + 文案 + 按钮：同一行簇；文案行高对齐常驻摘要，整簇在岛栏内垂直居中 */
+.bar-notify-cluster {
   display: inline-flex;
   flex-direction: row;
   align-items: center;
   justify-content: center;
-  align-self: center;
-  justify-self: center;
   gap: 8px;
-  height: 16px;
   max-width: 100%;
   min-width: 0;
-  margin: 0;
-  line-height: 0;
-  pointer-events: none;
+  line-height: 1;
+  /* 中文字体光心略偏下，上移与天气/摘要对齐 */
+  transform: translateY(-0.5px);
+  /* Parent .bar-notify is pointer-events:none; only the cluster receives taps. */
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.bar-notify-actions {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  pointer-events: auto;
+  margin-left: 2px;
 }
 
 .bar-notify-icon {
-  width: 16px;
-  height: 16px;
+  width: calc(16px * var(--chrome-scale, 1));
+  height: calc(16px * var(--chrome-scale, 1));
   border-radius: 4px;
   object-fit: contain;
   flex-shrink: 0;
   display: block;
-  align-self: center;
 }
 
 .bar-notify-fallback {
-  width: 16px;
-  height: 16px;
+  width: calc(16px * var(--chrome-scale, 1));
+  height: calc(16px * var(--chrome-scale, 1));
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: rgba(255, 255, 255, 0.16);
-  font-size: 10px;
+  font-size: calc(10px * var(--chrome-scale, 1));
   font-weight: 700;
   flex-shrink: 0;
   line-height: 1;
-  align-self: center;
 }
 
 .bar-notify-text {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  height: 16px;
+  height: calc(16px * var(--chrome-scale, 1));
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 16px;
-  font-size: 12px;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: calc(12px * var(--chrome-scale, 1));
   font-weight: 600;
-  align-self: center;
 }
 
-/* 通知按钮：仅 start/end 槽；垂直居中；大圆角矩形；字号=岛栏 12px；内容 2 字或 icon */
+/* 紧贴文案后的岛内按钮：高度贴合岛栏，胶囊圆角 */
 .bar-notify-action {
-  height: 22px;
-  min-width: 36px;
-  padding: 0 10px;
+  height: calc(20px * var(--chrome-scale, 1));
+  min-width: calc(32px * var(--chrome-scale, 1));
+  padding: 0 9px;
   border: none;
-  border-radius: 11px;
+  border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: calc(11px * var(--chrome-scale, 1));
+  font-weight: 650;
   letter-spacing: 0.02em;
   color: #fff;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
   cursor: pointer;
   flex-shrink: 0;
   line-height: 1;
   font-family: inherit;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
 }
 
 .bar-notify-action:hover {
@@ -1427,8 +1484,8 @@ button {
 }
 
 .tray-chevron {
-  width: 16px;
-  height: 16px;
+  width: calc(16px * var(--chrome-scale, 1));
+  height: calc(16px * var(--chrome-scale, 1));
   margin-left: 1px;
   display: grid;
   place-items: center;
@@ -1474,9 +1531,9 @@ button {
 }
 
 .tray-icon-btn {
-  width: 16px;
-  height: 16px;
-  min-width: 16px;
+  width: calc(16px * var(--chrome-scale, 1));
+  height: calc(16px * var(--chrome-scale, 1));
+  min-width: calc(16px * var(--chrome-scale, 1));
   margin-inline-end: 7px;
   padding: 0;
   display: grid;
@@ -1582,8 +1639,8 @@ button {
 }
 
 .tray-glyph {
-  width: 14px;
-  height: 14px;
+  width: calc(14px * var(--chrome-scale, 1));
+  height: calc(14px * var(--chrome-scale, 1));
   display: block;
   object-fit: contain;
   image-rendering: auto;
@@ -1592,12 +1649,12 @@ button {
 }
 
 .tray-glyph-fallback {
-  width: 14px;
-  height: 14px;
+  width: calc(14px * var(--chrome-scale, 1));
+  height: calc(14px * var(--chrome-scale, 1));
   border-radius: 2px;
   background: transparent;
   color: inherit;
-  font-size: 10px;
+  font-size: calc(10px * var(--chrome-scale, 1));
   font-weight: 700;
   display: grid;
   place-items: center;
@@ -1611,7 +1668,7 @@ button {
 .tray-ime-btn {
   flex-shrink: 0;
   height: var(--island-bar-h);
-  min-width: 22px;
+  min-width: calc(22px * var(--chrome-scale, 1));
   padding: 0 3px;
   margin: 0;
   display: inline-flex;
@@ -1626,6 +1683,13 @@ button {
   transition: opacity 140ms ease;
 }
 
+.chrome-control-center-btn svg {
+  width: calc(16px * var(--chrome-scale, 1));
+  height: calc(16px * var(--chrome-scale, 1));
+  display: block;
+  flex-shrink: 0;
+}
+
 .chrome-control-center-btn:hover,
 .tray-wifi-btn:hover,
 .tray-lang-btn:hover,
@@ -1634,7 +1698,7 @@ button {
 }
 
 .tray-wifi-btn {
-  min-width: 20px;
+  min-width: calc(20px * var(--chrome-scale, 1));
   padding: 0 2px;
 }
 
@@ -1643,19 +1707,21 @@ button {
 }
 
 .tray-wifi-glyph {
+  width: calc(15px * var(--chrome-scale, 1));
+  height: calc(15px * var(--chrome-scale, 1));
   display: block;
   flex-shrink: 0;
 }
 
 .tray-lang-abbr {
-  min-width: 20px;
-  height: 18px;
+  min-width: calc(20px * var(--chrome-scale, 1));
+  height: calc(18px * var(--chrome-scale, 1));
   padding: 0 5px;
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: calc(11px * var(--chrome-scale, 1));
   font-weight: 700;
   letter-spacing: 0.02em;
   line-height: 1;
@@ -1667,17 +1733,17 @@ button {
 }
 
 .tray-ime-btn {
-  min-width: 20px;
+  min-width: calc(20px * var(--chrome-scale, 1));
   padding: 0 2px;
 }
 
 .tray-ime-mark {
-  width: 18px;
-  height: 18px;
+  width: calc(18px * var(--chrome-scale, 1));
+  height: calc(18px * var(--chrome-scale, 1));
   border-radius: 5px;
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: calc(10px * var(--chrome-scale, 1));
   font-weight: 700;
   line-height: 1;
   color: var(--sys-accent-fg-on, #0f1115);
@@ -1703,7 +1769,7 @@ button {
   background: transparent;
   border: none;
   color: inherit;
-  font-size: 12px;
+  font-size: calc(12px * var(--chrome-scale, 1));
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;

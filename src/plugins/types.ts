@@ -17,7 +17,8 @@ export type PluginCapability =
   | "network"
   | "staging"
   | "everything.search"
-  | "system.monitor";
+  | "system.monitor"
+  | "webview";
 
 export type ShortcutsAction = "expand" | "popup.open" | "panel.open" | "command";
 

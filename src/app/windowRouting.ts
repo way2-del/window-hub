@@ -6,6 +6,7 @@ export type WindowFlags = Partial<Record<
   | "__WH_IS_DOCK_GLASS__"
   | "__WH_IS_ISLAND_BAR_GLASS__"
   | "__WH_IS_DOCK__"
+  | "__WH_IS_CHROME_SAT__"
   | "__WH_IS_PLUGIN_POPUP__"
   | "__WH_IS_WIFI_AUTH_POPUP__"
   | "__WH_IS_CONTROL_CENTER__"
@@ -30,6 +31,7 @@ export type WindowKind =
   | "dock"
   | "dock-glass"
   | "island-bar-glass"
+  | "chrome-sat"
   | "dock-icon-editor"
   | "dock-add-icon";
 
@@ -42,6 +44,7 @@ export function resolveWindowKind(
   if (flags.__WH_IS_DOCK_ADD_ICON_POPUP__ === true) return "dock-add-icon";
   if (flags.__WH_IS_DOCK_GLASS__ === true) return "dock-glass";
   if (flags.__WH_IS_ISLAND_BAR_GLASS__ === true) return "island-bar-glass";
+  if (flags.__WH_IS_CHROME_SAT__ === true) return "chrome-sat";
   if (flags.__WH_IS_DOCK__ === true) return "dock";
   if (flags.__WH_IS_PLUGIN_POPUP__ === true) return "plugin-popup";
   if (flags.__WH_IS_WIFI_AUTH_POPUP__ === true) return "wifi-auth";
@@ -58,6 +61,9 @@ export function resolveWindowKind(
     if (label === "dock-add-icon-popup") return "dock-add-icon";
     if (label === "dock-glass") return "dock-glass";
     if (label === "island-bar-glass") return "island-bar-glass";
+    if (label.startsWith("chrome-sat-")) return "chrome-sat";
+    if (label.startsWith("dock-sat-glass-")) return "dock-glass";
+    if (label.startsWith("dock-sat-")) return "dock";
     if (label === "dock") return "dock";
     if (label === "plugin-popup" || label === "plugin-window") return "plugin-popup";
     if (label === "wifi-auth-popup") return "wifi-auth";
@@ -76,6 +82,7 @@ export function resolveWindowKind(
   if (q === "dock-add-icon") return "dock-add-icon";
   if (q === "dock-glass") return "dock-glass";
   if (q === "island-bar-glass") return "island-bar-glass";
+  if (q === "chrome-sat") return "chrome-sat";
   if (q === "dock") return "dock";
   if (q === "plugin-popup" || q === "plugin-window") return "plugin-popup";
   if (q === "wifi-auth") return "wifi-auth";
@@ -88,4 +95,3 @@ export function resolveWindowKind(
   if (q === "settings") return "settings";
   return "island";
 }
-

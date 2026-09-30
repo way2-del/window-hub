@@ -14,10 +14,52 @@ pub struct WindowInfo {
     /// File stem of exe (e.g. wechatdevtools) for bind keys
     #[serde(default)]
     pub exe_name: Option<String>,
+    /// AppUserModelID when available (UWP / packaged / ApplicationFrameHost).
+    #[serde(default)]
+    pub aumid: Option<String>,
 }
 
 fn window_id(hwnd: isize) -> String {
     format!("hwnd:{hwnd}")
+}
+
+/// Read `PKEY_AppUserModel_ID` from a top-level HWND (Settings / Security / Store apps).
+#[cfg(windows)]
+pub fn window_aumid(hwnd: isize) -> Option<String> {
+    use windows::core::GUID;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, PROPERTYKEY, SHGetPropertyStoreForWindow,
+    };
+
+    // Same GUID as Windows SDK PKEY_AppUserModel_ID.
+    const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+        pid: 5,
+    };
+
+    if hwnd == 0 {
+        return None;
+    }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let store: IPropertyStore =
+            SHGetPropertyStoreForWindow(HWND(hwnd as *mut _)).ok()?;
+        let value = store.GetValue(&PKEY_APP_USER_MODEL_ID).ok()?;
+        let s = value.to_string();
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn window_aumid(_hwnd: isize) -> Option<String> {
+    None
 }
 
 #[cfg(windows)]
@@ -187,6 +229,7 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
             return BOOL(1);
         }
         let hwnd_i = hwnd.0 as isize;
+        let aumid = window_aumid(hwnd_i);
 
         if let Ok(mut out) = ctx.out.lock() {
             out.push(WindowInfo {
@@ -197,6 +240,7 @@ pub fn list_windows(exclude_hwnd: Option<isize>) -> Vec<WindowInfo> {
                 pid,
                 exe,
                 exe_name,
+                aumid,
             });
         }
         BOOL(1)

@@ -2011,30 +2011,17 @@ pub fn apply_main_window_material_now(app: &AppHandle) {
 fn apply_main_window_material_inner(app: &AppHandle) {
     let prefs = load_material_prefs();
     let bar_glass = get_island_prefs().bar_glass;
-    let desktop = {
-        #[cfg(windows)]
-        {
-            let hwnd = app
-                .get_webview_window("main")
-                .and_then(|w| w.hwnd().ok())
-                .map(|h| h.0 as isize);
-            crate::win32::ambient::is_desktop_scene(hwnd)
-        }
-        #[cfg(not(windows))]
-        {
-            true
-        }
-    };
-    let enabled = bar_glass && desktop;
     #[cfg(windows)]
     {
-        // Composition attach + foreign BitBlt during AppBar settle freezes WebView2.
-        let enabled = enabled && !crate::win32::work_area::work_area_quiet();
-        crate::win32::island_bar_glass::sync_inner(app, enabled, &prefs);
+        // Per-window desktop scene is decided inside sync_inner — do not gate
+        // all strips on primary's scene (secondary must keep the same frost).
+        // Quiet only pauses main bar_comp attach; chrome-sat still syncs.
+        let quiet = crate::win32::work_area::work_area_quiet();
+        crate::win32::island_bar_glass::sync_inner(app, bar_glass, quiet, &prefs);
     }
     #[cfg(not(windows))]
     {
-        let _ = (enabled, prefs, app);
+        let _ = (bar_glass, prefs, app);
     }
 }
 
@@ -2157,8 +2144,22 @@ pub fn apply_window_effect(
     } else {
         base
     };
-    // Main / island-bar-glass: material owned by sibling strip sync.
+    // Main / chrome-sat / island-bar-glass: shared bar material path.
     if window.label() == "main" || window.label() == "island-bar-glass" {
+        apply_main_window_material(window.app_handle());
+        return Ok(if get_island_prefs().bar_glass {
+            prefs.kind.as_str().to_string()
+        } else {
+            "none".into()
+        });
+    }
+    // chrome-sat: same material path as main (bar_comp via sync_inner), plus an
+    // immediate per-HWND sync so desktop frost does not wait on debounce.
+    if window.label().starts_with("chrome-sat-") {
+        #[cfg(windows)]
+        {
+            crate::win32::island_bar_glass::sync_sat_window_now(&window, &prefs);
+        }
         apply_main_window_material(window.app_handle());
         return Ok(if get_island_prefs().bar_glass {
             prefs.kind.as_str().to_string()
@@ -2224,6 +2225,20 @@ fn main_hwnd(app: &AppHandle) -> Option<isize> {
 pub fn sample_ambient_color(app: AppHandle) -> crate::win32::ambient::AmbientStrip {
     let hwnd = main_hwnd(&app);
     crate::win32::ambient::sample_nonblocking(hwnd)
+}
+
+/// Calling window sample — chrome-sat uses per-monitor cache (watcher fills it).
+/// FE poll must stay BitBlt-free so dual-monitor auto-switch cannot hang IPC.
+#[tauri::command]
+pub fn sample_ambient_for_window(
+    window: WebviewWindow,
+) -> crate::win32::ambient::AmbientStrip {
+    let label = window.label().to_string();
+    let hwnd = window.hwnd().ok().map(|h| h.0 as isize);
+    if label.starts_with("chrome-sat-") {
+        return crate::win32::ambient::sample_sat_for_ipc(&label, hwnd);
+    }
+    crate::win32::ambient::sample_nonblocking(hwnd).with_label("main")
 }
 
 #[tauri::command]
@@ -3917,6 +3932,8 @@ pub struct HubNotifyArgs {
     pub urgency: Option<String>,
     pub ttl_ms: Option<u64>,
     pub actions: Option<Vec<serde_json::Value>>,
+    /// Body click → fire `onAction` with this id (else dismiss / open panel).
+    pub default_action_id: Option<String>,
     pub data: Option<serde_json::Value>,
 }
 
@@ -3961,6 +3978,7 @@ pub fn hub_notify(
             "urgency": urgency,
             "ttlMs": opts.ttl_ms,
             "actions": opts.actions.unwrap_or_default(),
+            "defaultActionId": opts.default_action_id,
             "data": opts.data,
         }),
     );
@@ -4094,6 +4112,82 @@ pub fn hub_fetch(
         headers,
         body,
     })
+}
+
+// ── Plugin WebView (capability: webview) ────────────
+
+#[tauri::command]
+pub async fn hub_webview_open(
+    app: AppHandle,
+    plugin_id: String,
+    opts: crate::plugin_webview::OpenOpts,
+) -> Result<serde_json::Value, String> {
+    crate::plugin_webview::open(app, plugin_id, opts).await
+}
+
+#[tauri::command]
+pub fn hub_webview_close(
+    app: AppHandle,
+    plugin_id: String,
+    opts: crate::plugin_webview::SessionIdOpts,
+) -> Result<(), String> {
+    crate::plugin_webview::close(app, plugin_id, opts)
+}
+
+#[tauri::command]
+pub fn hub_webview_navigate(
+    app: AppHandle,
+    plugin_id: String,
+    opts: crate::plugin_webview::NavigateOpts,
+) -> Result<(), String> {
+    crate::plugin_webview::navigate(app, plugin_id, opts)
+}
+
+#[tauri::command]
+pub async fn hub_webview_start_pick(
+    app: AppHandle,
+    plugin_id: String,
+    opts: crate::plugin_webview::SessionIdOpts,
+) -> Result<crate::plugin_webview::PickResult, String> {
+    crate::plugin_webview::start_pick(app, plugin_id, opts).await
+}
+
+#[tauri::command]
+pub fn hub_webview_take_last_pick(
+    plugin_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    crate::plugin_webview::take_last_pick(plugin_id)
+}
+
+#[tauri::command]
+pub async fn hub_webview_snapshot(
+    app: AppHandle,
+    plugin_id: String,
+    opts: crate::plugin_webview::SnapshotOpts,
+) -> Result<crate::plugin_webview::SnapshotResult, String> {
+    crate::plugin_webview::snapshot(app, plugin_id, opts).await
+}
+
+#[tauri::command]
+pub async fn hub_webview_watch_start(
+    app: AppHandle,
+    plugin_id: String,
+    opts: crate::plugin_webview::WatchStartOpts,
+) -> Result<(), String> {
+    crate::plugin_webview::watch_start(app, plugin_id, opts).await
+}
+
+#[tauri::command]
+pub fn hub_webview_watch_stop(
+    plugin_id: String,
+    opts: crate::plugin_webview::WatchIdOpts,
+) -> Result<(), String> {
+    crate::plugin_webview::watch_stop(plugin_id, opts)
+}
+
+#[tauri::command]
+pub fn hub_webview_watch_list(plugin_id: String) -> Result<Vec<crate::plugin_webview::WatchInfo>, String> {
+    crate::plugin_webview::watch_list(plugin_id)
 }
 
 // ── Island prefs (host business tables) ────────────

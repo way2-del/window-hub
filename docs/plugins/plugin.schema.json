@@ -236,7 +236,8 @@
           "network",
           "staging",
           "everything.search",
-          "system.monitor"
+          "system.monitor",
+          "webview"
         ]
       },
       "uniqueItems": true

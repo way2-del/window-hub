@@ -116,6 +116,14 @@ pub fn general_set(conn: &Connection, value: &Value) -> Result<(), String> {
     singleton_set_json(conn, "prefs_general", value)
 }
 
+pub fn display_placement_get(conn: &Connection) -> Result<Option<Value>, String> {
+    singleton_get_json(conn, "prefs_display_placement")
+}
+
+pub fn display_placement_set(conn: &Connection, value: &Value) -> Result<(), String> {
+    singleton_set_json(conn, "prefs_display_placement", value)
+}
+
 // ── prefs_ambient ────────────────────────────────────────────────────
 
 pub fn ambient_get(conn: &Connection) -> Result<Option<String>, String> {

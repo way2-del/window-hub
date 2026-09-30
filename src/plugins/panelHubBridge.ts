@@ -40,6 +40,15 @@ const ALLOWED_CMDS = new Set([
   "hub_camera_open_privacy_settings",
   "hub_notify",
   "hub_fetch",
+  "hub_webview_open",
+  "hub_webview_close",
+  "hub_webview_navigate",
+  "hub_webview_start_pick",
+  "hub_webview_take_last_pick",
+  "hub_webview_snapshot",
+  "hub_webview_watch_start",
+  "hub_webview_watch_stop",
+  "hub_webview_watch_list",
   "hub_everything_status",
   "hub_everything_search",
   "hub_everything_open",
@@ -185,6 +194,59 @@ export function panelHubBootstrapScript(pluginId: string): string {
     sysmon: {
       snapshot: function () { return invoke("hub_sysmon_snapshot", withPlugin()); }
     },
+    webview: {
+      open: function (opts) { return invoke("hub_webview_open", withPlugin({ opts: opts || {} })); },
+      close: function (opts) { return invoke("hub_webview_close", withPlugin({ opts: opts || {} })); },
+      navigate: function (opts) { return invoke("hub_webview_navigate", withPlugin({ opts: opts || {} })); },
+      startPick: function (opts) { return invoke("hub_webview_start_pick", withPlugin({ opts: opts || {} })); },
+      takeLastPick: function () { return invoke("hub_webview_take_last_pick", withPlugin()); },
+      snapshot: function (opts) { return invoke("hub_webview_snapshot", withPlugin({ opts: opts || {} })); },
+      watch: {
+        start: function (opts) { return invoke("hub_webview_watch_start", withPlugin({ opts: opts || {} })); },
+        stop: function (opts) { return invoke("hub_webview_watch_stop", withPlugin({ opts: opts || {} })); },
+        list: function () { return invoke("hub_webview_watch_list", withPlugin()); }
+      },
+      onChanged: function (cb) {
+        function onMsg(ev) {
+          var d = ev && ev.data;
+          if (!d || d.channel !== "webview-watch-changed-fwd") return;
+          if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("message", onMsg);
+        return function () { window.removeEventListener("message", onMsg); };
+      },
+      onScanned: function (cb) {
+        function onMsg(ev) {
+          var d = ev && ev.data;
+          if (!d || d.channel !== "webview-watch-scanned-fwd") return;
+          if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("message", onMsg);
+        return function () { window.removeEventListener("message", onMsg); };
+      },
+      onPick: function (cb) {
+        function onMsg(ev) {
+          var d = ev && ev.data;
+          if (!d || d.channel !== "webview-pick-result-fwd") return;
+          if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("message", onMsg);
+        return function () { window.removeEventListener("message", onMsg); };
+      },
+      onClosed: function (cb) {
+        function onMsg(ev) {
+          var d = ev && ev.data;
+          if (!d || d.channel !== "webview-session-closed-fwd") return;
+          if (d.pluginId && d.pluginId !== PLUGIN_ID) return;
+          try { cb(d); } catch (_) {}
+        }
+        window.addEventListener("message", onMsg);
+        return function () { window.removeEventListener("message", onMsg); };
+      }
+    },
     panel: {
       close: function () {
         window.parent.postMessage({ channel: "${WH_PANEL_HUB}", cmd: "panel.close", args: {} }, "*");
@@ -259,6 +321,7 @@ export function panelHubBootstrapScript(pluginId: string): string {
         urgency: opts && opts.urgency,
         ttlMs: opts && opts.ttlMs,
         actions: opts && opts.actions,
+        defaultActionId: opts && opts.defaultActionId,
         data: opts && opts.data
       }
     }));

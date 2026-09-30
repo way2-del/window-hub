@@ -42,6 +42,18 @@ import {
 import PrefSelect from "./components/PrefSelect";
 import { clickTrace } from "./clickTrace";
 import {
+  getDisplayPlacementSnapshot,
+  hydrateDisplayPlacement,
+  listenDisplayPlacement,
+  PLACEMENT_PRESETS,
+  setDisplayPlacement,
+  TOP_BAR_OPTIONS,
+  type DisplayPlacementPrefs,
+  type PlacementPreset,
+  type PlacementSnapshot,
+  type TopBarMode,
+} from "./displayPlacementPrefs";
+import {
   hasRightShortcutsWing,
   resolveChromeRailTier,
 } from "./features/chrome/dualShortcuts";
@@ -52,6 +64,12 @@ import {
   subscribeChromePrefs,
   type ChromePrefs,
 } from "./chromePrefs";
+import {
+  BAR_H_STEP,
+  MAX_BAR_H,
+  MIN_BAR_H,
+  normalizeBarHeight,
+} from "./features/chrome/barHeight";
 import {
   pushSettingsToast,
   subscribeSettingsToast,
@@ -122,6 +140,8 @@ type DockPrefs = {
   hoverPreviewDelayMs: number;
   /** Thumbnail height in CSS px (default 160). */
   hoverPreviewHeightPx: number;
+  /** Auto solid plate behind transparent-edge icons (default on). */
+  iconPlate: boolean;
 };
 
 type AutostartBackend = "service" | "task" | "none";
@@ -192,6 +212,7 @@ function normalizeDockPrefs(dp: Partial<DockPrefs> | null | undefined): DockPref
         Number.isFinite(Number(dp?.hoverPreviewHeightPx)) ? Number(dp?.hoverPreviewHeightPx) : 160,
       ),
     ),
+    iconPlate: dp?.iconPlate !== false,
   };
 }
 
@@ -590,6 +611,10 @@ export default function SettingsApp() {
   };
   const [generalMsg, setGeneralMsg] = useState("");
   const [generalBusy, setGeneralBusy] = useState(false);
+  const [placementSnap, setPlacementSnap] = useState<PlacementSnapshot>(() =>
+    getDisplayPlacementSnapshot(),
+  );
+  const [placementBusy, setPlacementBusy] = useState(false);
   const [islandPrefs, setIslandPrefsState] = useState<IslandPrefs>(() => getIslandPrefs());
   /** scenario pluginId → whether openTrayKey is bound (plugin settings). */
   const [scenarioOpenBound, setScenarioOpenBound] = useState<Record<string, boolean>>({});
@@ -670,6 +695,16 @@ export default function SettingsApp() {
     });
     return () => {
       unsub();
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listenDisplayPlacement(setPlacementSnap).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
       unlisten?.();
     };
   }, []);
@@ -962,6 +997,7 @@ export default function SettingsApp() {
 
     void (async () => {
       await hydrateIslandPrefs().then(setIslandPrefsState);
+      await hydrateDisplayPlacement().then(setPlacementSnap);
 
       try {
         const prefs = await invoke<MaterialPrefs>("get_material_prefs");
@@ -974,6 +1010,10 @@ export default function SettingsApp() {
         window.setTimeout(() => {
           void invoke("apply_window_effect", {}).catch(() => undefined);
         }, 400);
+        // AppBar / display-placement churn can wipe immersive dark → white shell.
+        window.setTimeout(() => {
+          void invoke("apply_window_effect", {}).catch(() => undefined);
+        }, 1200);
       } catch {
         /* CSS already synced above */
       }
@@ -1211,6 +1251,32 @@ export default function SettingsApp() {
     }
   }
 
+  async function persistPlacement(prefs: DisplayPlacementPrefs) {
+    setPlacementBusy(true);
+    try {
+      const snap = await setDisplayPlacement(prefs);
+      setPlacementSnap(snap);
+    } catch (e) {
+      console.error("[settings] display placement save failed", e);
+    } finally {
+      setPlacementBusy(false);
+    }
+  }
+
+  function placementRows() {
+    const { prefs, displays, resolved } = placementSnap;
+    if (prefs.preset !== "custom") return resolved;
+    const byId = new Map(prefs.monitors.map((m) => [m.id, m]));
+    return displays.map((d) => {
+      const m = byId.get(d.id);
+      return {
+        ...d,
+        topBar: (m?.topBar ?? (d.isPrimary ? "full" : "none")) as TopBarMode,
+        dock: m?.dock ?? d.isPrimary,
+      };
+    });
+  }
+
   async function persistTrayPrefs(
     nextPinned: string[],
     nextHeights: Record<string, number>,
@@ -1347,10 +1413,11 @@ export default function SettingsApp() {
       const before = chromePrefs;
       const saved = await setChromePrefs(patch);
       setChromePrefsState(saved);
-      // Only prompt restart when rail tier changes (dual ↔ hybrid ↔ tray).
+      // Restart when rail tier or bar height changes (AppBar / frost / strip).
       const tierChanged =
         resolveChromeRailTier(before) !== resolveChromeRailTier(saved);
-      setChromeRestartPrompt(tierChanged);
+      const heightChanged = before.barHeight !== saved.barHeight;
+      setChromeRestartPrompt(tierChanged || heightChanged);
     } catch (e) {
       console.error("[settings] chrome prefs save failed", e);
       pushSettingsToast(`顶栏设置保存失败：${String(e)}`);
@@ -1619,6 +1686,153 @@ export default function SettingsApp() {
                   />
                 </div>
                 {generalMsg ? <p className="card-desc">{generalMsg}</p> : null}
+              </section>
+              <section className="settings-card">
+                <h2>多显示器</h2>
+                <p className="card-desc">
+                  分别指定每块屏幕的顶栏与 Dock。灵动岛仅在主屏且顶栏为「完整」时显示。应用顺序：先稳住主屏顶栏与
+                  Dock，再按需创建副屏顶栏。当前版本副屏 Dock 暂不克隆（避免抢主屏材质），Dock
+                  固定跟主屏。
+                </p>
+                <div className="mode-list">
+                  {PLACEMENT_PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`mode-item${placementSnap.prefs.preset === p.id ? " is-selected" : ""}`}
+                      disabled={placementBusy}
+                      onClick={() => {
+                        const next: DisplayPlacementPrefs = {
+                          preset: p.id,
+                          monitors:
+                            p.id === "custom"
+                              ? placementSnap.prefs.monitors.length > 0
+                                ? placementSnap.prefs.monitors
+                                : placementSnap.displays.map((d) => ({
+                                    id: d.id,
+                                    topBar: d.isPrimary ? "full" : "none",
+                                    dock: d.isPrimary,
+                                  }))
+                              : [],
+                        };
+                        void persistPlacement(next);
+                      }}
+                    >
+                      <span className="mode-label">{p.label}</span>
+                      <span className="mode-desc">{p.desc}</span>
+                    </button>
+                  ))}
+                </div>
+                {placementSnap.prefs.preset === "custom" ? (
+                  <div className="display-placement-table" role="table" aria-label="自定义显示器">
+                    <div className="display-placement-head" role="row">
+                      <span role="columnheader">显示器</span>
+                      <span role="columnheader">顶栏</span>
+                      <span role="columnheader">Dock</span>
+                    </div>
+                    {placementRows().map((row) => (
+                      <div className="display-placement-row" role="row" key={row.id}>
+                        <span className="display-placement-name" role="cell">
+                          {row.name}
+                          {row.isPrimary ? (
+                            <span className="display-placement-badge">主屏 · 灵动岛</span>
+                          ) : null}
+                          <span className="display-placement-meta">
+                            {row.width}×{row.height}
+                          </span>
+                        </span>
+                        <span role="cell">
+                          <PrefSelect
+                            ariaLabel={`${row.name} 顶栏`}
+                            disabled={placementBusy}
+                            value={row.topBar}
+                            options={TOP_BAR_OPTIONS.map((o) => ({
+                              value: o.value,
+                              label:
+                                !row.isPrimary && o.value === "full"
+                                  ? "完整（不含岛）"
+                                  : o.label,
+                            }))}
+                            onChange={(next) => {
+                              const monitors = placementSnap.displays.map((d) => {
+                                const cur = placementSnap.prefs.monitors.find(
+                                  (m) => m.id === d.id,
+                                );
+                                const base = {
+                                  id: d.id,
+                                  topBar: (cur?.topBar ??
+                                    (d.isPrimary ? "full" : "none")) as TopBarMode,
+                                  dock: cur?.dock ?? d.isPrimary,
+                                };
+                                if (d.id === row.id) {
+                                  return { ...base, topBar: next as TopBarMode };
+                                }
+                                return base;
+                              });
+                              void persistPlacement({
+                                preset: "custom" as PlacementPreset,
+                                monitors,
+                              });
+                            }}
+                          />
+                        </span>
+                        <span role="cell" className="display-placement-dock">
+                          <button
+                            type="button"
+                            className={`pref-switch${row.dock ? " is-on" : ""}`}
+                            role="switch"
+                            aria-checked={row.dock}
+                            disabled={placementBusy}
+                            onClick={() => {
+                              const monitors = placementSnap.displays.map((d) => {
+                                const cur = placementSnap.prefs.monitors.find(
+                                  (m) => m.id === d.id,
+                                );
+                                const base = {
+                                  id: d.id,
+                                  topBar: (cur?.topBar ??
+                                    (d.isPrimary ? "full" : "none")) as TopBarMode,
+                                  dock: cur?.dock ?? d.isPrimary,
+                                };
+                                if (d.id === row.id) {
+                                  return { ...base, dock: !row.dock };
+                                }
+                                return base;
+                              });
+                              void persistPlacement({
+                                preset: "custom",
+                                monitors,
+                              });
+                            }}
+                          >
+                            <span className="pref-switch-knob" />
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <ul className="display-placement-summary">
+                    {placementSnap.resolved.map((r) => (
+                      <li key={r.id}>
+                        <strong>
+                          {r.name}
+                          {r.isPrimary ? "（主屏）" : ""}
+                        </strong>
+                        {" · 顶栏 "}
+                        {r.topBar === "full"
+                          ? r.isPrimary
+                            ? "完整"
+                            : "完整（不含岛）"
+                          : r.topBar === "shortcuts"
+                            ? "仅快捷区"
+                            : "无"}
+                        {" · Dock "}
+                        {r.dock ? "开" : "关"}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </section>
               <section className="settings-card">
                 <h2>下拉内容</h2>
@@ -2094,6 +2308,41 @@ export default function SettingsApp() {
 
           {nav === "chrome" && (
             <section className="settings-card">
+              <h2>顶栏高度</h2>
+              <p className="card-desc">
+                调整灵动岛折叠条与快捷区高度；文字与图标按相对默认 28px
+                的比例缩放。保存后需重启生效（工作区预留与模糊条一并更新）。
+              </p>
+              <div className="pref-row">
+                <span className="pref-row-text">
+                  <span className="pref-row-label">
+                    高度 {chromePrefs.barHeight}px
+                  </span>
+                  <span className="pref-row-desc">
+                    范围 {MIN_BAR_H}–{MAX_BAR_H}，步进 {BAR_H_STEP}；当前缩放{" "}
+                    {(chromePrefs.barHeight / 28).toFixed(2)}×
+                  </span>
+                </span>
+                <input
+                  type="range"
+                  className="pref-range"
+                  min={MIN_BAR_H}
+                  max={MAX_BAR_H}
+                  step={BAR_H_STEP}
+                  value={chromePrefs.barHeight}
+                  disabled={chromeBusy || chromeRestartBusy}
+                  aria-label="顶栏高度"
+                  onChange={(e) => {
+                    const next = normalizeBarHeight(Number(e.target.value));
+                    void persistChromePrefs({ barHeight: next });
+                  }}
+                />
+              </div>
+            </section>
+          )}
+
+          {nav === "chrome" && (
+            <section className="settings-card">
               <h2>顶栏模块</h2>
               <p className="card-desc">
                 控制灵动岛右侧系统菜单是否显示。「托盘常驻」（顶栏图标轨）与「托盘下拉」（▾
@@ -2121,11 +2370,7 @@ export default function SettingsApp() {
               {chromeRestartPrompt ? (
                 <div className="chrome-restart-prompt" role="status">
                   <p className="chrome-restart-prompt-text">
-                    {chromeRailTier === "dual"
-                      ? "设置已保存。重启后左右均为快捷区；也可先改完再选手动下次重启。"
-                      : chromeRailTier === "hybrid"
-                        ? "设置已保存。重启后右侧为「系统芯片 + 内侧快捷」；打开托盘常驻会使右侧快捷让位。"
-                        : "设置已保存。请重启使完整托盘生效；关闭托盘常驻后可恢复右侧快捷。"}
+                    设置已保存。请重启使顶栏高度 / 模块档位生效；也可先改完再选手动下次重启。
                   </p>
                   <div className="chrome-restart-prompt-actions">
                     <button
@@ -2264,6 +2509,24 @@ export default function SettingsApp() {
                     aria-checked={dockPrefs.enabled}
                     disabled
                     title="启用 Dock 时自动隐藏，不可单独关闭"
+                  >
+                    <span className="pref-switch-knob" />
+                  </button>
+                </label>
+                <label className={`pref-row${dockPrefs.enabled ? "" : " is-disabled"}`}>
+                  <span className="pref-row-text">
+                    <span className="pref-row-label">图标底板</span>
+                    <span className="pref-row-desc">
+                      为透明边缘图标自动铺浅色底板；关闭后图标直接叠在 Dock 玻璃上（单项自定义背景仍生效）
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className={`pref-switch${dockPrefs.iconPlate ? " is-on" : ""}`}
+                    role="switch"
+                    aria-checked={dockPrefs.iconPlate}
+                    disabled={!dockPrefs.enabled || dockBusy}
+                    onClick={() => void persistDockPrefs({ iconPlate: !dockPrefs.iconPlate })}
                   >
                     <span className="pref-switch-knob" />
                   </button>

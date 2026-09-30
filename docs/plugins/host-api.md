@@ -23,6 +23,7 @@
 | `network` | `hub.fetch` + `permissions.network` 白名单 | ✅ |
 | `everything.search` | Everything 本机文件搜索 / 打开 / 定位（敏感；需本机 Everything 运行） | ✅ |
 | `system.monitor` | `hub.sysmon.snapshot`（CPU/内存/磁盘/温度） | ✅ |
+| `webview` | 托管外部网页 WebView2：打开 / 划定元素 / 后台监测（敏感） | ✅ |
 
 **槽位门控（非 capability）：** `hub.island.setBar` / `clearBar` 需 `slots["island.bar"]`。  
 设置「岛栏常驻」选中的插件可写折叠态摘要；`excludeFromBarResident` 插件（如中转站）可走临时覆盖层。  
@@ -144,9 +145,11 @@ hub.notify({
   urgency?: "passive" | "active" | "critical";
   ttlMs?: number;
   data?: unknown;
+  /** 点横幅中部：有则 onAction(此 id)；无则 dismiss（有 panel 则开面板） */
+  defaultActionId?: string;
   actions?: {
     id: string;
-    slot: "start" | "end";       // 仅开头/结尾，每槽最多 1
+    slot: "start" | "end";       // 排序用（先 start 后 end），每槽最多 1
     label?: string;              // 恰好 2 字；与 iconPng 互斥
     iconPng?: string;
     background: string;          // 安全 CSS 色
@@ -161,8 +164,9 @@ hub.notify.onAction((ev: {
 }) => void): () => void
 ```
 
-需 `notify` + `slots["island.notify"]`。按钮由 Host 固定布局（垂直居中、大圆角、字号=岛栏 12px）。  
-**点横幅中部**（所有插件统一）：dismiss 后若声明 `island.panel` 则下拉打开该插件面板；**不是**托盘应用跳转。左右按钮走 `onAction`。细则：`.cursor/skills/window-hub-island-notify/SKILL.md`。
+需 `notify` + `slots["island.notify"]`。按钮由 Host 固定：**追加在文案后**，与图标+文案整体居中。  
+**停留**：插件通知默认 `ttlMs: 0`（像微信，点开/划掉才消失）；显式传 `ttlMs` 才自动消失。多条通知可叠层显示（最多约 6 条）。  
+**点横幅中部**：若设 `defaultActionId` → `onAction`；否则 dismiss（有 `island.panel` 则开面板）。细则：`.cursor/skills/window-hub-island-notify/SKILL.md`。
 
 ## `hub.fetch`
 
@@ -176,6 +180,30 @@ hub.fetch(url: string, opts?: {
 ```
 
 需 `network`；URL 必须匹配 `permissions.network`（主机/模式白名单）。空白名单 → 拒绝。
+
+## `hub.webview`
+
+需 capability **`webview`**（敏感）。Host 为每个插件维护独立 WebView2 用户数据目录（`%APPDATA%/window-hub/webview-profiles/{pluginId}/`），交互浏览与后台监测共用 Cookie。
+
+```ts
+hub.webview.open({ url, title? }) → { sessionId }
+hub.webview.close({ sessionId })
+hub.webview.navigate({ sessionId, url })
+hub.webview.startPick({ sessionId }) → { selector, textPreview, outerHtml? }
+hub.webview.takeLastPick() → { sessionId, selector, textPreview, outerHtml? } | null
+hub.webview.snapshot({ sessionId?, url?, selector }) → { text, html? }
+hub.webview.watch.start({ id, url, selector, intervalMs?, title? })
+hub.webview.watch.stop({ id })
+hub.webview.watch.list() → WatchInfo[]
+hub.webview.onChanged(cb)   // webview-watch-changed（仅本 pluginId）
+hub.webview.onScanned(cb)   // webview-watch-scanned（每次轮询，含对比字段）
+hub.webview.onPick(cb)      // webview-pick-result（划定完成；弹窗可重建时用）
+hub.webview.onClosed(cb)    // webview-session-closed
+```
+
+规则：仅 `http`/`https`；监测间隔钳制 30s–1h；每插件最多 20 条 watch；首次采样只建基线不通知；`watch.stop` 会清该条基线文本。禁用/卸载插件时 Host 关闭该插件全部会话与监测。划定期间 Host 会 hold 弹窗不因失焦销毁；结果也可经 `takeLastPick` / `onPick` 回填。
+
+官方消费者：`com.window-hub.page-watch`（网页监测）。
 
 ## Companion
 

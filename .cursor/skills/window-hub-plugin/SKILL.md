@@ -61,6 +61,7 @@ description: >-
 | 岛栏摘要 + 下拉详情 + settings | **天气** | `docs/plugins/examples/weather/`（shortcuts `manage=none`） |
 | 岛栏歌词自适应宽 + 迷你播放器 | **正在播放** | `docs/plugins/examples/now-playing/`（`island.scenario` + `adaptiveWidth`；健康 claim） |
 | 快捷区成语 chip + 历史弹窗 + 带调拼音 | **成语** | `docs/plugins/examples/idiom/`（`manage=custom`；`pinyin-pro.min.js`） |
+| 网页监测 + WebView 划定元素 + 岛通知 | **网页监测** | `docs/plugins/examples/page-watch/` |
 | 快捷区白板 + 窗口化全屏 | **Excalidraw** | `docs/plugins/examples/excalidraw/`（CDN 加载；`setWindowedFullscreen`） |
 | 仅下拉面板（摄像头等） | **镜子** | `docs/plugins/examples/mirror/` |
 
@@ -130,8 +131,9 @@ my-plugin/
 | `windows.read` | `hub.windows.list/get/subscribe` | 否 |
 | `windows.focus` | `hub.windows.focus` | **是** |
 | `media.keys` | `hub.media.sendKey(action)` | **是** |
-| `notify` | `hub.notify`（需 slot `island.notify`） | 是 |
+| `notify` | `hub.notify` / `defaultActionId` / `onAction`（需 slot `island.notify`） | 是 |
 | `network` | `hub.fetch(url, opts?)` + `permissions.network` 白名单 | 是 |
+| `webview` | `hub.webview.*`（外部网页窗 / 划定元素 / 后台监测） | 是 |
 | `clipboard.*` | **仅 schema 占位，无实现** — 勿调用 | 是（若声明） |
 | `everything.search` | `hub.everything.status/search/open/reveal`（需本机 Everything） | **是** |
 | `system.monitor` | `hub.sysmon.snapshot`（CPU/内存/磁盘/温度） | **是** |
@@ -175,6 +177,7 @@ my-plugin/
 | `foreground.subscribe` | ❌ | ❌ | ✅ |
 | `notify` | ✅ | ✅ | ✅ |
 | `fetch` | ✅ | ✅ | ✅ |
+| `webview` | ✅ | ✅ | ✅ |
 
 - 快捷区细则 → `window-hub-shortcuts`（高度 `getBounds().height` / `--wh-bar-h`，禁止写死 28；**`slots.shortcuts.manage`**：`custom` 自画弹窗 / `none` 不显示 / `settings` Host 跳转设置；**hover** 用 `hub.shortcuts.showTip` 或 `title`（自动改 Host tip），禁止依赖系统原生气泡；**布局**：按住 Ctrl + 左键拖动排序，持久化 `prefs_shortcuts.pluginOrder`）
 - 岛面板尺寸 → `settings.panelWidth`/`panelHeight` → 否则 `defaultSize` → 否则 380×220；`excludeFromPullContent` 不进下拉列表
@@ -216,7 +219,7 @@ Host 设置页自动渲染；中转站：`panelWidth` / `panelHeight`；快捷�
 - [ ] `plugin.json` id / slots / capabilities / entry 与真实文件一致
 - [ ] panel 旁有 `panel.css`+`panel.js`（若有 panel）；popup / shortcuts 同理
 - [ ] 未使用 `setPins`、`alert`/`confirm`/`prompt`
-- [ ] 未调用未实现的 `hub.clipboard.*`；`hub.fetch` 已声明 `network` + `permissions.network`；`hub.notify` 已声明 `notify` + `island.notify`
+- [ ] 未调用未实现的 `hub.clipboard.*`；`hub.fetch` 已声明 `network` + `permissions.network`；`hub.notify` 已声明 `notify` + `island.notify`；`hub.webview` 已声明 `webview`
 - [ ] 快捷区高度来自 `getBounds` / `--wh-bar-h`
 - [ ] 长摘要 / 歌词：`slots["island.bar"].adaptiveWidth: true`（可选 min/max）；**勿**自改岛壳宽
 - [ ] 无硬编码官方插件 id 的 Host 后门依赖
@@ -281,7 +284,9 @@ API：`docs/plugins/host-api.md` · SDK：`docs/plugins/sdk.md`
 - Dock / Widget slot（未实现）
 - 远程市场 / 签名 `.whpx` / CLI publish
 - 统一三表面完全相同的 `hub` 全集（快捷区可 popup；岛/面板不能开弹窗 — **有意不同**）
-- 通知按钮自定义坐标（仅允许 `slot: start|end`，见 island-notify skill）
+- 通知按钮自定义坐标（按钮由 Host **追加在文案后整体居中**；`slot: start|end` 仅排序；可用 `defaultActionId` 指定中部点击，见 island-notify skill）
+
+`hub.webview.*` **已落地**（capability `webview`）；官方示例「网页监测」`page-watch`。
 
 缺能力 → 在插件文档记录 API 提案或降级；不要自动修改 CapGate。Companion 也必须使用已开放协议并在当前任务授权范围内。
 

@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::utils::config::Color;
 use tauri::{
-    AppHandle, Emitter, LogicalSize, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 
 use crate::commands::{apply_saved_material_pub, MaterialState};
@@ -143,6 +144,10 @@ pub struct DockPrefs {
     /// Thumbnail height in logical CSS px (default 160). Width follows window aspect.
     #[serde(default = "default_hover_preview_height_px")]
     pub hover_preview_height_px: u32,
+    /// Auto solid plate behind glyphs that lack an opaque frame (default on).
+    /// Per-item `icon_bg` still wins when set.
+    #[serde(default = "default_icon_plate")]
+    pub icon_plate: bool,
 }
 
 fn default_hotkey() -> String {
@@ -167,6 +172,10 @@ fn default_hover_preview_delay_ms() -> u32 {
 
 fn default_hover_preview_height_px() -> u32 {
     160
+}
+
+fn default_icon_plate() -> bool {
+    true
 }
 
 fn clamp_hover_preview_height_px(v: u32) -> u32 {
@@ -275,6 +284,7 @@ impl Default for DockPrefs {
             hover_window_preview: false,
             hover_preview_delay_ms: default_hover_preview_delay_ms(),
             hover_preview_height_px: default_hover_preview_height_px(),
+            icon_plate: default_icon_plate(),
         }
     }
 }
@@ -454,7 +464,20 @@ pub(crate) fn with_icons(mut prefs: DockPrefs) -> DockPrefs {
             item.icon_png = None;
             continue;
         }
-        item.icon_png = icon::resolve_item_icon_png(&item.icon_path, &item.launch_path);
+        // Backfill AUMID for older pins of System Settings / Security Center.
+        if item.virtual_path.trim().is_empty() {
+            if let Some(aumid) = icon::preferred_aumid_for_path(&item.real_path)
+                .or_else(|| icon::preferred_aumid_for_path(&item.launch_path))
+            {
+                item.virtual_path = aumid;
+                item.uwp = true;
+            }
+        }
+        item.icon_png = icon::resolve_item_icon_png_with_aumid(
+            &item.icon_path,
+            &item.launch_path,
+            &item.virtual_path,
+        );
     }
     prefs
 }
@@ -466,14 +489,21 @@ pub(crate) fn dock_layout_items(prefs: &DockPrefs) -> Vec<DockItem> {
 }
 
 fn windows_exe_sig(windows: &[crate::win32::enum_windows::WindowInfo]) -> String {
-    let mut exes: Vec<String> = windows
+    let mut keys: Vec<String> = windows
         .iter()
-        .filter_map(|w| w.exe.as_ref())
-        .map(|e| e.to_ascii_lowercase())
+        .filter_map(|w| {
+            let exe = w.exe.as_ref()?;
+            let aumid = w.aumid.as_deref().unwrap_or("");
+            Some(format!(
+                "{}@{}",
+                exe.to_ascii_lowercase(),
+                aumid.to_ascii_lowercase()
+            ))
+        })
         .collect();
-    exes.sort();
-    exes.dedup();
-    exes.join("|")
+    keys.sort();
+    keys.dedup();
+    keys.join("|")
 }
 
 fn pinned_layout_sig(items: &[DockItem]) -> String {
@@ -560,7 +590,7 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
         head.push(it.clone());
     }
 
-    let mut seen_exe: HashSet<String> = HashSet::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
     let mut extras: Vec<DockItem> = Vec::new();
     for w in &windows {
         let exe = w.exe.as_deref().unwrap_or("").trim();
@@ -571,13 +601,25 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
         if !self_exe.is_empty() && exe_key == self_exe {
             continue;
         }
-        if seen_exe.contains(&exe_key) {
+        let aumid = w
+            .aumid
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        // UWP hosts share ApplicationFrameHost.exe — dedupe by AUMID when present.
+        let dedupe_key = if !aumid.is_empty() {
+            format!("aumid:{}", aumid.to_ascii_lowercase())
+        } else {
+            exe_key.clone()
+        };
+        if seen_keys.contains(&dedupe_key) {
             continue;
         }
         if items.iter().any(|it| launch::item_matches_window(it, w)) {
             continue;
         }
-        seen_exe.insert(exe_key.clone());
+        seen_keys.insert(dedupe_key.clone());
         let stem = w
             .exe_name
             .clone()
@@ -595,12 +637,12 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
             format!("{stem}.exe")
         };
         let icon_png = if with_icons {
-            icon::resolve_item_icon_png("", exe)
+            icon::resolve_item_icon_png_with_aumid("", exe, aumid)
         } else {
             None
         };
         extras.push(DockItem {
-            id: format!("running:{exe_key}"),
+            id: format!("running:{dedupe_key}"),
             kind: "app".into(),
             label: if w.title.trim().is_empty() {
                 stem
@@ -610,10 +652,10 @@ pub(crate) fn dock_merge_running(prefs: &DockPrefs, with_icons: bool) -> Vec<Doc
             match_exe,
             launch_path: exe.to_string(),
             real_path: exe.to_string(),
-            virtual_path: String::new(),
+            virtual_path: aumid.to_string(),
             icon_path: exe.to_string(),
             icon_path_full: String::new(),
-            uwp: false,
+            uwp: !aumid.is_empty(),
             icon_png,
             icon_png_full: None,
             trash_full: false,
@@ -864,10 +906,17 @@ pub(crate) fn dock_pad_x(corner_radius_px: u32) -> f64 {
         .clamp(DOCK_PAD_X_MIN, 16.0)
 }
 
-/// True while the dock HWND is in the fixed expanded hover size.
+/// True while the dock HWND is in the fixed expanded hover size (primary flag).
 fn hover_expanded_flag() -> &'static std::sync::atomic::AtomicBool {
     static FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     &FLAG
+}
+
+/// Per icons-HWND hover — primary + satellites each need own fan headroom.
+fn hover_expanded_by_hwnd() -> &'static std::sync::Mutex<std::collections::HashMap<isize, bool>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<isize, bool>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 pub(crate) fn dock_hover_expanded() -> bool {
@@ -876,6 +925,24 @@ pub(crate) fn dock_hover_expanded() -> bool {
 
 fn set_hover_expanded(v: bool) {
     hover_expanded_flag().store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn set_hover_expanded_hwnd(hwnd_raw: isize, v: bool) {
+    if let Ok(mut map) = hover_expanded_by_hwnd().lock() {
+        if v {
+            map.insert(hwnd_raw, true);
+        } else {
+            map.remove(&hwnd_raw);
+        }
+    }
+}
+
+pub(crate) fn hover_expanded_hwnd(hwnd_raw: isize) -> bool {
+    hover_expanded_by_hwnd()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&hwnd_raw).copied())
+        .unwrap_or(false)
 }
 
 pub(crate) fn set_hover_expanded_pub(v: bool) {
@@ -1092,6 +1159,7 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
                     win32_dock_clear_transparent(hwnd.0 as isize);
                 }
                 sync_dock_bottom_appbar(app, prefs, shown);
+                place_dock_satellites(app, prefs, shown, animate);
                 return;
             }
         }
@@ -1147,6 +1215,121 @@ pub fn place_dock_window(app: &AppHandle, prefs: &DockPrefs, shown: bool, animat
     }
     let _ = win.set_ignore_cursor_events(!shown);
     sync_dock_bottom_appbar(app, prefs, shown);
+    place_dock_satellites(app, prefs, shown, animate);
+}
+
+/// Place every `dock-sat-*` pair. Visibility is **per-monitor** (same policy as
+/// primary) — `primary_shown` is only a fallback before the visibility map is warm.
+pub fn place_dock_satellites(app: &AppHandle, prefs: &DockPrefs, primary_shown: bool, animate: bool) {
+    if !prefs.enabled {
+        let snap = crate::display_placement::snapshot();
+        for r in &snap.resolved {
+            if r.is_primary || !r.dock {
+                continue;
+            }
+            let label = crate::display_placement::dock_sat_label(&r.id);
+            place_one_dock_satellite(app, prefs, &label, false, animate);
+        }
+        return;
+    }
+    let snap = crate::display_placement::snapshot();
+    let vis = app.try_state::<std::sync::Arc<DockVisibility>>();
+    for r in &snap.resolved {
+        if r.is_primary || !r.dock {
+            continue;
+        }
+        let label = crate::display_placement::dock_sat_label(&r.id);
+        let shown = vis
+            .as_ref()
+            .and_then(|v| v.sat_is_shown(&label))
+            .unwrap_or(primary_shown);
+        place_one_dock_satellite(app, prefs, &label, shown, animate);
+    }
+}
+
+/// Place a single dock-sat pair (icons + glass) onto its monitor.
+pub fn place_one_dock_satellite(
+    app: &AppHandle,
+    prefs: &DockPrefs,
+    label: &str,
+    shown: bool,
+    animate: bool,
+) {
+    // dock-sat-<hash> → dock-sat-glass-<hash>
+    let glass_label = label.replacen("dock-sat-", "dock-sat-glass-", 1);
+    let Some(win) = app.get_webview_window(label) else {
+        return;
+    };
+    let glass = app.get_webview_window(&glass_label);
+    let layout = dock_layout_items(prefs);
+    let height = dock_window_height(prefs.magnification);
+    let pair_expanded = win
+        .hwnd()
+        .ok()
+        .map(|h| hover_expanded_hwnd(h.0 as isize))
+        .unwrap_or(false);
+    let width = dock_window_width(
+        &layout,
+        prefs.corner_radius_px,
+        prefs.magnification,
+        pair_expanded,
+    );
+    let glass_w = width;
+    #[cfg(windows)]
+    {
+        // Pin onto the monitor recorded for this sat label.
+        let snap = crate::display_placement::snapshot();
+        if let Some(r) = snap.resolved.iter().find(|r| {
+            crate::display_placement::dock_sat_label(&r.id) == label
+        }) {
+            if let Ok(hwnd) = win.hwnd() {
+                crate::display_placement::move_dock_sat_onto_monitor(hwnd.0 as isize, r);
+            }
+            if let Some(g) = &glass {
+                if let Ok(hwnd) = g.hwnd() {
+                    crate::display_placement::move_dock_sat_onto_monitor(hwnd.0 as isize, r);
+                }
+            }
+        }
+        let glass_hwnd = glass
+            .as_ref()
+            .and_then(|g| g.hwnd().ok())
+            .map(|h| h.0 as isize);
+        if let Ok(hwnd) = win.hwnd() {
+            let _ = win32_dock_slide_root(
+                hwnd.0 as isize,
+                glass_hwnd,
+                width,
+                glass_w,
+                height,
+                prefs.bottom_offset_px,
+                prefs.corner_radius_px,
+                shown,
+                animate,
+            );
+            let _ = win.set_ignore_cursor_events(!shown);
+            if shown {
+                win32_dock_clear_transparent(hwnd.0 as isize);
+            }
+        }
+        if let Some(g) = &glass {
+            if shown {
+                let _ = g.show();
+            } else {
+                let _ = g.hide();
+            }
+            let _ = g.set_ignore_cursor_events(true);
+        }
+        if shown {
+            let _ = win.show();
+        } else {
+            let _ = win.hide();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (win, glass, shown, animate, width, glass_w, height);
+    }
 }
 
 /// Generation for in-flight width tweens — a newer expand/collapse cancels the old one.
@@ -1170,16 +1353,24 @@ pub fn dock_set_interaction_hold(vis: State<'_, Arc<DockVisibility>>, hold: bool
 }
 
 /// Toggle hover pad: Composition animates capsule only (HWND already host-sized).
+/// Applies to the calling dock / dock-sat pair (same path as primary).
 #[tauri::command]
 pub fn dock_set_hover_expand(
     app: AppHandle,
+    window: WebviewWindow,
     vis: State<'_, Arc<DockVisibility>>,
     expanded: bool,
 ) -> bool {
     // No place-lock / busy gate: first hover often overlaps show settle; callers
     // must be able to widen immediately and retry if the window is missing.
-    if !vis.ui_shown() {
+    let (icons_label, glass_label) = resolve_dock_pair_labels(window.label());
+    let is_primary = icons_label == "dock";
+    // Primary AutoHide gate only — sat docks stay interactive when primary is tucked.
+    if is_primary && !vis.ui_shown() {
         set_hover_expanded(false);
+        if let Ok(hwnd) = window.hwnd() {
+            set_hover_expanded_hwnd(hwnd.0 as isize, false);
+        }
         return false;
     }
     let prefs = load_dock_prefs();
@@ -1187,10 +1378,10 @@ pub fn dock_set_hover_expand(
     let content_w = dock_content_width(&layout, prefs.corner_radius_px);
     let host_w = dock_expanded_width(&layout, prefs.corner_radius_px, prefs.magnification);
     let logical_h = dock_window_height(prefs.magnification);
-    let Some(win) = app.get_webview_window("dock") else {
+    let Some(win) = app.get_webview_window(&icons_label) else {
         return false;
     };
-    let glass = app.get_webview_window(DOCK_GLASS_LABEL);
+    let glass = app.get_webview_window(&glass_label);
     #[cfg(windows)]
     {
         let glass_hwnd = glass
@@ -1204,17 +1395,24 @@ pub fn dock_set_hover_expand(
                 let _ = mi;
                 let content_px = (content_w * scale).round().max(1.0) as f32;
                 let host_px = (host_w * scale).round().max(1.0) as f32;
-                if dock_hover_expanded() == expanded
-                    && !crate::win32::dock_comp::width_tween_active()
-                    && crate::win32::dock_comp::capsule_near_target(expanded, content_px, host_px)
-                {
+                let near = crate::win32::dock_comp::capsule_near_target(
+                    glass_hwnd.unwrap_or(raw),
+                    expanded,
+                    content_px,
+                    host_px,
+                );
+                let already = hover_expanded_hwnd(raw) == expanded && near;
+                if already && !crate::win32::dock_comp::width_tween_active() {
                     // Re-assert silhouette (rest must stay chrome-only).
                     win32_dock_icons_set_round(raw, prefs.corner_radius_px);
                     return true;
                 }
             }
             let gen = width_tween_gen().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            set_hover_expanded(expanded);
+            set_hover_expanded_hwnd(raw, expanded);
+            if is_primary {
+                set_hover_expanded(expanded);
+            }
             // Open headroom before fan paints; collapse keeps headroom until tween end.
             if expanded {
                 win32_dock_icons_set_round(raw, prefs.corner_radius_px);
@@ -1234,7 +1432,7 @@ pub fn dock_set_hover_expand(
     }
 
     #[cfg(not(windows))]
-    if dock_hover_expanded() == expanded {
+    if is_primary && dock_hover_expanded() == expanded {
         return true;
     }
 
@@ -1245,7 +1443,9 @@ pub fn dock_set_hover_expand(
         let _ = g.set_size(LogicalSize::new(logical_w, DOCK_H));
     }
     let Ok(Some(monitor)) = win.current_monitor() else {
-        set_hover_expanded(expanded);
+        if is_primary {
+            set_hover_expanded(expanded);
+        }
         return true;
     };
     let scale = monitor.scale_factor();
@@ -1256,7 +1456,9 @@ pub fn dock_set_hover_expand(
     let glass_h = (DOCK_H * scale).round().max(1.0) as i32;
     let x = origin.x + ((screen.width as i32 - phys_w) / 2).max(0);
     let Ok(pos) = win.outer_position() else {
-        set_hover_expanded(expanded);
+        if is_primary {
+            set_hover_expanded(expanded);
+        }
         return true;
     };
     let y = pos.y;
@@ -1269,26 +1471,46 @@ pub fn dock_set_hover_expand(
             win32_dock_glass_set_round(gh.0 as isize, prefs.corner_radius_px);
         }
     }
-    set_hover_expanded(expanded);
+    if is_primary {
+        set_hover_expanded(expanded);
+    }
     true
+}
+
+fn resolve_dock_pair_labels(label: &str) -> (String, String) {
+    if label == "dock" || label == DOCK_GLASS_LABEL {
+        return ("dock".into(), DOCK_GLASS_LABEL.into());
+    }
+    if let Some(id) = label.strip_prefix("dock-sat-glass-") {
+        return (format!("dock-sat-{id}"), format!("dock-sat-glass-{id}"));
+    }
+    if let Some(id) = label.strip_prefix("dock-sat-") {
+        return (format!("dock-sat-{id}"), format!("dock-sat-glass-{id}"));
+    }
+    ("dock".into(), DOCK_GLASS_LABEL.into())
 }
 
 /// Legacy alias — maps any width request to expand/collapse vs content width.
 #[tauri::command]
-pub fn dock_set_live_width(app: AppHandle, vis: State<'_, Arc<DockVisibility>>, width: f64) -> bool {
+pub fn dock_set_live_width(
+    app: AppHandle,
+    window: WebviewWindow,
+    vis: State<'_, Arc<DockVisibility>>,
+    width: f64,
+) -> bool {
     let prefs = load_dock_prefs();
     let layout = dock_layout_items(&prefs);
     let rest = dock_content_width(&layout, prefs.corner_radius_px);
     let expanded =
         width.is_finite() && width > rest + dock_fan_extra(prefs.magnification) * 0.5;
-    dock_set_hover_expand(app, vis, expanded)
+    dock_set_hover_expand(app, window, vis, expanded)
 }
 
 /// Cursor position in the dock icons webview client space (CSS px), or `None`
 /// if the cursor is outside the dock HWND. Used to resume fan after AutoHide
 /// show (window slides under a stationary pointer — no pointerenter).
 #[tauri::command]
-pub fn dock_pointer_client_xy(app: AppHandle) -> Option<(f64, f64)> {
+pub fn dock_pointer_client_xy(app: AppHandle, window: WebviewWindow) -> Option<(f64, f64)> {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::{POINT, RECT};
@@ -1296,7 +1518,8 @@ pub fn dock_pointer_client_xy(app: AppHandle) -> Option<(f64, f64)> {
         use windows::Win32::UI::HiDpi::GetDpiForWindow;
         use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetCursorPos};
 
-        let win = app.get_webview_window("dock")?;
+        let (icons_label, _) = resolve_dock_pair_labels(window.label());
+        let win = app.get_webview_window(&icons_label)?;
         let hwnd = win.hwnd().ok()?;
         let hwnd = dock_root_hwnd(hwnd.0 as isize);
         unsafe {
@@ -1326,7 +1549,7 @@ pub fn dock_pointer_client_xy(app: AppHandle) -> Option<(f64, f64)> {
     }
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = (app, window);
         None
     }
 }
@@ -1515,7 +1738,7 @@ fn win32_dock_set_capsule(
     wait: bool,
 ) {
     // Persist before paint so frost re-attach cannot wipe rest → full-bleed.
-    crate::win32::dock_comp::remember_capsule(width_px, height_px, offset_x);
+    crate::win32::dock_comp::remember_capsule(glass_hwnd_raw, width_px, height_px, offset_x);
     let gh = dock_root_hwnd(glass_hwnd_raw);
     if wait {
         let _ = crate::win32::dock_comp::sync_layout_tween_frame_wait(
@@ -1703,9 +1926,10 @@ fn win32_dock_icons_set_round(hwnd_raw: isize, corner_radius_px: u32) {
 
     let hwnd = dock_root_hwnd(hwnd_raw);
     // Keep headroom during collapse tween (fan still painting) even though
-    // `dock_hover_expanded` is already false.
-    let include_headroom =
-        dock_hover_expanded() || crate::win32::dock_comp::width_tween_active();
+    // hover flag may already be false. Per-HWND so sat fan is not clipped.
+    let include_headroom = hover_expanded_hwnd(hwnd_raw)
+        || dock_hover_expanded()
+        || crate::win32::dock_comp::width_tween_active();
     unsafe {
         let mut rc = RECT::default();
         if GetClientRect(hwnd, &mut rc).is_err() {
@@ -2577,6 +2801,11 @@ fn dock_item_from_path(path_raw: &str) -> Result<DockItem, String> {
         icon_offset_y: 0.0,
         icon_bg: String::new(),
     };
+    // Packaged system apps: remember AUMID so AppsFolder icons / launch keep working.
+    if let Some(aumid) = icon::preferred_aumid_for_path(&real) {
+        item.virtual_path = aumid;
+        item.uwp = true;
+    }
     icon::ensure_item_icon_cached(&mut item);
     Ok(item)
 }

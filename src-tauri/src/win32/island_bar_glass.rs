@@ -35,26 +35,117 @@ fn theme_dark_from_prefs(prefs: &MaterialPrefs) -> Option<bool> {
 }
 
 /// Must run on the UI / main thread only.
-pub(crate) fn sync_inner(app: &AppHandle, enabled: bool, prefs: &MaterialPrefs) {
-    let Some(main) = app.get_webview_window("main") else {
-        return;
-    };
-
+///
+/// `bar_glass`: island pref. `quiet`: main AppBar settle — do **not** wipe
+/// chrome-sat SWCA during quiet (that left secondary bars empty until a manual refresh).
+pub(crate) fn sync_inner(app: &AppHandle, bar_glass: bool, quiet: bool, prefs: &MaterialPrefs) {
     hide_legacy_glass(app);
 
-    if !enabled {
+    if !bar_glass {
         crate::win32::bar_comp::detach();
-        let _ = crate::win32::material::clear(&main);
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = crate::win32::material::clear(&main);
+        }
+        for (label, win) in app.webview_windows() {
+            if label.starts_with("chrome-sat-") {
+                let _ = crate::win32::material::clear(&win);
+                crate::win32::blur_glass::clear_webview_fill(&win);
+            }
+        }
         return;
     }
 
-    let _ = crate::win32::material::clear(&main);
     let dark = theme_dark_from_prefs(prefs);
-    if let Some(hwnd) = main_hwnd(&main) {
-        if let Err(e) = crate::win32::bar_comp::attach_or_update(hwnd, dark) {
-            eprintln!("[bar-comp] attach failed: {e}");
+
+    if let Some(main) = app.get_webview_window("main") {
+        let me = main.hwnd().ok().map(|h| h.0 as isize);
+        if quiet {
+            // AppBar settle: leave main composition alone (attach races DWM).
+        } else if crate::win32::ambient::is_desktop_scene(me) {
+            let _ = crate::win32::material::clear(&main);
+            crate::win32::blur_glass::clear_webview_fill(&main);
+            if let Some(hwnd) = main_hwnd(&main) {
+                if let Err(e) = crate::win32::bar_comp::attach_or_update(hwnd, dark) {
+                    eprintln!("[bar-comp] attach failed: {e}");
+                }
+            }
+            crate::win32::blur_glass::clear_webview_fill(&main);
+        } else if let Some(raw) = me {
+            crate::win32::bar_comp::detach_hwnd(raw);
+            let _ = crate::win32::material::clear(&main);
         }
     }
+
+    // Secondary chrome: always sync per-monitor scene (even during main quiet).
+    for (label, win) in app.webview_windows() {
+        if !label.starts_with("chrome-sat-") {
+            continue;
+        }
+        sync_one_sat(&win, &label, dark);
+    }
+}
+
+/// Apply or clear frost for one chrome-sat HWND — **same as main**:
+/// desktop → `bar_comp` HostBackdrop; maximized → detach + clear (AmbientStrip).
+/// SWCA only if Composition attach fails on this WebView2.
+///
+/// Call from the UI thread (or via `run_on_main_thread`). Do **not** call
+/// `sync_attach_or_update` here — that deadlocks when already on the UI thread.
+pub fn sync_one_sat(win: &WebviewWindow, label: &str, dark: Option<bool>) {
+    use tauri::utils::config::Color;
+    let Ok(hwnd) = win.hwnd() else {
+        return;
+    };
+    let raw = hwnd.0 as isize;
+    let desktop = crate::win32::ambient::is_desktop_scene(Some(raw));
+    if !desktop {
+        // Floor = last sampled 吸色; never seed charcoal if cache empty.
+        let (r, g, b) = crate::win32::ambient::last_sat_strip(label)
+            .filter(|s| !(s.r == 48 && s.g == 48 && s.b == 52))
+            .map(|s| (s.r, s.g, s.b))
+            .unwrap_or((72, 72, 76));
+        let floor = Color(r, g, b, 255);
+        let _ = win.set_background_color(Some(floor));
+        crate::win32::bar_comp::detach_hwnd(raw);
+        let _ = crate::win32::material::clear(win);
+        let _ = win.set_background_color(Some(floor));
+        return;
+    }
+    // Desktop: clear SWCA leftovers, HostBackdrop under transparent WebView2.
+    let _ = crate::win32::material::clear(win);
+    crate::win32::blur_glass::clear_webview_fill(win);
+    let h = HWND(raw as *mut _);
+    match crate::win32::bar_comp::attach_or_update(h, dark) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("[chrome-sat] bar_comp {label}: {e}; SWCA fallback");
+            crate::win32::bar_comp::detach_hwnd(raw);
+            if let Err(e2) = crate::win32::blur_glass::apply_chrome_bar_swca(raw, dark) {
+                eprintln!("[chrome-sat] glass fallback {label}: {e2}");
+            }
+        }
+    }
+    crate::win32::blur_glass::clear_webview_fill(win);
+}
+
+/// Immediate glass sync for a chrome-sat. Marshals to that window's UI thread
+/// when needed (ambient watcher / IPC workers).
+pub fn sync_sat_window_now(win: &WebviewWindow, prefs: &MaterialPrefs) {
+    let dark = theme_dark_from_prefs(prefs);
+    let bar_glass = crate::commands::get_island_prefs().bar_glass;
+    let label = win.label().to_string();
+    let win2 = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        if !bar_glass {
+            if let Ok(hwnd) = win2.hwnd() {
+                crate::win32::bar_comp::detach_hwnd(hwnd.0 as isize);
+            }
+            let _ = crate::win32::material::clear(&win2);
+            crate::win32::blur_glass::clear_webview_fill(&win2);
+            return;
+        }
+        sync_one_sat(&win2, &label, dark);
+    });
 }
 
 fn schedule_on_main(app: AppHandle, f: impl FnOnce() + Send + 'static) {
@@ -67,9 +158,10 @@ fn schedule_on_main(app: AppHandle, f: impl FnOnce() + Send + 'static) {
 pub fn sync(app: &AppHandle, enabled: bool, prefs: &MaterialPrefs) {
     let app = app.clone();
     let prefs = prefs.clone();
+    let quiet = crate::win32::work_area::work_area_quiet();
     let app_for_thread = app.clone();
     schedule_on_main(app_for_thread, move || {
-        sync_inner(&app, enabled, &prefs);
+        sync_inner(&app, enabled, quiet, &prefs);
     });
 }
 
@@ -130,25 +222,60 @@ fn refresh_layout_now(app: &AppHandle) {
     if !crate::commands::get_island_prefs().bar_glass {
         return;
     }
+    let prefs = crate::commands::load_material_prefs();
+    let dark = theme_dark_from_prefs(&prefs);
+
     let Some(main) = app.get_webview_window("main") else {
         return;
     };
     let me = main.hwnd().ok().map(|h| h.0 as isize);
-    if !crate::win32::ambient::is_desktop_scene(me) {
-        return;
+    if crate::win32::ambient::is_desktop_scene(me) {
+        if let Some(hwnd) = main_hwnd(&main) {
+            let hwnd_raw = hwnd.0 as isize;
+            crate::win32::click_trace::log("bar-comp", "refresh_layout_now → main thread");
+            let _ = main.run_on_main_thread(move || {
+                let h = HWND(hwnd_raw as *mut _);
+                let _ = crate::win32::bar_comp::refresh_layout(h, dark);
+                crate::win32::click_trace::log("bar-comp", "refresh_layout_now done");
+            });
+        }
     }
-    let prefs = crate::commands::load_material_prefs();
-    let dark = theme_dark_from_prefs(&prefs);
-    let Some(hwnd) = main_hwnd(&main) else {
-        return;
-    };
-    let hwnd_raw = hwnd.0 as isize;
-    crate::win32::click_trace::log("bar-comp", "refresh_layout_now → main thread");
-    let _ = main.run_on_main_thread(move || {
-        let h = HWND(hwnd_raw as *mut _);
-        let _ = crate::win32::bar_comp::refresh_layout(h, dark);
-        crate::win32::click_trace::log("bar-comp", "refresh_layout_now done");
-    });
+
+    // Relayout secondary strips — same bar_comp refresh as main.
+    for (label, win) in app.webview_windows() {
+        if !label.starts_with("chrome-sat-") {
+            continue;
+        }
+        let Ok(hwnd) = win.hwnd() else {
+            continue;
+        };
+        let raw = hwnd.0 as isize;
+        if !crate::win32::ambient::is_desktop_scene(Some(raw)) {
+            // Maximized: keep opaque 吸色 floor — never alpha-0 (shows as black).
+            use tauri::utils::config::Color;
+            let (r, g, b) = crate::win32::ambient::last_sat_strip(&label)
+                .filter(|s| !(s.r == 48 && s.g == 48 && s.b == 52))
+                .map(|s| (s.r, s.g, s.b))
+                .unwrap_or((72, 72, 76));
+            let floor = Color(r, g, b, 255);
+            let _ = win.set_background_color(Some(floor));
+            crate::win32::bar_comp::detach_hwnd(raw);
+            let _ = crate::win32::material::clear(&win);
+            let _ = win.set_background_color(Some(floor));
+            continue;
+        }
+        let dark = dark;
+        let _ = win.run_on_main_thread(move || {
+            let h = HWND(raw as *mut _);
+            if crate::win32::bar_comp::is_attached_to(raw) {
+                let _ = crate::win32::bar_comp::refresh_layout(h, dark);
+            } else if let Err(e) = crate::win32::bar_comp::attach_or_update(h, dark) {
+                eprintln!("[chrome-sat] bar_comp refresh: {e}");
+                let _ = crate::win32::blur_glass::apply_chrome_bar_swca(raw, dark);
+            }
+        });
+        crate::win32::blur_glass::clear_webview_fill(&win);
+    }
 }
 
 /// No-op — Composition attaches on first `sync_inner`. Kept for boot call sites.

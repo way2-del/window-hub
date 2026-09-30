@@ -4,7 +4,7 @@
   --glass-main-bg: #1c1c1e;
   --glass-fg: #f4f4f5;
   --glass-fg-muted: #9ca3af;
-  --glass-side: transparent;
+  --glass-side: rgba(28, 28, 30, 0.82);
   --glass-card: rgba(255, 255, 255, 0.06);
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-input: rgba(0, 0, 0, 0.22);
@@ -364,6 +364,12 @@ a {
   line-height: 1.35;
 }
 
+.pref-range {
+  width: min(180px, 42vw);
+  flex-shrink: 0;
+  accent-color: var(--sys-accent, #30d158);
+}
+
 .hotkey-recorder {
   display: flex;
   align-items: center;
@@ -694,6 +700,73 @@ a {
   cursor: default;
   pointer-events: none;
   opacity: 0.92;
+}
+
+.display-placement-table {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.display-placement-head,
+.display-placement-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(120px, 1fr) 72px;
+  gap: 10px;
+  align-items: center;
+}
+
+.display-placement-head {
+  font-size: 12px;
+  opacity: 0.65;
+  padding: 0 2px;
+}
+
+.display-placement-row {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--settings-fg, #fff) 6%, transparent);
+}
+
+.display-placement-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.display-placement-badge {
+  display: inline-block;
+  width: fit-content;
+  font-size: 11px;
+  opacity: 0.75;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sys-accent, #3dd68c) 22%, transparent);
+}
+
+.display-placement-meta {
+  font-size: 11px;
+  opacity: 0.55;
+}
+
+.display-placement-dock {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.display-placement-summary {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  opacity: 0.85;
+}
+
+.display-placement-summary strong {
+  font-weight: 600;
 }
 
 .scenario-gate-settings {

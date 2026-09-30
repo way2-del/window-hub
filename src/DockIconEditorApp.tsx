@@ -47,6 +47,8 @@ type DockPrefs = {
   hotkey: string;
   hiddenItemIds?: string[];
   hoverWindowPreview?: boolean;
+  /** Global auto plate; per-item iconBg still overrides when set. */
+  iconPlate?: boolean;
 };
 
 /** Matches Rust `default_icon_scale` (0.9 → 90%). */
@@ -83,12 +85,22 @@ function scalePctFromItem(it: DockItem): number {
   return Math.round(s * 100);
 }
 
-function resolveStaticPlateBg(item: DockItem, draftBg?: string): string | null {
+/**
+ * Resolve plate color for editor preview.
+ * `iconPlateGlobal`: settings 「图标底板」. When false, empty iconBg = no plate
+ * (not auto-sampled), so users can still pick an explicit color per icon.
+ */
+function resolveStaticPlateBg(
+  item: DockItem,
+  draftBg: string | undefined,
+  iconPlateGlobal: boolean,
+): string | null {
   const raw = (draftBg ?? item.iconBg ?? "").trim();
   if (raw === "transparent" || raw === "none") return "transparent";
   if (raw) return raw;
   if (item.kind === "startmenu" && !item.iconPng) return DOCK_START_BG;
   if (item.kind === "trash" && !item.iconPng) return DOCK_TRASH_BG;
+  if (!iconPlateGlobal) return "transparent";
   return null; // auto → sample from PNG
 }
 
@@ -113,11 +125,18 @@ function ItemGlyph({ item, forceTrashFull }: { item: DockItem; forceTrashFull?: 
   return <span className="die-fallback-letter">{itemTitle(item).charAt(0)}</span>;
 }
 
-function useAutoPlateBg(item: DockItem, draftBg?: string): string {
-  const staticBg = resolveStaticPlateBg(item, draftBg);
+function useAutoPlateBg(
+  item: DockItem,
+  draftBg: string | undefined,
+  iconPlateGlobal: boolean,
+): string {
+  const staticBg = resolveStaticPlateBg(item, draftBg, iconPlateGlobal);
   const png = (item.iconPng || "").trim();
   const [auto, setAuto] = useState<string>(
-    () => (staticBg != null ? staticBg : peekCachedPlateColor(png) || DOCK_AUTO_PLATE_BG),
+    () =>
+      staticBg != null
+        ? staticBg
+        : peekCachedPlateColor(png) || DOCK_AUTO_PLATE_BG,
   );
 
   useEffect(() => {
@@ -152,6 +171,7 @@ function ItemThumb({
   scalePct,
   offsetX,
   offsetY,
+  iconPlateGlobal,
 }: {
   item: DockItem;
   /** Live draft from the editor when this row is selected. */
@@ -159,8 +179,9 @@ function ItemThumb({
   scalePct?: number;
   offsetX?: number;
   offsetY?: number;
+  iconPlateGlobal: boolean;
 }) {
-  const bg = useAutoPlateBg(item, draftBg);
+  const bg = useAutoPlateBg(item, draftBg, iconPlateGlobal);
   const scale = Math.min(2, Math.max(0.5, (scalePct ?? scalePctFromItem(item)) / 100));
   const ox = offsetX ?? Math.round(item.iconOffsetX ?? 0);
   const oy = offsetY ?? Math.round(item.iconOffsetY ?? 0);
@@ -222,6 +243,9 @@ function DockIconEditorInner() {
     () => editable.find((it) => it.id === selectedId) ?? editable[0] ?? null,
     [editable, selectedId],
   );
+
+  /** Settings → Dock「图标底板」；缺省 true。关了之后单项仍可设 iconBg。 */
+  const iconPlateGlobal = prefs?.iconPlate !== false;
 
   const applyItemDrafts = (hit: DockItem) => {
     setSelectedId(hit.id);
@@ -320,7 +344,12 @@ function DockIconEditorInner() {
     setMsg(null);
     try {
       const saved = await invoke<DockPrefs>("set_dock_prefs", {
-        prefs: { ...prefs, items: nextItems },
+        prefs: {
+          ...prefs,
+          // Keep global plate flag even if an older payload omitted it.
+          iconPlate: prefs.iconPlate !== false,
+          items: nextItems,
+        },
       });
       setPrefs(saved);
       setMsg("已保存");
@@ -424,18 +453,25 @@ function DockIconEditorInner() {
     await persist(next);
   }
 
-  async function onConfirm() {
+  async function onConfirm(bgOverride?: string) {
     if (!prefs || !selected) return;
     const scale = Math.min(200, Math.max(50, draftScale)) / 100;
     const ox = Math.min(24, Math.max(-24, draftOx));
     const oy = Math.min(24, Math.max(-24, draftOy));
-    const bg = draftBg.trim();
+    const bg = (bgOverride !== undefined ? bgOverride : draftBg).trim();
+    if (bgOverride !== undefined) setDraftBg(bg);
     const next = prefs.items.map((it) =>
       it.id === selected.id
         ? { ...it, iconScale: scale, iconOffsetX: ox, iconOffsetY: oy, iconBg: bg }
         : it,
     );
     await persist(next);
+  }
+
+  /** Background swatches apply immediately so per-icon plate works with global plate off. */
+  function onPickBg(value: string) {
+    setDraftBg(value);
+    void onConfirm(value);
   }
 
   const previewScale = Math.min(200, Math.max(50, draftScale)) / 100;
@@ -454,6 +490,7 @@ function DockIconEditorInner() {
       iconBg: "",
     },
     selected ? draftBg : "",
+    iconPlateGlobal,
   );
   const colorPickerValue =
     draftBg && draftBg !== "transparent" && draftBg.startsWith("#")
@@ -505,6 +542,7 @@ function DockIconEditorInner() {
                       scalePct={active ? draftScale : undefined}
                       offsetX={active ? draftOx : undefined}
                       offsetY={active ? draftOy : undefined}
+                      iconPlateGlobal={iconPlateGlobal}
                     />
                   </span>
                   <span className="die-nav-text">
@@ -664,10 +702,14 @@ function DockIconEditorInner() {
                 <div className="die-bg-block">
                   <strong>背景色</strong>
                   <p className="die-bg-hint">
-                    「自动」复用消息岛描边取色：从图标主色生成底板
+                    {iconPlateGlobal
+                      ? "「自动」从图标主色生成底板；点色块立即生效。也可在设置里关闭全局底板后，再为单个图标单独加背景。"
+                      : "全局「图标底板」已关闭：「自动」= 无背景。点浅灰/白/蓝等色块可为当前图标单独加底板，立即生效。"}
                   </p>
                   <div className="die-bg-presets" role="list">
                     {BG_PRESETS.map((p) => {
+                      const label =
+                        p.id === "auto" && !iconPlateGlobal ? "无" : p.label;
                       const active =
                         p.value === ""
                           ? draftBg === ""
@@ -677,20 +719,23 @@ function DockIconEditorInner() {
                           key={p.id}
                           type="button"
                           className={`die-bg-swatch${active ? " is-active" : ""}`}
-                          title={p.label}
+                          title={label}
+                          disabled={busy}
                           style={{
                             background:
                               p.value === ""
-                                ? plateBg.startsWith("#")
-                                  ? plateBg
-                                  : "conic-gradient(from 90deg, #f2f2f7, #0078D4, #1c1c1e, #f2f2f7)"
+                                ? !iconPlateGlobal || plateBg === "transparent"
+                                  ? "repeating-conic-gradient(#666 0% 25%, #333 0% 50%) 50% / 10px 10px"
+                                  : plateBg.startsWith("#")
+                                    ? plateBg
+                                    : "conic-gradient(from 90deg, #f2f2f7, #0078D4, #1c1c1e, #f2f2f7)"
                                 : p.value === "transparent"
                                   ? "repeating-conic-gradient(#666 0% 25%, #333 0% 50%) 50% / 10px 10px"
                                   : p.value,
                           }}
-                          onClick={() => setDraftBg(p.value)}
+                          onClick={() => onPickBg(p.value)}
                         >
-                          <span>{p.label}</span>
+                          <span>{label}</span>
                         </button>
                       );
                     })}
@@ -698,7 +743,8 @@ function DockIconEditorInner() {
                       <input
                         type="color"
                         value={colorPickerValue}
-                        onChange={(e) => setDraftBg(e.target.value)}
+                        disabled={busy}
+                        onChange={(e) => onPickBg(e.target.value)}
                       />
                       <span>自定义</span>
                     </label>
