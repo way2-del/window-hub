@@ -355,9 +355,10 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
             let mut sat_desktop_by_label: std::collections::HashMap<String, bool> =
                 std::collections::HashMap::new();
             let mut sat_scene_poll = std::time::Instant::now();
-            let mut sat_color_tick: u32 = 0;
             loop {
-                let ms = if crate::win32::ambient::is_settling() {
+                let ms = if crate::win32::ambient::is_settling()
+                    || crate::win32::ambient::is_sat_settling()
+                {
                     450
                 } else {
                     1200
@@ -369,45 +370,58 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                     let _ = app.emit_to("main", "tray-notification-viewed", token);
                 }
 
-                // Secondary chrome: scene flip must run even during main AppBar quiet,
-                // otherwise desktop↔maximize never auto-switches (manual refresh still works).
-                if sat_scene_poll.elapsed() >= Duration::from_millis(280) {
+                // Secondary chrome: same settle→lock as main (poll_changed_sat).
+                // Scene flip / material still runs; locked sats skip BitBlt.
+                let sat_interval = if crate::win32::ambient::is_sat_settling() {
+                    280
+                } else {
+                    600
+                };
+                if sat_scene_poll.elapsed() >= Duration::from_millis(sat_interval) {
                     sat_scene_poll = std::time::Instant::now();
-                    sat_color_tick = sat_color_tick.wrapping_add(1);
                     let quiet = crate::win32::work_area::work_area_quiet();
-                    let refresh_color = !quiet && sat_color_tick % 2 == 0;
                     let mut sat_material_needed = false;
                     for (label, win) in app.webview_windows() {
                         if !label.starts_with("chrome-sat-") {
                             continue;
                         }
                         let hwnd = hwnd_of(&win);
-                        let sat_desktop = crate::win32::ambient::is_desktop_scene(hwnd);
-                        let flipped =
-                            sat_desktop_by_label.get(&label).copied() != Some(sat_desktop);
-                        if !flipped && !refresh_color {
+                        // During AppBar quiet: only probe desktop/maximize for glass flip;
+                        // never BitBlt (same as main quiet gate).
+                        if quiet {
+                            let sat_desktop = crate::win32::ambient::is_desktop_scene(hwnd);
+                            let flipped =
+                                sat_desktop_by_label.get(&label).copied() != Some(sat_desktop);
+                            if flipped {
+                                sat_desktop_by_label.insert(label.clone(), sat_desktop);
+                                if sat_desktop {
+                                    sat_material_needed = true;
+                                    let prefs = crate::commands::load_material_prefs();
+                                    let win2 = win.clone();
+                                    std::thread::spawn(move || {
+                                        crate::win32::island_bar_glass::sync_sat_window_now(
+                                            &win2, &prefs,
+                                        );
+                                    });
+                                }
+                            }
                             continue;
                         }
-                        // Always live-sample on maximize — never charcoal hwnd marker
-                        // (that painted black under glass before the real ribbon arrived).
-                        let strip = if sat_desktop {
-                            crate::win32::ambient::sample_wallpaper_only(hwnd)
-                        } else {
-                            crate::win32::ambient::sample_for_satellite(hwnd)
+                        let Some(strip) =
+                            crate::win32::ambient::poll_changed_sat(&label, hwnd)
+                        else {
+                            continue;
                         };
                         let strip_desktop = strip.hwnd == 0;
-                        let scene_changed = flipped
-                            || sat_desktop_by_label.get(&label).copied() != Some(strip_desktop);
+                        let scene_changed =
+                            sat_desktop_by_label.get(&label).copied() != Some(strip_desktop);
                         let labeled = strip.with_label(&label);
-                        // Cache + emit only. Maximize: FE paints 吸色 *over* glass, then
-                        // apply_window_effect — never detach glass here (black flash).
                         crate::win32::ambient::remember_sat_strip(&label, labeled.clone());
                         let _ = app.emit_to(&label, "ambient-color", &labeled);
                         let _ = app.emit("ambient-color", &labeled);
                         if scene_changed {
                             sat_desktop_by_label.insert(label.clone(), strip_desktop);
                             if strip_desktop {
-                                // Back to desktop — reattach HostBackdrop.
                                 sat_material_needed = true;
                                 let prefs = crate::commands::load_material_prefs();
                                 let win2 = win.clone();
@@ -417,7 +431,6 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                                     );
                                 });
                             }
-                            // maximize: leave glass up until FE covers then clears.
                         }
                     }
                     if sat_material_needed {

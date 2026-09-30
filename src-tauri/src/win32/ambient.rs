@@ -5,7 +5,8 @@
 //!     chrome (tip / island panel / popups) covers the sample row.
 //!   - **center**: solid color from that same junction band
 //! - Windowed → desktop wallpaper (edge may use wallpaper top-row strip).
-//! - After a target switch: settle for 900ms, then refresh windows slowly.
+//! - After a target switch: live-settle for 2s, then **lock** until a new
+//!   maximize / fullscreen target or return to desktop (no same-HWND tab refresh).
 //! - Never PrintWindow on the hot path (full-frame PW can hang the process).
 //! - Never sample Hub chrome HWNDs (tip / menus / glass / dock) as targets.
 
@@ -123,8 +124,14 @@ pub fn last_sat_strip(label: &str) -> Option<AmbientStrip> {
         .and_then(|m| m.get(label).cloned())
 }
 
-/// FE / IPC: prefer cache; re-sample when cache is the charcoal maximize-fail marker.
+/// FE / IPC: prefer settle-lock, then cache; re-sample when cache is charcoal fail marker.
 pub fn sample_sat_for_ipc(label: &str, self_hwnd: Option<isize>) -> AmbientStrip {
+    #[cfg(windows)]
+    {
+        if let Some(locked) = sat_locked_strip(label) {
+            return locked.with_label(label);
+        }
+    }
     if let Some(cached) = last_sat_strip(label) {
         let charcoal = cached.r == 48 && cached.g == 48 && cached.b == 52;
         // Solid charcoal with hwnd≠0 means capture failed — don't keep serving it.
@@ -200,9 +207,9 @@ mod win {
     const MODE_EDGE: u8 = 0;
     const MODE_CENTER: u8 = 1;
 
-    /// How long to keep live-sampling after a window/desktop target switch.
-    /// Short settle + timed blit — avoid multi-second BitBlt storms (DWM freeze).
-    const SETTLE_MS: u64 = 900;
+    /// How long to live-sample after a maximize/desktop target switch, then lock.
+    /// Locked strip stays until pick_target changes (new maximize or desktop).
+    const SETTLE_MS: u64 = 2000;
     /// Top rows to average from the target window (window-local Y).
     const TOP_ROWS: i32 = 2;
     /// Hard cap on window-DC / screen ribbon width.
@@ -306,13 +313,14 @@ mod win {
     }
 
     fn reset_sampling_gate_inner() {
-        // Mode change → unlock and re-settle.
+        // Mode change → unlock and re-settle (main + all chrome-sat).
         if let Ok(mut g) = GATE.lock() {
             g.target_key = isize::MIN;
             g.locked = None;
             g.last_avg = None;
             g.settle_started = None;
         }
+        clear_sat_gates();
         SETTLING.store(true, Ordering::SeqCst);
     }
 
@@ -1194,8 +1202,8 @@ mod win {
         })
     }
 
-    /// Settle after a target switch, then refresh window content at low frequency
-    /// (tabs may change without changing HWND). Wallpaper stays cached.
+    /// Settle after a maximize/desktop target switch, then lock until the next
+    /// target change. Same HWND (tab / in-app navigation) must not recolor the bar.
     pub fn poll_changed(self_hwnd: Option<isize>) -> Option<AmbientStrip> {
         let foreground = foreground_key();
         let target = pick_target(self_hwnd);
@@ -1211,11 +1219,8 @@ mod win {
                 SETTLING.store(true, Ordering::SeqCst);
             } else if gate.locked.is_some() {
                 SETTLING.store(false, Ordering::SeqCst);
-                // Tabs/pages can change without a new HWND. Refresh slowly;
-                // foreground probes must not become high-frequency captures.
-                if key == 0 || gate.settle_started.is_some_and(|last| last.elapsed() < Duration::from_millis(1200)) {
-                    return None;
-                }
+                // Frozen until new maximize / desktop (target_key change).
+                return None;
             } else {
                 SETTLING.store(true, Ordering::SeqCst);
             }
@@ -1249,14 +1254,115 @@ mod win {
                     && old.offset_x == strip.offset_x && old.png_base64 == strip.png_base64
             });
             gate.locked = Some(strip.clone());
-            gate.settle_started = Some(Instant::now());
+            // Keep settle_started as lock time (diagnostics); no same-target refresh.
             SETTLING.store(false, Ordering::SeqCst);
             return if unchanged { None } else { Some(strip) };
         }
 
         SETTLING.store(true, Ordering::SeqCst);
-        // Settling: always push so the 色带 stays continuously dynamic.
+        // Settling: push live strips so the 色带 can settle before the lock.
         Some(strip)
+    }
+
+    // ── Per chrome-sat settle/lock (same policy as main GATE) ──────────────
+
+    struct SatSampleGate {
+        target_key: isize,
+        settle_started: Option<Instant>,
+        locked: Option<AmbientStrip>,
+        settling: bool,
+    }
+
+    fn sat_gates() -> &'static Mutex<std::collections::HashMap<String, SatSampleGate>> {
+        static GATES: std::sync::OnceLock<
+            Mutex<std::collections::HashMap<String, SatSampleGate>>,
+        > = std::sync::OnceLock::new();
+        GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    }
+
+    fn clear_sat_gates() {
+        if let Ok(mut m) = sat_gates().lock() {
+            m.clear();
+        }
+    }
+
+    /// True while any chrome-sat is still in its 2s settle window.
+    pub fn is_sat_settling() -> bool {
+        sat_gates()
+            .lock()
+            .ok()
+            .map(|m| m.values().any(|g| g.settling))
+            .unwrap_or(false)
+    }
+
+    /// Chrome-sat: same settle→lock as `poll_changed` (per label / monitor).
+    /// Returns `Some` while settling or on the lock transition; `None` when frozen.
+    pub fn poll_changed_sat(label: &str, self_hwnd: Option<isize>) -> Option<AmbientStrip> {
+        if label.is_empty() {
+            return None;
+        }
+        let target = pick_target(self_hwnd);
+        let key = target_key(target);
+
+        {
+            let mut map = sat_gates().lock().ok()?;
+            let gate = map.entry(label.to_string()).or_insert(SatSampleGate {
+                target_key: isize::MIN,
+                settle_started: None,
+                locked: None,
+                settling: true,
+            });
+            if gate.target_key != key {
+                gate.target_key = key;
+                gate.settle_started = Some(Instant::now());
+                gate.locked = None;
+                gate.settling = true;
+            } else if gate.locked.is_some() {
+                gate.settling = false;
+                return None;
+            } else {
+                gate.settling = true;
+            }
+        }
+
+        let strip = if target.is_some() {
+            sample_for_satellite(self_hwnd)
+        } else {
+            sample_wallpaper_only(self_hwnd)
+        };
+
+        let mut map = sat_gates().lock().ok()?;
+        let gate = map.get_mut(label)?;
+        if gate.target_key != key {
+            return None;
+        }
+
+        let started = gate.settle_started.get_or_insert_with(Instant::now);
+        if started.elapsed() >= Duration::from_millis(SETTLE_MS) {
+            let unchanged = gate.locked.as_ref().is_some_and(|old| {
+                old.r == strip.r
+                    && old.g == strip.g
+                    && old.b == strip.b
+                    && old.width == strip.width
+                    && old.span_width == strip.span_width
+                    && old.offset_x == strip.offset_x
+                    && old.png_base64 == strip.png_base64
+            });
+            gate.locked = Some(strip.clone());
+            gate.settling = false;
+            return if unchanged { None } else { Some(strip) };
+        }
+
+        gate.settling = true;
+        Some(strip)
+    }
+
+    /// Locked strip for a chrome-sat label, if any.
+    pub fn sat_locked_strip(label: &str) -> Option<AmbientStrip> {
+        sat_gates()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(label).and_then(|g| g.locked.clone()))
     }
 
     /// Average RGB of the desktop wallpaper top strip (never samples a window HWND).
@@ -2146,9 +2252,10 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    foreground_key, get_mode, is_desktop_scene, is_settling, poll_changed, reset_sampling_gate, sample,
-    sample_for_satellite, sample_nonblocking, sample_sat_hwnd_marker, sample_wallpaper_only,
-    set_ambient_sample_target, set_mode, sync_ignore_ambient_apps,
+    foreground_key, get_mode, is_desktop_scene, is_sat_settling, is_settling, poll_changed,
+    poll_changed_sat, reset_sampling_gate, sample, sample_for_satellite, sample_nonblocking,
+    sample_sat_hwnd_marker, sample_wallpaper_only, sat_locked_strip, set_ambient_sample_target,
+    set_mode, sync_ignore_ambient_apps,
 };
 
 #[cfg(not(windows))]
@@ -2194,12 +2301,27 @@ pub fn poll_changed(_self_hwnd: Option<isize>) -> Option<AmbientStrip> {
 }
 
 #[cfg(not(windows))]
+pub fn poll_changed_sat(_label: &str, _self_hwnd: Option<isize>) -> Option<AmbientStrip> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn sat_locked_strip(_label: &str) -> Option<AmbientStrip> {
+    None
+}
+
+#[cfg(not(windows))]
 pub fn is_desktop_scene(_self_hwnd: Option<isize>) -> bool {
     true
 }
 
 #[cfg(not(windows))]
 pub fn is_settling() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_sat_settling() -> bool {
     false
 }
 
