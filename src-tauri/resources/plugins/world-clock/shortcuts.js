@@ -92,7 +92,8 @@
   function reportWidth() {
     const bar = document.querySelector(".wc-strip");
     if (!bar) return;
-    const width = Math.ceil(Math.max(bar.scrollWidth, bar.getBoundingClientRect().width));
+    // Intrinsic only — do not mix getBoundingClientRect (Host iframe feedback).
+    const width = Math.ceil(Math.max(bar.scrollWidth, 28));
     if (width <= 0 || width === lastWidth) return;
     try {
       hub().shortcuts.requestSize({ width });

@@ -24,4 +24,21 @@
 
 范围检查只比较 Git 可见工作文件内容，不是操作系统沙箱，也不检查忽略目录里的运行行为。它能检测本次任务新增/修改/删除的越界文件；发现其他任务并发修改时先确认归属，禁止为了通过检查自动回滚他人文件或重建基线。
 
+## 快捷区条：图标方正、垂直对齐、防左右抖动
+
+<a id="shortcuts-strip-jitter"></a>
+
+常驻 shortcuts 条（对照 `world-clock` / `page-watch`）须遵守：
+
+1. **图标方正**：SVG 放在固定 **16×16** 盒内；图形几何在 `viewBox="0 0 24 24"` 里**居中**（圆或圆角正方形均可）。避免宽扁浏览器框贴在 viewBox 上半，否则视觉偏上且不够「方」。
+2. **垂直居中**：容器 / 按钮 `align-items: center`；图标 `display:block`。混排汉字时若图标仍偏高，可对**图标**做 `translateY(0.5px)` 光学校正；不要只把文字 `translateY(1px)` 拉下去，否则图标会更显「飘上」。
+3. **防 `requestSize` 抖动（必记）**
+   - **只量内容固有宽**：`Math.ceil(bar.scrollWidth)`（可与最小高度常量取 max）。不要用 `getBoundingClientRect().width` 与 `scrollWidth` 取 max 再上报——Host 按上报改 iframe 宽后，client 宽会跟 iframe 走，易与内容宽差 1px。
+   - **缓存 `lastWidth`**：宽度未变则不要再调 `hub.shortcuts.requestSize`。
+   - **禁止**在 `window.resize` 里上报宽度。Host 改 iframe 会触发 resize，再上报 → 再改宽，形成左右抖动反馈环。
+   - 初次 / 字体就绪后再量一次：`requestAnimationFrame` + `document.fonts.ready`；内容或设置变化时再报。
+   - **Host 也会自动量宽**（`ShortcutsPluginStrip`）：与上同规则——只读 `scrollWidth`、去重、RO/MO 合并；插件侧修好但 Host 仍 `max(scrollWidth, clientWidth)` 时条仍会抖。
+
+细则与 token 见 `.cursor/skills/window-hub-shortcuts/SKILL.md`。
+
 新插件进入内置市场、添加打包资源清单、变更全局依赖属于**宿主集成任务**，不是插件实现的隐含步骤。插件可先通过现有开发目录安装方式验证；不要为自动发现去改 `plugin_install.rs` 或市场目录。

@@ -1753,9 +1753,11 @@ export default function SettingsApp() {
                           {row.isPrimary ? (
                             <span className="display-placement-badge">主屏 · 灵动岛</span>
                           ) : null}
-                          <span className="display-placement-meta">
-                            {row.width}×{row.height}
-                          </span>
+                          {row.name.includes(`${row.width}×${row.height}`) ? null : (
+                            <span className="display-placement-meta">
+                              {row.width}×{row.height}
+                            </span>
+                          )}
                         </span>
                         <span role="cell">
                           <PrefSelect

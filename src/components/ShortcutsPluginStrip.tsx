@@ -56,6 +56,8 @@ export default function ShortcutsPluginStrip({
   onRequestWidthRef.current = onRequestWidth;
   const onHoverTipRef = useRef(onHoverTip);
   onHoverTipRef.current = onHoverTip;
+  /** Last width sent to Host — skip duplicates to avoid stripWidths → layout → remasure loops. */
+  const lastReportedWRef = useRef(-1);
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -103,12 +105,14 @@ export default function ShortcutsPluginStrip({
       }
       const bar = doc.getElementById("bar") ?? doc.body;
       if (!bar) return;
-      const measured = Math.ceil(
-        Math.max(bar.scrollWidth, bar.getBoundingClientRect().width, 0),
-      );
+      // Intrinsic content only. Mixing getBoundingClientRect() tracks the Host-sized
+      // iframe and oscillates 1px with ResizeObserver after onRequestWidth.
+      const measured = Math.ceil(bar.scrollWidth || 0);
       // Empty worker / pinless strips may be 0–1px; don't floor to 28.
       const w = measured <= 1 ? measured : Math.max(measured, 28);
-      if (w >= 0) onRequestWidthRef.current(pluginId, w);
+      if (w < 0 || w === lastReportedWRef.current) return;
+      lastReportedWRef.current = w;
+      onRequestWidthRef.current(pluginId, w);
     } catch {
       /* sandbox / not ready */
     }
@@ -136,10 +140,21 @@ export default function ShortcutsPluginStrip({
   }, [pluginId, entryPath]);
 
   useEffect(() => {
+    lastReportedWRef.current = -1;
+  }, [pluginId, entryPath]);
+
+  useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe || !srcdoc) return;
     let ro: ResizeObserver | null = null;
     let mo: MutationObserver | null = null;
+    let measureTimer = 0;
+
+    const scheduleMeasure = () => {
+      // Coalesce RO/MO bursts (font/chrome pushes) into one measure.
+      window.clearTimeout(measureTimer);
+      measureTimer = window.setTimeout(() => measureAndReport(), 32);
+    };
 
     const attach = () => {
       measureAndReport();
@@ -148,11 +163,12 @@ export default function ShortcutsPluginStrip({
         const bar = doc?.getElementById("bar") ?? doc?.body;
         if (!bar) return;
         if (typeof ResizeObserver !== "undefined") {
-          ro = new ResizeObserver(() => measureAndReport());
+          // Observe content box changes only — do not remasure from Host iframe width.
+          ro = new ResizeObserver(() => scheduleMeasure());
           ro.observe(bar);
         }
         if (typeof MutationObserver !== "undefined") {
-          mo = new MutationObserver(() => measureAndReport());
+          mo = new MutationObserver(() => scheduleMeasure());
           mo.observe(bar, { childList: true, subtree: true, characterData: true });
         }
       } catch {
@@ -168,6 +184,7 @@ export default function ShortcutsPluginStrip({
 
     return () => {
       iframe.removeEventListener("load", attach);
+      window.clearTimeout(measureTimer);
       ro?.disconnect();
       mo?.disconnect();
     };

@@ -224,6 +224,165 @@ fn save(prefs: &DisplayPlacementPrefs) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+fn utf16_z(buf: &[u16]) -> String {
+    String::from_utf16_lossy(&buf.iter().copied().take_while(|c| *c != 0).collect::<Vec<_>>())
+        .trim()
+        .to_string()
+}
+
+/// Extract EDID product id like `LEN9053` from paths such as
+/// `\\?\DISPLAY#LEN9053#4&...` or `MONITOR\LEN9053\...`.
+#[cfg(windows)]
+fn edid_code_from_path(path: &str) -> Option<String> {
+    let upper = path.to_ascii_uppercase();
+    for marker in ["DISPLAY#", "MONITOR\\", "MONITOR/"] {
+        if let Some(rest) = upper.split(marker).nth(1) {
+            let code: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if code.len() >= 3 {
+                // Preserve original casing from path when possible.
+                let start = path.to_ascii_uppercase().find(marker)? + marker.len();
+                let end = start + code.len();
+                if end <= path.len() {
+                    return Some(path[start..end].to_string());
+                }
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+fn is_useless_monitor_label(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower == "generic pnp monitor"
+        || lower.starts_with("generic ")
+        || lower == "default monitor"
+        || t.starts_with("显示器 ")
+        || t.eq_ignore_ascii_case("DISPLAY")
+}
+
+/// GDI `\\.\DISPLAYn` → EDID-style friendly name (`LEN9053`, …).
+#[cfg(windows)]
+fn gdi_monitor_name_map() -> std::collections::HashMap<String, String> {
+    use windows::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+        DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+    };
+
+    let mut map = std::collections::HashMap::new();
+    unsafe {
+        let mut path_count = 0u32;
+        let mut mode_count = 0u32;
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+            .is_err()
+            || path_count == 0
+        {
+            return map;
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+        if QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+        .is_err()
+        {
+            return map;
+        }
+        paths.truncate(path_count as usize);
+        for path in &paths {
+            let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+            src.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+            src.header.adapterId = path.sourceInfo.adapterId;
+            src.header.id = path.sourceInfo.id;
+            src.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            if DisplayConfigGetDeviceInfo(&mut src.header) != 0 {
+                continue;
+            }
+            let gdi = utf16_z(&src.viewGdiDeviceName);
+            if gdi.is_empty() {
+                continue;
+            }
+
+            let mut tgt = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+            tgt.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+            tgt.header.adapterId = path.targetInfo.adapterId;
+            tgt.header.id = path.targetInfo.id;
+            tgt.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+            if DisplayConfigGetDeviceInfo(&mut tgt.header) != 0 {
+                continue;
+            }
+            let friendly = utf16_z(&tgt.monitorFriendlyDeviceName);
+            let device_path = utf16_z(&tgt.monitorDevicePath);
+            let name = if !is_useless_monitor_label(&friendly) {
+                friendly
+            } else if let Some(code) = edid_code_from_path(&device_path) {
+                code
+            } else {
+                continue;
+            };
+            map.insert(gdi, name);
+        }
+    }
+    map
+}
+
+/// Prefer EDID / DisplayConfig product name (e.g. LEN9053); never「显示器 N」.
+#[cfg(windows)]
+fn monitor_display_name(
+    device: &str,
+    w: u32,
+    h: u32,
+    ccd_names: &std::collections::HashMap<String, String>,
+) -> String {
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
+
+    let fallback = format!("{w}×{h}");
+    if device.trim().is_empty() {
+        return fallback;
+    }
+    if let Some(n) = ccd_names.get(device) {
+        if !is_useless_monitor_label(n) {
+            return n.clone();
+        }
+    }
+    let wide: Vec<u16> = device.encode_utf16().chain(std::iter::once(0)).collect();
+    for i in 0..8u32 {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        let ok = unsafe { EnumDisplayDevicesW(PCWSTR(wide.as_ptr()), i, &mut dd, 0) };
+        if !ok.as_bool() {
+            break;
+        }
+        let device_id = utf16_z(&dd.DeviceID);
+        if let Some(code) = edid_code_from_path(&device_id) {
+            return code;
+        }
+        let label = utf16_z(&dd.DeviceString);
+        if !is_useless_monitor_label(&label) {
+            return label;
+        }
+    }
+    fallback
+}
+
+#[cfg(windows)]
 pub fn list_displays() -> Vec<DisplayInfo> {
     use std::sync::Mutex;
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
@@ -278,20 +437,8 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         } else {
             device.clone()
         };
-        let name = if device.trim().is_empty() {
-            format!("显示器 {}×{}", w, h)
-        } else {
-            // \\.\DISPLAY1 → 显示器 1
-            let n = device
-                .rsplit(['\\', '.'])
-                .next()
-                .unwrap_or(device.as_str());
-            if let Some(num) = n.strip_prefix("DISPLAY") {
-                format!("显示器 {num}")
-            } else {
-                n.to_string()
-            }
-        };
+        // Name filled after enum from DisplayConfig / EDID (see below).
+        let name = format!("{w}×{h}");
         let primary = (info.monitorInfo.dwFlags & 1) != 0;
         if let Ok(mut g) = ACC.lock() {
             if let Some(acc) = g.as_mut() {
@@ -360,6 +507,22 @@ pub fn list_displays() -> Vec<DisplayInfo> {
         .take()
         .map(|a| a.0)
         .unwrap_or_default();
+    let ccd_names = gdi_monitor_name_map();
+    for d in &mut out {
+        d.name = monitor_display_name(&d.id, d.width, d.height, &ccd_names);
+    }
+    // Same model on two ports → append resolution so rows stay distinct.
+    {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for d in &out {
+            *counts.entry(d.name.clone()).or_insert(0) += 1;
+        }
+        for d in &mut out {
+            if counts.get(&d.name).copied().unwrap_or(0) > 1 {
+                d.name = format!("{} · {}×{}", d.name, d.width, d.height);
+            }
+        }
+    }
     out.sort_by(|a, b| {
         b.is_primary
             .cmp(&a.is_primary)

@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.page-watch",
   "name": "网页监测",
-  "version": "1.2.6",
+  "version": "1.2.8",
   "official": true,
   "logo": "icon.svg",
   "description": "打开网页、划定元素并后台监测变化，变更时推送灵动岛通知。使用托管 WebView2，登录态与 Cookie 按插件隔离保存。",

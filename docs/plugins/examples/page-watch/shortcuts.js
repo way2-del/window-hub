@@ -13,6 +13,9 @@
   /** Dwell before hover-opens popup (avoid flash on every pass). */
   const HOVER_OPEN_MS = 450;
 
+  /** Shortcuts strip short label (full name stays on title / plugin.json). */
+  const SHORT_NAME = "监测";
+
   const state = {
     popupOpen: false,
     hoverTimer: null,
@@ -25,24 +28,32 @@
   }
 
   function chipIcon() {
+    /* Square glyph centered in 24 viewBox (like world-clock circle), not a wide browser frame. */
     return (
-      '<svg class="pw-chip-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false">' +
-      '<rect x="3" y="4" width="18" height="14" rx="2.5"/>' +
-      '<path d="M3 8.5h18"/>' +
-      '<path d="M8 14.5c1.2-2.2 2.8-3.3 4-3.3s2.8 1.1 4 3.3" stroke-linecap="round"/>' +
-      '<circle class="pw-fill" cx="12" cy="12.2" r="1.1"/>' +
+      '<svg class="pw-chip-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">' +
+      '<rect x="5" y="5" width="14" height="14" rx="3.5" stroke="currentColor" stroke-width="1.8"/>' +
+      '<path d="M5 9.25h14" stroke="currentColor" stroke-width="1.8"/>' +
+      '<path d="M9 14.2c.85-1.55 1.9-2.35 3-2.35s2.15.8 3 2.35" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' +
+      '<circle class="pw-fill" cx="12" cy="14.2" r="1.15"/>' +
       "</svg>"
     );
   }
 
+  /** Cache last reported width — Host iframe resize must not re-measure client box. */
+  let lastWidth = 0;
+
   function reportSize() {
     const bar = document.getElementById("bar");
-    if (!bar || !window.hub || !window.hub.shortcuts || !window.hub.shortcuts.requestSize) return;
-    const w = Math.ceil(
-      Math.max(bar.scrollWidth, bar.getBoundingClientRect().width, 28),
-    );
+    if (!bar || !window.hub || !window.hub.shortcuts || !window.hub.shortcuts.requestSize) {
+      return;
+    }
+    // Intrinsic content only. Math.max(..., getBoundingClientRect()) tracks the Host
+    // iframe after requestSize and can oscillate 1px with a window.resize listener.
+    const width = Math.ceil(Math.max(bar.scrollWidth, 28));
+    if (width <= 0 || width === lastWidth) return;
     try {
-      window.hub.shortcuts.requestSize({ width: w });
+      window.hub.shortcuts.requestSize({ width: width });
+      lastWidth = width;
     } catch (_) {}
   }
 
@@ -52,6 +63,9 @@
     bar.innerHTML =
       '<button type="button" class="pw-chip is-manage" id="pw-open" title="网页监测" aria-label="网页监测">' +
       chipIcon() +
+      '<span class="pw-chip-label">' +
+      SHORT_NAME +
+      "</span>" +
       "</button>";
     const btn = document.getElementById("pw-open");
     if (!btn) return;
@@ -414,6 +428,15 @@
     bindNotify();
     bindPick();
     bindScanned();
+    // Re-measure after paint / font inject — never on window.resize (Host width feedback).
+    requestAnimationFrame(function () {
+      reportSize();
+    });
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(function () {
+        reportSize();
+      }).catch(function () {});
+    }
     window.addEventListener("wh-shortcuts-evt", (ev) => {
       const d = ev && ev.detail;
       if (!d) return;
@@ -429,7 +452,6 @@
       void syncWatches();
       reportSize();
     });
-    window.addEventListener("resize", reportSize);
   }
 
   if (document.readyState === "loading") {

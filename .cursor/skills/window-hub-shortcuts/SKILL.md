@@ -90,13 +90,16 @@ document.documentElement.style.setProperty("--wh-bar-h", `${height}px`);
 
 验收同时比较文字与图标的视觉中心、相邻状态菜单标题的基线。中英文混排在几何居中后仍可能有字形偏差，允许在截图验证后对文字做局部 1px 光学校正；不要移动整个条或用固定 top 猜状态栏位置。高度不得超过 `getBounds().height`。
 
-### 动态内容宽度（防延迟裁切）
+### 动态内容宽度（防延迟裁切 / 防左右抖动）
 
 - 用 `id="bar"` 标记实际内容根节点，设置 `width:max-content`；chip 禁止 flex 收缩。Host 自动量测和插件主动上报必须量测同一内容。
-- 宽度取 `Math.ceil(Math.max(bar.scrollWidth, bar.getBoundingClientRect().width))`，包含图标、间隔、padding 和实际字体；不要按城市名字数估算，不要用固定上限截掉日期/星期/AM-PM。
-- 初次渲染、设置切换、定时刷新都走同一测量逻辑；用 `ResizeObserver` 处理 Host 字体注入和字体加载引起的宽度变化。仅宽度变化时调用 `requestSize`，避免重复消息。
+- **量测**：取内容固有宽 `Math.ceil(bar.scrollWidth)`（可与 `--wh-bar-h` 数值取 max）。**不要**再 `Math.max(..., getBoundingClientRect().width)`——后者在 Host 按上报改 iframe 后会跟视口走，易与 `scrollWidth` 差 1px。
+- **缓存 `lastWidth`**：仅宽度真正变化时调用 `requestSize`，避免重复消息。
+- **禁止** `window.addEventListener("resize", reportSize)`。Host 改 iframe 宽会触发 resize，再上报 → 再改宽，条会左右抖动。字体注入用 `document.fonts.ready` + `requestAnimationFrame` 补测即可；内容变化（设置、定时刷新）走同一测量逻辑。需要时可用 `ResizeObserver` 观察**内容节点**，不要观察视口。
+- **Host 自动量宽**（`ShortcutsPluginStrip.measureAndReport`）必须与插件同一套规则：只读 `scrollWidth`、`lastReported` 去重、RO/MO debounce；忽略已稳定后的 ±1px 回弹。仅改插件不够。
 - 不要量测 `width:100%` 的 iframe 视口来当作内容宽度，否则裁切后无法恢复或缩短后无法收回。Host 可用空间不足的裁切与插件错误上报宽度需分别排查。
-- 回归至少覆盖：最长组合 → 等待两次实际刷新 → 短组合 → 长组合、12/24 小时制、字体变化及不同缩放。确认右侧最后字符始终可见、宽度能扩大也能缩回。内置资源与 `docs/plugins/examples` 同步。
+- **图标**：固定 16×16 盒；图形在 24 viewBox 内居中（圆 / 圆角方均可）。偏上时校正图标而非只下移文字。参考 `world-clock`、`page-watch`。
+- 回归至少覆盖：最长组合 → 等待两次实际刷新 → 短组合 → 长组合、12/24 小时制、字体变化及不同缩放。确认右侧最后字符始终可见、宽度能扩大也能缩回、条不左右抖。内置资源与 `docs/plugins/examples` 同步。
 
 ## Hover 开 popup
 

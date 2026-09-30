@@ -31,6 +31,7 @@ body {
   );
   font-size: var(--wh-chrome-font-size, 12px);
   font-weight: var(--wh-chrome-font-weight, 700);
+  line-height: 1;
   user-select: none;
   scrollbar-width: none;
 }
@@ -48,6 +49,7 @@ button,
   font: inherit;
   color: inherit;
   text-shadow: inherit;
+  line-height: inherit;
   border: none !important;
   outline: none !important;
   box-shadow: none !important;
@@ -69,20 +71,20 @@ button,
   background: transparent !important;
 }
 
+/* Align with world-clock chip: square 16px glyph + short label. */
 .pw-chip {
-  position: relative;
+  width: max-content;
   flex-shrink: 0;
-  width: var(--wh-bar-h, 28px);
-  min-width: var(--wh-bar-h, 28px);
-  max-width: var(--wh-bar-h, 28px);
   height: var(--wh-bar-h, 28px);
-  padding: 0;
+  padding: 0 8px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  letter-spacing: 0.04em;
   opacity: 0.95;
   transition: opacity 140ms ease;
-  text-shadow: none;
 }
 
 .pw-chip:hover,
@@ -91,17 +93,29 @@ button,
 }
 
 .pw-chip-icon {
-  width: calc(13px * var(--wh-chrome-scale, 1));
-  height: calc(13px * var(--wh-chrome-scale, 1));
   display: block;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   overflow: visible;
   pointer-events: none;
   stroke: currentColor;
   fill: none;
+  opacity: 0.78;
+  /* Settle square glyph with CJK label (do not push label alone → icon looks high). */
+  transform: translateY(0.5px);
 }
 
 .pw-chip-icon .pw-fill {
   fill: currentColor;
   stroke: none;
+}
+
+.pw-chip-label {
+  display: block;
+  flex-shrink: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1;
+  opacity: 0.95;
 }

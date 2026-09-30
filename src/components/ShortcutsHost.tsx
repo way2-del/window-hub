@@ -595,7 +595,17 @@ export default function ShortcutsHost({
     // 岛栏 worker 永不占位；其它条仍受 MIN_STRIP_W 约束
     const next = rec && isIslandBarWorker(rec) ? 0 : raw <= 0 ? 0 : Math.max(MIN_STRIP_W, raw);
     setStripWidths((prev) => {
-      if (prev[pluginId] === next) return prev;
+      const cur = prev[pluginId];
+      if (cur === next) return prev;
+      // Ignore ±1px bounce after settle (subpixel / RO races).
+      if (
+        typeof cur === "number" &&
+        cur >= MIN_STRIP_W &&
+        next >= MIN_STRIP_W &&
+        Math.abs(cur - next) === 1
+      ) {
+        return prev;
+      }
       return { ...prev, [pluginId]: next };
     });
   }, []);
