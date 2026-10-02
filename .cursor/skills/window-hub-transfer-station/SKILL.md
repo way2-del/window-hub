@@ -30,7 +30,7 @@ description: >-
 
 - 索引：`hub.staging.*` → `plugin_kv.__staging_items`
 - 载荷：`%APPDATA%/window-hub/plugins/<id>/staging/`
-- 尺寸：`hub.settings.panelWidth` / `panelHeight`（默认 560×152）→ 否则 `defaultSize`
+- 尺寸：拖入 / 首页页签打开时 Host 壳用仪表台 `ISLAND_HOME_PANEL_*`（640×248）；不再走独立 `panelWidth`/`panelHeight` 矮壳
 ## Manifest（要点）
 
 ```json
@@ -48,6 +48,7 @@ description: >-
 }
 ```
 
+Host：拖入或点摘要 → `openTransferHomeTab`（切中转站 tab + 仪表台尺寸）。
 ## 相关
 
 - 总流程：`window-hub-plugin`

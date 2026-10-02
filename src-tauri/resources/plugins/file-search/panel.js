@@ -407,6 +407,49 @@ function buildEverythingQuery(userQuery) {
   return `${clause} ${q}`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function isEverythingBusyError(err) {
+  const msg = String(err?.message || err || "");
+  return msg.includes("正忙") || /busy/i.test(msg);
+}
+
+/**
+ * Host Everything IPC 同时只允许一次 QueryW；重叠会直接「正忙」。
+ * 宿主岛栏会把同一次回车 postMessage 两次（立刻 + 80ms），必须串行 + 去重。
+ */
+let everythingGate = Promise.resolve();
+
+async function everythingSearch(query, opts) {
+  const hubApi = hub();
+  if (!hubApi?.everything?.search) {
+    throw new Error("hub.everything 不可用（插件未就绪）");
+  }
+  const run = async () => {
+    let lastErr;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        return await hubApi.everything.search(query, opts);
+      } catch (e) {
+        lastErr = e;
+        if (!isEverythingBusyError(e) || attempt >= 3) throw e;
+        await sleep(140 + attempt * 200);
+      }
+    }
+    throw lastErr;
+  };
+  const next = everythingGate.then(run, run);
+  everythingGate = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 async function loadStore() {
   const raw = await hub().storage.get(STORE_KEY);
   state.store = normalize(raw);
@@ -462,17 +505,15 @@ async function runSearch(query, opts = {}) {
   render();
   const searchGen = (state._searchGen = (state._searchGen || 0) + 1);
   try {
-    const hubApi = hub();
-    if (!hubApi?.everything?.search) {
-      throw new Error("hub.everything 不可用（插件未就绪）");
-    }
-    const searchPromise = hubApi.everything.search(buildEverythingQuery(q), {
+    const searchPromise = everythingSearch(buildEverythingQuery(q), {
       max: 60,
     });
+    // 超时后底层 Promise 仍可能 resolve/reject，吞掉以免未处理 rejection
+    searchPromise.catch(() => undefined);
     const timeoutPromise = new Promise((_, reject) => {
       window.setTimeout(
         () => reject(new Error("搜索超时，请确认 Everything 正在运行后重试")),
-        6000,
+        8000,
       );
     });
     const res = await Promise.race([searchPromise, timeoutPromise]);
@@ -1308,6 +1349,12 @@ function bind() {
   window.addEventListener("resize", fitBoardHeight);
 }
 
+/** Host may post search before boot finishes — queue until ready. */
+let bootReady = false;
+let pendingHostSearch = null;
+/** Dedupe Host island-search-fwd double post (same nonce). */
+let lastHostSearchNonce = null;
+
 function onHostSearch(ev) {
   const d = ev?.detail;
   if (!d) return;
@@ -1316,12 +1363,12 @@ function onHostSearch(ev) {
     return;
   }
   if (d.action !== "submit") return;
+  if (d.nonce != null) {
+    if (d.nonce === lastHostSearchNonce) return;
+    lastHostSearchNonce = d.nonce;
+  }
   void runSearch(d.query || "");
 }
-
-/** Host may post search before boot finishes — queue until ready. */
-let bootReady = false;
-let pendingHostSearch = null;
 
 function onHostSearchQueued(ev) {
   const d = ev?.detail;

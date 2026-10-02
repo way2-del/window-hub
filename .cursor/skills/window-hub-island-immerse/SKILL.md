@@ -7,9 +7,10 @@ description: >-
 
 # 灵动岛沉浸式（immerse）
 
-沉浸 = 闲置后岛壳 `fill-opacity: 0.02`（近透底，保留 WebView2 命中以免 Explorer 拖放点透），栏内文字跟环境明暗切换（`data-chrome` = `chromeCenter.scheme`）。
+沉浸 / **桌面折叠常驻** = 岛壳近透底（`fill-opacity: 0.02`，保留 WebView2 命中以免点透），**无**黑胶囊 / 吸色实底；栏内文字跟 `chromeCenter` 反色并带描边，保证花壁纸可读。
+盖在窗口上、未沉浸时仍用黑胶囊 + 白字。
 
-源码：`src/App.tsx`（`scheduleImmerse` / `bumpIslandActivity`）、`src/App.css`（`.is-immersed`）、`src/islandPrefs.ts`（`autoImmerse`）。
+源码：`src/App.tsx`（`scheduleImmerse` / `bumpIslandActivity`）、`src/App.css`（`.is-immersed` / 桌面透底）、`src/islandPrefs.ts`（`autoImmerse`）。
 
 ## 唯一总开关
 
@@ -48,14 +49,16 @@ description: >-
 
 | 状态 | `data-chrome` | 栏文字 | 岛壳 |
 |------|---------------|--------|------|
-| 非沉浸 | `dark` | **固定白字**（黑胶囊可读） | 黑胶囊不透明 |
-| 沉浸 | `chromeCenter.scheme` | `--chrome-center-fg` | `fill-opacity: 0.02`（点透规避） |
+| 桌面折叠常驻 | `chromeCenter.scheme` | `--chrome-center-fg` + 描边 | **近透底** `fill-opacity: 0.02`（无常驻底色） |
+| 盖在窗口上、非沉浸 | `dark` | **固定白字** | 黑胶囊不透明 |
+| 沉浸（桌面） | `chromeCenter.scheme` | `--chrome-center-fg` + 描边 | **近透底** `0.02` |
 | 仅拖放命中 | 可强制 `dark` | 白字 | 不透明壳 |
 
-**岛与左右分段：** 左侧快捷区 / 右侧托盘走顶栏材质或吸色条；中间岛保持独立黑胶囊。  
-**禁止**在 `has-bar-glass` / `has-ambient` 下把折叠岛 `fill-opacity` 清零或把非沉浸常驻字色绑到 `--chrome-center-fg`（浅色壁纸会出黑字叠黑壳）。
+**岛与左右分段：** 左侧快捷区 / 右侧托盘走顶栏材质或吸色条；**桌面折叠 / 沉浸**中间岛无底色，只有摘要字；盖在窗口上时才用独立黑胶囊。  
+**禁止**桌面常驻再铺黑半透明或吸色实底——会在壁纸上留一块突兀胶囊。  
+**禁止** `fill-opacity: 0`（WebView2 整窗点透，拖放进不来）；用 `0.02`。
 
-中转站摘要（`.bar-staging`）在 `.is-immersed` 下须与 `.bar-weather` 一样跟 chrome，**禁止** `!important` 锁死白字 + 黑壳不透底。
+中转站摘要（`.bar-staging`）在桌面折叠 / `.is-immersed` 下须与 `.bar-weather` 一样跟 chrome，**禁止** `!important` 锁死白字 + 黑壳不透底。
 
 ## 下拉面板对比度（插件 iframe）
 
@@ -77,9 +80,10 @@ description: >-
 
 ## 检查清单
 
-- [ ] 自动沉浸勾选：闲置后含中转站摘要的岛也能透底，字色跟 chrome
-- [ ] 自动沉浸未勾选：永不沉浸；岛保持黑胶囊 + 白字，与左右快捷区/托盘分段
-- [ ] 非沉浸时 `data-chrome` 恒为 `dark`（勿因 `barGlass` 绑 chromeCenter）
+- [ ] 桌面折叠：岛壳近透底、看不见常驻胶囊；字色跟 chrome 且有描边
+- [ ] 自动沉浸勾选：桌面闲置后同样近透底，无突兀底色
+- [ ] 盖在窗口上、未沉浸：黑胶囊 + 白字
+- [ ] 非沉浸盖窗时 `data-chrome` 恒为 `dark`
 - [ ] 无 `staging.total` 永久阻断
 - [ ] 文件条目不复制本体；按钮为「复制路径」
 - [ ] 改沉浸逻辑时同步本 skill

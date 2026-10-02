@@ -56,6 +56,14 @@
           "type": "string",
           "description": "Shortcuts strip HTML; Host loads in a short iframe"
         },
+        "lyrics": {
+          "type": "string",
+          "description": "Optional companion HTML (e.g. full lyrics); Host may load via IslandPanelHost panelEntry when left card expands"
+        },
+        "forecast": {
+          "type": "string",
+          "description": "Optional companion HTML (e.g. 7-day weather); Host may load via IslandPanelHost panelEntry when left card expands"
+        },
         "development": {
           "type": "object",
           "additionalProperties": false,
@@ -210,6 +218,11 @@
             "excludeFromPullContent": {
               "type": "boolean",
               "description": "If true, omit from Settings pull-content list; open via session/drop/bar only"
+            },
+            "pullMode": {
+              "type": "string",
+              "enum": ["dashboard", "standalone"],
+              "description": "dashboard = embed in Host home left card; standalone = full island pull panel. Default: standalone when excludeFromPullContent, else dashboard."
             }
           }
         }

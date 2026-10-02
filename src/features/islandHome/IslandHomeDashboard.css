@@ -1,0 +1,507 @@
+.ih-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: #f4f4f5;
+  color-scheme: dark;
+  box-sizing: border-box;
+}
+
+.ih-root *,
+.ih-root *::before,
+.ih-root *::after {
+  box-sizing: border-box;
+}
+
+/* ── 岛栏 chrome（挂在 .island-bar 内） ── */
+.ih-bar-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+  pointer-events: auto;
+  opacity: 1;
+  /* 收起：与把手同拍淡出，避免叠进常驻岛栏 */
+  transition: opacity 80ms ease;
+}
+
+/* 岛栏右侧：截图灵动岛（含仪表盘） */
+.ih-bar-shot {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+  flex-shrink: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 1;
+  transition:
+    opacity 80ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.ih-bar-shot:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.ih-bar-shot.is-busy {
+  opacity: 0;
+  pointer-events: none;
+  cursor: wait;
+}
+
+.ih-bar-shot.is-done {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.22);
+}
+
+/* 收起一开始丢掉 is-expanded：页签 / 截图钮先全透明 */
+.island-root:not(.is-expanded) .ih-bar-nav,
+.island-root:not(.is-expanded) .ih-bar-shot {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 80ms;
+}
+
+.ih-bar-nav-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  width: 26px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.ih-bar-nav-btn:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.ih-bar-nav-btn.is-active {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.ih-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+  align-items: stretch;
+  position: relative;
+}
+
+.ih-body.is-resizing {
+  user-select: none;
+}
+
+.ih-card {
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ih-main {
+  position: relative;
+  flex: 1.05;
+  padding: 6px;
+  display: flex;
+  gap: 8px;
+  min-width: 120px;
+  transition: width 160ms ease;
+}
+
+.ih-body.is-resizing .ih-main {
+  transition: none;
+}
+
+.ih-main.is-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.ih-body.is-expanded .ih-main {
+  flex: 1 1 auto;
+  width: auto !important;
+}
+
+.ih-body.is-right-expanded .ih-side {
+  flex: 1 1 auto;
+  width: auto !important;
+  min-width: 0;
+}
+
+.ih-body.is-right-expanded .ih-handle {
+  margin-left: 0;
+}
+
+.ih-side {
+  flex: 1 1 0;
+  /* 左右边距对齐；指示点叠在右缘，不再额外加厚右侧 */
+  padding: 8px;
+  display: flex;
+  min-width: 0;
+  /* 捕获上下滑切换；勿 pan-y 交给浏览器 */
+  touch-action: none;
+  transition: width 160ms ease;
+}
+
+.ih-body.is-resizing .ih-side {
+  transition: none;
+}
+
+.ih-side-stack {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ih-side-stack .ih-embed {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 仪表台最右侧：竖向指示点，落在右卡 8px 边距正中 */
+.ih-dots {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  /* 与 .ih-side 右侧 padding 同宽，点落在边距中线 */
+  width: 8px;
+  padding: 6px 0;
+  border-radius: 999px;
+  background: transparent;
+  pointer-events: auto;
+  opacity: 0.28;
+  transition: opacity 220ms ease;
+}
+
+.ih-dots:hover,
+.ih-dots:focus-within {
+  opacity: 1;
+}
+
+/* 岛收起：与把手同拍淡出 */
+.ih-root[data-active="0"] .ih-dots {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 80ms;
+}
+
+.ih-dot {
+  appearance: none;
+  border: 0;
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 50%;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background 160ms ease,
+    height 160ms ease,
+    width 160ms ease,
+    opacity 160ms ease;
+}
+
+.ih-dot:hover {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.ih-dot.is-active {
+  width: 3.5px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+}
+
+/* 两卡之间竖向把手：仅中间一段，无整列底色 */
+.ih-handle {
+  appearance: none;
+  border: 0;
+  flex-shrink: 0;
+  width: 14px;
+  margin: 0;
+  padding: 0;
+  align-self: center;
+  height: 72px;
+  border-radius: 999px;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+  position: relative;
+  opacity: 1;
+  /* 收起：先淡出，避免 morph 收矮时白条叠进常驻岛栏 */
+  transition: opacity 80ms ease;
+}
+
+/* panel onLeave / 收起一开始 active→0：把手立刻全透明 */
+.ih-root[data-active="0"] .ih-handle {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 80ms;
+}
+
+.ih-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 56px;
+  margin: -28px 0 0 -1.5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.38);
+  pointer-events: none;
+  transition: background 140ms ease, height 140ms ease, width 140ms ease;
+}
+
+.ih-handle:hover::after,
+.ih-handle:focus-visible::after,
+.ih-body.is-resizing .ih-handle::after {
+  background: rgba(255, 255, 255, 0.72);
+  width: 5px;
+  height: 64px;
+  margin-top: -32px;
+  margin-left: -2.5px;
+}
+
+.ih-handle:focus-visible {
+  outline: none;
+}
+
+.ih-body.is-expanded .ih-handle {
+  margin-right: 0;
+}
+
+.ih-embed {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.ih-expand-pane,
+.ih-lyrics-pane {
+  min-width: 0;
+}
+
+.ih-embed .panel-plugin-frame,
+.ih-embed .panel-plugin-empty {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  border-radius: 0;
+}
+
+.ih-placeholder {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ih-placeholder-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.ih-placeholder strong {
+  font-size: 13px;
+  color: #fff;
+}
+
+.ih-placeholder span {
+  font-size: 11px;
+  opacity: 0.55;
+}
+
+.ih-cal {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 6px;
+}
+
+.ih-cal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ih-cal-month {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.1;
+}
+
+.ih-cal-month strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ih-cal-month span {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.ih-cal-strip {
+  display: flex;
+  gap: 3px;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.ih-cal-day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 30px;
+  height: 38px;
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 9px;
+}
+
+.ih-cal-day.is-selected {
+  background: #1d4ed8;
+  color: #fff;
+}
+
+.ih-cal-wd {
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+.ih-cal-num {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ih-cal-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.ih-cal-empty strong {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ih-cal-empty span {
+  font-size: 11px;
+}
+
+.ih-lyrics {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 6px;
+}
+
+.ih-lyrics-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.45);
+  flex-shrink: 0;
+}
+
+.ih-lyrics-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  scrollbar-width: none;
+}
+
+.ih-lyrics-list::-webkit-scrollbar {
+  display: none;
+}
+
+.ih-lyrics-list li {
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.4);
+  transition: color 160ms ease;
+}
+
+.ih-lyrics-list li.is-on {
+  color: #fff;
+  font-weight: 650;
+}
+
+.ih-transfer {
+  flex: 1;
+  min-height: 0;
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+}

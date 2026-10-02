@@ -12,7 +12,8 @@
   "slots": {
     "island.panel": {
       "defaultSize": { "w": 380, "h": 220 },
-      "excludeFromPullContent": false
+      "excludeFromPullContent": false,
+      "pullMode": "dashboard"
     }
   },
   "settings": [],

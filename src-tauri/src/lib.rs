@@ -1269,6 +1269,7 @@ pub fn run() {
             commands::hub_island_release_scenario,
             commands::hub_island_get_bound_tray,
             commands::hub_island_open_bound_tray,
+            commands::capture_island_screenshot,
             commands::hub_panel_open_session,
             commands::hub_panel_close_session,
             commands::hub_media_send_key,

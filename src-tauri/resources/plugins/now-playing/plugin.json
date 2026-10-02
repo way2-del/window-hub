@@ -2,14 +2,15 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.now-playing",
   "name": "正在播放",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "official": true,
   "logo": "icon.svg",
   "description": "情景临时：本机 Now Playing 服务正常且有曲目时暂代岛栏歌词与下拉播放器；停播或服务关闭后自动归还。设置中可绑定托盘，面板右下角打开对应应用。",
   "homepage": "https://github.com/Widdit/now-playing-service",
   "entry": {
     "shortcuts": "shortcuts.html",
-    "panel": "panel.html"
+    "panel": "panel.html",
+    "lyrics": "lyrics.html"
   },
   "slots": {
     "shortcuts": {
@@ -31,7 +32,8 @@
     },
     "island.panel": {
       "defaultSize": { "w": 400, "h": 200 },
-      "excludeFromPullContent": true
+      "excludeFromPullContent": true,
+      "pullMode": "dashboard"
     }
   },
   "settings": [

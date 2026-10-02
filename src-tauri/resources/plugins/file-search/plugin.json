@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.file-search",
   "name": "文件搜索",
-  "version": "1.5.10",
+  "version": "1.5.12",
   "official": true,
   "logo": "icon.svg",
   "description": "本地文件搜索。空态为可自定义卡片组网格；有关键字则 Everything 结果。需本机已运行 Everything。",
@@ -19,7 +19,8 @@
     },
     "island.panel": {
       "defaultSize": { "w": 560, "h": 400 },
-      "excludeFromPullContent": true
+      "excludeFromPullContent": true,
+      "pullMode": "standalone"
     }
   },
   "settings": [

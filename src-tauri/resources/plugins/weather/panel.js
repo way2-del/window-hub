@@ -140,18 +140,19 @@
         ? '<div class="wx-uptime">更新 ' + escapeHtml(data.uptime) + "</div>"
         : '<div class="wx-uptime">暂无更新时间</div>') +
       (err ? '<div class="wx-error">' + escapeHtml(err) + "</div>" : "") +
-      '<div class="wx-cards">' +
-      '<div class="wx-card"><span>湿度</span><strong>' +
+      '<div class="wx-metrics" role="list">' +
+      '<div class="wx-metric" role="listitem"><span>湿度</span><strong>' +
       escapeHtml(dash(data.humidity)) +
       "%</strong></div>" +
-      '<div class="wx-card"><span>风力</span><strong>' +
+      '<div class="wx-metric" role="listitem"><span>风力</span><strong>' +
       escapeHtml(dash(data.wind)) +
       "</strong></div>" +
-      '<div class="wx-card"><span>体感 / 高低</span><strong>' +
+      '<div class="wx-metric" role="listitem"><span>体感</span><strong>' +
       escapeHtml(dash(data.feelsLike)) +
-      "° · " +
+      "°</strong></div>" +
+      '<div class="wx-metric" role="listitem"><span>高低</span><strong>' +
       escapeHtml(dash(data.low)) +
-      "° / " +
+      "°/" +
       escapeHtml(dash(data.high)) +
       "°</strong></div>" +
       "</div></div>";

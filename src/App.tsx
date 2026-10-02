@@ -1,6 +1,21 @@
 import { lerp, clamp01, pullProgress, easeOutSmooth, channelEase } from "./features/island/motion";
 import { createIslandGeometry, ISLAND_CORNER_PATCH_SIZE } from "./features/island/geometry";
-import { resolveIslandPullContent } from "./features/island/pullContent";
+import {
+  isIslandHomePull,
+  resolveIslandPullContent,
+} from "./features/island/pullContent";
+import {
+  ISLAND_HOME_PANEL_H,
+  ISLAND_HOME_PANEL_W,
+  TRANSFER_STATION_PLUGIN_ID,
+} from "./features/islandHome/geometry";
+import IslandHomeDashboard from "./features/islandHome/IslandHomeDashboard";
+import {
+  IslandHomeNav,
+  IslandHomeStatus,
+} from "./features/islandHome/IslandHomeBarChrome";
+import type { IslandHomeTab } from "./features/islandHome/types";
+import "./features/islandHome/IslandHomeDashboard.css";
 import { chromeTokens, chromeCssVars, type Rgb } from "./features/chrome/tokens";
 import {
   hasRightShortcutsWing,
@@ -77,7 +92,6 @@ import { normalizeStagingChanged } from "./stagingApi";
 import {
   formatStagingBarText,
   isStagingPanelShell,
-  islandSearchScenarioClaimOk,
   ISLAND_SEARCH_PLUGIN_ID,
   measureIslandBarLabelWidth,
   resolveIslandBarAdaptive,
@@ -88,6 +102,10 @@ import {
   type IslandBarState,
 } from "./plugins/islandSlots";
 import { parsePluginPanelId } from "./plugins/panelProviders";
+import {
+  resolveHomeDashboardLeftPluginId,
+  resolvePanelPullMode,
+} from "./plugins/panelPullMode";
 import { pluginRegistry } from "./plugins/registry";
 import {
   scenarioPresenceOk,
@@ -100,9 +118,9 @@ import { clickTrace } from "./clickTrace";
 import "./App.css";
 import type { WindowInfo } from "./types";
 
-/** 默认插件面板展开尺寸（非中转站） */
-const VIEW_W_DEFAULT = 380;
-const VIEW_H_DEFAULT = 220;
+/** 默认 Host 首页展开尺寸；插件会话仍用 resolvePluginPanelShellSize */
+const VIEW_W_DEFAULT = ISLAND_HOME_PANEL_W;
+const VIEW_H_DEFAULT = ISLAND_HOME_PANEL_H;
 /** 岛贴屏顶后顶隙为 0；窗口高度 = 岛高（+ 冲突通知叠层） */
 const TOP_GAP = 0;
 /** 冲突通知：主岛下方独立胶囊与顶边距 */
@@ -131,6 +149,8 @@ let liveNotifyStackExtra = 0;
 const HEIGHT_MS = 280;
 /** 展开/收起总时长：宽高交错，禁止出现「380×28 宽扁直角条」中间态 */
 const MORPH_MS = 420;
+/** 首页 chrome（把手 / 页签 / 右侧状态）：收起前先淡出，避免叠进常驻岛栏 */
+const HOME_CHROME_FADE_MS = 80;
 const PULL_OPEN = 0.52;
 const CLICK_SLOP = 6;
 
@@ -140,9 +160,15 @@ const { islandBottomRadius, islandPath, islandNotifyInnerStrokePath, islandNotif
 type IslandSize = { width: number; height: number };
 
 function enabledPullContent(raw: string): string {
+  if (isIslandHomePull(raw)) return raw || "home";
   const pid = parsePluginPanelId(raw);
   if (!pid) return raw || "";
   return pluginRegistry.get(pid)?.enabled ? raw : "";
+}
+
+function syncLiveExpandedForHome() {
+  liveExpanded.width = ISLAND_HOME_PANEL_W;
+  liveExpanded.height = ISLAND_HOME_PANEL_H;
 }
 
 /** 窗口实际高度 = 岛高 + 可选冲突通知叠层 */
@@ -494,6 +520,12 @@ function App() {
   const liveTrayKeysRef = useRef<string[]>([]);
   const liveWindowKeysRef = useRef<string[]>([]);
   const barStagingTextRef = useRef<HTMLSpanElement>(null);
+  /**
+   * 用户左滑划掉的情景插件 id。抑制其 setBar 自动晋升，直到该插件 clearBar
+   *（停播/失活）或显式 claimScenario，避免「僵尸歌词」划不掉又立刻抢回。
+   */
+  const scenarioUserDismissedRef = useRef<string | null>(null);
+  const barWeatherRef = useRef<HTMLDivElement | null>(null);
   const collapsedSizeTimer = useRef<number | null>(null);
   const syncCollapsedIslandWidthRef = useRef<(nextW: number) => void>(() => undefined);
   const widthForBarLabelRef = useRef<
@@ -510,6 +542,42 @@ function App() {
     setScenarioOwner(null);
     setScenarioBar(null);
     setScenarioPull(null);
+  }
+
+  function paintResidentFallbackBar() {
+    const fallback = residentBarRef.current;
+    const text = fallback?.text ?? "";
+    const pluginId = fallback?.pluginId ?? null;
+    if (barStagingTextRef.current) {
+      barStagingTextRef.current.textContent = text;
+    }
+    if (!text.trim()) {
+      syncCollapsedIslandWidthRef.current(ISLAND_COLLAPSED_W_DEFAULT);
+      return;
+    }
+    syncCollapsedIslandWidthRef.current(
+      widthForBarLabelRef.current(text, pluginId, false, false),
+    );
+  }
+
+  /** 折叠岛左滑：划掉情景临时，常驻摘要立刻露出来。 */
+  function dismissScenarioByUser() {
+    const pid = scenarioOwnerRef.current;
+    if (!pid) return;
+    if (searchModeRef.current || hostSearchLocksScenario()) return;
+    scenarioUserDismissedRef.current = pid;
+    clearScenarioLayer();
+    paintResidentFallbackBar();
+    void invoke("hub_island_release_scenario", { pluginId: pid }).catch(() => undefined);
+  }
+
+  function resetBarWeatherSwipeStyles() {
+    const el = barWeatherRef.current;
+    if (!el) return;
+    el.classList.remove("is-swiping");
+    el.style.transition = "";
+    el.style.transform = "";
+    el.style.opacity = "";
   }
 
   function scenarioGateAllows(pluginId: string): boolean {
@@ -613,6 +681,10 @@ function App() {
    * 驱动 hub.panel.onEnter / onLeave（镜子等勿在折叠态开摄像头）。
    */
   const [panelActive, setPanelActive] = useState(false);
+  /** Host 首页：岛栏导航页签（首页 / 中转站 / 文件搜索） */
+  const [homeTab, setHomeTab] = useState<IslandHomeTab>("home");
+  const homeTabRef = useRef<IslandHomeTab>("home");
+  homeTabRef.current = homeTab;
   /** Alt+Space 全局搜索：岛栏变搜索框 + 打开 everything 面板会话 */
   const [searchMode, setSearchMode] = useState(false);
   const [searchDraft, setSearchDraft] = useState("");
@@ -675,6 +747,10 @@ function App() {
     active: boolean;
     moved: boolean;
     dismissed: boolean;
+    /** notify 横幅左滑 / 情景临时左滑划掉 */
+    kind: "notify" | "scenario";
+    /** scenario：触控轴未定时先观察，再交给左滑或下拉 */
+    axis: "x" | "y" | null;
   } | null>(null);
   const islandRef = useRef<HTMLDivElement>(null);
   const settingsAnchorRef = useRef<HTMLDivElement>(null);
@@ -709,21 +785,30 @@ function App() {
   // was clobbering a correct 400×200 sync mid-expand (two island sizes).
   // size / reveal 只由 paintDom 维护，避免重渲染把动画进度打回旧值
 
-  /** 面板尺寸：refs 优先，避免 expand/morph 中 React state 滞后把 liveExpanded 打回 380×220 */
+  /** 面板尺寸：仅 standalone 插件会话改壳；dashboard / 中转站 / 文件搜索嵌入保持首页尺寸 */
   function resolvePanelSizingPluginId(): string | null {
     const owner = scenarioOwnerRef.current;
     if (owner) {
       const sp = scenarioPullRef.current ?? `plugin:${owner}`;
       const v = enabledPullContent(sp);
-      if (v) return parsePluginPanelId(v);
+      const pid = v ? parsePluginPanelId(v) : null;
+      if (pid) {
+        // 文件搜索走首页页签，勿用 standalone 560×400 改壳
+        if (isFileSearchPlugin(pid) || isTransferStationPlugin(pid)) return null;
+        const mode = resolvePanelPullMode(pluginRegistry.get(pid)?.manifest);
+        if (mode === "standalone") return pid;
+      }
     }
     if (panelSessionArmedRef.current && panelSessionRef.current) {
       const v = enabledPullContent(panelSessionRef.current);
-      if (v) return parsePluginPanelId(v);
+      const pid = v ? parsePluginPanelId(v) : null;
+      if (pid) {
+        if (isFileSearchPlugin(pid) || isTransferStationPlugin(pid)) return null;
+        const mode = resolvePanelPullMode(pluginRegistry.get(pid)?.manifest);
+        if (mode === "standalone") return pid;
+      }
     }
-    return parsePluginPanelId(
-      enabledPullContent(islandPrefsRef.current.pullContent),
-    );
+    return null;
   }
 
   function isFileSearchPlugin(pluginId: string | null | undefined): boolean {
@@ -733,6 +818,39 @@ function App() {
       base === ISLAND_SEARCH_PLUGIN_ID ||
       pluginId === resolveIslandSearchPluginId()
     );
+  }
+
+  function isTransferStationPlugin(pluginId: string | null | undefined): boolean {
+    if (!pluginId) return false;
+    return pluginId.replace(/__dev$/, "") === TRANSFER_STATION_PLUGIN_ID;
+  }
+
+  /** 中转站：首页页签嵌入 + 仪表台壳尺寸（勿 standalone 560×152） */
+  async function openTransferHomeTab() {
+    clearSessionPanel();
+    syncLiveExpandedForHome();
+    shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+    shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+    setShellPanelW(ISLAND_HOME_PANEL_W);
+    setShellPanelH(ISLAND_HOME_PANEL_H);
+    setHomeTab("transfer");
+    if (!expandedRef.current) {
+      await expand({ force: true });
+    }
+  }
+
+  /** 文件搜索：首页页签嵌入 + 仪表台壳尺寸（勿 standalone 560×400） */
+  async function openSearchHomeTab() {
+    clearSessionPanel();
+    syncLiveExpandedForHome();
+    shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+    shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+    setShellPanelW(ISLAND_HOME_PANEL_W);
+    setShellPanelH(ISLAND_HOME_PANEL_H);
+    setHomeTab("search");
+    if (!expandedRef.current) {
+      await expand({ force: true });
+    }
   }
 
   /** Alt+空格 Host 搜索锁：期间禁止其它情景 claim / setBar 抢主人 */
@@ -768,24 +886,18 @@ function App() {
 
   useEffect(() => installChromeHoverTipGlobalDismiss(), []);
 
-  // 情景主人已是文件搜索 → 强制亮搜索 chrome（仅作兜底；主路径以 searchMode 为准）
+  // 切到文件搜索页签：聚焦岛栏搜索框
   useEffect(() => {
-    if (!isFileSearchPlugin(scenarioOwner)) return;
-    if (searchModeRef.current || searchLeavingRef.current) return;
-    searchModeRef.current = true;
-    setSearchMode(true);
-    liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
-    if (!expandedRef.current) {
-      syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
-    }
-  }, [scenarioOwner]);
+    if (homeTab !== "search" || !expanded) return;
+    const id = window.setTimeout(() => {
+      const el = searchInputRef.current;
+      if (!el) return;
+      el.focus({ preventScroll: true });
+    }, 40);
+    return () => window.clearTimeout(id);
+  }, [homeTab, expanded]);
 
-  // Alt+空格进入搜索态后，强制主窗焦点 + 输入框聚焦（与 claim 异步解耦）
-  useLayoutEffect(() => {
-    if (!searchActive || searchLeaving || expanded || pulling || springing) return;
-    void focusIslandSearchInput();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchActive, searchLeaving, expanded, pulling, springing]);
+  // Alt+空格已改为仪表台页签；不再因文件搜索情景强制亮独立搜索 chrome
 
   useEffect(() => {
     const sync = () => {
@@ -856,17 +968,9 @@ function App() {
         panelSessionArmedRef.current = false;
         return null;
       });
-      // Drop cached pull / bar targets only after plugins are loaded.
+      // Drop cached bar targets only after plugins are loaded.
       // Before bootstrap, registry is empty — treating that as "disabled" wiped prefs on every restart.
       if (arePluginsReady()) {
-        const pull = islandPrefsRef.current.pullContent;
-        if (pull.startsWith("plugin:")) {
-          const pid = pull.slice("plugin:".length);
-          // Only clear if uninstalled — disabled plugins keep preference for re-enable.
-          if (pid && !pluginRegistry.get(pid)) {
-            void setIslandPrefs({ pullContent: "" }).catch(() => undefined);
-          }
-        }
         const wantBar = islandPrefsRef.current.barResident;
         if (wantBar && !pluginRegistry.get(wantBar)) {
           void setIslandPrefs({ barResident: "" }).catch(() => undefined);
@@ -876,15 +980,6 @@ function App() {
         ) {
           // Scenario plugins are not permanent 常驻 — drop stale selection.
           void setIslandPrefs({ barResident: "" }).catch(() => undefined);
-        }
-        if (pull.startsWith("plugin:")) {
-          const pid = pull.slice("plugin:".length);
-          if (
-            pid &&
-            pluginRegistry.get(pid)?.manifest.slots?.["island.scenario"]
-          ) {
-            void setIslandPrefs({ pullContent: "" }).catch(() => undefined);
-          }
         }
       }
     };
@@ -920,24 +1015,15 @@ function App() {
     return Boolean(pluginRegistry.get(id)?.enabled);
   }
 
-  /** 用户配置了可用的下拉插件面板 */
+  /** 默认下拉已固定 Host 首页，始终可展开 */
   function hasConfiguredPullContent(): boolean {
-    const prefId = parsePluginPanelId(islandPrefsRef.current.pullContent);
-    if (!prefId) return false;
-    return pluginEnabled(prefId);
+    return true;
   }
 
-  function barResidentPanelPluginId(): string | null {
-    const pref = islandPrefsRef.current.barResident?.trim();
-    if (!pref || !pluginEnabled(pref)) return null;
-    const rec = pluginRegistry.get(pref);
-    if (!rec) return null;
-    if (!rec.manifest.slots?.["island.panel"]) return null;
-    if (!(rec.manifest.capabilities ?? []).includes("island.panel")) return null;
-    return pref;
-  }
-
-  /** 壳层点击/下拉应打开的插件：情景 claim 优先（与实际渲染一致），再 prefs 下拉 / 岛栏常驻 */
+  /**
+   * 壳层下拉 / 轻点 / 点击摘要：同一目标。
+   * 情景 claim > 岛栏可见层（overlay → 常驻摘要）> barResident；均需带 island.panel。
+   */
   function resolveShellExpandPluginId(): string | null {
     const owner = scenarioOwnerRef.current;
     if (owner) {
@@ -945,14 +1031,48 @@ function App() {
       const fromScenario = parsePluginPanelId(enabledPullContent(sp));
       if (fromScenario) return fromScenario;
     }
-    const pullPid = parsePluginPanelId(
-      enabledPullContent(islandPrefsRef.current.pullContent),
-    );
-    if (pullPid) return pullPid;
-    return barResidentPanelPluginId();
+    const candidates = [
+      overlayBarRef.current?.pluginId,
+      residentBarRef.current?.pluginId,
+      islandPrefsRef.current.barResident,
+    ];
+    for (const raw of candidates) {
+      const id = String(raw ?? "").trim();
+      if (!id || !pluginEnabled(id)) continue;
+      const rec = pluginRegistry.get(id);
+      const hasPanel =
+        Boolean(rec?.manifest.slots?.["island.panel"]) &&
+        (rec?.manifest.capabilities ?? []).includes("island.panel");
+      if (hasPanel) return id;
+    }
+    return null;
+  }
+
+  function openShellOrHome() {
+    const pid = resolveShellExpandPluginId();
+    if (pid) void openPluginSession(pid);
+    else void expand();
   }
 
   function syncLiveExpandedForPlugin(pluginId: string) {
+    // 中转站 / 文件搜索嵌入首页页签：壳始终仪表台尺寸
+    if (isTransferStationPlugin(pluginId) || isFileSearchPlugin(pluginId)) {
+      syncLiveExpandedForHome();
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+      setShellPanelW(ISLAND_HOME_PANEL_W);
+      setShellPanelH(ISLAND_HOME_PANEL_H);
+      return;
+    }
+    const mode = resolvePanelPullMode(pluginRegistry.get(pluginId)?.manifest);
+    if (mode !== "standalone") {
+      syncLiveExpandedForHome();
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+      setShellPanelW(ISLAND_HOME_PANEL_W);
+      setShellPanelH(ISLAND_HOME_PANEL_H);
+      return;
+    }
     const { w, h } = resolvePluginPanelShellSize(pluginId, null, {
       w: clampStagingPanelW,
       h: clampStagingPanelH,
@@ -1300,9 +1420,9 @@ function App() {
     }, delayMs);
   }
 
-  /** 壳层手势：下拉内容或岛栏常驻面板均可展开 */
+  /** 壳层手势：固定首页或情景面板均可展开 */
   function canShellPullExpand(): boolean {
-    return resolveShellExpandPluginId() != null;
+    return true;
   }
 
   /** 直接改 DOM；动画中不走 React，避免 ambient 等重渲染把路径打回旧值 */
@@ -1483,13 +1603,41 @@ function App() {
       clearSessionPanel();
       await refreshIslandPrefsFromDb().then(setIslandPrefsState);
       const pid = resolveShellExpandPluginId();
-      if (!pid) return;
-      armPluginSession(pid);
+      if (pid && isTransferStationPlugin(pid)) {
+        syncLiveExpandedForHome();
+        shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+        shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+        setShellPanelW(ISLAND_HOME_PANEL_W);
+        setShellPanelH(ISLAND_HOME_PANEL_H);
+        setHomeTab("transfer");
+      } else if (pid && isFileSearchPlugin(pid)) {
+        syncLiveExpandedForHome();
+        shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+        shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+        setShellPanelW(ISLAND_HOME_PANEL_W);
+        setShellPanelH(ISLAND_HOME_PANEL_H);
+        setHomeTab("search");
+      } else if (pid) {
+        armPluginSession(pid);
+      } else {
+        syncLiveExpandedForHome();
+        shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+        shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+        setShellPanelW(ISLAND_HOME_PANEL_W);
+        setShellPanelH(ISLAND_HOME_PANEL_H);
+      }
     } else {
       const pid =
         parsePluginPanelId(panelSessionRef.current ?? "") ??
         resolvePanelSizingPluginId();
       if (pid) syncLiveExpandedForPlugin(pid);
+      else {
+        syncLiveExpandedForHome();
+        shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+        shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+        setShellPanelW(ISLAND_HOME_PANEL_W);
+        setShellPanelH(ISLAND_HOME_PANEL_H);
+      }
     }
     bumpIslandActivity();
     const token = ++gen.current;
@@ -1546,6 +1694,7 @@ function App() {
     const token = ++gen.current;
     busy.current = true;
     setTrayUiPaused(true);
+    setHomeTab("home");
     try {
       // 先 leave：立刻关摄像头，再开收起动画
       setPanelActive(false);
@@ -1555,6 +1704,15 @@ function App() {
       // 收起目标宽按当前文案锁定，避免动画落到过期 liveCollapsed
       snapCollapsedFromBar();
       paintDom(sizeRef.current, revealRef.current);
+      // 首页 chrome：等把手/页签/状态淡出后再 morph，避免叠进常驻岛栏
+      if (!showStandalonePanel) {
+        await new Promise<void>((r) => {
+          requestAnimationFrame(() => {
+            window.setTimeout(r, HOME_CHROME_FADE_MS);
+          });
+        });
+        if (token !== gen.current) return;
+      }
       await animateMorph(token, false);
       if (token !== gen.current) return;
       await setBarHeight(islandBarH());
@@ -1571,20 +1729,23 @@ function App() {
         searchModeRef.current ||
         isFileSearchPlugin(scenarioOwnerRef.current)
       ) {
-        if (retainSearchModeRef.current) {
+        if (retainSearchModeRef.current && searchModeRef.current) {
           retainSearchModeRef.current = false;
           searchModeRef.current = true;
           setSearchMode(true);
           clearSearchLeaveTimer();
           searchLeavingRef.current = false;
           setSearchLeaving(false);
-          // 保留情景主人；折叠宽钉回搜索栏
+          // 保留情景主人；折叠宽钉回搜索栏（遗留独立搜索岛路径）
           liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
           syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
           void focusIslandSearchInput();
-        } else {
+        } else if (searchModeRef.current) {
           // 展开态 Esc/再热键：壳已 morph 完，chrome 再播交接
           exitIslandSearchChrome({ animated: true });
+        } else if (isFileSearchPlugin(scenarioOwnerRef.current)) {
+          // 仪表台页签路径：仅清文件搜索情景层，勿亮独立搜索岛
+          clearScenarioLayer();
         }
       }
     } finally {
@@ -1634,15 +1795,44 @@ function App() {
           active: true,
           moved: false,
           dismissed: false,
+          kind: "notify",
+          axis: "x",
         };
         bumpIslandActivity();
         return;
       }
     }
-    // 未配置下拉/常驻面板：不进入下拉手势（拖入仍走 openPluginSession）
+    // 情景临时：先记手势，移动后再决定左滑划掉或下拉展开
+    if (
+      scenarioOwnerRef.current &&
+      !searchModeRef.current &&
+      !searchLeavingRef.current &&
+      !hostSearchLocksScenario()
+    ) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      swipe.current = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        dx: 0,
+        active: true,
+        moved: false,
+        dismissed: false,
+        kind: "scenario",
+        axis: null,
+      };
+      bumpIslandActivity();
+      return;
+    }
+    // 未配置情景时仍可展开 Host 首页（拖入仍走 openPluginSession）
     if (!canShellPullExpand()) return;
     const shellPid = resolveShellExpandPluginId();
     if (shellPid) syncLiveExpandedForPlugin(shellPid);
+    else {
+      syncLiveExpandedForHome();
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+    }
     clearSessionPanel();
     void refreshIslandPrefsFromDb().then(setIslandPrefsState);
     bumpIslandActivity();
@@ -1672,13 +1862,83 @@ function App() {
     });
   }
 
+  function beginPullGesture(
+    e: ReactPointerEvent<HTMLDivElement>,
+    startY: number,
+  ) {
+    if (!canShellPullExpand()) return;
+    const shellPid = resolveShellExpandPluginId();
+    if (shellPid) syncLiveExpandedForPlugin(shellPid);
+    else {
+      syncLiveExpandedForHome();
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+    }
+    clearSessionPanel();
+    void refreshIslandPrefsFromDb().then(setIslandPrefsState);
+    bumpIslandActivity();
+    if (leaveShrinkTimer.current != null) {
+      window.clearTimeout(leaveShrinkTimer.current);
+      leaveShrinkTimer.current = null;
+    }
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* noop */
+    }
+    drag.current = {
+      pointerId: e.pointerId,
+      startY,
+      lastY: e.clientY,
+      moved: Math.abs(e.clientY - startY) > CLICK_SLOP,
+      active: true,
+      winReady: false,
+    };
+    setSpringing(false);
+    pullingRef.current = true;
+    setPulling(true);
+    paintDom(collapsedNow(), 0);
+    void ensureExpandedWindow().then(() => {
+      const d = drag.current;
+      if (!d || d.pointerId !== e.pointerId) return;
+      d.winReady = actualWinHRef.current >= winHeight(liveExpanded.height) - 2;
+    });
+  }
+
   function onIslandPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
     const s = swipe.current;
     if (s?.active && s.pointerId === e.pointerId) {
       const dx = e.clientX - s.startX;
       const dy = e.clientY - s.startY;
       if (Math.abs(dx) > CLICK_SLOP || Math.abs(dy) > CLICK_SLOP) s.moved = true;
-      // 以横向左滑为主
+
+      if (s.kind === "scenario") {
+        if (!s.axis) {
+          if (Math.abs(dx) <= CLICK_SLOP && Math.abs(dy) <= CLICK_SLOP) return;
+          if (Math.abs(dx) >= Math.abs(dy) && dx < 0) {
+            s.axis = "x";
+          } else {
+            // 纵向 / 右滑 → 交给下拉展开
+            swipe.current = null;
+            resetBarWeatherSwipeStyles();
+            beginPullGesture(e, s.startY);
+            return;
+          }
+        }
+        if (s.axis === "x") {
+          s.dx = Math.min(0, dx);
+          const el = barWeatherRef.current;
+          if (el) {
+            el.classList.add("is-swiping");
+            el.style.transition = "none";
+            el.style.transform = `translateX(${s.dx}px)`;
+            el.style.opacity = String(Math.max(0.15, 1 + s.dx / 140));
+          }
+        }
+        return;
+      }
+
+      // notify：以横向左滑为主
       if (dx < 0 && Math.abs(dx) >= Math.abs(dy)) {
         s.dx = dx;
         const el = notifyRef.current;
@@ -1698,7 +1958,7 @@ function App() {
     // 故意不 paintDom 长高：展开动画与点击共用 openPluginSession
   }
 
-  /** 下拉手势结束：打开时与点击同一路径，避免跟手长高造成闪裁 */
+  /** 下拉手势结束：与点击常驻同一路径（openPluginSession / expand 首页） */
   function finishPull(open: boolean) {
     drag.current = null;
     pullingRef.current = false;
@@ -1710,8 +1970,7 @@ function App() {
     setReveal(0);
     if (open && canShellPullExpand()) {
       clearSessionPanel();
-      const pid = resolveShellExpandPluginId();
-      if (pid) void openPluginSession(pid);
+      openShellOrHome();
       return;
     }
     clearSessionPanel();
@@ -1728,6 +1987,50 @@ function App() {
         /* noop */
       }
       const dx = s.dx;
+
+      if (s.kind === "scenario") {
+        const el = barWeatherRef.current;
+        // 未选定横轴（轻点）→ 交给 onClick 展开
+        if (!s.axis || s.axis === "y") {
+          resetBarWeatherSwipeStyles();
+          swipe.current = null;
+          return;
+        }
+        if (dx < -56) {
+          s.dismissed = true;
+          if (el) {
+            el.classList.add("is-swiping");
+            el.style.transition = "transform 220ms ease, opacity 200ms ease";
+            el.style.transform = "translateX(-120%)";
+            el.style.opacity = "0";
+          }
+          window.setTimeout(() => {
+            dismissScenarioByUser();
+            resetBarWeatherSwipeStyles();
+          }, 180);
+          window.setTimeout(() => {
+            swipe.current = null;
+          }, 280);
+        } else {
+          if (el) {
+            el.style.transition =
+              "transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease";
+            el.style.transform = "";
+            el.style.opacity = "";
+            window.setTimeout(() => el.classList.remove("is-swiping"), 220);
+          }
+          if (s.moved && Math.abs(dx) > CLICK_SLOP) {
+            s.dismissed = true;
+            window.setTimeout(() => {
+              swipe.current = null;
+            }, 280);
+          } else {
+            swipe.current = null;
+          }
+        }
+        return;
+      }
+
       const el = notifyRef.current;
       if (dx < -56) {
         s.dismissed = true;
@@ -1782,11 +2085,15 @@ function App() {
     const s = swipe.current;
     if (s?.active && s.pointerId === e.pointerId) {
       s.active = false;
-      const el = notifyRef.current;
-      if (el) {
-        el.style.transition = "transform 220ms ease, opacity 180ms ease";
-        el.style.transform = "";
-        el.style.opacity = "";
+      if (s.kind === "scenario") {
+        resetBarWeatherSwipeStyles();
+      } else {
+        const el = notifyRef.current;
+        if (el) {
+          el.style.transition = "transform 220ms ease, opacity 180ms ease";
+          el.style.transform = "";
+          el.style.opacity = "";
+        }
       }
       swipe.current = null;
       return;
@@ -1802,8 +2109,7 @@ function App() {
       e.preventDefault();
       if (expandedRef.current) void collapse();
       else if (canShellPullExpand()) {
-        const pid = resolveShellExpandPluginId();
-        if (pid) void openPluginSession(pid);
+        openShellOrHome();
       }
     }
   }
@@ -2039,14 +2345,31 @@ function App() {
     scenarioPull,
     sessionOverride: panelSessionRef.current,
     sessionOverrideActive,
-    pullContent: islandPrefs.pullContent,
   }, enabledPullContent);
 
-  /** 当前会话 / 投放 / 情景插件：同步面板壳尺寸 */
-  const sizePluginId = parsePluginPanelId(resolvedPullContent) ?? dropPluginId;
+  /** 当前会话 / 投放 / 情景：仅 standalone 同步壳尺寸 */
+  const overridePluginId = parsePluginPanelId(resolvedPullContent);
+  const overridePullMode = overridePluginId
+    ? resolvePanelPullMode(pluginRegistry.get(overridePluginId)?.manifest)
+    : null;
+  const sizePluginId =
+    (overridePullMode === "standalone" ? overridePluginId : null) ??
+    (dropPluginId &&
+    resolvePanelPullMode(pluginRegistry.get(dropPluginId)?.manifest) ===
+      "standalone"
+      ? dropPluginId
+      : null);
 
   useEffect(() => {
-    if (!sizePluginId) return;
+    if (!sizePluginId) {
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+      setShellPanelW(ISLAND_HOME_PANEL_W);
+      setShellPanelH(ISLAND_HOME_PANEL_H);
+      liveExpanded.width = ISLAND_HOME_PANEL_W;
+      liveExpanded.height = ISLAND_HOME_PANEL_H;
+      return;
+    }
     let cancelled = false;
     const apply = (settings?: Record<string, unknown> | null) => {
       const { w, h } = resolvePluginPanelShellSize(sizePluginId, settings, {
@@ -2154,16 +2477,8 @@ function App() {
       unsubPlugins = fn;
     });
     void listen<IslandPrefs>("island-prefs", (ev) => {
-      const prev = islandPrefsRef.current;
       const next = applyIslandPrefsSnapshot(ev.payload);
       setIslandPrefsState(next);
-      if (next.pullContent !== prev.pullContent) {
-        const sessPid = parsePluginPanelId(panelSessionRef.current ?? "");
-        const wantPid = parsePluginPanelId(
-          enabledPullContent(next.pullContent),
-        );
-        if (sessPid && sessPid !== wantPid) clearSessionPanel();
-      }
       clearStalePanelOverride();
     }).then((fn) => {
       unlistenPrefs = fn;
@@ -2214,14 +2529,12 @@ function App() {
         });
         if (panelSessionRef.current === `plugin:${pluginId}`) {
           clearSessionPanel();
-          // 下拉为「无」：清空后直接收起，勿落回空面板
-          if (!hasConfiguredPullContent() && expandedRef.current) {
-            queueMicrotask(() => {
-              if (expandedRef.current) void collapse();
-            });
-          }
+          // 清空中转站会话后回落到 Host 首页，不收起
         }
-        // 常驻+下拉皆无：清空后立刻沉浸，勿留黑色空岛
+        if (isTransferStationPlugin(pluginId)) {
+          setHomeTab("home");
+        }
+        // 常驻皆无：清空后立刻沉浸，勿留黑色空岛
         queueMicrotask(() => {
           if (!expandedRef.current) scheduleImmerse();
         });
@@ -2294,6 +2607,16 @@ function App() {
           if (isScenarioOwner && !hostSearchLocksScenario()) clearScenarioLayer();
           return;
         }
+        // 用户左滑划掉后：空 setBar/clearBar 解除抑制；有文案时禁止自动晋升（等停播后再补回）
+        if (
+          scenarioUserDismissedRef.current === p.pluginId &&
+          scenarioOwnerRef.current !== p.pluginId
+        ) {
+          if (!next) {
+            scenarioUserDismissedRef.current = null;
+          }
+          return;
+        }
         if (next && scenarioOwnerRef.current !== p.pluginId) {
           if (hostSearchLocksScenario() && !isFileSearchPlugin(p.pluginId)) {
             return;
@@ -2301,10 +2624,7 @@ function App() {
           scenarioOwnerRef.current = p.pluginId;
           setScenarioOwner(p.pluginId);
           setScenarioPull(`plugin:${p.pluginId}`);
-          if (isFileSearchPlugin(p.pluginId)) {
-            searchModeRef.current = true;
-            setSearchMode(true);
-          }
+          // 文件搜索已改走仪表台页签，不再亮独立搜索 chrome
         }
         if (
           hostSearchLocksScenario() &&
@@ -2386,25 +2706,24 @@ function App() {
           if (!hostSearchLocksScenario()) clearScenarioLayer();
           return;
         }
+        // 显式 claim 视为用户/插件主动接管，清掉左滑抑制
+        if (scenarioUserDismissedRef.current === pluginId) {
+          scenarioUserDismissedRef.current = null;
+        }
         scenarioOwnerRef.current = pluginId;
         setScenarioOwner(pluginId);
         setScenarioPull(`plugin:${pluginId}`);
-        // 文件搜索 claim = 立即接管岛栏为搜索框（与 Host Alt+空格同源）
-        if (isFileSearchPlugin(pluginId)) {
-          searchModeRef.current = true;
-          setSearchMode(true);
-          liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
-          syncCollapsedIslandWidth(ISLAND_SEARCH_COLLAPSED_W);
-          queueMicrotask(() => {
-            void focusIslandSearchInput();
-          });
-        } else if (!searchModeRef.current) {
+        // 文件搜索已改走仪表台页签，claim 不再亮独立搜索 chrome
+        if (!isFileSearchPlugin(pluginId) && !searchModeRef.current) {
           setScenarioBar((prev) => (prev?.pluginId === pluginId ? prev : null));
         }
         return;
       }
       if (action === "release") {
-        if (scenarioOwnerRef.current !== pluginId) return;
+        if (scenarioOwnerRef.current !== pluginId) {
+          // 用户划掉后 Host 已 clear 主人；保持抑制直到插件 clearBar
+          return;
+        }
         // 搜索锁下忽略非文件搜索的 release（防止正在播放 release 清掉搜索情景）
         if (hostSearchLocksScenario() && !isFileSearchPlugin(pluginId)) {
           return;
@@ -2624,7 +2943,6 @@ function App() {
     residentBar?.pluginId,
     islandPrefs.autoImmerse,
     islandPrefs.immerseIdleSec,
-    islandPrefs.pullContent,
     islandPrefs.barResident,
     immersed,
   ]);
@@ -2653,10 +2971,36 @@ function App() {
   const effectivePullContent =
     resolvedPullContent ||
     (sessionOverrideActive ? panelOverride : null) ||
-    "";
-  const panelHostPluginId =
-    parsePluginPanelId(effectivePullContent || panelOverride || "") ||
-    "none";
+    "home";
+  const effectivePluginId = parsePluginPanelId(effectivePullContent);
+  const effectivePullMode = effectivePluginId
+    ? resolvePanelPullMode(pluginRegistry.get(effectivePluginId)?.manifest)
+    : null;
+  /** 仅其它 standalone 占满下拉；中转站/文件搜索走首页页签 */
+  const showStandalonePanel =
+    effectivePullMode === "standalone" &&
+    !isFileSearchPlugin(effectivePluginId) &&
+    !isTransferStationPlugin(effectivePluginId);
+  /** 情景/会话 dashboard 优先；否则岛栏常驻（如天气）占左卡 */
+  const dashboardLeftPluginId = resolveHomeDashboardLeftPluginId({
+    forcedDashboardPluginId:
+      effectivePullMode === "dashboard" ? effectivePluginId : null,
+    barResidentId: islandPrefs.barResident,
+    barResidentPullMode: (() => {
+      const id = islandPrefs.barResident?.trim();
+      if (!id || !pluginEnabled(id)) return null;
+      const rec = pluginRegistry.get(id);
+      if (!rec?.manifest.slots?.["island.panel"]) return null;
+      return resolvePanelPullMode(rec.manifest);
+    })(),
+  });
+  const showHomeBarChrome =
+    !showStandalonePanel &&
+    (expanded || reveal > 0.12) &&
+    !showSearchChrome;
+  /** 仪表台「文件搜索」页签：中间常驻栏改搜索框（仍保留左右导航/状态） */
+  const showSearchTabBar = showHomeBarChrome && homeTab === "search";
+  const panelHostPluginId = effectivePluginId || "home";
   /**
    * 主岛已被临时占用时，通知不得盖住栏内内容，改为下方独立胶囊：
    * Alt+空格搜索 / 情景临时（正在播放等）/ 下拉展开。
@@ -2823,6 +3167,7 @@ function App() {
   // 搜索激活时禁止把天气常驻刷回 span；离场动画期间允许刷回以便交接
   useLayoutEffect(() => {
     if (searchModeRef.current && !searchLeavingRef.current) return;
+    if (homeTabRef.current === "search") return;
     if (
       isFileSearchPlugin(scenarioOwnerRef.current) &&
       !searchLeavingRef.current
@@ -2846,6 +3191,7 @@ function App() {
     searchMode,
     scenarioOwner,
     searchLeaving,
+    homeTab,
   ]);
 
   const sizingPluginId = resolvePanelSizingPluginId();
@@ -2858,7 +3204,7 @@ function App() {
     liveExpanded.height = viewH;
   }
 
-  /** 展开态下目标尺寸变化时做宽高插值（天气 ↔ 中转站） */
+  /** 展开态下目标尺寸变化时做宽高插值（首页 ↔ 中转站） */
   function morphExpandedSize(target: IslandSize) {
     if (
       Math.abs(sizeRef.current.width - target.width) < 1 &&
@@ -2900,9 +3246,9 @@ function App() {
     }
     if (!expanded) return;
     if (busy.current || morphingRef.current) return;
-    // 无会话、也无可用下拉内容 → 收起，避免空壳面板
+    // 无插件会话时保持 Host 首页壳，勿收起
     if (!sizingPluginId) {
-      void collapse();
+      morphExpandedSize({ width: targetW, height: targetH });
       return;
     }
     // 搜索会话未主动关闭：禁止 morph 把已展开面板缩回小尺寸
@@ -2917,18 +3263,47 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sizingPluginId, shellPanelW, shellPanelH, expanded]);
 
-  /** 打开会话面板前同步 liveExpanded 为目标插件尺寸（同步读 defaultSize，避免直开时仍用中转站 560×152） */
+  /** 打开会话面板前同步 liveExpanded（仅其它 standalone 改壳；中转站/文件搜索保持首页尺寸） */
   function armPluginSession(pluginId: string) {
-    const { w, h } = resolvePluginPanelShellSize(pluginId, null, {
-      w: clampStagingPanelW,
-      h: clampStagingPanelH,
-    });
-    shellPanelWRef.current = w;
-    shellPanelHRef.current = h;
-    setShellPanelW(w);
-    setShellPanelH(h);
-    liveExpanded.width = w;
-    liveExpanded.height = h;
+    if (isTransferStationPlugin(pluginId)) {
+      // 中转站不建 standalone 会话；由 openTransferHomeTab 切页签
+      syncLiveExpandedForHome();
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+      setShellPanelW(ISLAND_HOME_PANEL_W);
+      setShellPanelH(ISLAND_HOME_PANEL_H);
+      setHomeTab("transfer");
+      return;
+    }
+    if (isFileSearchPlugin(pluginId)) {
+      // 文件搜索不建 standalone 会话；由 openSearchHomeTab 切页签
+      syncLiveExpandedForHome();
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+      setShellPanelW(ISLAND_HOME_PANEL_W);
+      setShellPanelH(ISLAND_HOME_PANEL_H);
+      setHomeTab("search");
+      return;
+    }
+    const mode = resolvePanelPullMode(pluginRegistry.get(pluginId)?.manifest);
+    if (mode === "standalone") {
+      const { w, h } = resolvePluginPanelShellSize(pluginId, null, {
+        w: clampStagingPanelW,
+        h: clampStagingPanelH,
+      });
+      shellPanelWRef.current = w;
+      shellPanelHRef.current = h;
+      setShellPanelW(w);
+      setShellPanelH(h);
+      liveExpanded.width = w;
+      liveExpanded.height = h;
+    } else {
+      syncLiveExpandedForHome();
+      shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+      shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+      setShellPanelW(ISLAND_HOME_PANEL_W);
+      setShellPanelH(ISLAND_HOME_PANEL_H);
+    }
     panelSessionRef.current = `plugin:${pluginId}`;
     panelSessionArmedRef.current = true;
     setPanelOverride(`plugin:${pluginId}`);
@@ -2936,6 +3311,15 @@ function App() {
 
   async function openPluginSession(pluginId: string | null | undefined) {
     if (!pluginId || !pluginRegistry.get(pluginId)?.enabled) return;
+    // 中转站 / 文件搜索走首页页签，壳保持仪表台尺寸
+    if (isTransferStationPlugin(pluginId)) {
+      await openTransferHomeTab();
+      return;
+    }
+    if (isFileSearchPlugin(pluginId)) {
+      await openSearchHomeTab();
+      return;
+    }
     armPluginSession(pluginId);
     if (!expandedRef.current) {
       await expand({ force: true });
@@ -3043,74 +3427,49 @@ function App() {
     if (!arePluginsReady()) {
       await bootstrapPlugins();
     }
-    const pluginId = resolveIslandSearchPluginId();
-    if (!pluginId) return;
+    if (!resolveIslandSearchPluginId()) return;
 
-    clearSearchLeaveTimer();
-    searchLeavingRef.current = false;
-    setSearchLeaving(false);
-
-    if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
-
-    // 热键路径：先置顶/取消点击穿透并抢焦点，再 expand（避免「要先摸一下顶栏才出来」）
+    // 热键路径：先顶起，再展开仪表台（避免「要先摸一下顶栏才出来」）
     try {
       await getCurrentWindow().setIgnoreCursorEvents(false);
     } catch {
       /* noop */
     }
-    void focusIslandSearchInput();
 
     bumpIslandActivity();
-    searchModeRef.current = true;
-    setSearchMode(true);
     immersedRef.current = false;
     setImmersed(false);
-    setSearchDraft("");
-    setSearchSubmit(null);
-    liveCollapsed.width = ISLAND_SEARCH_COLLAPSED_W;
 
-    scenarioOwnerRef.current = pluginId;
-    setScenarioOwner(pluginId);
-    setScenarioPull(`plugin:${pluginId}`);
-    setScenarioBar({
-      pluginId,
-      text: " ",
-      title: "Alt+空格 · Everything",
-    });
-    try {
-      await invoke("hub_island_claim_scenario", { pluginId });
-    } catch (err) {
-      console.warn("[island-search] claimScenario", err);
+    // 清掉遗留的独立搜索 chrome（旧路径）
+    clearSearchLeaveTimer();
+    searchLeavingRef.current = false;
+    setSearchLeaving(false);
+    if (searchModeRef.current) {
+      clearSearchChromeState({ clearDraft: true });
     }
-    armPluginSession(pluginId);
 
-    // 立刻展开；顶栏仍用原 Host 搜索框（panel 只画最近使用网格）
-    if (!expandedRef.current) {
-      await expand({ force: true });
-    }
-    void focusIslandSearchInput();
+    await openSearchHomeTab();
   }
 
   async function toggleIslandSearchMode() {
     if (searchToggleBusyRef.current) return;
-    // 热键连按：勿在 toggle 层 await bootstrap，交给 enterIslandSearchMode
-    // 离场动画中再按热键 → 取消离场并重新进入（避免「时好时坏」被吞）
     if (searchLeavingRef.current) {
-      if (!resolveIslandSearchPluginId()) return;
       clearSearchLeaveTimer();
       searchLeavingRef.current = false;
       setSearchLeaving(false);
-      searchToggleBusyRef.current = true;
-      try {
-        await enterIslandSearchMode();
-      } finally {
-        searchToggleBusyRef.current = false;
+      if (searchModeRef.current) {
+        clearSearchChromeState({ clearDraft: true });
       }
+    }
+    // 已在仪表台文件搜索页签 → 再按收起
+    if (expandedRef.current && homeTabRef.current === "search") {
+      retainSearchModeRef.current = false;
+      void collapse();
       return;
     }
+    // 遗留独立搜索 chrome：收起或退出
     if (searchModeRef.current) {
       if (expandedRef.current) {
-        // 下拉已开：收起并退出搜索（壳 morph；chrome 在 collapse 末尾清）
         retainSearchModeRef.current = false;
         void collapse();
       } else {
@@ -3134,34 +3493,22 @@ function App() {
     const pluginId =
       resolveIslandFileSearchPluginId() || resolveIslandSearchPluginId();
     if (!pluginId) return;
-    if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
     bumpIslandActivity();
-    // Favorites always targets file-search
+    immersedRef.current = false;
+    setImmersed(false);
+    // 清遗留独立搜索 chrome
     clearSearchLeaveTimer();
     searchLeavingRef.current = false;
     setSearchLeaving(false);
-    searchModeRef.current = true;
-    setSearchMode(true);
-    setSearchDraft("");
-    scenarioOwnerRef.current = pluginId;
-    setScenarioOwner(pluginId);
-    setScenarioPull(`plugin:${pluginId}`);
-    try {
-      await invoke("hub_island_claim_scenario", { pluginId });
-    } catch (err) {
-      console.warn("[island-search] claimScenario favorites", err);
+    if (searchModeRef.current) {
+      clearSearchChromeState({ clearDraft: true });
     }
-    armPluginSession(pluginId);
-    const fire = () =>
-      setSearchSubmit({
-        nonce: Date.now(),
-        query: "",
-        action: "openFavorites",
-      });
-    if (!expandedRef.current) {
-      await expand({ force: true });
-    }
-    fire();
+    await openSearchHomeTab();
+    setSearchSubmit({
+      nonce: Date.now(),
+      query: "",
+      action: "openFavorites",
+    });
   }
   openFavoritesHotkeyRef.current = () => {
     void openFileSearchFavorites();
@@ -3171,24 +3518,17 @@ function App() {
   async function handoffIslandFileSearch(query: string) {
     const pluginId = resolveIslandFileSearchPluginId();
     if (!pluginId) return;
-    if (!islandSearchScenarioClaimOk(pluginId, scenarioGateAllows)) return;
     bumpIslandActivity();
-    searchModeRef.current = true;
-    setSearchMode(true);
+    immersedRef.current = false;
+    setImmersed(false);
+    clearSearchLeaveTimer();
+    searchLeavingRef.current = false;
+    setSearchLeaving(false);
+    if (searchModeRef.current) {
+      clearSearchChromeState({ clearDraft: true });
+    }
     const q = String(query || "").trim();
-    setSearchDraft(q);
-    scenarioOwnerRef.current = pluginId;
-    setScenarioOwner(pluginId);
-    setScenarioPull(`plugin:${pluginId}`);
-    try {
-      await invoke("hub_island_claim_scenario", { pluginId });
-    } catch (err) {
-      console.warn("[island-search] handoff claim", err);
-    }
-    armPluginSession(pluginId);
-    if (!expandedRef.current) {
-      await expand({ force: true });
-    }
+    await openSearchHomeTab();
     setSearchSubmit({
       nonce: Date.now(),
       query: q,
@@ -3463,6 +3803,8 @@ function App() {
             active: true,
             moved: false,
             dismissed: false,
+            kind: "notify",
+            axis: "x",
           };
           bumpIslandActivity();
         }}
@@ -3665,7 +4007,7 @@ function App() {
           data-chrome={
             dropTarget || showSearchChrome
               ? "dark"
-              : immersed
+              : immersed || (!ambientFromWindow && !shellExpanded)
                 ? chromeCenter.scheme
                 : "dark"
           }
@@ -3689,6 +4031,11 @@ function App() {
             if (!canShellPullExpand()) return;
             const pid = resolveShellExpandPluginId();
             if (pid) syncLiveExpandedForPlugin(pid);
+            else {
+              syncLiveExpandedForHome();
+              shellPanelWRef.current = ISLAND_HOME_PANEL_W;
+              shellPanelHRef.current = ISLAND_HOME_PANEL_H;
+            }
             if (!expandedRef.current && !busy.current) void ensureExpandedWindow();
           }}
           onPointerLeave={() => {
@@ -3820,52 +4167,131 @@ function App() {
             <div
               className={`island-bar${notifyInline ? " is-notifying" : ""}${
                 searchActive && !searchLeaving ? " is-searching" : ""
-              }${searchLeaving ? " is-search-leaving" : ""}`}
+              }${searchLeaving ? " is-search-leaving" : ""}${
+                showHomeBarChrome ? " has-home-chrome" : ""
+              }${showSearchTabBar ? " has-search-tab" : ""}`}
             >
-              <div className={`bar-weather${weatherBarExiting ? " is-exiting" : ""}`}>
-                {barText ? (
-                  <div
-                    className={`bar-staging${dropTarget ? " is-drop-hint" : ""}`}
-                    role="button"
-                    tabIndex={0}
-                    {...hostTipPointerProps(barTitle)}
+              {showHomeBarChrome ? (
+                <IslandHomeNav tab={homeTab} onTabChange={setHomeTab} />
+              ) : null}
+              {showSearchTabBar ? (
+                <div
+                  className="bar-search is-tab-inline"
+                  key="island-search-tab"
+                >
+                  <svg
+                    className="bar-search-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden
+                  >
+                    <circle
+                      cx="10.5"
+                      cy="10.5"
+                      r="6.25"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                    />
+                    <path
+                      d="M15.2 15.2L20 20"
+                      stroke="currentColor"
+                      strokeWidth="1.7"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                  <input
+                    ref={searchInputRef}
+                    className="bar-search-input"
+                    type="search"
+                    enterKeyHint="search"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="全局搜索，一搜全有"
+                    value={searchDraft}
+                    onChange={(e) => {
+                      setSearchDraft(e.target.value);
+                    }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        submitIslandSearch();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        if (expandedRef.current) {
+                          retainSearchModeRef.current = false;
+                          void collapse();
+                        }
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="bar-search-btn"
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (dropTarget || showSearchChrome) return;
-                      void hideChromeHoverTip();
-                      const pid = barPluginId;
-                      if (!pid) return;
-                      void emit("island-bar-click", { pluginId: pid }).catch(console.error);
-                      const rec = pluginRegistry.get(pid);
-                      const hasPanel =
-                        Boolean(rec?.manifest.slots?.["island.panel"]) &&
-                        (rec?.manifest.capabilities ?? []).includes("island.panel");
-                      if (hasPanel) void openPluginSession(pid);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key !== "Enter" && e.key !== " ") return;
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (dropTarget || showSearchChrome) return;
-                      void hideChromeHoverTip();
-                      const pid = barPluginId;
-                      if (!pid) return;
-                      void emit("island-bar-click", { pluginId: pid }).catch(console.error);
-                      const rec = pluginRegistry.get(pid);
-                      const hasPanel =
-                        Boolean(rec?.manifest.slots?.["island.panel"]) &&
-                        (rec?.manifest.capabilities ?? []).includes("island.panel");
-                      if (hasPanel) void openPluginSession(pid);
+                      submitIslandSearch();
                     }}
                   >
-                    {showBarStagingDot ? (
-                      <span className="bar-staging-dot" aria-hidden />
-                    ) : null}
-                    <span className="bar-staging-text" ref={barStagingTextRef} />
-                  </div>
-                ) : null}
-              </div>
+                    搜索
+                  </button>
+                </div>
+              ) : (
+                <div
+                  ref={barWeatherRef}
+                  className={`bar-weather${weatherBarExiting ? " is-exiting" : ""}`}
+                >
+                  {barText ? (
+                    <div
+                      className={`bar-staging${dropTarget ? " is-drop-hint" : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      {...hostTipPointerProps(barTitle)}
+                      onPointerDown={(e) => {
+                        // 有情景临时时放行到岛根，才能左滑划掉；否则挡住以免误触下拉
+                        if (!scenarioOwner) e.stopPropagation();
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (dropTarget || showSearchChrome) return;
+                        // 左滑划掉情景后吞掉误触 click
+                        if (swipe.current?.dismissed || swipe.current?.moved) return;
+                        void hideChromeHoverTip();
+                        const pid = resolveShellExpandPluginId() ?? barPluginId;
+                        if (pid) {
+                          void emit("island-bar-click", { pluginId: pid }).catch(
+                            console.error,
+                          );
+                        }
+                        openShellOrHome();
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (dropTarget || showSearchChrome) return;
+                        void hideChromeHoverTip();
+                        const pid = resolveShellExpandPluginId() ?? barPluginId;
+                        if (pid) {
+                          void emit("island-bar-click", { pluginId: pid }).catch(
+                            console.error,
+                          );
+                        }
+                        openShellOrHome();
+                      }}
+                    >
+                      {showBarStagingDot ? (
+                        <span className="bar-staging-dot" aria-hidden />
+                      ) : null}
+                      <span className="bar-staging-text" ref={barStagingTextRef} />
+                    </div>
+                  ) : null}
+                </div>
+              )}
+              {showHomeBarChrome ? <IslandHomeStatus /> : null}
               {showSearchChrome ? (
                   <div
                   className={`bar-search${searchLeaving ? " is-exiting" : ""}`}
@@ -3892,7 +4318,6 @@ function App() {
                     />
                   </svg>
                   <input
-                    ref={searchInputRef}
                     className="bar-search-input"
                     type="search"
                     enterKeyHint="search"
@@ -3949,7 +4374,7 @@ function App() {
               }`}
               onClick={(e) => e.stopPropagation()}
             >
-              {effectivePullContent || panelOverride ? (
+              {showStandalonePanel ? (
                 <IslandPanelHost
                   key={panelHostPluginId}
                   pullContent={effectivePullContent || panelOverride || ""}
@@ -3960,10 +4385,15 @@ function App() {
                   }}
                 />
               ) : (
-                <div className="panel-plugin-empty">
-                  面板未绑定插件
-                  <span>请在设置 → 灵动岛中选择「下拉内容」</span>
-                </div>
+                <IslandHomeDashboard
+                  active={panelActive || expanded}
+                  tab={homeTab}
+                  forcedLeftPluginId={dashboardLeftPluginId}
+                  searchSubmit={searchSubmit}
+                  onPanelClose={() => {
+                    if (expandedRef.current) void collapse();
+                  }}
+                />
               )}
             </div>
           </div>

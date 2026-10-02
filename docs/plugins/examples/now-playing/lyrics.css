@@ -1,0 +1,126 @@
+/* Full lyrics companion for Host home left-card expand split */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: #f4f4f5;
+  font-family: -apple-system, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI",
+    system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.unselectable {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+.ly-root {
+  width: 100%;
+  height: 100%;
+  padding: 10px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.ly-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.45);
+  flex-shrink: 0;
+}
+
+.ly-meta {
+  flex-shrink: 0;
+  margin-bottom: 2px;
+}
+
+.ly-title {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ly-artist {
+  font-size: 11px;
+  color: #86efac;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ly-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  mask-image: linear-gradient(
+    180deg,
+    transparent 0%,
+    #000 8%,
+    #000 92%,
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    180deg,
+    transparent 0%,
+    #000 8%,
+    #000 92%,
+    transparent 100%
+  );
+}
+
+.ly-list::-webkit-scrollbar {
+  display: none;
+}
+
+.ly-list li {
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.38);
+  transition: color 160ms ease, transform 160ms ease;
+  padding: 0 2px;
+}
+
+.ly-list li.is-on {
+  color: #fff;
+  font-weight: 650;
+  transform: scale(1.02);
+  transform-origin: left center;
+}
+
+.ly-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.ly-empty[hidden],
+.ly-meta[hidden],
+.ly-list[hidden] {
+  display: none !important;
+}

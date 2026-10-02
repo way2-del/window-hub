@@ -4005,13 +4005,54 @@ mod win {
     pub fn acknowledge_icon_attention(id: Option<String>, hwnd: isize, uid: u32) {
         clear_flashing(id.as_deref(), hwnd, uid);
     }
+
+    /// Resolve a saved `openTrayKey` / pin to a live tray icon (uid-migration aware).
+    pub fn find_icon_by_bind_key(saved: &str) -> Option<TrayIconInfo> {
+        let saved = saved.trim();
+        if saved.is_empty() {
+            return None;
+        }
+        let icons = list_icons();
+        if icons.is_empty() {
+            return None;
+        }
+        let remap = HashMap::new();
+        let resolved = resolve_tray_bind_key(saved, &icons, &remap);
+        let stem = pin_key_stem(saved);
+        let uid = pin_key_uid(saved);
+
+        if let Some(icon) = icons.iter().find(|i| {
+            let pk = pin_key_of(i);
+            saved == pk
+                || saved == i.id
+                || (!resolved.is_empty() && (resolved == pk || resolved == i.id))
+        }) {
+            return Some(icon.clone());
+        }
+
+        for icon in &icons {
+            let pk = pin_key_of(icon);
+            if pin_key_stem(&pk) != stem {
+                continue;
+            }
+            let iu = pin_key_uid(&pk);
+            if let (Some(a), Some(b)) = (uid, iu) {
+                if a == b {
+                    return Some(icon.clone());
+                }
+            } else if live_keys_with_stem(&icons, &stem).len() == 1 {
+                return Some(icon.clone());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(windows)]
 pub use win::{
-    acknowledge_icon_attention, clickable_count, flush_publish, get_prefs, glyphs_for_ids,
-    invoke_icon_by_id, list_icons, request_refresh, set_emit_paused, set_prefs, start,
-    sync_toolbar_icons, total_icon_count,
+    acknowledge_icon_attention, clickable_count, find_icon_by_bind_key, flush_publish, get_prefs,
+    glyphs_for_ids, invoke_icon_by_id, list_icons, request_refresh, set_emit_paused, set_prefs,
+    start, sync_toolbar_icons, total_icon_count,
 };
 
 
@@ -4067,6 +4108,11 @@ pub fn invoke_icon_by_id(
 
 #[cfg(not(windows))]
 pub fn acknowledge_icon_attention(_id: Option<String>, _hwnd: isize, _uid: u32) {}
+
+#[cfg(not(windows))]
+pub fn find_icon_by_bind_key(_saved: &str) -> Option<TrayIconInfo> {
+    None
+}
 
 #[cfg(not(windows))]
 pub fn start<F, A, P>(_on_change: F, _on_attention: A, _on_prefs: P)

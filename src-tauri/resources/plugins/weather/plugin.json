@@ -2,13 +2,14 @@
   "$schema": "../plugin.schema.json",
   "id": "com.window-hub.weather",
   "name": "天气",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "official": true,
   "logo": "icon.svg",
-  "description": "岛栏常驻天气摘要；下拉查看详细天气。开发者 ID / KEY 在本插件设置中配置。",
+  "description": "岛栏常驻天气摘要；下拉详情；左卡展开后显示 7 天预报。开发者 ID / KEY 在本插件设置中配置。",
   "entry": {
     "shortcuts": "shortcuts.html",
-    "panel": "panel.html"
+    "panel": "panel.html",
+    "forecast": "forecast.html"
   },
   "slots": {
     "shortcuts": {
@@ -23,7 +24,8 @@
     },
     "island.panel": {
       "defaultSize": { "w": 380, "h": 248 },
-      "excludeFromPullContent": false
+      "excludeFromPullContent": false,
+      "pullMode": "dashboard"
     }
   },
   "settings": [

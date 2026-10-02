@@ -40,11 +40,124 @@ test('geometry preserves short-panel rounding and screen-edge bleed without depe
   }
 });
 
-test('pull content prioritizes available scenario, then session, then user preference', () => {
-  const base = { scenarioOwner: 'clock', scenarioPull: null, sessionOverride: 'plugin:search', sessionOverrideActive: true, pullContent: 'plugin:weather' };
-  const enabled = value => value === 'plugin:disabled' ? '' : value;
+test('pull content prioritizes available scenario, then session, then host home', () => {
+  const base = {
+    scenarioOwner: 'clock',
+    scenarioPull: null,
+    sessionOverride: 'plugin:search',
+    sessionOverrideActive: true,
+  };
+  const enabled = (value) => (value === 'plugin:disabled' ? '' : value);
   assert.equal(resolveIslandPullContent(base, enabled), 'plugin:clock');
-  assert.equal(resolveIslandPullContent({ ...base, scenarioPull: 'plugin:disabled' }, enabled), 'plugin:search');
-  assert.equal(resolveIslandPullContent({ ...base, scenarioOwner: null, sessionOverrideActive: false }, enabled), 'plugin:weather');
-  assert.equal(resolveIslandPullContent({ ...base, scenarioOwner: null, sessionOverride: 'plugin:disabled' }, enabled), 'plugin:weather');
+  assert.equal(
+    resolveIslandPullContent({ ...base, scenarioPull: 'plugin:disabled' }, enabled),
+    'plugin:search',
+  );
+  assert.equal(
+    resolveIslandPullContent(
+      { ...base, scenarioOwner: null, sessionOverrideActive: false },
+      enabled,
+    ),
+    'home',
+  );
+  assert.equal(
+    resolveIslandPullContent(
+      { ...base, scenarioOwner: null, sessionOverride: 'plugin:disabled' },
+      enabled,
+    ),
+    'home',
+  );
+});
+
+test('home left card prefers bar resident weather over fallback', () => {
+  const { resolveHomeDashboardLeftPluginId } = loadTs(
+    fileURLToPath(new URL('../src/plugins/panelPullMode.ts', import.meta.url)),
+  );
+  assert.equal(
+    resolveHomeDashboardLeftPluginId({
+      forcedDashboardPluginId: 'com.window-hub.now-playing',
+      barResidentId: 'com.window-hub.weather',
+      barResidentPullMode: 'dashboard',
+    }),
+    'com.window-hub.now-playing',
+  );
+  assert.equal(
+    resolveHomeDashboardLeftPluginId({
+      forcedDashboardPluginId: null,
+      barResidentId: 'com.window-hub.weather',
+      barResidentPullMode: 'dashboard',
+    }),
+    'com.window-hub.weather',
+  );
+  assert.equal(
+    resolveHomeDashboardLeftPluginId({
+      forcedDashboardPluginId: null,
+      barResidentId: 'com.window-hub.weather',
+      barResidentPullMode: 'standalone',
+    }),
+    null,
+  );
+  assert.equal(
+    resolveHomeDashboardLeftPluginId({
+      forcedDashboardPluginId: null,
+      barResidentId: '',
+      barResidentPullMode: 'dashboard',
+    }),
+    null,
+  );
+});
+
+test('panel pullMode defaults and listing for dashboard rail', () => {
+  const { resolvePanelPullMode, listDashboardPanelProviders } = loadTs(
+    fileURLToPath(new URL('../src/plugins/panelPullMode.ts', import.meta.url)),
+  );
+  assert.equal(
+    resolvePanelPullMode({ slots: { 'island.panel': { pullMode: 'dashboard' } } }),
+    'dashboard',
+  );
+  assert.equal(
+    resolvePanelPullMode({ slots: { 'island.panel': { pullMode: 'standalone' } } }),
+    'standalone',
+  );
+  assert.equal(
+    resolvePanelPullMode({
+      slots: { 'island.panel': { excludeFromPullContent: true } },
+    }),
+    'standalone',
+  );
+  assert.equal(resolvePanelPullMode({ slots: { 'island.panel': {} } }), 'dashboard');
+
+  const listed = listDashboardPanelProviders([
+    {
+      id: 'a',
+      name: 'A',
+      entry: { panel: 'panel.html' },
+      slots: { 'island.panel': { pullMode: 'dashboard' } },
+    },
+    {
+      id: 'b',
+      name: 'B',
+      entry: { panel: 'panel.html' },
+      slots: { 'island.panel': { excludeFromPullContent: true } },
+    },
+    {
+      id: 'c',
+      name: 'C',
+      entry: { panel: 'panel.html' },
+      slots: {
+        'island.scenario': { order: 1 },
+        'island.panel': { excludeFromPullContent: true, pullMode: 'dashboard' },
+      },
+    },
+    {
+      id: 'a__dev',
+      name: 'A',
+      entry: { panel: 'panel.html' },
+      slots: { 'island.panel': { pullMode: 'dashboard' } },
+    },
+  ]);
+  assert.equal(
+    listed.map((p) => p.id).join(","),
+    "c,a",
+  );
 });

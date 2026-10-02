@@ -36,7 +36,7 @@ Cookie / 登录态保存在 `%APPDATA%/window-hub/webview-profiles/{pluginId}/`�
 
 ## 注意
 
-- **快捷区条**：图标为 16×16 居中方正 glyph + 简称「监测」。防抖：插件与 Host `ShortcutsPluginStrip` 都只报 `scrollWidth`、缓存上次宽度，禁止 `resize`/`clientWidth` 反馈环。详见 [插件开发工作流 · 快捷区条](../../development.md#shortcuts-strip-jitter)
+- **快捷区条**：图标为 16×16 居中方正 glyph + 简称「监测」；**仅点击**打开弹窗（不支持悬停打开）。防抖：插件与 Host `ShortcutsPluginStrip` 都只报 `scrollWidth`、缓存上次宽度，禁止 `resize`/`clientWidth` 反馈环。详见 [插件开发工作流 · 快捷区条](../../development.md#shortcuts-strip-jitter)
 - **关掉浏览窗不影响监测**：后台用独立隐藏 WebView 按保存的 URL/选择器轮询；浏览窗只用于登录与划定
 - **岛通知只由快捷区发出**（常驻表面）；弹窗只记扫描日志，避免与快捷区各发一次叠成多条
 - **及时、不堆积**：用 Host 事件 `atMs` 拼 `changeId`（`watchId@atMs`）做唯一去重——同一扫描只推一次；新 `atMs` 立即推。`hub.notify` 的 `data.changeId` / `data.atMs` 可核对；控制台有 `notify` / `skip duplicate` 日志

@@ -15,9 +15,7 @@ import {
   isTrayPinnedKey,
   trayKeysMatch,
 } from "./scenarioGates";
-import { listPanelProviders } from "./plugins/panelProviders";
 import { listBarResidentProviders, listScenarioProviders } from "./plugins/islandSlots";
-import { pluginRegistry } from "./plugins/registry";
 import {
   bootstrapPlugins,
   subscribeInstalledPlugins,
@@ -713,15 +711,6 @@ export default function SettingsApp() {
       unlisten?.();
     };
   }, []);
-
-  const pullOptions = useMemo(() => {
-    const panels = listPanelProviders(pluginRegistry.listPanelManifests());
-    return panels.map((p) => ({
-      id: p.id,
-      label: p.label,
-      desc: p.description,
-    }));
-  }, [installed, bumpRegistry]);
 
   const barResidentOptions = useMemo(() => {
     return listBarResidentProviders();
@@ -1857,38 +1846,11 @@ export default function SettingsApp() {
                 )}
               </section>
               <section className="settings-card">
-                <h2>下拉内容</h2>
-                <p className="card-desc">
-                  选择点击或下拉展开灵动岛时默认显示的内容。列表来自已启用且声明 island.panel、未设
-                  excludeFromPullContent 的插件（如天气、镜子）。中转站等排除项不出现在此，经拖入或岛栏摘要临时打开。
-                </p>
-                <div className="mode-list">
-                  <button
-                    type="button"
-                    className={`mode-item${islandPrefs.pullContent === "" ? " is-selected" : ""}`}
-                    onClick={() => updateIslandPrefs({ pullContent: "" })}
-                  >
-                    <span className="mode-label">无</span>
-                    <span className="mode-desc">下拉手势不展开面板（岛栏 chip / 拖入仍可临时打开）</span>
-                  </button>
-                  {pullOptions.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      className={`mode-item${islandPrefs.pullContent === item.id ? " is-selected" : ""}`}
-                      onClick={() => updateIslandPrefs({ pullContent: item.id })}
-                    >
-                      <span className="mode-label">{item.label}</span>
-                      <span className="mode-desc">{item.desc}</span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-              <section className="settings-card">
                 <h2>岛栏常驻</h2>
                 <p className="card-desc">
                   折叠态岛栏默认展示哪个插件的摘要。列表来自已启用、声明 island.bar、且非情景临时 /
                   excludeFromBarResident 的插件（如天气）。中转站有条目时仍会临时覆盖；情景插件健康时也会暂代，结束后回到此处选择。
+                  若常驻插件带 panel（天气等），下拉与点击岛栏摘要同一操作，首页左卡打开该面板；情景临时仍优先。
                 </p>
                 <div className="mode-list">
                   <button
@@ -1915,7 +1877,7 @@ export default function SettingsApp() {
               <section className="settings-card">
                 <h2>情景临时</h2>
                 <p className="card-desc">
-                  启用后，满足条件时自动暂代岛栏摘要与下拉内容（不改动上方常驻/下拉设置）；条件结束（如停播或服务关闭）后自动归还。中转站有暂存条目时仍优先于情景。点进插件可配置存在条件；打开应用绑定在插件设置里。
+                  启用后，满足条件时自动暂代岛栏摘要与下拉面板（不改动上方常驻设置）；条件结束（如停播或服务关闭）后自动归还。中转站有暂存条目时仍优先于情景。点进插件可配置存在条件；打开应用绑定在插件设置里。
                 </p>
                 {scenarioOptions.length === 0 ? (
                   <p className="settings-lead">暂无已启用的情景插件</p>

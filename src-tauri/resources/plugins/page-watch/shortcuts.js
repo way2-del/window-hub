@@ -10,16 +10,11 @@
     notifyTitle: "{title}",
     notifyBody: "{title}更新了",
   };
-  /** Dwell before hover-opens popup (avoid flash on every pass). */
-  const HOVER_OPEN_MS = 450;
-
   /** Shortcuts strip short label (full name stays on title / plugin.json). */
   const SHORT_NAME = "监测";
 
   const state = {
     popupOpen: false,
-    hoverTimer: null,
-    hoverGen: 0,
   };
 
   function hub() {
@@ -73,29 +68,9 @@
     btn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      clearHover();
       void togglePopup();
     });
-    btn.addEventListener("pointerenter", () => {
-      state.hoverGen += 1;
-      const gen = state.hoverGen;
-      clearHover();
-      state.hoverTimer = setTimeout(() => {
-        if (gen !== state.hoverGen) return;
-        void openPopup();
-      }, HOVER_OPEN_MS);
-    });
-    btn.addEventListener("pointerleave", () => {
-      clearHover();
-    });
     reportSize();
-  }
-
-  function clearHover() {
-    if (state.hoverTimer) {
-      clearTimeout(state.hoverTimer);
-      state.hoverTimer = null;
-    }
   }
 
   function openPopup() {
@@ -109,7 +84,6 @@
   function togglePopup() {
     const h = hub();
     if (!h.popup) return;
-    clearHover();
     if (state.popupOpen) {
       void h.popup.close().catch(() => undefined);
       return;

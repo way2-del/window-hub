@@ -1,0 +1,66 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: rgba(244, 246, 250, 0.92);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  user-select: none;
+}
+
+.cs-strip {
+  height: var(--wh-bar-h, 28px);
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+}
+
+.cs-chip {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  height: 100%;
+  max-height: var(--wh-bar-h, 28px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cs-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.cs-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex-shrink: 0;
+  transform: translateY(0.5px);
+}
+
+.cs-label {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cs-time {
+  font-size: 11px;
+  color: rgba(178, 204, 255, 0.9);
+  font-variant-numeric: tabular-nums;
+}

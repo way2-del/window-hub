@@ -17,6 +17,7 @@ export type PanelProvider = {
  * Resolve pullContent id list for settings + island.
  * Weather / mirror are plugins — no Host builtin entries.
  * `excludeFromPullContent` plugins open via drop / bar / session only.
+ * Prefer `listDashboardPanelProviders` + `resolvePanelPullMode` for Host home.
  */
 export function listPanelProviders(
   panelPlugins: PluginManifest[],

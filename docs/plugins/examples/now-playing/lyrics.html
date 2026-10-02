@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>歌词</title>
+    <link rel="stylesheet" href="./lyrics.css" />
+  </head>
+  <body class="unselectable">
+    <div class="ly-root" id="root">
+      <div class="ly-head">歌词</div>
+      <div class="ly-meta" id="meta" hidden>
+        <div class="ly-title" id="title"></div>
+        <div class="ly-artist" id="artist"></div>
+      </div>
+      <ul class="ly-list" id="list" aria-live="polite"></ul>
+      <div class="ly-empty" id="empty">暂无歌词</div>
+    </div>
+    <script src="./lyrics.js"></script>
+  </body>
+</html>

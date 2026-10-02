@@ -43,7 +43,7 @@ Slot：`island.panel`。展开内容由插件 Web 入口提供（iframe）；**�
 7. **禁止 iframe 再套圆角**：`.panel-plugin-frame` 始终 `border-radius: 0`；预览/卡片圆角由插件内层（如镜子 `.mirror-frame`）自绘，避免 Host 底角大圆角把上下裁成不一致。
 8. **`excludeFromPullContent: true`** 的面板不进「下拉内容」；`panelOverride` / `hub.panel.openSession` 仅拖入或点岛栏时临时打开，收起必须清会话。
 9. **槽位门控**：DnD → `resolveIslandDropPluginId()`（需 `island.drop` + `staging`）；岛栏 → `hub.island.setBar`（需 capability+slot `island.bar`）；全局 `barResident` 决定常驻层；`excludeFromBarResident` 不进设置列表。
-10. **情景临时**（`slots["island.scenario"]`）：`claimScenario` / `releaseScenario` 暂代岛栏 + 下拉，**不改** prefs。优先级：staging overlay > scenario > resident；pull：scenario > session > prefs。有 scenario 槽的插件不进常驻/下拉竞选。Host **存在门禁**与 **打开应用托盘** 在「已安装插件详情」统一配置（全局「情景临时」仅跳转入口）。示例：正在播放。
+10. **情景临时**（`slots["island.scenario"]`）：`claimScenario` / `releaseScenario` 暂代岛栏 + 下拉，**不改** prefs。优先级：staging overlay > scenario > resident；pull：scenario > session > prefs。有 scenario 槽的插件不进常驻/下拉竞选。Host **存在门禁**与 **打开应用托盘** 在「已安装插件详情」统一配置（全局「情景临时」仅跳转入口）。**折叠岛左滑**可划掉情景层并露出常驻；Host 抑制该插件 `setBar` 自动晋升直到 `clearBar`/显式 `claim`，停播后再播可自行补回。示例：正在播放。
 11. **折叠岛宽自适应**：`slots["island.bar"].adaptiveWidth: true`（可选 `minWidth`/`maxWidth`）。Host 按摘要文案测量并改折叠宽（默认约 220–560）；长歌词等用此能力，**勿**在插件内改岛壳几何。源码：`resolveIslandBarAdaptive` / `measureIslandBarLabelWidth`（`islandSlots.ts`）+ `App.tsx` `liveCollapsed`。
 
 ## 生命周期

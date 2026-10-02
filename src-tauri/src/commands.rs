@@ -3885,13 +3885,8 @@ pub fn hub_island_open_bound_tray(plugin_id: String) -> Result<(), String> {
     crate::plugin_hub::assert_plugin_slot(&plugin_id, "island.scenario")?;
     let key = plugin_open_tray_key(&plugin_id)?
         .ok_or_else(|| "未绑定打开用托盘（插件详情 → 打开应用）".to_string())?;
-    let icons = crate::win32::tray::list_icons();
-    let icon = icons
-        .iter()
-        .find(|i| {
-            let pk = i.pin_key.trim();
-            (!pk.is_empty() && pk == key) || i.id == key
-        })
+    // Fuzzy resolve (same rules as 常显 pin / OpenTraySetting): uid may change after reboot.
+    let icon = crate::win32::tray::find_icon_by_bind_key(&key)
         .ok_or_else(|| "绑定的托盘当前不在系统托盘中".to_string())?;
     crate::win32::tray::invoke_icon_by_id(
         Some(icon.id.clone()),
@@ -3902,6 +3897,17 @@ pub fn hub_island_open_bound_tray(plugin_id: String) -> Result<(), String> {
         crate::win32::tray::TrayClick::Left,
         None,
     )
+}
+
+/// Capture the island window (bar + expanded dashboard) to the clipboard.
+#[tauri::command]
+pub fn capture_island_screenshot(app: AppHandle) -> Result<(), String> {
+    let hwnd = main_hwnd_raw(&app);
+    if hwnd == 0 {
+        return Err("island window missing".into());
+    }
+    let (png, _w, _h) = crate::win32::capture::capture_window_png(hwnd)?;
+    crate::win32::capture::copy_png_to_clipboard(&png)
 }
 
 #[tauri::command]

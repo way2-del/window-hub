@@ -637,6 +637,148 @@ pub fn capture_window_owned_thumb_jpeg(
     }
 }
 
+/// Full-window screenshot (PNG): on-screen pixels of the island HWND, including expanded dashboard.
+#[cfg(windows)]
+pub fn capture_window_png(hwnd_raw: isize) -> Result<(Vec<u8>, u32, u32), String> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindow};
+
+    if crate::win32::hang::is_hung_hwnd(hwnd_raw) {
+        return Err("window hung".into());
+    }
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return Err("Invalid window".into());
+        }
+        let mut rect = RECT::default();
+        GetWindowRect(hwnd, &mut rect).map_err(|e| format!("GetWindowRect: {e}"))?;
+        let full_w = (rect.right - rect.left).max(1);
+        let full_h = (rect.bottom - rect.top).max(1);
+        let mut bgra = capture_screen_bgra(rect.left, rect.top, full_w, full_h)
+            .filter(|b| bgra_looks_usable(b));
+        if bgra.is_none() {
+            bgra = capture_windowdc_bgra(hwnd, full_w, full_h).filter(|b| bgra_looks_usable(b));
+        }
+        if bgra.is_none() {
+            bgra =
+                capture_printwindow_bgra_timed(hwnd, full_w, full_h).filter(|b| bgra_looks_usable(b));
+        }
+        let bgra = bgra.ok_or_else(|| "island capture blank".to_string())?;
+        encode_png_bgra(&bgra, full_w, full_h)
+    }
+}
+
+#[cfg(windows)]
+fn encode_png_bgra(bgra: &[u8], w: i32, h: i32) -> Result<(Vec<u8>, u32, u32), String> {
+    use image::{ImageBuffer, ImageFormat, Rgba};
+    use std::io::Cursor;
+
+    let cw = w.max(1) as u32;
+    let ch = h.max(1) as u32;
+    let mut rgba = vec![0u8; (cw as usize) * (ch as usize) * 4];
+    for i in 0..(cw as usize * ch as usize) {
+        let si = i * 4;
+        let di = i * 4;
+        rgba[di] = bgra[si + 2];
+        rgba[di + 1] = bgra[si + 1];
+        rgba[di + 2] = bgra[si];
+        rgba[di + 3] = 255;
+    }
+    let img: ImageBuffer<Rgba<u8>, _> =
+        ImageBuffer::from_raw(cw, ch, rgba).ok_or("ImageBuffer failed")?;
+    let mut cursor = Cursor::new(Vec::new());
+    img.write_to(&mut cursor, ImageFormat::Png)
+        .map_err(|e| format!("PNG encode: {e}"))?;
+    Ok((cursor.into_inner(), cw, ch))
+}
+
+/// Put PNG + DIB on the clipboard so Explorer / Word / browsers can paste.
+#[cfg(windows)]
+pub fn copy_png_to_clipboard(png: &[u8]) -> Result<(), String> {
+    use windows::core::w;
+    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    const CF_DIB: u32 = 8;
+    let img = image::load_from_memory(png).map_err(|e| format!("decode png: {e}"))?;
+    let rgba = img.to_rgba8();
+    let w = rgba.width() as i32;
+    let h = rgba.height() as i32;
+    let row_bytes = ((w as usize * 3 + 3) / 4) * 4;
+    let pixel_bytes = row_bytes * h as usize;
+    let mut dib = vec![0u8; std::mem::size_of::<BITMAPINFOHEADER>() + pixel_bytes];
+    let header = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: w,
+        biHeight: h,
+        biPlanes: 1,
+        biBitCount: 24,
+        biCompression: BI_RGB.0 as u32,
+        biSizeImage: pixel_bytes as u32,
+        ..Default::default()
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &header as *const BITMAPINFOHEADER as *const u8,
+            dib.as_mut_ptr(),
+            std::mem::size_of::<BITMAPINFOHEADER>(),
+        );
+    }
+    let pixels = rgba.as_raw();
+    let dest = &mut dib[std::mem::size_of::<BITMAPINFOHEADER>()..];
+    for y in 0..h as usize {
+        let src_y = h as usize - 1 - y;
+        let dst_row = &mut dest[y * row_bytes..y * row_bytes + w as usize * 3];
+        for x in 0..w as usize {
+            let si = (src_y * w as usize + x) * 4;
+            dst_row[x * 3] = pixels[si + 2];
+            dst_row[x * 3 + 1] = pixels[si + 1];
+            dst_row[x * 3 + 2] = pixels[si];
+        }
+    }
+
+    unsafe {
+        OpenClipboard(HWND::default()).map_err(|e| e.to_string())?;
+        let _ = EmptyClipboard();
+        let set_blob = |fmt: u32, bytes: &[u8]| -> Result<(), String> {
+            let hmem = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|e| e.to_string())?;
+            let ptr = GlobalLock(hmem) as *mut u8;
+            if ptr.is_null() {
+                return Err("GlobalLock failed".into());
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            let _ = GlobalUnlock(hmem);
+            SetClipboardData(fmt, HANDLE(hmem.0 as _)).map_err(|e| e.to_string())?;
+            Ok(())
+        };
+        if let Err(err) = set_blob(CF_DIB, &dib) {
+            let _ = CloseClipboard();
+            return Err(err);
+        }
+        let png_fmt = RegisterClipboardFormatW(w!("PNG"));
+        if png_fmt != 0 {
+            let _ = set_blob(png_fmt, png);
+        }
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn capture_window_png(_hwnd_raw: isize) -> Result<(Vec<u8>, u32, u32), String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(windows))]
+pub fn copy_png_to_clipboard(_png: &[u8]) -> Result<(), String> {
+    Err("Windows only".into())
+}
+
 #[cfg(not(windows))]
 pub fn capture_window_jpeg(_hwnd_raw: isize, _roi: Roi) -> Result<CapturedFrame, String> {
     Err("Windows only".into())

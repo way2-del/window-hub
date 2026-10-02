@@ -19,6 +19,11 @@ type Props = {
   onPanelClose?: () => void;
   /** Alt+Space 岛栏回车：把 query 转发给当前面板 iframe */
   searchSubmit?: { nonce: number; query: string; action?: string } | null;
+  /**
+   * Override manifest entry.panel（如正在播放 `lyrics.html` 右侧完整歌词）。
+   * 仍读同目录 `{stem}.css` / `{stem}.js`。
+   */
+  panelEntry?: string;
 };
 
 type PendingPanelScripts = {
@@ -161,8 +166,13 @@ function buildPanelSrcdoc(opts: {
 }): string {
   let html = opts.html;
   html = html.replace(/<link[^>]*href=["'][^"']*panel\.css["'][^>]*>/gi, "");
+  html = html.replace(/<link[^>]*href=["'][^"']*lyrics\.css["'][^>]*>/gi, "");
   html = html.replace(
     /<script[^>]*src=["'][^"']*panel\.js["'][^>]*>\s*<\/script>/gi,
+    "",
+  );
+  html = html.replace(
+    /<script[^>]*src=["'][^"']*lyrics\.js["'][^>]*>\s*<\/script>/gi,
     "",
   );
   html = html.replace(
@@ -203,26 +213,35 @@ export default function IslandPanelHost({
   active,
   onPanelClose,
   searchSubmit,
+  panelEntry,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const pendingScriptsRef = useRef<PendingPanelScripts | null>(null);
   const [srcdoc, setSrcdoc] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
-  const [registryEpoch, setRegistryEpoch] = useState(0);
   const activeRef = useRef(active);
   activeRef.current = active;
   const pluginIdRef = useRef<string | null>(null);
+  const onPanelCloseRef = useRef(onPanelClose);
+  onPanelCloseRef.current = onPanelClose;
 
   const pluginId = parsePluginPanelId(pullContent);
   pluginIdRef.current = pluginId;
-  const enabled = pluginId
-    ? Boolean(pluginRegistry.get(pluginId)?.enabled)
-    : false;
-
-  useEffect(
-    () => pluginRegistry.subscribe(() => setRegistryEpoch((n) => n + 1)),
-    [],
+  const [enabled, setEnabled] = useState(() =>
+    pluginId ? Boolean(pluginRegistry.get(pluginId)?.enabled) : false,
   );
+
+  // 仅同步 enabled；勿因 badge/items/register 等 registry 广播整页重载 iframe
+  useEffect(() => {
+    const sync = () => {
+      const next = pluginId
+        ? Boolean(pluginRegistry.get(pluginId)?.enabled)
+        : false;
+      setEnabled(next);
+    };
+    sync();
+    return pluginRegistry.subscribe(sync);
+  }, [pluginId]);
 
   useEffect(() => {
     const onMessage = (ev: MessageEvent) => {
@@ -244,7 +263,7 @@ export default function IslandPanelHost({
       const pid = pluginIdRef.current;
 
       if (d.cmd === "panel.close") {
-        onPanelClose?.();
+        onPanelCloseRef.current?.();
         return;
       }
       if (!pid) return;
@@ -288,7 +307,7 @@ export default function IslandPanelHost({
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [onPanelClose]);
+  }, []);
 
   useEffect(() => {
     if (!pluginId || !enabled) {
@@ -301,7 +320,10 @@ export default function IslandPanelHost({
     void (async () => {
       try {
         const runtime = pluginRegistry.get(pluginId);
-        const panel = runtime?.manifest.entry?.panel ?? "panel.html";
+        const panel =
+          (panelEntry && String(panelEntry).trim()) ||
+          runtime?.manifest.entry?.panel ||
+          "panel.html";
         if ((runtime?.manifest.capabilities ?? []).includes("media.camera")) {
           await invoke("hub_camera_prepare", { pluginId }).catch(() => undefined);
         }
@@ -314,27 +336,28 @@ export default function IslandPanelHost({
           : panel.includes("\\")
             ? panel.slice(0, panel.lastIndexOf("\\") + 1)
             : "";
+        const stem = panel.replace(/^.*[\\/]/, "").replace(/\.html?$/i, "") || "panel";
         const wantsBoard = (runtime?.manifest.capabilities ?? []).includes(
           "everything.search",
         );
         const [css, js, boardJs] = await Promise.all([
           invoke<string>("hub_plugin_read_text", {
             pluginId,
-            relativePath: `${dir}panel.css`,
+            relativePath: `${dir}${stem}.css`,
           }).catch(() => ""),
           invoke<string>("hub_plugin_read_text", {
             pluginId,
-            relativePath: `${dir}panel.js`,
+            relativePath: `${dir}${stem}.js`,
           }),
-          wantsBoard
+          wantsBoard && stem === "panel"
             ? loadOptionalBoardJs(pluginId, `${dir}board.js`)
             : Promise.resolve(""),
         ]);
         if (cancelled) return;
         if (!js?.trim()) {
-          throw new Error("panel.js 读取失败或为空");
+          throw new Error(`${stem}.js 读取失败或为空`);
         }
-        if (wantsBoard && !boardJs) {
+        if (wantsBoard && stem === "panel" && !boardJs) {
           console.warn(
             "[IslandPanelHost] board.js missing — home cards will degrade",
             pluginId,
@@ -345,7 +368,7 @@ export default function IslandPanelHost({
           );
         }
 
-        const token = `${pluginId}:${Date.now()}:${boardJs.length}:${js.length}`;
+        const token = `${pluginId}:${panel}:${boardJs.length}:${js.length}:${css.length}`;
         pendingScriptsRef.current = {
           token,
           boardJs,
@@ -353,7 +376,8 @@ export default function IslandPanelHost({
         };
         const injected = buildPanelSrcdoc({ pluginId, html, css });
         if (cancelled) return;
-        setSrcdoc(injected);
+        // 相同 srcdoc 勿 setState，否则 WebView 会整页闪白重载
+        setSrcdoc((prev) => (prev === injected ? prev : injected));
         setPanelError(null);
       } catch (e) {
         if (!cancelled) {
@@ -366,7 +390,7 @@ export default function IslandPanelHost({
     return () => {
       cancelled = true;
     };
-  }, [pluginId, pullContent, enabled, registryEpoch]);
+  }, [pluginId, panelEntry, enabled]);
 
   useEffect(() => {
     if (!pluginId || !enabled) return;
@@ -554,6 +578,7 @@ export default function IslandPanelHost({
     }
   };
 
+  // srcdoc / pluginId / enabled 变化时注入；active 变化只走生命周期，勿重绑 load
   useEffect(() => {
     if (!pluginId || !srcdoc || !enabled) return;
     tryInjectAndEnter();
@@ -561,7 +586,6 @@ export default function IslandPanelHost({
     if (!iframe) return;
     const onLoad = () => tryInjectAndEnter();
     iframe.addEventListener("load", onLoad);
-    // srcdoc can finish before listener attaches
     const t0 = window.setTimeout(tryInjectAndEnter, 0);
     const t1 = window.setTimeout(tryInjectAndEnter, 50);
     return () => {
@@ -570,13 +594,13 @@ export default function IslandPanelHost({
       window.clearTimeout(t1);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, pluginId, srcdoc, enabled]);
+  }, [pluginId, srcdoc, enabled]);
 
   useEffect(() => {
-    if (!pluginId || !enabled || !active || !srcdoc) return;
+    if (!pluginId || !enabled || !srcdoc) return;
     const frame = iframeRef.current?.contentWindow;
-    postPanelLifecycle(frame, pluginId, true);
-    if (!searchSubmit) return;
+    postPanelLifecycle(frame, pluginId, active);
+    if (!active || !searchSubmit) return;
     frame?.postMessage(
       {
         channel: "island-search-fwd",
@@ -615,7 +639,7 @@ export default function IslandPanelHost({
   return (
     <iframe
       ref={iframeRef}
-      key={String(pluginId)}
+      key={`${String(pluginId)}:${panelEntry || "panel"}`}
       className="panel-plugin-frame"
       title={`plugin-panel-${pluginId}`}
       srcDoc={srcdoc}

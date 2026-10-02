@@ -405,7 +405,10 @@
       await updateUI(q);
     } catch (err) {
       failStreak = Math.min(8, failStreak + 1);
-      await updateUI(null, { silentIcon: true });
+      // 短暂失败保留上一帧，避免整卡闪回 Nothing Playing
+      if (failStreak >= 3) {
+        await updateUI(null, { silentIcon: true });
+      }
     }
   }
 
@@ -479,7 +482,6 @@
       const openApp = function (e) {
         e.preventDefault();
         e.stopPropagation();
-        if (dom.openAppBtn.classList.contains("is-unbound")) return;
         dom.openAppBtn.classList.add("animating");
         window.setTimeout(function () {
           dom.openAppBtn.classList.remove("animating");
@@ -491,6 +493,18 @@
         if (e.key === "Enter" || e.key === " ") openApp(e);
       });
     }
+  }
+
+  let openAppHintTimer = 0;
+  function flashOpenAppHint(msg) {
+    if (!dom.openAppBtn) return;
+    const text = String(msg || "").trim() || "无法打开应用";
+    dom.openAppBtn.title = text;
+    if (openAppHintTimer) window.clearTimeout(openAppHintTimer);
+    openAppHintTimer = window.setTimeout(function () {
+      openAppHintTimer = 0;
+      void refreshOpenAppBtn();
+    }, 2800);
   }
 
   async function refreshOpenAppBtn() {
@@ -510,26 +524,50 @@
     dom.openAppBtn.hidden = false;
     dom.openAppBtn.removeAttribute("hidden");
     dom.openAppBtn.classList.toggle("is-unbound", !bound);
-    dom.openAppBtn.title = bound ? "打开应用" : "请先在插件详情中绑定打开应用托盘";
+    if (!openAppHintTimer) {
+      dom.openAppBtn.title = bound
+        ? "打开应用"
+        : "未绑定：点击打开插件设置绑定托盘";
+    }
     dom.openAppBtn.setAttribute("aria-disabled", bound ? "false" : "true");
+    return bound;
+  }
+
+  async function openPluginSettings() {
+    try {
+      const h = hub();
+      if (h.host && h.host.openSettings) {
+        await h.host.openSettings({ pluginId: h.pluginId || undefined });
+      }
+    } catch (err) {
+      console.warn("[now-playing] openSettings", err);
+    }
   }
 
   async function openBoundApp() {
     try {
       const h = hub();
       if (!h.island || !h.island.openBoundTray) return;
-      if (dom.openAppBtn && dom.openAppBtn.classList.contains("is-unbound")) {
-        await refreshOpenAppBtn();
-        if (dom.openAppBtn.classList.contains("is-unbound")) return;
+      // Re-check binding every click (settings may have changed while panel stayed open).
+      const bound = await refreshOpenAppBtn();
+      if (!bound) {
+        flashOpenAppHint("未绑定托盘，正在打开设置…");
+        await openPluginSettings();
+        return;
       }
       await h.island.openBoundTray();
+      // Delay collapse so tray left-click can foreground the app before island morph steals focus.
       if (h.panel && h.panel.close) {
-        try {
-          h.panel.close();
-        } catch (_) {}
+        window.setTimeout(function () {
+          try {
+            h.panel.close();
+          } catch (_) {}
+        }, 420);
       }
     } catch (err) {
+      const msg = err && err.message ? err.message : String(err || "");
       console.warn("[now-playing] openBoundTray", err);
+      flashOpenAppHint(msg || "打开失败：托盘可能已退出");
       void refreshOpenAppBtn();
     }
   }

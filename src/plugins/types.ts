@@ -86,6 +86,10 @@ export type PluginManifest = {
     popup?: string;
     /** Short strip HTML for status-menu shortcuts (Host iframe shell). */
     shortcuts?: string;
+    /** Optional companion view (e.g. now-playing full lyrics for home expand). */
+    lyrics?: string;
+    /** Optional companion view (e.g. weather 7-day forecast for home expand). */
+    forecast?: string;
     development?: { panel?: string; popup?: string; shortcuts?: string };
   };
   slots?: {
@@ -115,6 +119,13 @@ export type PluginManifest = {
       maxSize?: { w: number; h: number };
       /** Omit from Settings pull-content; open via drop/bar/session only */
       excludeFromPullContent?: boolean;
+      /**
+       * 下拉呈现方式：
+       * - `dashboard`（默认）：嵌入 Host 首页左主卡，竖条可切换
+       * - `standalone`：独立占满下拉面板（文件搜索等）
+       * 未写时：`excludeFromPullContent` → standalone，否则 dashboard
+       */
+      pullMode?: "dashboard" | "standalone";
     };
   };
   /** Declarative settings rendered in Host Settings; values in __settings */

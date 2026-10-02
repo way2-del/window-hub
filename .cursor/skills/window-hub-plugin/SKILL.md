@@ -41,7 +41,7 @@ description: >-
 | 快捷区（状态菜单左侧） | `shortcuts` | `entry.shortcuts` → iframe 自画 | `shortcuts` + 常用 `storage`/`popup`/`windows.*` |
 | 灵动岛下拉面板 | `island.panel` | `entry.panel` | `island.panel` |
 | 岛栏摘要 | `island.bar` | （无独立入口；API / Host 同步） | **capability + slot** `island.bar`；全局设置「岛栏常驻」竞选；`excludeFromBarResident` 仅临时条；**`adaptiveWidth`** 折叠岛宽随文案（见下） |
-| 情景临时 | `island.scenario` | （无独立入口） | 与 bar+panel 同用；`claimScenario`/`releaseScenario` 暂代岛栏+下拉，不改 prefs；Host 配存在门禁；`settings.openTrayKey` → `openBoundTray` |
+| 情景临时 | `island.scenario` | （无独立入口） | 与 bar+panel 同用；`claimScenario`/`releaseScenario` 暂代岛栏+下拉，不改 prefs；Host 配存在门禁；`settings.openTrayKey` → `openBoundTray`；折叠岛可左滑划掉，停播/`clearBar` 后再 claim 可补回 |
 | 岛上拖放 | `island.drop` | （Host DnD） | **必须** `island.drop` + `staging` |
 | 岛通知横幅 | `island.notify` | （无独立 iframe；`hub.notify`） | `notify` |
 | 托管弹窗 | — | `entry.popup` | `popup` |

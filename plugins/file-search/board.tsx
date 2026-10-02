@@ -471,8 +471,8 @@ function BoardApp(props: BoardProps) {
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(480);
-  const [rowHeight, setRowHeight] = useState(120);
-  const margin: [number, number] = [10, 10];
+  const [rowHeight, setRowHeight] = useState(96);
+  const [margin, setMargin] = useState<[number, number]>([10, 10]);
   const interacting = useRef(false);
 
   const layoutFromCards: Layout = useMemo(
@@ -501,12 +501,16 @@ function BoardApp(props: BoardProps) {
   const measure = useCallback(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const w = Math.max(200, Math.floor(el.clientWidth));
-    const h = Math.max(160, Math.floor(el.clientHeight));
-    const gaps = margin[1] * (MAX_ROWS - 1);
-    const rh = Math.max(72, Math.floor((h - gaps) / MAX_ROWS));
+    const w = Math.max(160, Math.floor(el.clientWidth));
+    // 仪表台矮壳（~140–180）勿再抬到 160，否则行高溢出裁切底角
+    const h = Math.max(1, Math.floor(el.clientHeight));
+    const compact = h < 200;
+    const nextMargin: [number, number] = compact ? [8, 6] : [10, 10];
+    const gaps = nextMargin[1] * (MAX_ROWS - 1);
+    const rh = Math.max(40, Math.floor((h - gaps) / MAX_ROWS));
     setWidth(w);
     setRowHeight(rh);
+    setMargin(nextMargin);
   }, []);
 
   useEffect(() => {

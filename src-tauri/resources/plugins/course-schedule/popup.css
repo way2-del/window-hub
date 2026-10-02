@@ -1,0 +1,387 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: rgba(244, 246, 250, 0.94);
+  font-family: "Segoe UI Variable", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+/*
+ * Host mounts <main id="app" class="wg-shell"> — style #app.wg-shell.
+ */
+#app.wg-shell,
+.wg-shell.cs-shell,
+.cs-shell {
+  box-sizing: border-box;
+  height: 100vh;
+  padding: var(--wh-popup-pad-top, 12px) var(--wh-popup-pad-x, 12px)
+    var(--wh-popup-pad-bottom, 14px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+/* —— header —— */
+.cs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.cs-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cs-logo {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: rgba(92, 139, 214, 0.9);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #fff;
+  font-size: 13px;
+}
+
+.cs-title {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cs-lang {
+  display: flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.cs-lang button {
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 550;
+  color: rgba(244, 246, 250, 0.5);
+}
+
+.cs-lang button.is-on {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.cs-lang button:hover:not(.is-on) {
+  color: rgba(244, 246, 250, 0.85);
+}
+
+/* —— nav: 今天左 | 日期壳右 —— */
+.cs-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.cs-today-btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 550;
+  color: rgba(244, 246, 250, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
+}
+
+.cs-today-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.cs-date-shell {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 0 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
+  max-width: calc(100% - 72px);
+}
+
+.cs-date-shell .cs-nav-btn {
+  width: 26px;
+  height: 24px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: rgba(244, 246, 250, 0.65);
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.cs-date-shell .cs-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.cs-date-label {
+  min-width: 0;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: rgba(244, 246, 250, 0.92);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+/* —— legend —— */
+.cs-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.cs-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 9px;
+  color: rgba(244, 246, 250, 0.55);
+  white-space: nowrap;
+}
+
+.cs-legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* —— vertical week list (no horizontal scroll) —— */
+.cs-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.cs-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.cs-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.cs-week {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  gap: 10px;
+}
+
+.cs-day {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* —— event cards: larger, date + weekday inside —— */
+.cs-ev {
+  border-radius: 12px;
+  padding: 14px 14px 15px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: relative;
+  overflow: hidden;
+  min-height: 88px;
+}
+
+.cs-ev::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3.5px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.cs-ev-when {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cs-ev-wd {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  opacity: 0.78;
+}
+
+.cs-ev-date {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.62;
+}
+
+.cs-ev-today {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 650;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+  opacity: 0.95;
+}
+
+.cs-ev-title {
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.cs-ev-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.9;
+  margin-top: auto;
+}
+
+.cs-ev-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  word-break: break-word;
+}
+
+.cs-ev-time {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.3);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.cs-ev-empty {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(244, 246, 250, 0.55);
+  min-height: 64px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cs-ev-empty .cs-ev-wd,
+.cs-ev-empty .cs-ev-date {
+  opacity: 0.7;
+  color: rgba(244, 246, 250, 0.7);
+}
+
+.cs-ev-muted {
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0.45;
+}
+
+.cs-ev.is-today {
+  box-shadow: 0 0 0 1px rgba(142, 182, 255, 0.35);
+}
+
+/* type colors (from source schedule) */
+.bg-welcome { background: #5c8bd6; color: #fff; }
+.bg-intro { background: #e4f0a3; color: #334155; }
+.bg-self { background: #f1e6e6; color: #475569; }
+.bg-lecture { background: #c9def0; color: #1e293b; }
+.bg-lang { background: #d0e5cb; color: #1e293b; }
+.bg-reading { background: #f4cccc; color: #7f1d1d; }
+.bg-transloc { background: #1a569d; color: #fff; }
+.bg-assist { background: #f6b677; color: #7c2d12; }
+.bg-install { background: #ea9999; color: #7f1d1d; }
+.bg-madep { background: #e31837; color: #fff; }
+.bg-open { background: #e06666; color: #fff; }
+.bg-takedown { background: #a3a3a3; color: #fff; }
+
+.dot-welcome { background: #5c8bd6; }
+.dot-intro { background: #c5d66a; }
+.dot-self { background: #c4b0b0; }
+.dot-lecture { background: #7eb0d8; }
+.dot-lang { background: #8bc281; }
+.dot-reading { background: #e08888; }
+.dot-transloc { background: #1a569d; }
+.dot-assist { background: #f6b677; }
+.dot-install { background: #ea9999; }
+.dot-madep { background: #e31837; }
+.dot-open { background: #e06666; }
+.dot-takedown { background: #a3a3a3; }
+
+.cs-footer {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: rgba(244, 246, 250, 0.3);
+  line-height: 1.3;
+}

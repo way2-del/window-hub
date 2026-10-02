@@ -1,0 +1,51 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "com.window-hub.course-schedule",
+  "name": "课表",
+  "version": "1.1.0",
+  "official": false,
+  "logo": "icon.svg",
+  "description": "MA Design 周视图课表：玻璃壳整表展示，UK/中文切换时间与文案，顶栏日期随周导航更新。",
+  "entry": {
+    "shortcuts": "shortcuts.html",
+    "popup": "popup.html",
+    "panel": "panel.html"
+  },
+  "slots": {
+    "shortcuts": {
+      "icon": "icon.svg",
+      "label": "课表",
+      "order": 28,
+      "action": "popup.open",
+      "manage": "custom"
+    },
+    "island.panel": {
+      "defaultSize": { "w": 400, "h": 300 },
+      "excludeFromPullContent": false,
+      "pullMode": "dashboard"
+    }
+  },
+  "settings": [
+    {
+      "key": "popupWidth",
+      "type": "number",
+      "label": "弹窗宽度",
+      "default": 400,
+      "min": 320,
+      "max": 420,
+      "step": 10,
+      "unit": "px"
+    },
+    {
+      "key": "popupHeight",
+      "type": "number",
+      "label": "弹窗高度",
+      "default": 560,
+      "min": 420,
+      "max": 600,
+      "step": 10,
+      "unit": "px"
+    }
+  ],
+  "capabilities": ["storage", "shortcuts", "popup", "island.panel"]
+}

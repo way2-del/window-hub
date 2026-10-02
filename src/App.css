@@ -261,25 +261,58 @@ button {
   filter: var(--chrome-center-glyph-shadow, drop-shadow(0 1px 1px rgba(0, 0, 0, 0.28)));
 }
 
-/* 顶栏 Win32 材质在 sibling island-bar-glass；左右 chrome 走材质，岛保持黑胶囊独立。
-   勿再把折叠岛 fill-opacity 清零 — 否则与左右融成一条，常驻黑字叠黑壳无法区分。 */
+/* 顶栏 Win32 材质在 bar_comp；桌面折叠岛近透底，不再常驻黑/吸色胶囊。 */
 .shell.has-bar-glass:not(.is-expanded) .island-beam {
   /* 保留岛底圆角，与左右直角顶栏分段 */
   border-radius: 0 0 var(--island-r-bot, 14px) var(--island-r-bot, 14px) !important;
 }
 
-/* 非沉浸：岛内常驻固定浅色（黑胶囊上可读）；沉浸才跟 --chrome-center-fg */
-.island-root:not(.is-immersed) .bar-weather,
-.island-root:not(.is-immersed) .bar-staging,
-.island-root:not(.is-immersed) .bar-staging-text {
+/* 非沉浸且盖在窗口上：黑胶囊 + 固定浅色字 */
+.shell.has-ambient .island-root:not(.is-immersed) .bar-weather,
+.shell.has-ambient .island-root:not(.is-immersed) .bar-staging,
+.shell.has-ambient .island-root:not(.is-immersed) .bar-staging-text,
+.shell.is-expanded .island-root:not(.is-immersed) .bar-weather,
+.shell.is-expanded .island-root:not(.is-immersed) .bar-staging,
+.shell.is-expanded .island-root:not(.is-immersed) .bar-staging-text {
   color: rgba(255, 255, 255, 0.96);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
-.island-root:not(.is-immersed) .bar-condition,
-.island-root:not(.is-immersed) .bar-meta {
+.shell.has-ambient .island-root:not(.is-immersed) .bar-condition,
+.shell.has-ambient .island-root:not(.is-immersed) .bar-meta,
+.shell.is-expanded .island-root:not(.is-immersed) .bar-condition,
+.shell.is-expanded .island-root:not(.is-immersed) .bar-meta {
   color: rgba(255, 255, 255, 0.82);
   opacity: 1;
+}
+
+/* 桌面折叠常驻：无岛壳底色，字色跟 chrome + 描边保证花壁纸可读 */
+.shell:not(.has-ambient):not(.is-expanded) .island-root:not(.is-searching) .bar-weather,
+.shell:not(.has-ambient):not(.is-expanded) .island-root:not(.is-searching) .bar-staging,
+.shell:not(.has-ambient):not(.is-expanded) .island-root:not(.is-searching) .bar-staging-text {
+  color: var(--chrome-center-fg, rgba(255, 255, 255, 0.94));
+  text-shadow:
+    var(--chrome-center-shadow, none),
+    0 0 1px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.shell:not(.has-ambient):not(.is-expanded) .island-root:not(.is-searching) .bar-condition,
+.shell:not(.has-ambient):not(.is-expanded) .island-root:not(.is-searching) .bar-meta {
+  color: color-mix(in srgb, var(--chrome-center-fg, #fff) 82%, transparent);
+  opacity: 1;
+  text-shadow:
+    0 0 1px rgba(0, 0, 0, 0.5),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.island-root.is-immersed .bar-weather,
+.island-root.is-immersed .bar-staging,
+.island-root.is-immersed .bar-staging-text {
+  text-shadow:
+    var(--chrome-center-shadow, none),
+    0 0 1px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
 /* 搜索岛：黑胶囊 + 固定浅色字（勿跟桌面 chrome 反成黑字） */
@@ -471,7 +504,11 @@ button {
   transition: background 240ms ease, opacity 320ms ease;
 }
 
-.island-root.is-immersed .island-top-cap {
+.island-root.is-immersed .island-top-cap,
+.shell:not(.has-ambient):not(.is-expanded)
+  .island-root:not(.is-drop-target):not(.is-notifying):not(.is-searching)
+  .island-top-cap {
+  /* 桌面透底：顶盖关掉，避免一条实色缝 */
   opacity: 0;
 }
 
@@ -527,7 +564,10 @@ button {
   --_fade: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
 }
 
-.island-root.is-immersed .island-side-fade {
+.island-root.is-immersed .island-side-fade,
+.shell:not(.has-ambient):not(.is-expanded)
+  .island-root:not(.is-drop-target):not(.is-notifying):not(.is-searching)
+  .island-side-fade {
   opacity: 0;
 }
 
@@ -537,6 +577,7 @@ button {
 .island-root.is-notifying.is-immersed .island-top-cap,
 .island-root.is-searching .island-top-cap {
   opacity: 1;
+  background: #000;
 }
 
 .island-root.is-drop-target .island-top-cap {
@@ -577,13 +618,27 @@ button {
   transition: fill-opacity 320ms ease, fill 240ms ease;
 }
 
-.island-root.is-immersed .island-corner-patch-fill {
+.island-root.is-immersed .island-corner-patch-fill,
+.shell:not(.has-ambient):not(.is-expanded)
+  .island-root:not(.is-drop-target):not(.is-notifying):not(.is-searching)
+  .island-corner-patch-fill {
+  /* 桌面透底：极淡不透明，保留命中、看不见底色 */
+  fill: #000000;
+  fill-opacity: 0.02;
+}
+
+.shell.has-bar-glass:not(.has-ambient) .island-root.is-immersed .island-corner-patch-fill,
+.shell.has-bar-glass:not(.has-ambient):not(.is-expanded)
+  .island-root:not(.is-drop-target):not(.is-notifying):not(.is-searching)
+  .island-corner-patch-fill {
+  fill: #000000;
   fill-opacity: 0.02;
 }
 
 .island-root.is-drop-target .island-corner-patch-fill,
 .island-root.is-notifying.is-immersed .island-corner-patch-fill,
 .island-root.is-searching .island-corner-patch-fill {
+  fill: #000000;
   fill-opacity: 1;
 }
 
@@ -620,7 +675,7 @@ button {
 .island-path {
   fill: #000000;
   fill-opacity: 1;
-  transition: fill-opacity 320ms ease;
+  transition: fill-opacity 320ms ease, fill 240ms ease;
   /* 顶边直角用非零填充，避免半透明描边感 */
   stroke: none;
 }
@@ -633,15 +688,28 @@ button {
   pointer-events: none;
 }
 
-.island-root.is-immersed .island-path {
-  /* WebView2 对 alpha=0 整窗点透，拖放进不来；极淡不透明仍可命中 OLE/DnD */
+.island-root.is-immersed .island-path,
+.shell:not(.has-ambient):not(.is-expanded)
+  .island-root:not(.is-drop-target):not(.is-notifying):not(.is-searching)
+  .island-path {
+  /* 桌面折叠 / 沉浸：无常驻底色；0.02 保留 WebView2 命中，避免 OLE 点透 */
+  fill: #000000;
   fill-opacity: 0.02;
 }
 
-/* 拖放高亮 / 通知横幅 / 搜索岛：保持不透明壳（中转站不阻断沉浸） */
+.shell.has-bar-glass:not(.has-ambient) .island-root.is-immersed .island-path,
+.shell.has-bar-glass:not(.has-ambient):not(.is-expanded)
+  .island-root:not(.is-drop-target):not(.is-notifying):not(.is-searching)
+  .island-path {
+  fill: #000000;
+  fill-opacity: 0.02;
+}
+
+/* 拖放高亮 / 通知横幅 / 搜索岛：保持不透明黑壳（中转站不阻断沉浸） */
 .island-root.is-drop-target .island-path,
 .island-root.is-notifying.is-immersed .island-path,
 .island-root.is-searching .island-path {
+  fill: #000000;
   fill-opacity: 1;
 }
 
@@ -681,6 +749,45 @@ button {
   overflow: hidden;
 }
 
+/* 展开首页：左导航 / 中摘要 / 右状态 */
+.island-bar.has-home-chrome {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.island-bar.has-home-chrome .bar-weather {
+  flex: 1;
+  min-width: 0;
+  justify-content: center;
+}
+
+.island-bar.has-home-chrome .bar-staging {
+  max-width: 100%;
+}
+
+/* 搜索页签：中间常驻栏换成搜索框（不盖住左右导航/状态） */
+.island-bar.has-home-chrome .bar-search.is-tab-inline {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-width: 0;
+  z-index: 2;
+  height: 100%;
+  padding: 0 2px;
+  animation: none;
+  background: transparent;
+  opacity: 1;
+  transition: opacity 80ms ease;
+}
+
+/* 收起：搜索页签中间框与导航同拍淡出 */
+.island-root:not(.is-expanded) .bar-search.is-tab-inline {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 80ms;
+}
+
 .bar-weather {
   display: flex;
   align-items: center;
@@ -707,6 +814,11 @@ button {
   position: absolute;
   transform: translateY(130%);
   opacity: 0;
+}
+
+.bar-weather.is-swiping {
+  /* 左滑划掉情景临时：跟手位移时关掉默认过渡 */
+  transition: none;
 }
 
 .bar-staging {

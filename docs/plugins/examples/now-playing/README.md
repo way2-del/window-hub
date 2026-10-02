@@ -8,10 +8,10 @@
 |------|------|
 | 快捷区 | **不显示**（`manage: none` + `requestSize(0)` 隐形 worker） |
 | 岛栏常驻 | 当前歌词 / 歌名（`setBar`）；需在设置里选为「岛栏常驻」；`adaptiveWidth` 折叠岛随歌词变宽 |
-| 岛下拉 | 迷你播放器；视觉对齐官方 **iOS 歌曲组件**（`Assets/PublicExample`）；右下角「打开应用」→ `hub.island.openBoundTray`（插件详情绑定 `settings.openTrayKey`） |
-| 情景临时 | 健康有曲时 claim；Host 存在门禁在插件详情；打开托盘绑定在插件 `settings.openTrayKey` |
+| 岛下拉 | 迷你播放器；视觉对齐官方 **iOS 歌曲组件**；左卡向右拉把手展开时 Host 二分屏嵌入 `lyrics.html`；右下角「打开应用」→ `hub.island.openBoundTray` |
+| 情景临时 | 健康有曲时 claim；Host 存在门禁 + 打开托盘绑定在全局设置「情景临时」二级页 |
 
-设置在 **插件市场 / 本插件已安装详情**（`apiBase`、`pollMs`、`barMode`、`lyricOffsetMs`、`openTrayKey` 等插件 settings；Host 情景存在门禁单独成块）。全局设置「情景临时」仅跳转到该详情页。
+设置在 **插件市场 / 本插件已安装详情**（`apiBase`、`pollMs`、`barMode`、`lyricOffsetMs` 等插件 settings + Host 情景门禁 / 打开托盘绑定）。全局设置「情景临时」仅跳转到该详情页。
 
 `lyricOffsetMs`：毫秒偏移（正数提前、负数延后）。Host 设置：同排 ±50 图标 / 重置 / 滑块 / 手改数值。
 

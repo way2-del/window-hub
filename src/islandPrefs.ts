@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parseScenarioGates, type ScenarioGatesMap } from "./scenarioGates";
 
-/** 下拉展开内容：`plugin:{id}`（legacy weather|mirror 会迁移） */
+/** 下拉展开内容哨兵：固定 Host 首页；保留字段兼容旧 DB，运行时忽略 plugin 偏好 */
 export type PullContent = string;
 
 export type IslandPrefs = {
@@ -15,7 +15,10 @@ export type IslandPrefs = {
   barGlass: boolean;
   /** 忽略吸色的程序（windowKey：`exe:` / `proc:`，与快捷区 scope 相同） */
   ignoreAmbientApps: string[];
-  /** 下拉岛默认展示内容 */
+  /**
+   * 历史字段：默认下拉已固定为 Host 首页（`home`）。
+   * 情景 / 会话仍用 `plugin:{id}` 临时覆盖；设置页不再改此值。
+   */
   pullContent: PullContent;
   /**
    * 岛栏常驻插件 id；空字符串 = 无常驻。
@@ -69,8 +72,7 @@ const DEFAULTS: IslandPrefs = {
   immerseIdleSec: 8,
   barGlass: true,
   ignoreAmbientApps: [],
-  /** Weather is a plugin; migrate legacy "weather"|"mirror" in parsePullContent */
-  pullContent: "plugin:com.window-hub.weather",
+  pullContent: "home",
   barResident: "com.window-hub.weather",
   msgNotify: true,
   msgNotifyText: "收到一条消息",
@@ -122,11 +124,10 @@ export function clampStagingPanelH(h: number): number {
 function parsePullContent(raw: string | null | undefined): PullContent {
   if (raw == null) return DEFAULTS.pullContent;
   const t = String(raw).trim();
-  if (!t || t === "none" || t === "off") return "";
-  if (t === "weather") return "plugin:com.window-hub.weather";
-  if (t === "mirror") return "plugin:com.window-hub.mirror";
-  if (t.startsWith("plugin:")) return t;
-  return "";
+  if (!t || t === "none" || t === "off" || t === "home") return "home";
+  // Legacy plugin ids kept in storage but Host no longer uses them as default pull.
+  if (t === "weather" || t === "mirror" || t.startsWith("plugin:")) return "home";
+  return "home";
 }
 
 function parseBarResident(raw: string | null | undefined): string {

@@ -19,7 +19,8 @@
       "defaultSize": { "w": 560, "h": 152 },
       "minSize": { "w": 440, "h": 120 },
       "maxSize": { "w": 720, "h": 184 },
-      "excludeFromPullContent": true
+      "excludeFromPullContent": true,
+      "pullMode": "standalone"
     }
   },
   "settings": [
