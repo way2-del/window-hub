@@ -34,8 +34,10 @@ use windows::Win32::System::Threading::{
 
 pub const SERVICE_NAME: &str = "WindowHubAutoStart";
 pub const SERVICE_DISPLAY: &str = "Window Hub Auto Start";
-/// Manual-reset Global event: set by GUI “退出”, cleared on service start / GUI start / restart.
-/// Keeps the SCM worker from treating intentional quit as a crash to relaunch.
+/// Manual-reset Global event: set by GUI “退出 window-hub” (`exit_app`), cleared on
+/// service start, new interactive login, manual GUI start, or restart.
+/// Keeps the SCM worker from treating intentional quit as a crash to relaunch
+/// *within the same login*; Fast Startup / logoff must not leave this sticky.
 pub const USER_QUIT_EVENT: &str = "Global\\com.xushi.window-hub.user-quit.v2";
 const LAUNCH_RETRY_SECS: u64 = 3;
 /// After CreateProcessAsUser, wait this long before treating the GUI as "up".
@@ -45,8 +47,6 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static STATUS_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 /// Service holds this so the named event survives across GUI process lifetimes.
 static QUIT_EVENT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
-/// GUI is handing off to a new process (`restart` / `relaunch`) — do not set quit on Exit.
-static EXPECT_RELAUNCH: AtomicBool = AtomicBool::new(false);
 
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -210,20 +210,7 @@ pub fn signal_user_quit() {
     }
 }
 
-/// Call from Tauri `RunEvent::Exit` so any quit path (not only `exit_app`) suppresses relaunch.
-pub fn signal_user_quit_unless_relaunching() {
-    if EXPECT_RELAUNCH.load(Ordering::SeqCst) {
-        return;
-    }
-    signal_user_quit();
-}
-
-/// Next process exit is a handoff (`restart_app` / `relaunch_app`) — allow service recovery.
-pub fn note_expect_relaunch() {
-    EXPECT_RELAUNCH.store(true, Ordering::SeqCst);
-}
-
-/// Allow autostart relaunch again (GUI start, restart, or fresh service boot).
+/// Allow autostart relaunch again (GUI start, restart, new login, or fresh service boot).
 pub fn clear_user_quit() {
     use windows::Win32::System::Threading::{OpenEventW, ResetEvent, EVENT_MODIFY_STATE};
     let name = wide(USER_QUIT_EVENT);
@@ -475,6 +462,10 @@ fn service_worker() {
     let mut child: Option<HANDLE> = None;
     let mut last_err: Option<String> = None;
     let mut shell_settled = false;
+    // Track interactive session so Fast Startup / logoff→logon can relaunch.
+    // Under hybrid shutdown the SCM worker often keeps running; a stale
+    // user-quit from the previous session must not block the next login.
+    let mut last_session: Option<u32> = None;
 
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         // Drop dead child handle.
@@ -493,6 +484,10 @@ fn service_worker() {
             if last_err.take().is_some() {
                 svc_log("GUI mutex held (UI running)");
             }
+            // Keep session tracking warm while UI is up.
+            if let Some(sid) = resolve_interactive_session() {
+                last_session = Some(sid);
+            }
             sleep_interruptible(LAUNCH_RETRY_SECS * 1000);
             continue;
         }
@@ -502,17 +497,43 @@ fn service_worker() {
             continue;
         }
 
-        // User chose “退出” — stay down until reboot (service restart clears) or manual start.
+        // Session transitions must be observed *before* the user-quit gate:
+        // otherwise a quit from the previous login (or EndSession teardown)
+        // permanently blocks relaunch across Fast Startup.
+        let session_now = resolve_interactive_session();
+        match (last_session, session_now) {
+            (_, None) => {
+                if last_session.is_some() {
+                    svc_log("interactive session ended");
+                    last_err = None;
+                }
+                last_session = None;
+                shell_settled = false;
+            }
+            (prev, Some(sid)) if prev != Some(sid) => {
+                clear_user_quit();
+                svc_log(&format!(
+                    "session {sid}: new interactive session — cleared user-quit for login relaunch"
+                ));
+                last_session = Some(sid);
+                shell_settled = false;
+                last_err = None;
+            }
+            _ => {}
+        }
+
+        // User chose “退出 window-hub” — stay down for this login only.
+        // New session (above) or manual GUI start clears the event.
         if user_quit_signaled() {
             if last_err.as_deref() != Some("user-quit") {
-                svc_log("user quit signaled — not relaunching");
+                svc_log("user quit signaled — not relaunching until next login / manual start");
                 last_err = Some("user-quit".into());
             }
             sleep_interruptible(LAUNCH_RETRY_SECS * 1000);
             continue;
         }
 
-        let Some(session) = resolve_interactive_session() else {
+        let Some(session) = session_now else {
             if last_err.as_deref() != Some("waiting-session") {
                 svc_log("waiting for interactive session…");
                 last_err = Some("waiting-session".into());
@@ -531,7 +552,7 @@ fn service_worker() {
         }
 
         // explorer.exe can exist before Shell_TrayWnd / TrayNotifyWnd is live.
-        // Settle once per boot so the GUI hook does not race an empty tray.
+        // Settle once per session so the GUI hook does not race an empty tray.
         if !shell_settled {
             shell_settled = true;
             svc_log(&format!(

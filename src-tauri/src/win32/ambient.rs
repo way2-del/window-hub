@@ -177,7 +177,7 @@ impl From<&AmbientStrip> for AmbientColor {
 #[cfg(windows)]
 mod win {
     use super::{default_window_label, solid_png_b64, AmbientStrip, SampleMode};
-    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
@@ -222,6 +222,12 @@ mod win {
     static SAMPLE_MODE: AtomicU8 = AtomicU8::new(MODE_EDGE);
     /// True while still in the post-switch settle window (watcher polls faster).
     static SETTLING: AtomicBool = AtomicBool::new(true);
+    /// Live 吸色 ready for FE overlay; glass stays until `AMBIENT_OWNS_MAIN`.
+    static LIVE_AMBIENT_READY: AtomicBool = AtomicBool::new(false);
+    /// After live ribbon + hold, HostBackdrop may detach.
+    static AMBIENT_OWNS_MAIN: AtomicBool = AtomicBool::new(false);
+    /// Cancel token for delayed glass unload.
+    static GLASS_HOLD_GEN: AtomicU64 = AtomicU64::new(0);
     /// prefs_island.ignore_ambient_apps — never read SQLite on the ambient hot path.
     static IGNORE_AMBIENT_APPS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -327,6 +333,72 @@ mod win {
     /// Watcher: poll often while settling, rarely when locked (only to detect switch).
     pub fn is_settling() -> bool {
         SETTLING.load(Ordering::SeqCst)
+    }
+
+    /// When true, main chrome should drop HostBackdrop (AmbientStrip already painted).
+    pub fn ambient_owns_main_chrome() -> bool {
+        AMBIENT_OWNS_MAIN.load(Ordering::SeqCst)
+    }
+
+    /// True once a live ribbon was emitted (FE may overlay glass; glass not yet unloaded).
+    pub fn live_ambient_ready() -> bool {
+        LIVE_AMBIENT_READY.load(Ordering::SeqCst)
+    }
+
+    fn strip_is_live_ribbon(strip: &AmbientStrip) -> bool {
+        if strip.hwnd == 0 || strip.png_base64.is_empty() {
+            return false;
+        }
+        // Quiet-period charcoal marker — not a real capture.
+        if strip.width <= 1 && strip.r == 48 && strip.g == 48 && strip.b == 52 {
+            return false;
+        }
+        // Edge ribbon is wide; Center mode is a 1× solid from a real capture.
+        strip.width > 1 || matches!(strip.mode, SampleMode::Center)
+    }
+
+    /// Handle a main ambient strip after emit.
+    ///
+    /// - `hwnd == 0` (desktop): clear live/owns → caller should re-apply glass now.
+    /// - live ribbon: first time returns `Some(gen)` → caller schedules glass unload in 2s;
+    ///   FE AmbientStrip should already cover glass. Later live strips return `None`.
+    /// - fake maximized floor (hwnd≠0 but not live): ignore for ownership.
+    ///
+    /// Returns `(material_now, schedule_unload_gen)`.
+    pub fn note_main_ambient_strip(strip: &AmbientStrip) -> (bool, Option<u64>) {
+        if strip.hwnd == 0 {
+            let changed = LIVE_AMBIENT_READY.swap(false, Ordering::SeqCst)
+                | AMBIENT_OWNS_MAIN.swap(false, Ordering::SeqCst);
+            GLASS_HOLD_GEN.fetch_add(1, Ordering::SeqCst);
+            return (changed, None);
+        }
+        if !strip_is_live_ribbon(strip) {
+            return (false, None);
+        }
+        // First live ribbon for this scene → keep glass 2s under AmbientStrip.
+        if !LIVE_AMBIENT_READY.swap(true, Ordering::SeqCst) {
+            let gen = GLASS_HOLD_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+            return (false, Some(gen));
+        }
+        (false, None)
+    }
+
+    /// Delayed glass unload after live AmbientStrip has been covering for ~2s.
+    pub fn commit_ambient_owns_if_gen(gen: u64) -> bool {
+        if GLASS_HOLD_GEN.load(Ordering::SeqCst) != gen {
+            return false;
+        }
+        if !LIVE_AMBIENT_READY.load(Ordering::SeqCst) {
+            return false;
+        }
+        !AMBIENT_OWNS_MAIN.swap(true, Ordering::SeqCst)
+    }
+
+    /// Force glass floor (boot / scene flip to window before live sample).
+    pub fn clear_ambient_owns_main_chrome() {
+        LIVE_AMBIENT_READY.store(false, Ordering::SeqCst);
+        AMBIENT_OWNS_MAIN.store(false, Ordering::SeqCst);
+        GLASS_HOLD_GEN.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Cheap switch detection only. Never capture or enumerate from this probe.
@@ -1387,6 +1459,9 @@ mod win {
 
     /// Always sample live (settings / first paint). Also seeds the settle gate.
     /// When already locked on the same target, return the frozen strip (no flicker).
+    ///
+    /// When a maximized target exists, **always** return `hwnd ≠ 0` (same contract as
+    /// `sample_for_satellite`) so FE leaves desktop-glass mode even if BitBlt fails.
     pub fn sample(self_hwnd: Option<isize>) -> AmbientStrip {
         let target = pick_target(self_hwnd);
         let key = target_key(target);
@@ -1411,7 +1486,17 @@ mod win {
                 }
                 return strip;
             }
-            return last_strip().unwrap_or_else(AmbientStrip::fallback);
+            // Capture missed — keep hwnd=0 so HostBackdrop glass stays until a live ribbon.
+            if let Some(strip) = sample_wallpaper(self_hwnd) {
+                remember(strip.clone());
+                return strip;
+            }
+            return last_strip()
+                .map(|mut s| {
+                    s.hwnd = 0;
+                    s
+                })
+                .unwrap_or_else(AmbientStrip::fallback);
         }
         if let Some(strip) = sample_wallpaper(self_hwnd) {
             remember(strip.clone());
@@ -1425,6 +1510,9 @@ mod win {
 
     /// For UI invoke: never BitBlt a foreign HWND on the IPC thread.
     /// Watcher thread owns live capture via `poll_changed` / `sample`.
+    ///
+    /// Boot seed stays `hwnd = 0` even if a maximized window exists — FE/Rust keep
+    /// HostBackdrop glass until the first live sample, then AmbientStrip takes over.
     pub fn sample_nonblocking(self_hwnd: Option<isize>) -> AmbientStrip {
         let target = pick_target(self_hwnd);
         let key = target_key(target);
@@ -1440,6 +1528,49 @@ mod win {
         }
         // Wallpaper decode is local disk — safe; skip window BitBlt.
         sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback)
+    }
+
+    /// Soft floor for maximized scene when live ribbon is unavailable.
+    /// Prefer last strip / wallpaper tint — never charcoal, never hwnd=0.
+    fn maximized_scene_floor(self_hwnd: Option<isize>, target: HWND) -> AmbientStrip {
+        if let Some((r, g, b)) = window_top_avg_rgb(target).or_else(|| {
+            self_hwnd.and_then(|raw| junction_avg_rgb(HWND(raw as *mut _), target))
+        }) {
+            let bar_w = self_hwnd
+                .and_then(|raw| {
+                    let me = HWND(raw as *mut _);
+                    unsafe {
+                        let mut mine = RECT::default();
+                        GetWindowRect(me, &mut mine).ok()?;
+                        let dpi = GetDpiForWindow(me).max(96) as f64;
+                        Some((((mine.right - mine.left) as f64) / (dpi / 96.0)).round() as i32)
+                    }
+                })
+                .unwrap_or(800)
+                .max(1);
+            return AmbientStrip {
+                r,
+                g,
+                b,
+                width: 1,
+                offset_x: 0,
+                span_width: bar_w,
+                png_base64: solid_png_b64(r, g, b),
+                hwnd: target.0 as isize,
+                mode: get_mode(),
+                window_label: default_window_label(),
+            };
+        }
+        if let Some(mut prev) = last_strip() {
+            prev.hwnd = target.0 as isize;
+            if prev.png_base64.is_empty() {
+                prev.png_base64 = solid_png_b64(prev.r, prev.g, prev.b);
+            }
+            return prev;
+        }
+        let mut wall = sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback);
+        wall.hwnd = target.0 as isize;
+        wall
     }
 
     /// Satellite chrome only: wallpaper strip for that HWND's monitor.
@@ -1493,11 +1624,9 @@ mod win {
                     window_label: default_window_label(),
                 };
             }
-            // Keep maximized scene (hwnd≠0) but use wallpaper tint so FE drops glass
-            // without painting a fake near-black slab.
-            let mut wall = sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback);
-            wall.hwnd = t.0 as isize;
-            return wall;
+            // Keep maximized scene (hwnd≠0) but use wallpaper / avg tint so FE drops
+            // desktop-glass without painting a fake near-black slab.
+            return maximized_scene_floor(self_hwnd, t);
         }
         sample_wallpaper(self_hwnd).unwrap_or_else(AmbientStrip::fallback)
     }
@@ -2252,11 +2381,35 @@ mod win {
 
 #[cfg(windows)]
 pub use win::{
-    foreground_key, get_mode, is_desktop_scene, is_sat_settling, is_settling, poll_changed,
-    poll_changed_sat, reset_sampling_gate, sample, sample_for_satellite, sample_nonblocking,
-    sample_sat_hwnd_marker, sample_wallpaper_only, sat_locked_strip, set_ambient_sample_target,
-    set_mode, sync_ignore_ambient_apps,
+    ambient_owns_main_chrome, clear_ambient_owns_main_chrome, commit_ambient_owns_if_gen,
+    foreground_key, get_mode, is_desktop_scene, is_sat_settling, is_settling, live_ambient_ready,
+    note_main_ambient_strip, poll_changed, poll_changed_sat, reset_sampling_gate, sample,
+    sample_for_satellite, sample_nonblocking, sample_sat_hwnd_marker, sample_wallpaper_only,
+    sat_locked_strip, set_ambient_sample_target, set_mode, sync_ignore_ambient_apps,
 };
+
+#[cfg(not(windows))]
+pub fn ambient_owns_main_chrome() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn live_ambient_ready() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn clear_ambient_owns_main_chrome() {}
+
+#[cfg(not(windows))]
+pub fn note_main_ambient_strip(_strip: &AmbientStrip) -> (bool, Option<u64>) {
+    (false, None)
+}
+
+#[cfg(not(windows))]
+pub fn commit_ambient_owns_if_gen(_gen: u64) -> bool {
+    false
+}
 
 #[cfg(not(windows))]
 pub fn foreground_key() -> isize { 0 }

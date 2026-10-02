@@ -873,6 +873,7 @@ pub fn hub_init_script(plugin_id: &str) -> String {
       copyAllPaths: () => invoke("hub_staging_copy_all_paths", withPlugin()),
       thumb: (id) => invoke("hub_staging_thumb", withPlugin({{ id }})),
       reveal: (id) => invoke("hub_staging_reveal", withPlugin({{ id }})),
+      open: (id) => invoke("hub_staging_open", withPlugin({{ id }})),
       startDrag: (ids) => invoke("hub_staging_start_drag", withPlugin({{ ids }})),
       subscribe: (cb) => {{
         const listenFn =
@@ -891,6 +892,7 @@ pub fn hub_init_script(plugin_id: &str) -> String {
             files: p.files || 0,
             texts: p.texts || 0,
             images: p.images || 0,
+            links: p.links || 0,
             total: p.total || 0,
           }};
           try {{ cb(summary); }} catch (_) {{}}

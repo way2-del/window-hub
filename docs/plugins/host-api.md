@@ -62,8 +62,13 @@ Host 面板尺寸：settings → `defaultSize` → 380×220。
 
 ## `hub.staging.*`
 
-需 `staging`。事件 `staging-changed` → `{ pluginId, files, texts, images, total }`。  
-方法：`list` / `summary` / `addText` / `addPaths` / `addImageBytes` / `remove` / `clear` / `copy` / `copyAllPaths` / `thumb` / `reveal` / `startDrag` / `subscribe`。
+需 `staging`。事件 `staging-changed` → `{ pluginId, files, texts, images, links, total }`。  
+方法：`list` / `summary` / `addText` / `addPaths` / `addImageBytes` / `remove` / `clear` / `copy` / `copyAllPaths` / `thumb` / `reveal` / `open` / `startDrag` / `subscribe`。
+
+- `addText`：纯文本；若整段为单个 `http(s)://` URL，则存为 `kind: "link"`。
+- `open(id)`：文件/图片用系统默认程序打开；链接（或文本内容为 URL）用默认浏览器打开；普通文字打开暂存 `.txt`。
+- `reveal(id)`：文件/图片在资源管理器中定位；链接则打开 URL（同 `open`）。
+- 岛上拖入：Host OLE 接受文件路径 + `CF_UNICODETEXT` / `UniformResourceLocator*`（浏览器选中文字与链接）；HTML5 路径仍读 `text/uri-list`（优先）与 `text/plain`，再走 `addText`。
 
 ## `hub.island.*` / `hub.panel`
 

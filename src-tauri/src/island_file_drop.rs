@@ -1,8 +1,13 @@
-//! Native OLE file-drop onto the island (main) HWND.
+//! Native OLE drop onto the island (main) HWND.
 //!
 //! Frameless transparent WebView2 often leaves wry's drag-drop as a no-drop cursor
 //! (same class of bug as Dock). We Revoke + Register our own `IDropTarget` and emit
-//! paths for the Host FE to route into `hub.staging` via `island.drop`.
+//! paths / text for the Host FE to route into `hub.staging` via `island.drop`.
+//!
+//! Accepted formats:
+//! - `CF_HDROP` / Shell IDList — file paths
+//! - `CF_UNICODETEXT` / `CF_TEXT` — selected text or URL string (browser)
+//! - `UniformResourceLocatorW` / `UniformResourceLocator` — link drag
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -20,6 +25,8 @@ struct IslandFileDragPayload {
     count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     paths: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
 }
 
 #[cfg(windows)]
@@ -126,7 +133,12 @@ pub fn schedule_island_file_drop_rebind(app: &AppHandle, hwnd_raw: isize) {
 pub fn schedule_island_file_drop_rebind(_app: &AppHandle, _hwnd_raw: isize) {}
 
 #[cfg(windows)]
-fn emit_phase(phase: &'static str, count: usize, paths: Option<Vec<String>>) {
+fn emit_phase(
+    phase: &'static str,
+    count: usize,
+    paths: Option<Vec<String>>,
+    text: Option<String>,
+) {
     let Some(app) = DROP_APP.get().and_then(|m| m.lock().clone()) else {
         return;
     };
@@ -136,6 +148,7 @@ fn emit_phase(phase: &'static str, count: usize, paths: Option<Vec<String>>) {
             phase,
             count,
             paths,
+            text,
         },
     );
 }
@@ -149,6 +162,14 @@ fn shell_idlist_format() -> u16 {
 }
 
 #[cfg(windows)]
+fn registered_format(name: &str) -> u16 {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) as u16 }
+}
+
+#[cfg(windows)]
 fn formatetc(cf: u16) -> windows::Win32::System::Com::FORMATETC {
     use std::ptr;
     use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
@@ -159,6 +180,31 @@ fn formatetc(cf: u16) -> windows::Win32::System::Com::FORMATETC {
         lindex: -1,
         tymed: TYMED_HGLOBAL.0 as u32,
     }
+}
+
+/// CF_TEXT = 1, CF_UNICODETEXT = 13 (Winuser.h).
+const CF_TEXT: u16 = 1;
+const CF_UNICODETEXT: u16 = 13;
+
+#[cfg(windows)]
+fn data_object_has_text(data_obj: &windows::Win32::System::Com::IDataObject) -> bool {
+    for cf in [
+        CF_UNICODETEXT,
+        CF_TEXT,
+        registered_format("UniformResourceLocatorW"),
+        registered_format("UniformResourceLocator"),
+        registered_format("text/uri-list"),
+        registered_format("text/plain"),
+    ] {
+        if cf == 0 {
+            continue;
+        }
+        let fmt = formatetc(cf);
+        if unsafe { data_obj.QueryGetData(&fmt) }.is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(windows)]
@@ -177,9 +223,120 @@ fn data_object_looks_droppable(
     if unsafe { obj.QueryGetData(&idlist) }.is_ok() {
         return true;
     }
+    if data_object_has_text(obj) {
+        return true;
+    }
     collect_paths_from_data_object(Some(obj))
         .map(|p| !p.is_empty())
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn read_hglobal_unicode(hglobal: windows::Win32::Foundation::HGLOBAL) -> Option<String> {
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    unsafe {
+        let size = GlobalSize(hglobal);
+        if size < 2 {
+            return None;
+        }
+        let ptr = GlobalLock(hglobal) as *const u16;
+        if ptr.is_null() {
+            return None;
+        }
+        let max_chars = (size / 2) as usize;
+        let slice = std::slice::from_raw_parts(ptr, max_chars);
+        let end = slice.iter().position(|&c| c == 0).unwrap_or(max_chars);
+        let s = String::from_utf16_lossy(&slice[..end]);
+        let _ = GlobalUnlock(hglobal);
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_hglobal_ansi(hglobal: windows::Win32::Foundation::HGLOBAL) -> Option<String> {
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    unsafe {
+        let size = GlobalSize(hglobal);
+        if size == 0 {
+            return None;
+        }
+        let ptr = GlobalLock(hglobal) as *const u8;
+        if ptr.is_null() {
+            return None;
+        }
+        let slice = std::slice::from_raw_parts(ptr, size);
+        let end = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+        let s = String::from_utf8_lossy(&slice[..end]);
+        let _ = GlobalUnlock(hglobal);
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn text_from_format(
+    data_obj: &windows::Win32::System::Com::IDataObject,
+    cf: u16,
+    unicode: bool,
+) -> Option<String> {
+    use windows::Win32::System::Ole::ReleaseStgMedium;
+    if cf == 0 {
+        return None;
+    }
+    let fmt = formatetc(cf);
+    let mut medium = unsafe { data_obj.GetData(&fmt) }.ok()?;
+    let text = if unicode {
+        read_hglobal_unicode(unsafe { medium.u.hGlobal })
+    } else {
+        read_hglobal_ansi(unsafe { medium.u.hGlobal })
+    };
+    unsafe {
+        let _ = ReleaseStgMedium(&mut medium);
+    }
+    text
+}
+
+/// Prefer URL clipboard formats, then unicode/ansi text. Strip `text/uri-list` comments.
+#[cfg(windows)]
+fn collect_text_from_data_object(
+    data_obj: Option<&windows::Win32::System::Com::IDataObject>,
+) -> Option<String> {
+    let obj = data_obj?;
+
+    let url_w = text_from_format(obj, registered_format("UniformResourceLocatorW"), true);
+    if let Some(t) = url_w.filter(|s| !s.is_empty()) {
+        return Some(t);
+    }
+    let url_a = text_from_format(obj, registered_format("UniformResourceLocator"), false);
+    if let Some(t) = url_a.filter(|s| !s.is_empty()) {
+        return Some(t);
+    }
+
+    let uri_list = text_from_format(obj, registered_format("text/uri-list"), false)
+        .or_else(|| text_from_format(obj, registered_format("text/uri-list"), true));
+    if let Some(raw) = uri_list {
+        for line in raw.split(['\r', '\n']) {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            return Some(t.to_string());
+        }
+    }
+
+    text_from_format(obj, CF_UNICODETEXT, true)
+        .or_else(|| text_from_format(obj, CF_TEXT, false))
+        .or_else(|| text_from_format(obj, registered_format("text/plain"), false))
+        .or_else(|| text_from_format(obj, registered_format("text/plain"), true))
 }
 
 #[cfg(windows)]
@@ -308,10 +465,18 @@ impl windows::Win32::System::Ole::IDropTarget_Impl for IslandDropTarget_Impl {
             };
         }
         if valid {
-            let count = collect_paths_from_data_object(pdataobj)
+            let path_count = collect_paths_from_data_object(pdataobj)
                 .map(|p| p.len())
-                .unwrap_or(1);
-            emit_phase("enter", count, None);
+                .unwrap_or(0);
+            let has_text = collect_text_from_data_object(pdataobj).is_some();
+            let count = if path_count > 0 {
+                path_count
+            } else if has_text {
+                1
+            } else {
+                1
+            };
+            emit_phase("enter", count, None, None);
         }
         Ok(())
     }
@@ -330,7 +495,7 @@ impl windows::Win32::System::Ole::IDropTarget_Impl for IslandDropTarget_Impl {
     }
 
     fn DragLeave(&self) -> windows_core::Result<()> {
-        emit_phase("leave", 0, None);
+        emit_phase("leave", 0, None, None);
         Ok(())
     }
 
@@ -346,17 +511,31 @@ impl windows::Win32::System::Ole::IDropTarget_Impl for IslandDropTarget_Impl {
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
         }
-        if let Some(paths) = collect_paths_from_data_object(pdataobj) {
-            let list: Vec<String> = paths
+
+        let paths = collect_paths_from_data_object(pdataobj).map(|paths| {
+            paths
                 .into_iter()
                 .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-            let count = list.len();
-            eprintln!("[island] file-drop: {count} path(s)");
-            emit_phase("drop", count, Some(list));
+                .collect::<Vec<_>>()
+        });
+        // Prefer paths when present (Explorer / file drag). Otherwise take text/URL.
+        let text = if paths.as_ref().map(|p| !p.is_empty()).unwrap_or(false) {
+            None
         } else {
-            eprintln!("[island] file-drop: Drop with no resolvable paths");
-            emit_phase("error", 0, None);
+            collect_text_from_data_object(pdataobj)
+        };
+
+        let path_count = paths.as_ref().map(|p| p.len()).unwrap_or(0);
+        if path_count > 0 {
+            eprintln!("[island] file-drop: {path_count} path(s)");
+            emit_phase("drop", path_count, paths, None);
+        } else if let Some(t) = text {
+            let preview: String = t.chars().take(48).collect();
+            eprintln!("[island] file-drop: text/link ({preview}…)");
+            emit_phase("drop", 1, None, Some(t));
+        } else {
+            eprintln!("[island] file-drop: Drop with no resolvable paths or text");
+            emit_phase("error", 0, None, None);
         }
         Ok(())
     }

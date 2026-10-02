@@ -1,9 +1,9 @@
 {
   "id": "com.window-hub.transfer-station",
   "name": "中转站",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "official": true,
-  "description": "拖入文件后展开横向预览；弹出宽高在本插件设置中配置。",
+  "description": "拖入文件、文字、链接或图片后展开横向预览；双击链接可在浏览器打开。",
   "entry": {
     "panel": "panel.html"
   },

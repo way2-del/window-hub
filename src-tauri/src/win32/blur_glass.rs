@@ -129,6 +129,14 @@ pub fn clear(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// Drop full-HWND SWCA / acrylic without needing a WebviewWindow handle.
+/// Critical after hover-expand bugs: acrylic on `main` paints the tall client.
+pub fn clear_hwnd_composition(hwnd_raw: isize) {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    let _ = set_window_composition_attribute(hwnd, ACCENT_DISABLED, 0, 0);
+    disable_system_backdrop(hwnd);
+}
+
 /// `WS_EX_TOOLWINDOW` blocks SYSTEMBACKDROP on many Win11 builds — drop it and
 /// use ITaskbarList::DeleteTab so popups stay off the taskbar.
 fn prepare_hwnd_for_system_backdrop(hwnd: HWND) {

@@ -45,10 +45,17 @@ pub(crate) fn sync_inner(app: &AppHandle, bar_glass: bool, quiet: bool, prefs: &
         crate::win32::bar_comp::detach();
         if let Some(main) = app.get_webview_window("main") {
             let _ = crate::win32::material::clear(&main);
+            if let Ok(hwnd) = main.hwnd() {
+                crate::win32::blur_glass::clear_hwnd_composition(hwnd.0 as isize);
+            }
+            crate::win32::blur_glass::clear_webview_fill(&main);
         }
         for (label, win) in app.webview_windows() {
             if label.starts_with("chrome-sat-") {
                 let _ = crate::win32::material::clear(&win);
+                if let Ok(hwnd) = win.hwnd() {
+                    crate::win32::blur_glass::clear_hwnd_composition(hwnd.0 as isize);
+                }
                 crate::win32::blur_glass::clear_webview_fill(&win);
             }
         }
@@ -61,18 +68,28 @@ pub(crate) fn sync_inner(app: &AppHandle, bar_glass: bool, quiet: bool, prefs: &
         let me = main.hwnd().ok().map(|h| h.0 as isize);
         if quiet {
             // AppBar settle: leave main composition alone (attach races DWM).
-        } else if crate::win32::ambient::is_desktop_scene(me) {
+        } else {
+            let desktop = crate::win32::ambient::is_desktop_scene(me);
+            // Glass first: keep strip-clipped HostBackdrop until live AmbientStrip has
+            // covered it for ~2s (`ambient_owns_main_chrome`), then detach.
+            let want_glass = desktop || !crate::win32::ambient::ambient_owns_main_chrome();
             let _ = crate::win32::material::clear(&main);
-            crate::win32::blur_glass::clear_webview_fill(&main);
-            if let Some(hwnd) = main_hwnd(&main) {
-                if let Err(e) = crate::win32::bar_comp::attach_or_update(hwnd, dark) {
-                    eprintln!("[bar-comp] attach failed: {e}");
-                }
+            if let Some(raw) = me {
+                crate::win32::blur_glass::clear_hwnd_composition(raw);
             }
             crate::win32::blur_glass::clear_webview_fill(&main);
-        } else if let Some(raw) = me {
-            crate::win32::bar_comp::detach_hwnd(raw);
-            let _ = crate::win32::material::clear(&main);
+            if want_glass {
+                if let Some(hwnd) = main_hwnd(&main) {
+                    if let Err(e) = crate::win32::bar_comp::attach_or_update(hwnd, dark) {
+                        eprintln!("[bar-comp] attach failed: {e}; keep transparent strip");
+                        crate::win32::bar_comp::detach();
+                    }
+                }
+                crate::win32::blur_glass::clear_webview_fill(&main);
+            } else if let Some(raw) = me {
+                crate::win32::bar_comp::detach_hwnd(raw);
+                crate::win32::blur_glass::clear_webview_fill(&main);
+            }
         }
     }
 
@@ -100,6 +117,7 @@ pub fn sync_one_sat(win: &WebviewWindow, label: &str, dark: Option<bool>) {
     let desktop = crate::win32::ambient::is_desktop_scene(Some(raw));
     if !desktop {
         // Floor = last sampled 吸色; never seed charcoal if cache empty.
+        // Do NOT apply full-HWND SWCA — chrome-sat can grow and acrylic becomes a slab.
         let (r, g, b) = crate::win32::ambient::last_sat_strip(label)
             .filter(|s| !(s.r == 48 && s.g == 48 && s.b == 52))
             .map(|s| (s.r, s.g, s.b))
@@ -108,6 +126,7 @@ pub fn sync_one_sat(win: &WebviewWindow, label: &str, dark: Option<bool>) {
         let _ = win.set_background_color(Some(floor));
         crate::win32::bar_comp::detach_hwnd(raw);
         let _ = crate::win32::material::clear(win);
+        crate::win32::blur_glass::clear_hwnd_composition(raw);
         let _ = win.set_background_color(Some(floor));
         return;
     }

@@ -2511,7 +2511,13 @@ function App() {
     });
     const applyStagingBar = (
       pluginId: string,
-      summary: { files: number; texts: number; images: number; total: number },
+      summary: {
+        files: number;
+        texts: number;
+        images: number;
+        links?: number;
+        total: number;
+      },
     ) => {
       const rec = pluginRegistry.get(pluginId);
       if (
@@ -3567,11 +3573,24 @@ function App() {
     fire();
   }
 
+  /** Prefer text/uri-list (browser link drag); fall back to text/plain. */
+  function textFromDataTransfer(dt: DataTransfer): string {
+    const uriList = dt.getData("text/uri-list");
+    if (uriList) {
+      for (const line of uriList.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t || t.startsWith("#")) continue;
+        if (/^https?:\/\//i.test(t)) return t;
+      }
+    }
+    return (dt.getData("text/plain") || "").trim();
+  }
+
   async function ingestDrop(dt: DataTransfer | null) {
     const pluginId = dropPluginIdRef.current;
     if (!pluginId || !dt) return;
-    const text = dt.getData("text/plain");
-    if (text && text.trim()) {
+    const text = textFromDataTransfer(dt);
+    if (text) {
       await invoke("hub_staging_add_text", { pluginId, text }).catch(console.error);
     }
     const files = dt.files;
@@ -3679,12 +3698,14 @@ function App() {
   }, []);
 
   // Native OLE file-drop (Rust) — wry DnD on transparent island often shows no-drop.
+  // Also accepts CF_UNICODETEXT / UniformResourceLocator (browser text & link drag).
   useEffect(() => {
     let un: (() => void) | undefined;
     void listen<{
       phase?: string;
       count?: number;
       paths?: string[];
+      text?: string;
     }>("island-file-drag", (ev) => {
       if (!dropPluginIdRef.current) {
         if (ev.payload?.phase === "leave" || ev.payload?.phase === "drop") {
@@ -3708,8 +3729,13 @@ function App() {
         void invoke("float_overlay").catch(() => undefined);
         const pluginId = dropPluginIdRef.current;
         const paths = ev.payload?.paths ?? [];
+        const text = (ev.payload?.text || "").trim();
         if (pluginId && paths.length) {
           void invoke("hub_staging_add_paths", { pluginId, paths })
+            .then(() => openPluginSession(pluginId))
+            .catch(console.error);
+        } else if (pluginId && text) {
+          void invoke("hub_staging_add_text", { pluginId, text })
             .then(() => openPluginSession(pluginId))
             .catch(console.error);
         } else if (pluginId) {

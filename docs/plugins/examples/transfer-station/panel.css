@@ -219,6 +219,15 @@ body {
   background: rgba(80, 120, 255, 0.22);
 }
 
+.ts-thumb-fallback.is-link {
+  background: rgba(16, 160, 120, 0.28);
+  color: rgba(200, 255, 230, 0.92);
+}
+
+.ts-card.is-link .ts-name {
+  color: rgba(180, 240, 210, 0.92);
+}
+
 .ts-name {
   width: 100%;
   max-height: 2.6em;

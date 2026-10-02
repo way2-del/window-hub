@@ -31,6 +31,7 @@ description: >-
 - 索引：`hub.staging.*` → `plugin_kv.__staging_items`
 - 载荷：`%APPDATA%/window-hub/plugins/<id>/staging/`
 - 尺寸：拖入 / 首页页签打开时 Host 壳用仪表台 `ISLAND_HOME_PANEL_*`（640×248）；不再走独立 `panelWidth`/`panelHeight` 矮壳
+- 文本 / 链接：岛上拖入走 Host OLE（`CF_UNICODETEXT` / `UniformResourceLocator*`）+ HTML5 `text/uri-list`/`text/plain` → `addText`；整段 URL 存为 `kind: "link"`；双击 `hub.staging.open` 用默认浏览器打开
 ## Manifest（要点）
 
 ```json

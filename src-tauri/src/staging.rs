@@ -18,6 +18,8 @@ pub enum StagingKind {
     File,
     Text,
     Image,
+    /// Single http(s) URL stored as staging-owned .txt (same payload as Text).
+    Link,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +39,8 @@ pub struct StagingSummary {
     pub files: u32,
     pub texts: u32,
     pub images: u32,
+    #[serde(default)]
+    pub links: u32,
     pub total: u32,
 }
 
@@ -87,6 +91,7 @@ fn kind_str(k: &StagingKind) -> &'static str {
         StagingKind::File => "file",
         StagingKind::Text => "text",
         StagingKind::Image => "image",
+        StagingKind::Link => "link",
     }
 }
 
@@ -94,8 +99,83 @@ fn parse_kind(s: &str) -> StagingKind {
     match s {
         "text" => StagingKind::Text,
         "image" => StagingKind::Image,
+        "link" => StagingKind::Link,
         _ => StagingKind::File,
     }
+}
+
+/// Trimmed single-line http(s) URL, or None.
+pub fn single_http_url(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() || t.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    let lower = t.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return None;
+    }
+    // Reject obviously incomplete schemes.
+    if lower == "http://" || lower == "https://" {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+fn link_label(url: &str) -> String {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("HTTPS://"))
+        .or_else(|| url.strip_prefix("HTTP://"))
+        .unwrap_or(url);
+    let host = rest
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or(rest);
+    let host = if host.is_empty() { url } else { host };
+    let s: String = host.chars().take(22).collect();
+    if host.chars().count() > 22 {
+        format!("{s}…")
+    } else {
+        s
+    }
+}
+
+#[cfg(windows)]
+fn shell_open(target: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide_nul(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("empty open target".into());
+    }
+    let wide = wide_nul(target);
+    let op = wide_nul("open");
+    let ret = unsafe {
+        ShellExecuteW(
+            HWND::default(),
+            PCWSTR(op.as_ptr()),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (ret.0 as isize) <= 32 {
+        return Err(format!("无法打开: {target}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn shell_open(_target: &str) -> Result<(), String> {
+    Err("open only on Windows".into())
 }
 
 fn to_row(item: &StagingItem) -> crate::db::StagingRow {
@@ -195,6 +275,7 @@ fn summarize(items: &[StagingItem]) -> StagingSummary {
             StagingKind::File => s.files += 1,
             StagingKind::Text => s.texts += 1,
             StagingKind::Image => s.images += 1,
+            StagingKind::Link => s.links += 1,
         }
         s.total += 1;
     }
@@ -247,21 +328,27 @@ pub fn add_text(
     if text.len() as u64 > MAX_BYTES {
         return Err("text too large (max 50MB)".into());
     }
+    let as_link = single_http_url(&text);
     let id = new_id();
     let path = staging_dir(plugin_id)?.join(format!("{id}.txt"));
     fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
-    let label: String = text.chars().take(24).collect();
-    let label = if text.chars().count() > 24 {
-        format!("{label}…")
+    let (kind, label) = if let Some(ref url) = as_link {
+        (StagingKind::Link, link_label(url))
     } else {
-        label
+        let label: String = text.chars().take(24).collect();
+        let label = if text.chars().count() > 24 {
+            format!("{label}…")
+        } else {
+            label
+        };
+        (StagingKind::Text, label)
     };
     push_item(
         app,
         plugin_id,
         StagingItem {
             id,
-            kind: StagingKind::Text,
+            kind,
             label,
             created_at: now_ms(),
             path: path.to_string_lossy().into_owned(),
@@ -333,7 +420,8 @@ pub fn add_paths(
                 .get(plugin_id)
                 .map(|idx| {
                     idx.items.iter().any(|it| {
-                        it.kind != StagingKind::Text && it.path.eq_ignore_ascii_case(&path_str)
+                        !matches!(it.kind, StagingKind::Text | StagingKind::Link)
+                            && it.path.eq_ignore_ascii_case(&path_str)
                     })
                 })
                 .unwrap_or(false)
@@ -415,6 +503,13 @@ pub fn reveal(plugin_id: &str, id: &str) -> Result<(), String> {
         .get(plugin_id)
         .and_then(|idx| idx.items.iter().find(|i| i.id == id))
         .ok_or_else(|| "item not found".to_string())?;
+    if matches!(item.kind, StagingKind::Link) {
+        let path = item.path.clone();
+        drop(map);
+        let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let url = single_http_url(&text).ok_or_else(|| "invalid link".to_string())?;
+        return shell_open(&url);
+    }
     let path = item.path.clone();
     drop(map);
     Command::new("explorer")
@@ -422,6 +517,32 @@ pub fn reveal(plugin_id: &str, id: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Open file/image with the shell, or open a link/URL text in the default browser.
+pub fn open(plugin_id: &str, id: &str) -> Result<(), String> {
+    let mut map = store().by_plugin.lock();
+    ensure_loaded(&mut map, plugin_id);
+    let item = map
+        .get(plugin_id)
+        .and_then(|idx| idx.items.iter().find(|i| i.id == id))
+        .cloned()
+        .ok_or_else(|| "item not found".to_string())?;
+    drop(map);
+    match item.kind {
+        StagingKind::File | StagingKind::Image => shell_open(&item.path),
+        StagingKind::Link | StagingKind::Text => {
+            let text = fs::read_to_string(&item.path).map_err(|e| e.to_string())?;
+            if let Some(url) = single_http_url(&text) {
+                shell_open(&url)
+            } else if matches!(item.kind, StagingKind::Link) {
+                Err("invalid link".into())
+            } else {
+                // Plain text snippet — open the staging .txt in the default editor.
+                shell_open(&item.path)
+            }
+        }
+    }
 }
 
 pub fn paths_for_drag(plugin_id: &str, ids: &[String]) -> Result<Vec<PathBuf>, String> {
@@ -496,7 +617,9 @@ pub fn copy_to_clipboard(plugin_id: &str, id: &str) -> Result<(), String> {
         .ok_or_else(|| "item not found".to_string())?;
     drop(map);
     let text = match item.kind {
-        StagingKind::Text => fs::read_to_string(&item.path).map_err(|e| e.to_string())?,
+        StagingKind::Text | StagingKind::Link => {
+            fs::read_to_string(&item.path).map_err(|e| e.to_string())?
+        }
         StagingKind::File | StagingKind::Image => item.path,
     };
     set_clipboard_text(&text)

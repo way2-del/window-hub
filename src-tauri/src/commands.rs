@@ -1993,10 +1993,11 @@ fn reapply_material_to_popups(app: &AppHandle, prefs: &crate::win32::material::M
     apply_main_window_material(app);
 }
 
-/// Top status bar Win32 glass: only when on desktop AND barGlass is on.
-/// Over a maximized window: never — Host uses ambient color sampling only.
+/// Top status bar Win32 glass (`bar_comp`, strip-clipped):
+/// - Desktop: always on when `barGlass`
+/// - Maximized: on until live ambient (`hwnd≠0`) owns chrome, then detach
 ///
-/// Marshals to the UI thread with debounce — safe from ambient/watchdog workers.
+/// Never full-HWND acrylic — island hover expands the client and would paint a slab.
 pub fn apply_main_window_material(app: &AppHandle) {
     schedule_main_window_material(app, 120);
 }
@@ -3622,7 +3623,6 @@ pub fn restart_app(app: AppHandle) -> Result<(), String> {
     cmd.spawn().map_err(|e| format!("restart spawn failed: {e}"))?;
     #[cfg(windows)]
     {
-        crate::win32::autostart_svc::note_expect_relaunch();
         crate::win32::autostart_svc::clear_user_quit();
     }
     crate::lifecycle::begin_shutdown(Some(app));
@@ -3748,6 +3748,12 @@ pub fn hub_staging_thumb(plugin_id: String, id: String) -> Result<Option<String>
 pub fn hub_staging_reveal(plugin_id: String, id: String) -> Result<(), String> {
     crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
     crate::staging::reveal(&plugin_id, &id)
+}
+
+#[tauri::command]
+pub fn hub_staging_open(plugin_id: String, id: String) -> Result<(), String> {
+    crate::plugin_hub::assert_capability(&plugin_id, "staging")?;
+    crate::staging::open(&plugin_id, &id)
 }
 
 #[tauri::command]

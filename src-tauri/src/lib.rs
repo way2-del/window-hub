@@ -354,10 +354,11 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 // while dock WebViews are still settling (was blocking main + freezing dock IPC).
                 cleared = true;
                 last_desktop = Some(crate::win32::ambient::is_desktop_scene(hwnd_of(&window)));
-                // Wallpaper seed only — defer live BitBlt until work-area quiet ends.
+                // Glass first: never hand chrome to AmbientStrip from the wallpaper seed.
+                crate::win32::ambient::clear_ambient_owns_main_chrome();
                 let seed = crate::win32::ambient::sample_nonblocking(hwnd_of(&window));
                 let _ = app.emit("ambient-color", seed.with_label("main"));
-                boot_log("ambient", "seed emitted (live capture deferred)");
+                boot_log("ambient", "seed emitted (glass floor; live capture deferred)");
             }
 
             let mut last_foreground = crate::win32::ambient::foreground_key();
@@ -465,11 +466,25 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
 
                 if !material_after_quiet && !crate::win32::work_area::work_area_quiet() {
                     material_after_quiet = true;
-                    crate::commands::apply_main_window_material(&app);
-                    // Quiet blocked live BitBlt — force one capture so chrome 反色 paints.
+                    // Live ribbon → FE AmbientStrip covers glass; unload glass 2s later.
                     crate::win32::ambient::reset_sampling_gate();
                     let strip = crate::win32::ambient::sample(hwnd_of(&window));
-                    let _ = app.emit("ambient-color", strip.with_label("main"));
+                    let labeled = strip.with_label("main");
+                    let (material_now, unload_gen) =
+                        crate::win32::ambient::note_main_ambient_strip(&labeled);
+                    let _ = app.emit("ambient-color", &labeled);
+                    if material_now {
+                        crate::commands::apply_main_window_material(&app);
+                    }
+                    if let Some(gen) = unload_gen {
+                        let app2 = app.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(2000));
+                            if crate::win32::ambient::commit_ambient_owns_if_gen(gen) {
+                                crate::commands::apply_main_window_material(&app2);
+                            }
+                        });
+                    }
                 }
 
                 // BitBlt + bar_comp during AppBar settle → DWM / main-thread 未响应.
@@ -480,12 +495,46 @@ fn spawn_ambient_watcher(app: tauri::AppHandle) {
                 let desktop_now = crate::win32::ambient::is_desktop_scene(hwnd_of(&window));
                 if last_desktop != Some(desktop_now) {
                     last_desktop = Some(desktop_now);
-                    // Desktop ↔ window: glass only when desktop && barGlass.
+                    // Scene flip: glass floor first; unload only after live ribbon + 2s.
+                    crate::win32::ambient::clear_ambient_owns_main_chrome();
                     crate::commands::apply_main_window_material(&app);
+                    crate::win32::ambient::reset_sampling_gate();
+                    let strip = crate::win32::ambient::sample(hwnd_of(&window));
+                    let labeled = strip.with_label("main");
+                    let (material_now, unload_gen) =
+                        crate::win32::ambient::note_main_ambient_strip(&labeled);
+                    let _ = app.emit("ambient-color", &labeled);
+                    if material_now {
+                        crate::commands::apply_main_window_material(&app);
+                    }
+                    if let Some(gen) = unload_gen {
+                        let app2 = app.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(2000));
+                            if crate::win32::ambient::commit_ambient_owns_if_gen(gen) {
+                                crate::commands::apply_main_window_material(&app2);
+                            }
+                        });
+                    }
                 }
 
                 if let Some(strip) = crate::win32::ambient::poll_changed(hwnd_of(&window)) {
-                    let _ = app.emit("ambient-color", strip.with_label("main"));
+                    let labeled = strip.with_label("main");
+                    let (material_now, unload_gen) =
+                        crate::win32::ambient::note_main_ambient_strip(&labeled);
+                    let _ = app.emit("ambient-color", &labeled);
+                    if material_now {
+                        crate::commands::apply_main_window_material(&app);
+                    }
+                    if let Some(gen) = unload_gen {
+                        let app2 = app.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(2000));
+                            if crate::win32::ambient::commit_ambient_owns_if_gen(gen) {
+                                crate::commands::apply_main_window_material(&app2);
+                            }
+                        });
+                    }
                 }
             }
         })
@@ -1262,6 +1311,7 @@ pub fn run() {
             commands::hub_staging_copy_all_paths,
             commands::hub_staging_thumb,
             commands::hub_staging_reveal,
+            commands::hub_staging_open,
             commands::hub_staging_start_drag,
             commands::hub_island_set_bar,
             commands::hub_island_clear_bar,
@@ -1306,9 +1356,9 @@ pub fn run() {
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 lifecycle::begin_shutdown(None);
-                // Any GUI teardown (菜单退出 / 进程结束) — tell SCM not to treat as crash.
-                #[cfg(windows)]
-                crate::win32::autostart_svc::signal_user_quit_unless_relaunching();
+                // Do NOT signal user-quit here. Logoff / Fast Startup EndSession also
+                // fires Exit; treating that as “用户退出” leaves WindowHubAutoStart
+                // idle across the next login. Intentional quit uses exit_app only.
             }
         });
 }

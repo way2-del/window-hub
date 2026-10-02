@@ -22,6 +22,7 @@ const ALLOWED_CMDS = new Set([
   "hub_staging_copy_all_paths",
   "hub_staging_thumb",
   "hub_staging_reveal",
+  "hub_staging_open",
   "hub_staging_start_drag",
   "hub_island_set_bar",
   "hub_island_clear_bar",
@@ -130,6 +131,7 @@ export function panelHubBootstrapScript(pluginId: string): string {
       copyAllPaths: function () { return invoke("hub_staging_copy_all_paths", withPlugin()); },
       thumb: function (id) { return invoke("hub_staging_thumb", withPlugin({ id: id })); },
       reveal: function (id) { return invoke("hub_staging_reveal", withPlugin({ id: id })); },
+      open: function (id) { return invoke("hub_staging_open", withPlugin({ id: id })); },
       startDrag: function (ids) { return invoke("hub_staging_start_drag", withPlugin({ ids: ids })); },
       subscribe: function (cb) {
         function onMsg(ev) {

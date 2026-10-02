@@ -219,7 +219,7 @@ button {
   background: var(--glass-panel-bg, rgba(28, 28, 30, 0.48));
 }
 
-/* 桌面：不吸色，仅透出 Win32 模糊材质 */
+/* 桌面：不吸色，仅透出 Win32 模糊材质（条高内；勿全窗 acrylic） */
 .bar-glass {
   position: absolute;
   left: 0;

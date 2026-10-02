@@ -6,7 +6,7 @@
   const menu = document.getElementById("menu");
   const clearBtn = document.getElementById("menu-clear");
 
-  const KIND_FALLBACK = { file: "文件", text: "文字", image: "图片" };
+  const KIND_FALLBACK = { file: "文件", text: "文字", image: "图片", link: "链接" };
   const DRAG_THRESHOLD = 6;
   const thumbCache = Object.create(null);
 
@@ -54,8 +54,26 @@
     return s.slice(0, 16) + "…";
   }
 
+  function isLink(it) {
+    return it && it.kind === "link";
+  }
+
+  function cardTitle(it) {
+    if (isLink(it)) {
+      return (it.label || "链接") + "\n单击复制 · 双击打开链接 · Delete 删除";
+    }
+    if (it.kind === "text") {
+      return (it.label || "文字") + "\n单击复制 · 双击打开 · Delete 删除";
+    }
+    return (
+      (it.path || it.label || "") +
+      "\n拖出到文件夹 / 网页上传 · 单击复制 · 双击打开 · Delete 删除"
+    );
+  }
+
   function bindOsDrag(card, h, it) {
     if (!h.staging.startDrag || !it.path) return;
+    if (it.kind === "text" || it.kind === "link") return;
     card.addEventListener("pointerdown", function (e) {
       if (e.button !== 0) return;
       const startX = e.clientX;
@@ -94,11 +112,9 @@
   function makeCard(h, it) {
     const card = document.createElement("button");
     card.type = "button";
-    card.className = "ts-card";
+    card.className = "ts-card" + (isLink(it) ? " is-link" : "");
     card.setAttribute("role", "listitem");
-    card.title =
-      (it.path || it.label || "") +
-      "\n拖出到文件夹 / 网页上传 · 单击复制 · 双击打开位置 · Delete 删除";
+    card.title = cardTitle(it);
 
     const name = document.createElement("span");
     name.className = "ts-name";
@@ -152,7 +168,13 @@
 
     card.addEventListener("dblclick", function (e) {
       e.preventDefault();
+      if (h.staging.open) {
+        h.staging.open(it.id).catch(console.error);
+        return;
+      }
       if (it.kind === "file" || it.kind === "image") {
+        h.staging.reveal(it.id).catch(console.error);
+      } else if (isLink(it) && h.staging.reveal) {
         h.staging.reveal(it.id).catch(console.error);
       }
     });
@@ -169,7 +191,10 @@
 
   function fallbackEl(kind) {
     const el = document.createElement("span");
-    el.className = "ts-thumb-fallback" + (kind === "text" ? " is-text" : "");
+    let cls = "ts-thumb-fallback";
+    if (kind === "text") cls += " is-text";
+    if (kind === "link") cls += " is-link";
+    el.className = cls;
     el.textContent = KIND_FALLBACK[kind] || "文件";
     return el;
   }
@@ -205,6 +230,7 @@
     const parts = ["中转站"];
     if (summary.files > 0) parts.push("文件 " + summary.files);
     if (summary.texts > 0) parts.push("文字片段 " + summary.texts);
+    if (summary.links > 0) parts.push("链接 " + summary.links);
     if (summary.images > 0) parts.push("图片 " + summary.images);
     h.island.setBar({ text: parts.join(" | "), title: "中转站" }).catch(function () {});
   }
